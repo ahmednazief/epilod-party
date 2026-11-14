@@ -108,3 +108,23 @@ test("Built dist bundle emits strictly 3 WOFF2 fonts and includes reliability sy
     assert.equal(jsBundle.includes(token), true, `Expected token "${token}" in built JS bundle`);
   }
 });
+
+test("Fix 22: compact static TTF fonts exist for mpv under 350 KB installer budget", () => {
+  const fontsDir = path.join(REPO_ROOT, "src-tauri/resources/fonts");
+  const expected = ["Inter-Regular.ttf", "NotoSansArabic-Regular.ttf"];
+  let totalBytes = 0;
+
+  for (const file of expected) {
+    const full = path.join(fontsDir, file);
+    assert.equal(fs.existsSync(full), true, `Missing bundled mpv font: ${file}`);
+    const size = fs.statSync(full).size;
+    assert.ok(size > 10_000, `Font ${file} unexpectedly empty (${size} bytes)`);
+    totalBytes += size;
+  }
+
+  assert.ok(
+    totalBytes < 350 * 1024,
+    `Bundled TTF fonts (${totalBytes} bytes) exceeded 350 KB size budget`,
+  );
+});
+

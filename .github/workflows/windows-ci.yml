@@ -1,0 +1,50 @@
+name: Windows & Cross-Platform CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows-verify:
+    name: Windows MSVC Build & Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies & build Vite bundle
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run Node UX, bundle & reliability tests
+        run: node --test tests/*.test.ts
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run workspace tests (including Windows-only modules)
+        run: cargo test --workspace
+
+      - name: Run Clippy across all Windows targets
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Verify release compilation of Tauri Windows app
+        run: cargo check --manifest-path src-tauri/Cargo.toml --release
