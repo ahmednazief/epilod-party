@@ -644,7 +644,10 @@ mod windows_app {
             .setup(|app| {
                 if let Some(win) = app.get_webview_window("main") {
                     let url_str = win.url().map(|u| u.to_string()).unwrap_or_default();
-                    if !url_str.is_empty() && !is_allowed_webview_url(&url_str) {
+                    if !url_str.is_empty()
+                        && url_str != "about:blank"
+                        && !is_allowed_webview_url(&url_str)
+                    {
                         return Err(format!("Blocked unexpected WebView origin: {url_str}").into());
                     }
                 }
