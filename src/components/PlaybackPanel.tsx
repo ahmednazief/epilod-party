@@ -21,7 +21,7 @@ const ASPECT_OPTIONS: ReadonlyArray<SelectMenuOption<AspectMode>> = [
   { value: "16:9", label: "16:9 Widescreen" },
   { value: "4:3", label: "4:3 Classic" },
   { value: "21:9", label: "21:9 Cinema" },
-  { value: "fill", label: "Stretch / Fill" },
+  { value: "fill", label: "Fill Screen" },
 ];
 
 export function PlaybackPanel() {
@@ -43,7 +43,7 @@ export function PlaybackPanel() {
 
   const handleSpeedClick = (nextSpeed: number) => {
     if (!canChangePlaybackSpeed(syncConnected, nextSpeed)) {
-      pushNote("info", "Playback speed stays locked to 1.0× while synced with peers.");
+      pushNote("info", "Playback speed stays at 1× during a watch party.");
       return;
     }
     setSpeed(nextSpeed);
@@ -51,14 +51,59 @@ export function PlaybackPanel() {
   };
 
   return (
-    <div className="anim-tab-in p-3 space-y-4">
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-secondary">Playback Speed</span>
+    <div className="anim-tab-in p-3.5 space-y-3.5">
+      <div className="p-3.5 bg-canvas border border-hairline rounded-xl space-y-2">
+        <span className="text-xs font-medium text-primary block">Audio Track</span>
+        <SelectMenu
+          ariaLabel="Audio Track"
+          disabled={!loaded}
+          value={currentAudioVal}
+          options={audioOptions.map((o) => ({ value: o.value, label: o.label }))}
+          onChange={(val) => {
+            const aid = val === "none" ? null : Number(val);
+            void selectAudioTrack(aid, { mpvSetAudioTrack });
+          }}
+        />
+      </div>
+
+      <div className="p-3.5 bg-canvas border border-hairline rounded-xl space-y-2">
+        <span className="text-xs font-medium text-primary block">Screen Fit</span>
+        <SelectMenu
+          ariaLabel="Screen Fit"
+          disabled={!loaded}
+          value={aspectMode}
+          options={ASPECT_OPTIONS}
+          onChange={(val) => {
+            setAspectMode(val);
+            void mpvSetAspectMode(val);
+          }}
+        />
+      </div>
+
+      <div className="px-3.5 py-3 bg-canvas border border-hairline rounded-xl flex items-center justify-between gap-3">
+        <span className="text-xs font-medium text-primary">Loop Video</span>
+        <Button
+          variant={looping ? "primary" : "secondary"}
+          size="sm"
+          disabled={!loaded}
+          onClick={() => {
+            const next = !looping;
+            setLooping(next);
+            void mpvSetLoop(next);
+          }}
+        >
+          <Repeat className="h-3.5 w-3.5" />
+          <span>{looping ? "On" : "Off"}</span>
+        </Button>
+      </div>
+
+      <div className="p-3.5 bg-canvas border border-hairline rounded-xl space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-primary">Speed</span>
           {syncConnected && (
             <span className="inline-flex items-center gap-1 text-[11px] text-accent-soft">
               <Lock className="h-3 w-3" />
-              Locked 1.0×
+              Locked at 1× during watch party
             </span>
           )}
         </div>
@@ -79,51 +124,6 @@ export function PlaybackPanel() {
             );
           })}
         </div>
-      </div>
-
-      <div className="space-y-1.5">
-        <span className="text-xs font-medium text-secondary block">Audio Track</span>
-        <SelectMenu
-          ariaLabel="Audio Track"
-          disabled={!loaded}
-          value={currentAudioVal}
-          options={audioOptions.map((o) => ({ value: o.value, label: o.label }))}
-          onChange={(val) => {
-            const aid = val === "none" ? null : Number(val);
-            void selectAudioTrack(aid, { mpvSetAudioTrack });
-          }}
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <span className="text-xs font-medium text-secondary block">Aspect Ratio</span>
-        <SelectMenu
-          ariaLabel="Aspect Ratio"
-          disabled={!loaded}
-          value={aspectMode}
-          options={ASPECT_OPTIONS}
-          onChange={(val) => {
-            setAspectMode(val);
-            void mpvSetAspectMode(val);
-          }}
-        />
-      </div>
-
-      <div className="flex items-center justify-between pt-1">
-        <span className="text-xs font-medium text-secondary">Loop Video</span>
-        <Button
-          variant={looping ? "primary" : "secondary"}
-          size="sm"
-          disabled={!loaded}
-          onClick={() => {
-            const next = !looping;
-            setLooping(next);
-            void mpvSetLoop(next);
-          }}
-        >
-          <Repeat className="h-3.5 w-3.5" />
-          <span>{looping ? "Looping" : "Off"}</span>
-        </Button>
       </div>
     </div>
   );

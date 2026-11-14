@@ -135,3 +135,50 @@ test("Main app uses Royal Purple branding (#7C3AED/#8B5CF6) with zero legacy amb
   assert.equal(globalsCss.includes("#8B5CF6"), true);
 });
 
+test("Custom frameless TitleBar and consumer UX invariants are configured cleanly", () => {
+  const tauriConf = JSON.parse(
+    fs.readFileSync(path.join(REPO_ROOT, "src-tauri/tauri.conf.json"), "utf8"),
+  ) as { app: { windows: Array<{ decorations?: boolean }> } };
+  assert.equal(tauriConf.app.windows[0]?.decorations, false);
+
+  const caps = JSON.parse(
+    fs.readFileSync(path.join(REPO_ROOT, "src-tauri/capabilities/default.json"), "utf8"),
+  ) as { permissions: string[] };
+  for (const perm of [
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+  ]) {
+    assert.equal(caps.permissions.includes(perm), true, `Missing capability permission ${perm}`);
+  }
+
+  const titleBar = fs.readFileSync(path.join(REPO_ROOT, "src/components/TitleBar.tsx"), "utf8");
+  assert.equal(titleBar.includes("data-tauri-drag-region"), true);
+  assert.equal(titleBar.includes("toggleMaximize"), true);
+  assert.equal(titleBar.includes("minimize"), true);
+
+  const homeSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/HomeScreen.tsx"), "utf8");
+  assert.equal(homeSrc.includes("<TitleBar"), true);
+  assert.equal(homeSrc.includes("Start a Watch Party"), true);
+  assert.equal(homeSrc.includes("Server &amp; room options"), true);
+
+  const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  assert.equal(watchSrc.includes("<TitleBar"), true);
+  assert.equal(watchSrc.includes('{ value: "room", label: "Party" }'), true);
+  assert.equal(watchSrc.includes('{ value: "subtitles", label: "Subtitles" }'), true);
+  assert.equal(watchSrc.includes('{ value: "playback", label: "Audio" }'), true);
+
+  const subSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"), "utf8");
+  assert.equal(subSrc.includes("Advanced timing &amp; encoding"), true);
+
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  assert.equal(settingsSrc.includes('{ value: "prefs", label: "General" }'), true);
+  assert.equal(settingsSrc.includes('{ value: "server", label: "Connection" }'), true);
+  assert.equal(settingsSrc.includes("View diagnostic logs"), true);
+});
+
+

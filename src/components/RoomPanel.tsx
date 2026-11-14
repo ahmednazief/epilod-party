@@ -1,13 +1,10 @@
 import {
   Check,
-  CheckCircle2,
-  Circle,
   Copy,
   EyeOff,
   Lock,
   RefreshCw,
   Server,
-  Shield,
 } from "lucide-react";
 import { useState } from "react";
 import { formatUserError } from "../lib/errors";
@@ -26,22 +23,26 @@ import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { Button } from "./ui/Button";
-import { LogoMark } from "./ui/LogoMark";
 import { StatusDot, type StatusTone } from "./ui/StatusDot";
 
 function matchLabel(match: FileMatchStatus): { text: string; className: string } {
   switch (match) {
     case "matched":
-      return { text: "Exact match", className: "text-ok" };
+      return { text: "Same video", className: "text-secondary" };
     case "sameLengthDifferentEncode":
       return { text: "Same length · check file", className: "text-warn" };
     case "durationMismatch":
-      return { text: "Duration differs", className: "text-bad" };
+      return { text: "Different length", className: "text-bad" };
     case "differentFile":
-      return { text: "Different filename", className: "text-warn" };
+      return { text: "Check episode", className: "text-warn" };
     default:
-      return { text: "No file loaded", className: "text-muted" };
+      return { text: "No video yet", className: "text-muted" };
   }
+}
+
+function getInitial(name: string): string {
+  const trimmed = name.trim();
+  return trimmed ? trimmed[0].toUpperCase() : "?";
 }
 
 export function RoomPanel() {
@@ -67,6 +68,7 @@ export function RoomPanel() {
   const syncConnected = status.state === "connected";
   const effectiveUsername = resolveEffectiveUsername(status, username);
   const ctrlLock = getControllerLockState(syncConnected, participants, effectiveUsername);
+  const isReady = localReady && loaded;
 
   let dotTone: StatusTone = "muted";
   let pulse = false;
@@ -82,7 +84,7 @@ export function RoomPanel() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch {
-      pushNote("info", `Room code: ${roomCode}`);
+      pushNote("info", `Invite code: ${roomCode}`);
     }
   };
 
@@ -105,16 +107,16 @@ export function RoomPanel() {
           literalRoom,
           password: serverPassword || null,
         });
-        pushNote("info", "Switching room session to backup server (:8998).");
+        pushNote("info", "Switching watch party to the backup server.");
       } catch (err) {
-        pushNote("error", formatUserError(err, "Backup switch failed."));
+        pushNote("error", formatUserError(err, "Could not switch to backup server."));
       }
     });
   };
 
   const handleToggleReady = () => {
     if (!canToggleReady(loaded)) {
-      pushNote("info", "Load a local video file first.");
+      pushNote("info", "Open a video first to mark yourself Ready.");
       return;
     }
     const target = resolveReadyToggleTarget(loaded, localReady);
@@ -124,129 +126,139 @@ export function RoomPanel() {
     }
   };
 
+  const showConnectionCard =
+    status.state !== "connected" || endpointSummary.isBackupServer;
+
   return (
-    <div className="anim-tab-in p-3 space-y-4">
-      <div className="p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted">
-            <LogoMark variant="party" size={16} />
-            {literalRoom ? "Syncplay Room" : "Room Code"}
+    <div className="anim-tab-in p-3.5 space-y-3">
+      <div className="p-3.5 bg-canvas border border-hairline rounded-xl flex items-center justify-between gap-3">
+        <div className="min-w-0 space-y-0.5">
+          <span className="text-[11px] font-medium text-muted block">
+            {literalRoom ? "Room Name" : "Invite Code"}
           </span>
-          <Button variant="ghost" size="sm" onClick={() => void handleCopyRoom()}>
-            {copied ? <Check className="h-3.5 w-3.5 text-ok" /> : <Copy className="h-3.5 w-3.5" />}
-            <span>{copied ? "Copied" : "Copy"}</span>
-          </Button>
+          <p className="text-sm font-mono font-semibold text-primary tracking-wide truncate">
+            {roomCode}
+          </p>
         </div>
-        <p className="text-sm font-mono font-medium text-primary break-all">{roomCode}</p>
+        <Button variant="secondary" size="sm" onClick={() => void handleCopyRoom()}>
+          {copied ? <Check className="h-3.5 w-3.5 text-ok" /> : <Copy className="h-3.5 w-3.5" />}
+          <span>{copied ? "Copied" : "Copy"}</span>
+        </Button>
       </div>
 
-      <div className="p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-2.5">
-        <div className="flex items-center justify-between gap-2">
+      <div className="px-3.5 py-3 bg-canvas border border-hairline rounded-xl flex items-center justify-between gap-3">
+        <span className="text-xs font-medium text-primary">Your Status</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={isReady}
+          disabled={!canToggleReady(loaded)}
+          onClick={handleToggleReady}
+          title={
+            loaded
+              ? isReady
+                ? "Mark as Not Ready"
+                : "Mark as Ready"
+              : "Open a video first"
+          }
+          className={`inline-flex items-center gap-2 pl-3 pr-1.5 py-1 rounded-full text-xs font-medium transition-colors duration-150 cursor-pointer disabled:opacity-45 disabled:pointer-events-none focus-visible:outline-2 focus-visible:outline-accent ${
+            isReady
+              ? "bg-accent text-white hover:bg-accent-hover"
+              : "bg-raised text-secondary border border-hairline hover:text-primary"
+          }`}
+        >
+          <span>{isReady ? "Ready" : "Not Ready"}</span>
+          <span
+            aria-hidden="true"
+            className={`h-4 w-4 rounded-full transition-colors ${
+              isReady ? "bg-white" : "bg-muted/60"
+            }`}
+          />
+        </button>
+      </div>
+
+      {showConnectionCard && (
+        <div className="p-3 bg-canvas border border-hairline rounded-xl space-y-2.5">
           <div className="flex items-center gap-2 min-w-0">
             <StatusDot tone={dotTone} pulse={pulse} />
             <span className="text-xs font-medium text-primary truncate">
-              {endpointSummary.badgeText}
+              {status.state === "connecting"
+                ? "Connecting to watch party…"
+                : status.state === "reconnecting"
+                  ? `Reconnecting in ${status.retryInSecs}s…`
+                  : status.state === "error"
+                    ? "Connection issue"
+                    : endpointSummary.isBackupServer
+                      ? "Using backup server"
+                      : "Disconnected"}
             </span>
           </div>
-          {status.state === "connected" && status.tls && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-raised text-ok border border-hairline rounded-[4px] shrink-0">
-              <Shield className="h-2.5 w-2.5" />
-              TLS
-            </span>
+
+          {endpointSummary.detailText && (
+            <p
+              className={`text-[11px] leading-relaxed ${
+                status.state === "error" ? "text-bad" : "text-secondary"
+              }`}
+            >
+              {endpointSummary.detailText}
+            </p>
+          )}
+
+          {(status.state === "reconnecting" || status.state === "error") && (
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <Button variant="secondary" size="sm" onClick={handleRetryConnect}>
+                <RefreshCw className="h-3 w-3" />
+                Retry
+              </Button>
+              {status.suggestBackup && !endpointSummary.isBackupServer && (
+                <Button variant="secondary" size="sm" onClick={handleSwitchBackup}>
+                  <Server className="h-3 w-3" />
+                  Try Backup Server
+                </Button>
+              )}
+            </div>
           )}
         </div>
-
-        {endpointSummary.detailText && (
-          <p
-            className={`text-[11px] leading-relaxed ${
-              endpointSummary.isBackupServer || status.state === "reconnecting"
-                ? "text-warn"
-                : status.state === "error"
-                  ? "text-bad"
-                  : "text-secondary"
-            }`}
-          >
-            {endpointSummary.detailText}
-          </p>
-        )}
-
-        {(status.state === "reconnecting" || status.state === "error") && (
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <Button variant="secondary" size="sm" onClick={handleRetryConnect}>
-              <RefreshCw className="h-3 w-3" />
-              Retry Now
-            </Button>
-            {status.suggestBackup && !endpointSummary.isBackupServer && (
-              <Button variant="secondary" size="sm" onClick={handleSwitchBackup}>
-                <Server className="h-3 w-3" />
-                Switch to :8998
-              </Button>
-            )}
-          </div>
-        )}
-      </div>
+      )}
 
       {ctrlLock.hasControllers && (
-        <div className="p-2.5 bg-canvas border border-accent/40 rounded-[var(--radius-ui)] space-y-1">
+        <div className="p-3 bg-canvas border border-accent/35 rounded-xl space-y-1">
           <div className="flex items-center gap-1.5 text-xs font-medium text-accent-soft">
             <Lock className="h-3.5 w-3.5 shrink-0" />
             <span>
               {ctrlLock.localIsController
-                ? "You are a room controller"
-                : `Managed room (${ctrlLock.controllers.join(", ")})`}
+                ? "You are the room host"
+                : `Hosted by ${ctrlLock.controllers.join(", ")}`}
             </span>
           </div>
           {ctrlLock.lockedForLocalUser && (
             <p className="text-[11px] text-secondary">
-              Play, pause, and seeking are locked to room controllers.
+              Only the host can play, pause, or seek in this room.
             </p>
           )}
         </div>
       )}
 
       {serverOverrideNotice && (
-        <div className="p-2.5 bg-canvas border border-hairline rounded-[var(--radius-ui)] text-[11px] text-secondary">
+        <div className="p-2.5 bg-canvas border border-hairline rounded-xl text-[11px] text-secondary">
           {serverOverrideNotice}
         </div>
       )}
 
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-secondary">Your Status</span>
-          <Button
-            variant={localReady && loaded ? "primary" : "secondary"}
-            size="sm"
-            disabled={!canToggleReady(loaded)}
-            onClick={handleToggleReady}
-          >
-            {localReady && loaded ? (
-              <CheckCircle2 className="h-3.5 w-3.5" />
-            ) : (
-              <Circle className="h-3.5 w-3.5" />
-            )}
-            <span>{localReady && loaded ? "Ready" : "Not Ready"}</span>
-          </Button>
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-secondary">
-            Participants ({participants.length})
-          </span>
-        </div>
-
+      <div className="space-y-2 pt-1">
         {hideParticipants ? (
-          <div className="p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] flex items-center gap-2 text-xs text-muted">
+          <div className="p-3.5 bg-canvas border border-hairline rounded-xl flex items-center gap-2 text-xs text-muted">
             <EyeOff className="h-3.5 w-3.5 shrink-0" />
-            <span>Hidden in Privacy Mode</span>
+            <span>Friend names hidden in Privacy Mode</span>
           </div>
         ) : participants.length === 0 ? (
-          <p className="text-xs text-muted p-2">
-            {syncConnected ? "Only you are in this room so far." : "Waiting to join room…"}
+          <p className="text-xs text-muted px-1 py-2">
+            {syncConnected
+              ? "Share the invite code above to watch with friends."
+              : "Joining watch party…"}
           </p>
         ) : (
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             {participants.map((p) => {
               const badge = matchLabel(p.fileMatch);
               const isSelf =
@@ -254,28 +266,38 @@ export function RoomPanel() {
               return (
                 <div
                   key={p.username}
-                  className="p-2.5 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-1"
+                  className="p-3 bg-canvas border border-hairline rounded-xl flex items-center gap-3"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <StatusDot tone={p.isReady ? "ok" : "muted"} />
+                  <div
+                    aria-hidden="true"
+                    className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 ${
+                      isSelf
+                        ? "bg-raised text-primary border border-hairline"
+                        : "bg-accent text-white"
+                    }`}
+                  >
+                    {getInitial(p.username)}
+                  </div>
+
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
                       <span className="text-xs font-medium text-primary truncate">
                         {p.username}
-                        {isSelf ? " (you)" : ""}
+                        {isSelf ? " (You)" : ""}
                       </span>
                       {p.isController && (
-                        <span className="px-1 py-0.5 text-[10px] bg-raised text-accent-soft border border-hairline rounded-[3px]">
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-raised text-accent-soft border border-hairline rounded-[4px] shrink-0">
                           Host
                         </span>
                       )}
                     </div>
-                    <span className="text-[11px] text-secondary shrink-0">
-                      {p.isReady ? "Ready" : "Not ready"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 text-[11px]">
-                    <span className="text-muted truncate">{p.fileName || "No file"}</span>
-                    <span className={`${badge.className} shrink-0`}>{badge.text}</span>
+
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                      <StatusDot tone={p.isReady ? "ok" : "muted"} />
+                      <span className={`${badge.className} truncate`}>
+                        {badge.text}
+                      </span>
+                    </div>
                   </div>
                 </div>
               );

@@ -3,11 +3,11 @@
 @import "./fonts.css";
 
 @theme {
-  --color-canvas: #0C0C10;
-  --color-chrome: #14141A;
-  --color-raised: #1B1B22;
+  --color-canvas: #0A0A0F;
+  --color-chrome: #13131A;
+  --color-raised: #1A1A23;
   --color-hover: #221D33;
-  --color-hairline: #23232D;
+  --color-hairline: #23232E;
   --color-primary: #F4F4F6;
   --color-secondary: #A1A1AE;
   --color-muted: #7C7C8E;
@@ -19,7 +19,7 @@
   --color-bad: #F87171;
   --font-sans: "Inter", "Segoe UI Variable Display", system-ui, sans-serif;
   --font-arabic: "Noto Sans Arabic", "Inter", system-ui, sans-serif;
-  --radius-ui: 6px;
+  --radius-ui: 8px;
 }
 
 @layer base {

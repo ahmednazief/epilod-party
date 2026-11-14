@@ -1,6 +1,8 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Check,
+  Copy,
   FolderOpen,
   LogOut,
   PanelRightClose,
@@ -81,6 +83,7 @@ import { RoomPanel } from "./RoomPanel";
 import { SettingsModal } from "./SettingsModal";
 import { ShortcutsModal } from "./ShortcutsModal";
 import { SubtitlePanel } from "./SubtitlePanel";
+import { TitleBar } from "./TitleBar";
 import { TransportBar } from "./TransportBar";
 import { ViewportPlaceholder } from "./ViewportPlaceholder";
 import { Button } from "./ui/Button";
@@ -89,7 +92,7 @@ import { NotificationStrip } from "./ui/NotificationStrip";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { StatusDot } from "./ui/StatusDot";
 
-type SideTab = "room" | "playback" | "subtitles";
+type SideTab = "room" | "subtitles" | "playback";
 
 export function WatchRoom() {
   const {
@@ -100,6 +103,7 @@ export function WatchRoom() {
     serverPassword,
     allowNetworkShares,
     hashFilenames,
+    hideParticipants,
     settingsOpen,
     shortcutsOpen,
     selectedFilePath,
@@ -113,6 +117,7 @@ export function WatchRoom() {
       serverPassword: s.serverPassword,
       allowNetworkShares: s.allowNetworkShares,
       hashFilenames: s.hashFilenames,
+      hideParticipants: s.hideParticipants,
       settingsOpen: s.settingsOpen,
       shortcutsOpen: s.shortcutsOpen,
       selectedFilePath: s.selectedFilePath,
@@ -134,11 +139,13 @@ export function WatchRoom() {
   const feedback = usePlayerStore((s) => s.feedback);
 
   const syncStatus = useSyncStore((s) => s.status);
+  const participantsCount = useSyncStore((s) => s.participants.length);
   const pushNote = useNotificationStore((s) => s.push);
 
   const [sideTab, setSideTab] = useState<SideTab>("room");
   const [panelOpen, setPanelOpen] = useState(true);
   const [isDragActive, setIsDragActive] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -654,79 +661,123 @@ export function WatchRoom() {
     leaveRoom();
   };
 
+  const handleCopyInviteCode = async () => {
+    try {
+      await navigator.clipboard.writeText(roomCode);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 1800);
+    } catch {
+      pushNote("info", `Invite code: ${roomCode}`);
+    }
+  };
+
+  const syncStatusLabel =
+    syncStatus.state === "connected"
+      ? !hideParticipants && participantsCount > 0
+        ? `In Sync · ${participantsCount} watching`
+        : "In Sync"
+      : syncStatus.state === "connecting"
+        ? "Connecting…"
+        : syncStatus.state === "reconnecting"
+          ? "Reconnecting…"
+          : syncStatus.state === "error"
+            ? "Connection issue"
+            : "Offline";
+
   return (
     <div className="h-full w-full flex flex-col bg-canvas text-primary overflow-hidden">
       {chrome.showTopBar && (
-        <header className="h-11 shrink-0 flex items-center justify-between px-3 bg-chrome border-b border-hairline select-none">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <LogoMark variant="party" size={26} />
-            <div className="flex items-center gap-2 min-w-0">
-              <StatusDot
-                tone={
-                  syncStatus.state === "connected"
-                    ? "ok"
-                    : syncStatus.state === "error"
-                      ? "bad"
-                      : "warn"
-                }
-                pulse={syncStatus.state === "connecting" || syncStatus.state === "reconnecting"}
-              />
-              <span className="text-xs font-medium text-primary truncate">
-                {selectedFileName || `Room ${roomCode}`}
+        <TitleBar
+          leftSlot={
+            <>
+              <LogoMark variant="party" size={22} />
+              <span className="text-[13px] font-medium text-primary truncate">
+                {selectedFileName || "Watch Party"}
               </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            {feedback && (
-              <span
-                key={feedback.id}
-                className="anim-pop-in px-2 py-0.5 text-[11px] font-medium bg-raised text-accent-soft border border-hairline rounded-[var(--radius-ui)]"
-              >
-                {feedback.text}
+              <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] font-medium bg-raised text-secondary border border-hairline rounded-full shrink-0">
+                <StatusDot
+                  tone={
+                    syncStatus.state === "connected"
+                      ? "ok"
+                      : syncStatus.state === "error"
+                        ? "bad"
+                        : "warn"
+                  }
+                  pulse={syncStatus.state === "connecting" || syncStatus.state === "reconnecting"}
+                />
+                <span>{syncStatusLabel}</span>
               </span>
-            )}
-
-            <Button variant="secondary" size="sm" onClick={() => void handleChooseFile()}>
-              <FolderOpen className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Open File</span>
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => openSettings()}
-              aria-label="Open settings"
-              title="Settings"
-            >
-              <Settings className="h-3.5 w-3.5" />
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setPanelOpen((o) => !o)}
-              aria-label={panelOpen ? "Collapse side panel" : "Expand side panel"}
-              title={panelOpen ? "Hide panel" : "Show panel"}
-            >
-              {panelOpen ? (
-                <PanelRightClose className="h-3.5 w-3.5" />
-              ) : (
-                <PanelRightOpen className="h-3.5 w-3.5" />
+            </>
+          }
+          rightActions={
+            <>
+              {feedback && (
+                <span
+                  key={feedback.id}
+                  className="anim-pop-in hidden md:inline-block px-2 py-0.5 text-[11px] font-medium bg-raised text-accent-soft border border-hairline rounded-[var(--radius-ui)]"
+                >
+                  {feedback.text}
+                </span>
               )}
-            </Button>
 
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleLeaveRoom}
-              aria-label="Leave room"
-              title="Leave room"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </header>
+              <Button variant="secondary" size="sm" onClick={() => void handleChooseFile()}>
+                <FolderOpen className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Open Video</span>
+              </Button>
+
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleCopyInviteCode()}
+                title="Copy invite code"
+              >
+                {copiedCode ? (
+                  <Check className="h-3.5 w-3.5 text-ok" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+                <span className="hidden sm:inline">{copiedCode ? "Copied" : "Copy Code"}</span>
+              </Button>
+
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => openSettings("prefs")}
+                aria-label="Open settings"
+                title="Settings"
+              >
+                <Settings className="h-3.5 w-3.5" />
+                <span className="hidden lg:inline">Settings</span>
+              </Button>
+
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setPanelOpen((o) => !o)}
+                aria-label={panelOpen ? "Hide sidebar" : "Show sidebar"}
+                title={panelOpen ? "Hide sidebar" : "Show sidebar"}
+              >
+                {panelOpen ? (
+                  <PanelRightClose className="h-3.5 w-3.5" />
+                ) : (
+                  <PanelRightOpen className="h-3.5 w-3.5" />
+                )}
+                <span className="hidden lg:inline">Sidebar</span>
+              </Button>
+
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleLeaveRoom}
+                aria-label="Leave watch party"
+                title="Leave watch party"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span className="hidden lg:inline">Leave</span>
+              </Button>
+            </>
+          }
+        />
       )}
 
       <NotificationStrip />
@@ -752,25 +803,25 @@ export function WatchRoom() {
         </div>
 
         {chrome.showPanel && (
-          <aside className="anim-drawer-in w-72 shrink-0 flex flex-col bg-chrome border-l border-hairline min-h-0">
-            <div className="p-2 border-b border-hairline">
+          <aside className="anim-drawer-in w-80 shrink-0 flex flex-col bg-chrome border-l border-hairline min-h-0">
+            <div className="p-2.5 border-b border-hairline">
               <SegmentedTabs
-                ariaLabel="Inspector panel"
+                ariaLabel="Watch party panel"
                 value={sideTab}
                 onChange={setSideTab}
                 className="w-full"
                 items={[
-                  { value: "room", label: "Room" },
-                  { value: "playback", label: "Playback" },
+                  { value: "room", label: "Party" },
                   { value: "subtitles", label: "Subtitles" },
+                  { value: "playback", label: "Audio" },
                 ]}
               />
             </div>
 
             <div className="flex-1 overflow-y-auto min-h-0">
               {sideTab === "room" && <RoomPanel />}
-              {sideTab === "playback" && <PlaybackPanel />}
               {sideTab === "subtitles" && <SubtitlePanel />}
+              {sideTab === "playback" && <PlaybackPanel />}
             </div>
           </aside>
         )}

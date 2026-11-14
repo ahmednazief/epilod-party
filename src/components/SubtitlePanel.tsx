@@ -1,13 +1,13 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
+  ChevronRight,
   Eye,
   EyeOff,
   FolderOpen,
   RotateCcw,
   Sparkles,
   Square,
-  Wrench,
 } from "lucide-react";
 import { useState } from "react";
 import { isDesktop } from "../lib/bridge";
@@ -28,7 +28,6 @@ import {
 import {
   buildSubTrackOptions,
   formatDelayLabel,
-  formatTimingStatus,
   isBitmapSubtitleTrack,
   selectSubTrack,
 } from "../lib/tracks";
@@ -100,7 +99,7 @@ export function SubtitlePanel() {
 
   const pushNote = useNotificationStore((s) => s.push);
 
-  const [showTwoAnchor, setShowTwoAnchor] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [srcASecs, setSrcASecs] = useState("10");
   const [dstASecs, setDstASecs] = useState("10");
   const [srcBSecs, setSrcBSecs] = useState("600");
@@ -127,11 +126,11 @@ export function SubtitlePanel() {
 
   const handleLoadExternalSubtitle = async () => {
     if (!loaded) {
-      pushNote("info", "Load a video file before loading a subtitle.");
+      pushNote("info", "Open a video before loading a subtitle file.");
       return;
     }
     if (!isDesktop()) {
-      pushNote("warn", "File dialog is only available in the Windows desktop app.");
+      pushNote("warn", "File dialog requires the Windows desktop app.");
       return;
     }
     let chosen: string | null = null;
@@ -173,7 +172,7 @@ export function SubtitlePanel() {
         }
         await mpvAddSubtitle(targetPath, hint);
         applyStyleNow();
-        pushNote("info", `Reloaded subtitle with ${hint} encoding.`);
+        pushNote("info", "Updated subtitle text encoding.");
       } catch (err) {
         pushNote("error", formatUserError(err, "Failed re-decoding subtitle."));
       }
@@ -217,10 +216,7 @@ export function SubtitlePanel() {
       setLoadedTrack(result.syncedSubtitlePath, result.sourceSubtitlePath);
       setAutoSyncResult(result);
       applyStyleNow();
-      pushNote(
-        "success",
-        `Subtitle auto-synced (offset ${result.offsetSecs >= 0 ? "+" : ""}${result.offsetSecs.toFixed(2)}s, z=${result.confidenceZ.toFixed(1)}).`,
-      );
+      pushNote("success", "Subtitles synced to audio.");
     } catch (err) {
       if (
         useSubtitleStore.getState().sessionGen !== startGen ||
@@ -228,7 +224,7 @@ export function SubtitlePanel() {
       ) {
         return;
       }
-      const msg = formatUserError(err, "Auto-sync could not find a confident alignment.");
+      const msg = formatUserError(err, "Could not auto-sync subtitles automatically.");
       setAutoSyncError(msg);
       pushNote("error", msg);
     }
@@ -283,7 +279,7 @@ export function SubtitlePanel() {
       setLoadedTrack(result.syncedSubtitlePath, targetSub);
       setAutoSyncResult(result);
       applyStyleNow();
-      pushNote("success", "Applied 2-point subtitle timing calibration.");
+      pushNote("success", "Applied manual 2-point timing.");
     } catch (err) {
       if (
         useSubtitleStore.getState().sessionGen !== startGen ||
@@ -291,7 +287,7 @@ export function SubtitlePanel() {
       ) {
         return;
       }
-      pushNote("error", formatUserError(err, "Two-anchor calibration failed."));
+      pushNote("error", formatUserError(err, "Manual timing calibration failed."));
     }
   };
 
@@ -300,45 +296,46 @@ export function SubtitlePanel() {
     void mpvSetSubDelay(next);
   };
 
-  return (
-    <div className="anim-tab-in p-3 space-y-4">
-      <div className="flex items-center gap-2">
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!loaded}
-          onClick={() => void handleLoadExternalSubtitle()}
-          className="flex-1"
-        >
-          <FolderOpen className="h-3.5 w-3.5" />
-          Load Subtitle File
-        </Button>
-        <Button
-          variant={visible ? "primary" : "secondary"}
-          size="sm"
-          disabled={!loaded}
-          onClick={() => {
-            const next = !visible;
-            setVisible(next);
-            void mpvSetSubStyle({
-              font,
-              fontSize,
-              color,
-              borderSize,
-              pos,
-              visible: next,
-              overrideAss: overrideAssStyle,
-            });
-          }}
-          aria-label={visible ? "Hide subtitles" : "Show subtitles"}
-          title="Toggle subtitles (V)"
-        >
-          {visible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-        </Button>
-      </div>
+  const hasTrack = currentSubVal !== "none" || Boolean(loadedFilePath);
 
-      <div className="space-y-1.5">
-        <span className="text-xs font-medium text-secondary block">Active Subtitle Track</span>
+  return (
+    <div className="anim-tab-in p-3.5 space-y-4">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={!loaded}
+            onClick={() => void handleLoadExternalSubtitle()}
+            className="flex-1"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            Load Subtitle
+          </Button>
+          <Button
+            variant={visible ? "primary" : "secondary"}
+            size="sm"
+            disabled={!loaded}
+            onClick={() => {
+              const next = !visible;
+              setVisible(next);
+              void mpvSetSubStyle({
+                font,
+                fontSize,
+                color,
+                borderSize,
+                pos,
+                visible: next,
+                overrideAss: overrideAssStyle,
+              });
+            }}
+            aria-label={visible ? "Hide subtitles" : "Show subtitles"}
+            title="Show/Hide subtitles (V)"
+          >
+            {visible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+
         <SelectMenu
           ariaLabel="Subtitle Track"
           disabled={!loaded}
@@ -357,117 +354,60 @@ export function SubtitlePanel() {
         />
         {loadedFilePath && (
           <p className="text-[11px] text-muted truncate">
-            External: {getFileDisplayName(loadedFilePath)}
+            {getFileDisplayName(loadedFilePath)}
           </p>
         )}
       </div>
 
       {subIsBitmap && (
-        <div className="p-2.5 bg-canvas border border-warn/40 rounded-[var(--radius-ui)] flex items-start gap-2 text-[11px] text-warn">
+        <div className="p-3 bg-canvas border border-warn/35 rounded-xl flex items-start gap-2 text-[11px] text-warn">
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
-            Bitmap subtitle track detected ({selectedSub?.codec}). Font styling and text auto-sync only work with text subtitles (.srt/.ass/.vtt).
+            This track uses image-based subtitles, so font styling and auto-sync aren&apos;t available.
           </span>
         </div>
       )}
 
-      <div className="p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-2.5">
+      <div className="p-3.5 bg-canvas border border-hairline rounded-xl space-y-3">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-medium text-primary">Auto-Sync to Speech</span>
-          <span className="text-[11px] text-muted">
-            {formatTimingStatus({
-              delaySecs,
-              hasTrack: currentSubVal !== "none" || Boolean(loadedFilePath),
-              isAutoSynced: Boolean(autoSyncOutcome),
-            })}
+          <span className="text-xs font-medium text-primary">Timing</span>
+          <span className="num text-[11px] text-muted">
+            {!hasTrack
+              ? "No subtitle active"
+              : autoSyncOutcome && Math.abs(delaySecs) < 0.01
+                ? "Synced to audio"
+                : delaySecs === 0
+                  ? "On time"
+                  : formatDelayLabel(delaySecs)}
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          {autoSyncBusy ? (
-            <Button
-              variant="danger"
-              size="sm"
-              className="flex-1"
-              onClick={() => void handleCancelAutoSync()}
-            >
-              <Square className="h-3 w-3" />
-              Cancel Auto-Sync
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              size="sm"
-              className="flex-1"
-              disabled={!canAutoSync}
-              onClick={() => void handleAutoSync()}
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              Auto-Sync Subtitles
-            </Button>
-          )}
+        {autoSyncBusy ? (
           <Button
-            variant="ghost"
+            variant="danger"
             size="sm"
-            onClick={() => setShowTwoAnchor((v) => !v)}
-            title="Manual 2-point sync calibration"
+            className="w-full"
+            onClick={() => void handleCancelAutoSync()}
           >
-            <Wrench className="h-3.5 w-3.5" />
+            <Square className="h-3 w-3" />
+            Cancel Auto-Sync
           </Button>
-        </div>
-
-        {autoSyncOutcome && (
-          <div className="text-[11px] text-ok space-y-0.5">
-            <p className="num">
-              Shift: {autoSyncOutcome.offsetSecs >= 0 ? "+" : ""}
-              {autoSyncOutcome.offsetSecs.toFixed(2)}s · z={autoSyncOutcome.confidenceZ.toFixed(1)}
-              {autoSyncOutcome.driftApplied ? ` · scale=${autoSyncOutcome.scale.toFixed(4)}×` : ""}
-            </p>
-          </div>
+        ) : (
+          <Button
+            variant="primary"
+            size="sm"
+            className="w-full"
+            disabled={!canAutoSync}
+            onClick={() => void handleAutoSync()}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Auto-Sync to Audio
+          </Button>
         )}
 
         {autoSyncError && <p className="text-[11px] text-bad">{autoSyncError}</p>}
 
-        {showTwoAnchor && (
-          <div className="pt-2 border-t border-hairline space-y-2">
-            <p className="text-[11px] text-secondary">
-              2-Point Manual Calibration (seconds): match two subtitle lines to spoken audio timestamps.
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              <TextField
-                label="Early sub (s)"
-                value={srcASecs}
-                onChange={(e) => setSrcASecs(e.target.value)}
-              />
-              <TextField
-                label="Early audio (s)"
-                value={dstASecs}
-                onChange={(e) => setDstASecs(e.target.value)}
-              />
-              <TextField
-                label="Late sub (s)"
-                value={srcBSecs}
-                onChange={(e) => setSrcBSecs(e.target.value)}
-              />
-              <TextField
-                label="Late audio (s)"
-                value={dstBSecs}
-                onChange={(e) => setDstBSecs(e.target.value)}
-              />
-            </div>
-            <Button variant="secondary" size="sm" className="w-full" onClick={() => void handleTwoAnchorApply()}>
-              Apply 2-Point Calibration
-            </Button>
-          </div>
-        )}
-      </div>
-
-      <div className="space-y-2">
-        <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-secondary">Manual Delay</span>
-          <span className="num text-primary">{formatDelayLabel(delaySecs)}</span>
-        </div>
-        <div className="grid grid-cols-5 gap-1">
+        <div className="grid grid-cols-5 gap-1 pt-0.5">
           <Button variant="secondary" size="sm" disabled={!loaded} onClick={() => handleNudge(-0.5)}>
             -0.5s
           </Button>
@@ -494,19 +434,9 @@ export function SubtitlePanel() {
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <span className="text-xs font-medium text-secondary block">Text Encoding</span>
-        <SelectMenu
-          ariaLabel="Subtitle Encoding"
-          value={encodingHint}
-          options={SUBTITLE_ENCODING_OPTIONS}
-          onChange={(val) => void handleEncodingChange(val)}
-        />
-      </div>
-
-      <div className="space-y-3 pt-1 border-t border-hairline">
+      <div className="p-3.5 bg-canvas border border-hairline rounded-xl space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-secondary">Appearance</span>
+          <span className="text-xs font-medium text-primary">Look</span>
           <Button
             variant="ghost"
             size="sm"
@@ -530,9 +460,9 @@ export function SubtitlePanel() {
           }}
         />
 
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           <div className="flex justify-between text-[11px] text-secondary">
-            <span>Font Size</span>
+            <span>Text Size</span>
             <span className="num">{fontSize}px</span>
           </div>
           <Scrubber
@@ -548,81 +478,152 @@ export function SubtitlePanel() {
           />
         </div>
 
-        <div className="space-y-1">
-          <div className="flex justify-between text-[11px] text-secondary">
-            <span>Vertical Position</span>
-            <span className="num">{pos}%</span>
+        <div className="flex items-center justify-between pt-0.5">
+          <span className="text-[11px] text-secondary">Color</span>
+          <div className="flex items-center gap-2">
+            {SUBTITLE_COLORS.map((c) => {
+              const active = color.toUpperCase() === c.hex.toUpperCase();
+              return (
+                <button
+                  key={c.hex}
+                  type="button"
+                  aria-label={`Color ${c.label}`}
+                  title={c.label}
+                  onClick={() => {
+                    setColor(c.hex);
+                    applyStyleNow();
+                  }}
+                  className={`h-5 w-5 rounded-full border cursor-pointer transition-transform ${
+                    active ? "border-accent ring-2 ring-accent/40 scale-110" : "border-hairline"
+                  }`}
+                  style={{ backgroundColor: c.hex }}
+                />
+              );
+            })}
           </div>
-          <Scrubber
-            ariaLabel="Subtitle Position"
-            value={pos}
-            min={20}
-            max={100}
-            step={1}
-            onChange={(val) => {
-              setPos(val);
-              applyStyleNow();
-            }}
-          />
         </div>
+      </div>
 
-        <div className="space-y-1">
-          <div className="flex justify-between text-[11px] text-secondary">
-            <span>Outline Thickness</span>
-            <span className="num">{borderSize.toFixed(1)}</span>
-          </div>
-          <Scrubber
-            ariaLabel="Subtitle Border Size"
-            value={borderSize}
-            min={0}
-            max={6}
-            step={0.5}
-            onChange={(val) => {
-              setBorderSize(val);
-              applyStyleNow();
-            }}
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="w-full flex items-center justify-between px-1 py-1.5 text-xs text-muted hover:text-secondary transition-colors cursor-pointer"
+        >
+          <span>Advanced timing &amp; encoding</span>
+          <ChevronRight
+            className={`h-3.5 w-3.5 transition-transform duration-150 ${
+              showAdvanced ? "rotate-90" : ""
+            }`}
           />
-        </div>
+        </button>
 
-        <div className="flex items-center gap-2">
-          {SUBTITLE_COLORS.map((c) => {
-            const active = color.toUpperCase() === c.hex.toUpperCase();
-            return (
-              <button
-                key={c.hex}
-                type="button"
-                aria-label={`Color ${c.label}`}
-                title={c.label}
-                onClick={() => {
-                  setColor(c.hex);
+        {showAdvanced && (
+          <div className="mt-2 p-3.5 bg-canvas border border-hairline rounded-xl space-y-3.5">
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-medium text-secondary block">Text Encoding</span>
+              <SelectMenu
+                ariaLabel="Subtitle Encoding"
+                value={encodingHint}
+                options={SUBTITLE_ENCODING_OPTIONS}
+                onChange={(val) => void handleEncodingChange(val)}
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-[11px] text-secondary">
+                <span>Vertical Position</span>
+                <span className="num">{pos}%</span>
+              </div>
+              <Scrubber
+                ariaLabel="Subtitle Position"
+                value={pos}
+                min={20}
+                max={100}
+                step={1}
+                onChange={(val) => {
+                  setPos(val);
                   applyStyleNow();
                 }}
-                className={`h-6 w-6 rounded-full border cursor-pointer ${
-                  active ? "border-accent ring-2 ring-accent/40" : "border-hairline"
-                }`}
-                style={{ backgroundColor: c.hex }}
               />
-            );
-          })}
-        </div>
+            </div>
 
-        <label className="flex items-start justify-between gap-2 pt-1 text-xs cursor-pointer">
-          <div>
-            <span className="text-secondary block">Override styled .ass/.ssa subtitles</span>
-            <span className="text-[11px] text-muted">
-              Leave off for anime fansubs; enable to force consistent font/color.
-            </span>
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-[11px] text-secondary">
+                <span>Outline Thickness</span>
+                <span className="num">{borderSize.toFixed(1)}</span>
+              </div>
+              <Scrubber
+                ariaLabel="Subtitle Border Size"
+                value={borderSize}
+                min={0}
+                max={6}
+                step={0.5}
+                onChange={(val) => {
+                  setBorderSize(val);
+                  applyStyleNow();
+                }}
+              />
+            </div>
+
+            <label className="flex items-start justify-between gap-2 pt-1 text-xs cursor-pointer">
+              <div>
+                <span className="text-secondary block">Override styled .ass/.ssa subtitles</span>
+                <span className="text-[11px] text-muted">
+                  Force the font and color above on stylized fansubs.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={overrideAssStyle}
+                onChange={(e) => {
+                  setOverrideAssStyle(e.target.checked);
+                  applyStyleNow();
+                }}
+                className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
+              />
+            </label>
+
+            {autoSyncOutcome && (
+              <p className="num text-[11px] text-ok pt-1 border-t border-hairline">
+                Shift {autoSyncOutcome.offsetSecs >= 0 ? "+" : ""}
+                {autoSyncOutcome.offsetSecs.toFixed(2)}s · z={autoSyncOutcome.confidenceZ.toFixed(1)}
+                {autoSyncOutcome.driftApplied ? ` · ${autoSyncOutcome.scale.toFixed(4)}×` : ""}
+              </p>
+            )}
+
+            <div className="pt-2 border-t border-hairline space-y-2">
+              <p className="text-[11px] text-secondary">
+                2-Point Manual Timing (seconds)
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <TextField
+                  label="Early sub (s)"
+                  value={srcASecs}
+                  onChange={(e) => setSrcASecs(e.target.value)}
+                />
+                <TextField
+                  label="Early audio (s)"
+                  value={dstASecs}
+                  onChange={(e) => setDstASecs(e.target.value)}
+                />
+                <TextField
+                  label="Late sub (s)"
+                  value={srcBSecs}
+                  onChange={(e) => setSrcBSecs(e.target.value)}
+                />
+                <TextField
+                  label="Late audio (s)"
+                  value={dstBSecs}
+                  onChange={(e) => setDstBSecs(e.target.value)}
+                />
+              </div>
+              <Button variant="secondary" size="sm" className="w-full" onClick={() => void handleTwoAnchorApply()}>
+                Apply 2-Point Timing
+              </Button>
+            </div>
           </div>
-          <input
-            type="checkbox"
-            checked={overrideAssStyle}
-            onChange={(e) => {
-              setOverrideAssStyle(e.target.checked);
-              applyStyleNow();
-            }}
-            className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
-          />
-        </label>
+        )}
       </div>
     </div>
   );
