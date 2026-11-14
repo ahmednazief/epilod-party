@@ -16,18 +16,17 @@ try {
 
     Write-Host "==> Running Rust tests and clippy..."
     cargo fmt --all -- --check
-    cargo test -p epilod-core
-    cargo test -p epilod-party
+    cargo test --workspace
     cargo clippy --all-targets -- -D warnings
 
-    Write-Host "==> Running TypeScript check, Vite build, and Node tests..."
+    Write-Host "==> Running TypeScript check, Vite builds, and Node tests..."
     npm ci
     npm run build
     node --test tests/*.test.ts
 
-    Write-Host "==> Building Windows Tauri NSIS installer..."
-    npx tauri build
-    Write-Host "==> Windows verification & build complete!"
+    Write-Host "==> Building custom standalone Windows installer (Epilod Party Setup.exe)..."
+    & (Join-Path $PSScriptRoot "build-installer.ps1") -SkipFrontendBuild
+    Write-Host "==> Windows verification & custom installer build complete!"
 }
 finally {
     Pop-Location

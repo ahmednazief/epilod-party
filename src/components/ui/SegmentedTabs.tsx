@@ -47,7 +47,7 @@ export function SegmentedTabs<T extends string>({
       {indicator.width > 0 && (
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute top-0.5 bottom-0.5 left-0 bg-raised border border-hairline rounded-[4px] transition-[transform,width] duration-200 ease-out"
+          className="pointer-events-none absolute top-0.5 bottom-0.5 left-0 bg-hover border border-accent/35 rounded-[4px] transition-[transform,width] duration-200 ease-out"
           style={{
             width: `${indicator.width}px`,
             transform: `translateX(${indicator.left}px)`,
@@ -67,7 +67,7 @@ export function SegmentedTabs<T extends string>({
             aria-selected={active}
             onClick={() => onChange(item.value)}
             className={`relative z-10 flex-1 px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent rounded-[4px] ${
-              active ? "text-primary" : "text-muted hover:text-secondary"
+              active ? "text-[#C4B5FD]" : "text-muted hover:text-secondary"
             }`}
           >
             {item.label}

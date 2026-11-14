@@ -46,5 +46,7 @@ jobs:
       - name: Run Clippy across all Windows targets
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Verify release compilation of Tauri Windows app
-        run: cargo check --manifest-path src-tauri/Cargo.toml --release
+      - name: Verify release compilation of Tauri Windows app & custom installer
+        run: |
+          cargo check --manifest-path src-tauri/Cargo.toml --release
+          cargo check --manifest-path src-installer/Cargo.toml --release

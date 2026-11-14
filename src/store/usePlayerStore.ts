@@ -99,11 +99,13 @@ export const usePlayerStore = create<PlayerState>((set) => ({
 
   resetForNewFile: () =>
     set({
+      paused: true,
       positionSecs: 0,
       durationSecs: 0,
       speed: 1.0,
       looping: false,
       aspectMode: "auto",
+      loaded: false,
       endedAtEof: false,
       playerError: null,
       tracks: [],

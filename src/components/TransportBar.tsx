@@ -11,12 +11,18 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { mpvSeek, mpvSetMute, mpvSetPause, mpvSetVolume } from "../lib/mpv";
 import { shouldReplayFromStart } from "../lib/playbackEnd";
 import { canToggleReady, resolveReadyToggleTarget } from "../lib/syncReady";
-import { getControllerLockState } from "../lib/syncController";
-import { syncSetReady, syncUserPause, syncUserPlay, syncUserSeek } from "../lib/syncplay";
+import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
+import {
+  syncSetReady,
+  syncSetScrubbing,
+  syncUserPause,
+  syncUserPlay,
+  syncUserSeek,
+} from "../lib/syncplay";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
@@ -46,6 +52,7 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
   const syncConnected = useSyncStore((s) => s.status.state === "connected");
 
   const [dragSecs, setDragSecs] = useState<number | null>(null);
+  const scrubbingRef = useRef(false);
 
   const throttledSeek = useMemo(
     () =>
@@ -54,6 +61,16 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
       }, 90),
     [],
   );
+
+  useEffect(() => {
+    return () => {
+      throttledSeek.cancel();
+      if (scrubbingRef.current) {
+        scrubbingRef.current = false;
+        void syncSetScrubbing(false);
+      }
+    };
+  }, [throttledSeek]);
 
   const displayedPos = dragSecs !== null ? dragSecs : positionSecs;
   const disabled = !loaded || durationSecs <= 0 || locked;
@@ -73,6 +90,10 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
         disabled={disabled}
         formatTooltip={formatClock}
         onChange={(val) => {
+          if (!scrubbingRef.current) {
+            scrubbingRef.current = true;
+            void syncSetScrubbing(true);
+          }
           setDragSecs(val);
           throttledSeek.call(val);
         }}
@@ -84,6 +105,10 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
           void mpvSeek(val);
           if (syncConnected) {
             void syncUserSeek(val);
+          }
+          if (scrubbingRef.current) {
+            scrubbingRef.current = false;
+            void syncSetScrubbing(false);
           }
         }}
       />
@@ -124,7 +149,8 @@ export function TransportBar({ onToggleFullscreen }: TransportBarProps) {
   const pushNote = useNotificationStore((s) => s.push);
 
   const syncConnected = syncStatus.state === "connected";
-  const ctrlLock = getControllerLockState(syncConnected, participants, username);
+  const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
+  const ctrlLock = getControllerLockState(syncConnected, participants, effectiveUsername);
 
   const throttledVol = useMemo(
     () =>

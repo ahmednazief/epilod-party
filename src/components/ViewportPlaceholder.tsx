@@ -1,5 +1,6 @@
-import { AlertTriangle, Film, FolderOpen } from "lucide-react";
+import { AlertTriangle, FolderOpen } from "lucide-react";
 import { Button } from "./ui/Button";
+import { LogoMark } from "./ui/LogoMark";
 
 interface ViewportPlaceholderProps {
   loaded: boolean;
@@ -47,7 +48,13 @@ export function ViewportPlaceholder({
           }`}
         >
           <div className={isDragActive ? "anim-drop-float" : ""}>
-            <Film className={`h-8 w-8 ${isDragActive ? "text-accent" : "text-muted"}`} />
+            <LogoMark
+              variant="party"
+              size={52}
+              className={`transition-transform duration-150 ${
+                isDragActive ? "scale-105 opacity-100" : "opacity-95"
+              }`}
+            />
           </div>
           <div className="space-y-1">
             <p className="text-sm font-medium text-primary">

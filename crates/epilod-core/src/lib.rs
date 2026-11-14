@@ -1,3 +1,4 @@
+pub mod ed25519;
 pub mod logging;
 pub mod matching;
 pub mod models;
@@ -7,4 +8,5 @@ pub mod rate_limit;
 pub mod room_code;
 pub mod subtitle_sync;
 pub mod syncplay;
+pub mod updater;
 pub mod validation;

@@ -1,16 +1,16 @@
-import { RefreshCw, X } from "lucide-react";
+import { Download, Pause, RefreshCw, RotateCw, ShieldCheck, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { setAllowNetworkShares } from "../lib/mpv";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
+import { formatBytesCompact, formatTransferSpeed } from "../lib/updater";
 import { validateServerEndpointInput } from "../lib/webviewHardening";
-import { useAppStore } from "../store/useAppStore";
+import { useAppStore, type SettingsTab } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
+import { useUpdaterStore } from "../store/useUpdaterStore";
 import { Button } from "./ui/Button";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { TextField } from "./ui/TextField";
-
-type SettingsTab = "server" | "prefs" | "logs";
 
 interface SettingsModalProps {
   open: boolean;
@@ -19,22 +19,40 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsModalProps) {
-  const [tab, setTab] = useState<SettingsTab>("server");
+  const tab = useAppStore((s) => s.settingsTab);
+  const setTab = useAppStore((s) => s.setSettingsTab);
 
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const allowNetworkShares = useAppStore((s) => s.allowNetworkShares);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
+  const hashFilenames = useAppStore((s) => s.hashFilenames);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
+  const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
 
   const setServerEndpoint = useAppStore((s) => s.setServerEndpoint);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const setStoreAllowShares = useAppStore((s) => s.setAllowNetworkShares);
   const setHideParticipants = useAppStore((s) => s.setHideParticipants);
+  const setHashFilenames = useAppStore((s) => s.setHashFilenames);
   const setReducedMotion = useAppStore((s) => s.setReducedMotion);
   const setLowPowerMode = useAppStore((s) => s.setLowPowerMode);
+  const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
   const pushNote = useNotificationStore((s) => s.push);
+
+  const updateStatus = useUpdaterStore((s) => s.status);
+  const updateProgress = useUpdaterStore((s) => s.progress);
+  const isCheckingUpdates = useUpdaterStore((s) => s.isChecking);
+  const isDownloadingUpdate = useUpdaterStore((s) => s.isDownloading);
+  const isUpdatePaused = useUpdaterStore((s) => s.isPaused);
+  const isApplyingUpdate = useUpdaterStore((s) => s.isApplying);
+  const updateError = useUpdaterStore((s) => s.error);
+  const initUpdater = useUpdaterStore((s) => s.init);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const startUpdateDownload = useUpdaterStore((s) => s.startDownload);
+  const cancelUpdateDownload = useUpdaterStore((s) => s.cancelDownload);
+  const applyAndRestartUpdate = useUpdaterStore((s) => s.applyAndRestart);
 
   const [endpointDraft, setEndpointDraft] = useState(serverEndpoint);
   const [passwordDraft, setPasswordDraft] = useState(serverPassword);
@@ -48,8 +66,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       setEndpointDraft(serverEndpoint);
       setPasswordDraft(serverPassword);
       setEndpointError(null);
+      void initUpdater();
     }
-  }, [open, serverEndpoint, serverPassword]);
+  }, [open, serverEndpoint, serverPassword, initUpdater]);
 
   const loadLogs = async () => {
     setLogsLoading(true);
@@ -84,6 +103,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     onClose();
   };
 
+  const availableRelease = updateStatus?.availableRelease ?? null;
+  const availability = updateStatus?.availability ?? "upToDate";
+  const progressFraction = Math.min(1, Math.max(0, (updateProgress?.percent ?? 0) / 100));
+  const lastCheckedLabel = updateStatus?.checkedAtUnix
+    ? new Date(updateStatus.checkedAtUnix * 1000).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
   return (
     <div
       className="anim-backdrop-in fixed inset-0 z-50 flex items-center justify-center bg-canvas/85 p-4"
@@ -103,7 +132,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
         </div>
 
         <div className="px-4 pt-3">
-          <SegmentedTabs
+          <SegmentedTabs<SettingsTab>
             ariaLabel="Settings sections"
             value={tab}
             onChange={setTab}
@@ -111,6 +140,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             items={[
               { value: "server", label: "Server" },
               { value: "prefs", label: "Preferences" },
+              { value: "updates", label: "Updates" },
               { value: "logs", label: "Diagnostics" },
             ]}
           />
@@ -202,6 +232,23 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
               <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
                 <div>
+                  <p className="text-xs font-medium text-primary">
+                    Privacy Mode: Hash Shared Filenames
+                  </p>
+                  <p className="text-[11px] text-secondary mt-0.5">
+                    Send SHA-256 hashed filenames and sizes to the Syncplay server instead of plain titles.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={hashFilenames}
+                  onChange={(e) => setHashFilenames(e.target.checked)}
+                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
+                />
+              </label>
+
+              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
+                <div>
                   <p className="text-xs font-medium text-primary">Reduced Motion</p>
                   <p className="text-[11px] text-secondary mt-0.5">
                     Minimize transitions and animations throughout the interface.
@@ -226,6 +273,168 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   type="checkbox"
                   checked={lowPowerMode}
                   onChange={(e) => setLowPowerMode(e.target.checked)}
+                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
+                />
+              </label>
+            </div>
+          )}
+
+          {tab === "updates" && (
+            <div className="anim-tab-in space-y-4">
+              <div className="p-3.5 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${
+                        availability === "downloadedReady"
+                          ? "bg-ok"
+                          : availability === "updateAvailable"
+                            ? "bg-accent"
+                            : availability === "unsupportedUpgrade"
+                              ? "bg-bad"
+                              : "bg-muted"
+                      }`}
+                    />
+                    <span className="text-xs font-medium text-primary">
+                      Installed: v{updateStatus?.currentVersion ?? "0.1.0"}
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-muted">
+                    {lastCheckedLabel ? `Checked at ${lastCheckedLabel}` : "Official GitHub Releases"}
+                  </span>
+                </div>
+
+                <p className="text-xs text-secondary leading-relaxed">
+                  {updateStatus?.message ?? "Check GitHub Releases for SHA-256 verified updates."}
+                </p>
+
+                {availableRelease && (
+                  <div className="rounded-[var(--radius-ui)] bg-chrome border border-hairline p-3 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-primary">
+                        Epilod Party v{availableRelease.version}
+                      </span>
+                      <span className="text-[11px] font-mono text-muted">
+                        {formatBytesCompact(availableRelease.sizeBytes)}
+                      </span>
+                    </div>
+                    {availableRelease.notes && (
+                      <p className="text-[11px] text-secondary leading-relaxed whitespace-pre-line">
+                        {availableRelease.notes}
+                      </p>
+                    )}
+                    <div className="flex items-center gap-1.5 pt-1 text-[10.5px] font-mono text-muted">
+                      <ShieldCheck className="h-3 w-3 text-ok shrink-0" />
+                      <span className="truncate">
+                        {updateStatus?.signatureVerified
+                          ? `Ed25519 Signed · SHA-256: ${availableRelease.sha256.slice(0, 16)}...`
+                          : `SHA-256 Verified: ${availableRelease.sha256.slice(0, 16)}...`}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {(isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
+                  updateProgress && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-secondary truncate">{updateProgress.message}</span>
+                        <span className="font-mono text-muted shrink-0">
+                          {updateProgress.speedBps > 0
+                            ? `${formatTransferSpeed(updateProgress.speedBps)} · `
+                            : ""}
+                          {Math.round(updateProgress.percent)}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-chrome border border-hairline">
+                        <div
+                          className="h-full w-full origin-left bg-accent transition-transform duration-150 ease-out"
+                          style={{ transform: `scaleX(${progressFraction})` }}
+                        />
+                      </div>
+                      {updateProgress.totalBytes > 0 && (
+                        <div className="flex justify-between text-[10.5px] font-mono text-muted">
+                          <span>{formatBytesCompact(updateProgress.downloadedBytes)}</span>
+                          <span>{formatBytesCompact(updateProgress.totalBytes)}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                {updateError && (
+                  <p className="text-[11px] text-bad bg-chrome border border-bad/40 rounded-[var(--radius-ui)] px-2.5 py-2">
+                    {updateError}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={isCheckingUpdates || isDownloadingUpdate || isApplyingUpdate}
+                    onClick={() => void checkForUpdates(false)}
+                  >
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 ${isCheckingUpdates ? "animate-spin" : ""}`}
+                    />
+                    {isCheckingUpdates ? "Checking..." : "Check for Updates"}
+                  </Button>
+
+                  <div className="flex items-center gap-2">
+                    {isDownloadingUpdate && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void cancelUpdateDownload()}
+                      >
+                        <Pause className="h-3.5 w-3.5" />
+                        Pause
+                      </Button>
+                    )}
+
+                    {!isDownloadingUpdate && availability === "updateAvailable" && availableRelease && (
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => void startUpdateDownload()}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        {isUpdatePaused ? "Resume Download" : "Download Update"}
+                      </Button>
+                    )}
+
+                    {availability === "downloadedReady" && availableRelease && (
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={isApplyingUpdate}
+                        onClick={() => void applyAndRestartUpdate()}
+                      >
+                        <RotateCw
+                          className={`h-3.5 w-3.5 ${isApplyingUpdate ? "animate-spin" : ""}`}
+                        />
+                        {isApplyingUpdate
+                          ? "Launching Updater..."
+                          : `Restart & Update to v${availableRelease.version}`}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
+                <div>
+                  <p className="text-xs font-medium text-primary">
+                    Check for updates automatically
+                  </p>
+                  <p className="text-[11px] text-secondary mt-0.5">
+                    Quietly check GitHub Releases on launch with SHA-256 verification before installing.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={autoCheckUpdates}
+                  onChange={(e) => setAutoCheckUpdates(e.target.checked)}
                   className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
                 />
               </label>

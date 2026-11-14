@@ -1,9 +1,11 @@
 node_modules/
 dist/
+installer/dist/
 target/
 src-tauri/gen/
 *.log
 *.exe
 *.dll
+*.epkg
 .DS_Store
 Thumbs.db

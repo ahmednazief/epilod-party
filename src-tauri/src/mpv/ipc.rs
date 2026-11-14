@@ -2,8 +2,9 @@
 
 use epilod_core::mpv_ipc::{encode_observe, parse_line, MpvEvent, MpvMessage};
 use epilod_core::syncplay::PlayerSnapshot;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -14,6 +15,8 @@ pub async fn connect_and_run_ipc(
     app: AppHandle,
     mut cmd_rx: mpsc::Receiver<String>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
+    loading_media: Arc<AtomicBool>,
+    pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
 ) {
     let full_pipe = format!(r"\\.\pipe\{pipe_name}");
     let mut client = None;
@@ -43,6 +46,7 @@ pub async fn connect_and_run_ipc(
         encode_observe(2, 2, "duration"),
         encode_observe(3, 3, "pause"),
         encode_observe(4, 4, "track-list"),
+        encode_observe(5, 5, "eof-reached"),
     ];
     for c in init_cmds {
         if writer_half.write_all(c.as_bytes()).await.is_err() {
@@ -67,6 +71,30 @@ pub async fn connect_and_run_ipc(
         match parse_line(&line) {
             Ok(MpvMessage::Event(ev)) => match ev {
                 MpvEvent::TimePos(position) => {
+                    if loading_media.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let skip_stale_seek = {
+                        if let Ok(mut ps) = pending_seek.lock() {
+                            if let Some((target, at)) = *ps {
+                                if at.elapsed() < Duration::from_millis(2500)
+                                    && (position - target).abs() > 1.0
+                                {
+                                    true
+                                } else {
+                                    *ps = None;
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if skip_stale_seek {
+                        continue;
+                    }
                     if let Ok(mut snap) = snapshot.lock() {
                         snap.position = position;
                     }
@@ -79,15 +107,31 @@ pub async fn connect_and_run_ipc(
                     );
                 }
                 MpvEvent::Paused(paused) => {
+                    if loading_media.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     if let Ok(mut snap) = snapshot.lock() {
                         snap.paused = paused;
                     }
                     let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
                 }
+                MpvEvent::EofReached(eof) => {
+                    if eof && !loading_media.load(Ordering::SeqCst) {
+                        let _ = app.emit(
+                            "mpv://ended",
+                            serde_json::json!({ "reason": "eof", "error": serde_json::Value::Null }),
+                        );
+                    }
+                }
                 MpvEvent::FileLoaded => {
+                    loading_media.store(false, Ordering::SeqCst);
                     let _ = app.emit("mpv://file-loaded", ());
                 }
                 MpvEvent::EndFile { reason, file_error } => {
+                    if reason.as_deref() != Some("replace") && reason.as_deref() != Some("redirect")
+                    {
+                        loading_media.store(false, Ordering::SeqCst);
+                    }
                     let error = if reason.as_deref() == Some("error") {
                         Some(
                             file_error
@@ -108,10 +152,13 @@ pub async fn connect_and_run_ipc(
                 MpvEvent::Other => {}
             },
             Ok(MpvMessage::Reply(rep)) => {
-                if rep.error != "success" && !rep.error.is_empty() {
+                if rep.error != "success"
+                    && !rep.error.is_empty()
+                    && rep.error != "property unavailable"
+                {
                     let _ = app.emit(
-                        "mpv://error",
-                        serde_json::json!({ "message": format!("mpv command error: {}", rep.error) }),
+                        "mpv://command-warning",
+                        serde_json::json!({ "message": format!("mpv command warning: {}", rep.error) }),
                     );
                 }
             }

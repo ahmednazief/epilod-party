@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { formatUserError } from "../lib/errors";
-import { getControllerLockState } from "../lib/syncController";
+import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
 import { canToggleReady, resolveReadyToggleTarget } from "../lib/syncReady";
 import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
 import {
@@ -26,6 +26,7 @@ import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { Button } from "./ui/Button";
+import { LogoMark } from "./ui/LogoMark";
 import { StatusDot, type StatusTone } from "./ui/StatusDot";
 
 function matchLabel(match: FileMatchStatus): { text: string; className: string } {
@@ -33,7 +34,7 @@ function matchLabel(match: FileMatchStatus): { text: string; className: string }
     case "matched":
       return { text: "Exact match", className: "text-ok" };
     case "sameLengthDifferentEncode":
-      return { text: "Same length · diff encode", className: "text-ok" };
+      return { text: "Same length · check file", className: "text-warn" };
     case "durationMismatch":
       return { text: "Duration differs", className: "text-bad" };
     case "differentFile":
@@ -64,7 +65,8 @@ export function RoomPanel() {
 
   const endpointSummary = describeSyncEndpoint(status, serverEndpoint);
   const syncConnected = status.state === "connected";
-  const ctrlLock = getControllerLockState(syncConnected, participants, username);
+  const effectiveUsername = resolveEffectiveUsername(status, username);
+  const ctrlLock = getControllerLockState(syncConnected, participants, effectiveUsername);
 
   let dotTone: StatusTone = "muted";
   let pulse = false;
@@ -126,7 +128,8 @@ export function RoomPanel() {
     <div className="anim-tab-in p-3 space-y-4">
       <div className="p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] uppercase tracking-wider text-muted">
+          <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted">
+            <LogoMark variant="party" size={16} />
             {literalRoom ? "Syncplay Room" : "Room Code"}
           </span>
           <Button variant="ghost" size="sm" onClick={() => void handleCopyRoom()}>
@@ -185,7 +188,7 @@ export function RoomPanel() {
 
       {ctrlLock.hasControllers && (
         <div className="p-2.5 bg-canvas border border-accent/40 rounded-[var(--radius-ui)] space-y-1">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-accent">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-accent-soft">
             <Lock className="h-3.5 w-3.5 shrink-0" />
             <span>
               {ctrlLock.localIsController
@@ -246,7 +249,8 @@ export function RoomPanel() {
           <div className="space-y-1.5">
             {participants.map((p) => {
               const badge = matchLabel(p.fileMatch);
-              const isSelf = p.username.trim().toLowerCase() === username.trim().toLowerCase();
+              const isSelf =
+                p.username.trim().toLowerCase() === effectiveUsername.trim().toLowerCase();
               return (
                 <div
                   key={p.username}
@@ -260,7 +264,7 @@ export function RoomPanel() {
                         {isSelf ? " (you)" : ""}
                       </span>
                       {p.isController && (
-                        <span className="px-1 py-0.5 text-[10px] bg-raised text-accent border border-hairline rounded-[3px]">
+                        <span className="px-1 py-0.5 text-[10px] bg-raised text-accent-soft border border-hairline rounded-[3px]">
                           Host
                         </span>
                       )}

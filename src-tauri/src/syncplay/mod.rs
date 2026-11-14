@@ -2,12 +2,12 @@
 
 use crate::mpv::MpvController;
 use epilod_core::matching::{compare_files, FileIdentity, FileMatchStatus};
-use epilod_core::mpv_ipc::{seek_absolute_cmd, set_pause_cmd};
+use epilod_core::mpv_ipc::{seek_absolute_cmd, set_pause_cmd, set_speed_cmd};
 use epilod_core::room_code::resolve_syncplay_room;
 use epilod_core::syncplay::{
     encode_hello, encode_set_file, encode_set_ready, encode_start_tls_send,
-    extract_tls_server_name, hash_filename, parse_server_line, PlayerSnapshot, ReconnectPolicy,
-    RoomParticipantUpdate, ServerMessage, SetUpdate, SyncAction, SyncStateMachine,
+    extract_tls_server_name, hash_filename, hash_filesize, parse_server_line, PlayerSnapshot,
+    ReconnectPolicy, RoomParticipantUpdate, ServerMessage, SetUpdate, SyncAction, SyncStateMachine,
     MAX_WIRE_LINE_BYTES,
 };
 use epilod_core::validation::validate_endpoint;
@@ -50,6 +50,8 @@ pub enum SyncCommand {
     UserPlay(f64),
     UserPause(f64),
     UserSeek(f64),
+    ResetForNewFile,
+    SetScrubbing(bool),
     ManualRetry,
 }
 
@@ -94,6 +96,11 @@ impl SyncController {
             resolve_syncplay_room(&room_input, literal_room).map_err(|e| e.to_string())?;
 
         self.disconnect_internal().await;
+        let _ = app.emit("sync://participants", Vec::<serde_json::Value>::new());
+        let _ = app.emit(
+            "sync://status",
+            serde_json::json!({ "state": "disconnected" }),
+        );
 
         let (tx, rx) = mpsc::channel::<SyncCommand>(64);
         let cfg = SyncSessionConfig {
@@ -231,6 +238,20 @@ impl SyncController {
             *guard = is_ready;
         }
         self.try_send(SyncCommand::SetReady { is_ready, manual });
+    }
+
+    pub fn reset_for_new_file(&self) {
+        if let Ok(mut guard) = self.local_file.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.local_ready.lock() {
+            *guard = false;
+        }
+        self.try_send(SyncCommand::ResetForNewFile);
+    }
+
+    pub fn set_scrubbing(&self, scrubbing: bool) {
+        self.try_send(SyncCommand::SetScrubbing(scrubbing));
     }
 
     pub fn send_command(&self, cmd: SyncCommand) {
@@ -482,6 +503,7 @@ where
     let mut participants: HashMap<String, RoomParticipantUpdate> = HashMap::new();
     let mut lines = BufReader::new(reader).lines();
     let mut connected_emitted = false;
+    let mut is_scrubbing = false;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -541,6 +563,7 @@ where
                     }
                     Ok(ServerMessage::Set(updates)) => {
                         let mut changed = false;
+                        let mut refresh_list = false;
                         for upd in updates {
                             match upd {
                                 SetUpdate::UserJoined { username: u } => {
@@ -554,6 +577,7 @@ where
                                         file: None,
                                     });
                                     changed = true;
+                                    refresh_list = true;
                                 }
                                 SetUpdate::UserLeft { username: u } => {
                                     participants.remove(&u);
@@ -585,13 +609,30 @@ where
                                     entry.file = Some(file);
                                     changed = true;
                                 }
-                                SetUpdate::ControllerAuth { username: u, is_controller } => {
+                                SetUpdate::FileCleared { username: u } => {
                                     if let Some(entry) = participants.get_mut(&u) {
-                                        entry.is_controller = is_controller;
+                                        entry.file = None;
+                                        entry.is_ready = Some(false);
                                         changed = true;
                                     }
                                 }
+                                SetUpdate::ControllerAuth { username: u, is_controller } => {
+                                    let entry = participants.entry(u.clone()).or_insert(RoomParticipantUpdate {
+                                        username: u,
+                                        room: wire_room.to_string(),
+                                        position: 0.0,
+                                        paused: true,
+                                        is_ready: Some(false),
+                                        is_controller,
+                                        file: None,
+                                    });
+                                    entry.is_controller = is_controller;
+                                    changed = true;
+                                }
                             }
+                        }
+                        if refresh_list {
+                            let _ = writer.write_all(b"{\"List\":null}\r\n").await;
                         }
                         if changed {
                             emit_participants(app, &participants, local_file);
@@ -599,8 +640,10 @@ where
                     }
                     Ok(ServerMessage::State(st)) => {
                         let now_secs = start_instant.elapsed().as_secs_f64();
-                        let snap = mpv.snapshot();
-                        sm.update_local_player(snap.position, snap.paused);
+                        if !is_scrubbing {
+                            let snap = mpv.snapshot();
+                            sm.update_local_player(snap.position, snap.paused);
+                        }
                         let actions = sm.handle_server_state(&st, now_secs);
                         for act in actions {
                             match act {
@@ -611,12 +654,22 @@ where
                                     );
                                 }
                                 SyncAction::SetPaused(p) => {
+                                    mpv.note_paused(p);
                                     let req = mpv.next_request_id();
                                     let _ = mpv.send_command(set_pause_cmd(req, p));
                                 }
                                 SyncAction::Seek(pos) => {
-                                    let req = mpv.next_request_id();
-                                    let _ = mpv.send_command(seek_absolute_cmd(req, pos));
+                                    if !is_scrubbing {
+                                        mpv.note_seek_target(pos);
+                                        let req = mpv.next_request_id();
+                                        let _ = mpv.send_command(seek_absolute_cmd(req, pos));
+                                    }
+                                }
+                                SyncAction::SetSpeed(spd) => {
+                                    if !is_scrubbing {
+                                        let req = mpv.next_request_id();
+                                        let _ = mpv.send_command(set_speed_cmd(req, spd));
+                                    }
                                 }
                             }
                         }
@@ -632,8 +685,10 @@ where
             }
             _ = heartbeat.tick() => {
                 if connected_emitted {
-                    let snap = mpv.snapshot();
-                    sm.update_local_player(snap.position, snap.paused);
+                    if !is_scrubbing {
+                        let snap = mpv.snapshot();
+                        sm.update_local_player(snap.position, snap.paused);
+                    }
                     let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
                     if writer.write_all(hb.as_bytes()).await.is_err() {
                         return Err("Syncplay heartbeat write failed.".to_string());
@@ -655,6 +710,7 @@ where
                         if writer.write_all(wire.as_bytes()).await.is_err() {
                             return Err("Failed sending file info to Syncplay.".to_string());
                         }
+                        emit_participants(app, &participants, local_file);
                     }
                     SyncCommand::SetFile(None) => {}
                     SyncCommand::SetReady { is_ready, manual } => {
@@ -677,6 +733,19 @@ where
                         sm.on_user_seek(pos);
                         let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
                         let _ = writer.write_all(hb.as_bytes()).await;
+                    }
+                    SyncCommand::ResetForNewFile => {
+                        sm.reset_for_new_file();
+                        let spd_req = mpv.next_request_id();
+                        let _ = mpv.send_command(set_speed_cmd(spd_req, 1.0));
+                        let ready_wire = encode_set_ready(false, false);
+                        if writer.write_all(ready_wire.as_bytes()).await.is_err() {
+                            return Err("Failed resetting ready status for new file.".to_string());
+                        }
+                        emit_participants(app, &participants, local_file);
+                    }
+                    SyncCommand::SetScrubbing(scrubbing) => {
+                        is_scrubbing = scrubbing;
                     }
                     SyncCommand::ManualRetry => {}
                 }
@@ -701,6 +770,10 @@ fn emit_participants(
                 f.name
             },
             size_bytes: f.size_bytes,
+            size_hash: f
+                .hash_identity
+                .then(|| f.size_bytes.map(hash_filesize))
+                .flatten(),
             duration_secs: Some(f.duration_secs),
             is_hashed: f.hash_identity,
         });
@@ -708,11 +781,16 @@ fn emit_participants(
     let mut list: Vec<ParticipantDto> = participants
         .values()
         .map(|p| {
-            let peer_id = p.file.as_ref().map(|pf| FileIdentity {
-                name: pf.name.clone(),
-                size_bytes: pf.size,
-                duration_secs: pf.duration,
-                is_hashed: true,
+            let peer_id = p.file.as_ref().map(|pf| {
+                let peer_name_hashed = pf.size_hash.is_some()
+                    || (pf.name.len() == 12 && pf.name.bytes().all(|b| b.is_ascii_hexdigit()));
+                FileIdentity {
+                    name: pf.name.clone(),
+                    size_bytes: pf.size,
+                    size_hash: pf.size_hash.clone(),
+                    duration_secs: pf.duration,
+                    is_hashed: peer_name_hashed,
+                }
             });
             let file_match = compare_files(local_id.as_ref(), peer_id.as_ref());
             ParticipantDto {

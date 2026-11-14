@@ -1,17 +1,19 @@
 @import "tailwindcss";
+@source not "../../installer";
 @import "./fonts.css";
 
 @theme {
-  --color-canvas: #070708;
-  --color-chrome: #0E0E11;
-  --color-raised: #15151A;
-  --color-hover: #1C1C23;
-  --color-hairline: #1D1D24;
+  --color-canvas: #0C0C10;
+  --color-chrome: #14141A;
+  --color-raised: #1B1B22;
+  --color-hover: #221D33;
+  --color-hairline: #23232D;
   --color-primary: #F4F4F6;
   --color-secondary: #A1A1AE;
-  --color-muted: #6E6E7D;
-  --color-accent: #E5A93C;
-  --color-accent-hover: #F0B94E;
+  --color-muted: #7C7C8E;
+  --color-accent: #7C3AED;
+  --color-accent-hover: #8B5CF6;
+  --color-accent-soft: #A78BFA;
   --color-ok: #4ADE80;
   --color-warn: #FBBF24;
   --color-bad: #F87171;

@@ -184,10 +184,12 @@ mod windows_impl {
     };
     use epilod_core::validation::{validate_existing_local_file_with_options, LocalPathOptions};
     use std::io::Read;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use tauri::AppHandle;
     use tokio::process::Command;
+
+    static AUTOSYNC_JOB_SEQ: AtomicU64 = AtomicU64::new(1);
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
@@ -338,6 +340,8 @@ mod windows_impl {
     ) -> Result<AutoSyncResultDto, String> {
         let start = Instant::now();
         let cancel = controller.begin();
+        let job_seq = AUTOSYNC_JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
 
         let video_pb = validate_existing_local_file_with_options(video_path, path_opts)
             .map_err(|e| e.to_string())?;
@@ -363,20 +367,24 @@ mod windows_impl {
                 );
             };
             let ext = infer_sub_extension_from_codec(embedded_sub_codec);
-            let out_sub = work_dir.join(format!("embedded_{}.{ext}", std::process::id()));
+            let out_sub = work_dir.join(format!("embedded_{pid}_{job_seq}.{ext}"));
             let args = autosync_extract_sub_args_ffmpeg(
                 video_pb.to_string_lossy().as_ref(),
                 out_sub.to_string_lossy().as_ref(),
                 sub_idx,
             );
-            run_command_with_watchdog(ff, &args, &out_sub, &cancel, low_power).await?;
+            if let Err(e) = run_command_with_watchdog(ff, &args, &out_sub, &cancel, low_power).await
+            {
+                let _ = fs::remove_file(&out_sub);
+                return Err(e);
+            }
             temp_extracted_sub = Some(out_sub.clone());
             out_sub
         } else {
             return Err("No subtitle track or file selected for auto-sync.".to_string());
         };
 
-        let pcm_path = work_dir.join(format!("audio_{}.pcm", std::process::id()));
+        let pcm_path = work_dir.join(format!("audio_{pid}_{job_seq}.pcm"));
         let _ = fs::remove_file(&pcm_path);
 
         let mpv_exe = resolve_mpv_exe(app)?;
@@ -406,8 +414,14 @@ mod windows_impl {
                     pcm_path.to_string_lossy().as_ref(),
                     stream_idx,
                 );
-                run_command_with_watchdog(ff, &ff_args, &pcm_path, &cancel, low_power).await?;
+                if let Err(e) =
+                    run_command_with_watchdog(ff, &ff_args, &pcm_path, &cancel, low_power).await
+                {
+                    let _ = fs::remove_file(&pcm_path);
+                    return Err(e);
+                }
             } else {
+                let _ = fs::remove_file(&pcm_path);
                 return Err(format_missing_extractor_error(
                     mpv_res.err().as_deref(),
                     false,
@@ -416,14 +430,35 @@ mod windows_impl {
         }
 
         // Stream PCM into envelope builder
-        let sub_bytes =
-            fs::read(&sub_pb).map_err(|e| format!("Failed reading subtitle file: {e}"))?;
-        let decoded = decode_subtitle_bytes_with_hint(&sub_bytes, encoding_hint)
-            .map_err(|e| e.to_string())?;
-        let cues = parse_subtitles(&decoded).map_err(|e| e.to_string())?;
+        let sub_bytes = match fs::read(&sub_pb) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = fs::remove_file(&pcm_path);
+                return Err(format!("Failed reading subtitle file: {e}"));
+            }
+        };
+        let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, encoding_hint) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = fs::remove_file(&pcm_path);
+                return Err(e.to_string());
+            }
+        };
+        let cues = match parse_subtitles(&decoded) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = fs::remove_file(&pcm_path);
+                return Err(e.to_string());
+            }
+        };
 
-        let mut pcm_file = fs::File::open(&pcm_path)
-            .map_err(|e| format!("Failed opening extracted audio PCM: {e}"))?;
+        let mut pcm_file = match fs::File::open(&pcm_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = fs::remove_file(&pcm_path);
+                return Err(format!("Failed opening extracted audio PCM: {e}"));
+            }
+        };
         let mut builder = AudioEnvelopeBuilder::new();
         let mut buf = vec![0u8; 65_536];
         loop {
@@ -431,9 +466,13 @@ mod windows_impl {
                 let _ = fs::remove_file(&pcm_path);
                 return Err("Auto-sync cancelled.".to_string());
             }
-            let n = pcm_file
-                .read(&mut buf)
-                .map_err(|e| format!("Failed reading extracted PCM: {e}"))?;
+            let n = match pcm_file.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = fs::remove_file(&pcm_path);
+                    return Err(format!("Failed reading extracted PCM: {e}"));
+                }
+            };
             if n == 0 {
                 break;
             }

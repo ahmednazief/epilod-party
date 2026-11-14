@@ -7,6 +7,8 @@ pub const DURATION_TOLERANCE_SECS: f64 = 2.5;
 pub struct FileIdentity {
     pub name: String,
     pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub size_hash: Option<String>,
     pub duration_secs: Option<f64>,
     pub is_hashed: bool,
 }
@@ -34,21 +36,37 @@ pub fn compare_files(local: Option<&FileIdentity>, peer: Option<&FileIdentity>) 
 
     let size_matches = match (l.size_bytes, p.size_bytes) {
         (Some(ls), Some(ps)) => ls == ps,
-        _ => false,
+        _ => match (l.size_hash.as_deref(), p.size_hash.as_deref()) {
+            (Some(lh), Some(ph)) if !lh.is_empty() => lh.eq_ignore_ascii_case(ph),
+            _ => match (l.size_bytes, p.size_hash.as_deref()) {
+                (Some(ls), Some(ph)) if !ph.is_empty() => {
+                    crate::syncplay::hash_filesize(ls).eq_ignore_ascii_case(ph)
+                }
+                _ => match (l.size_hash.as_deref(), p.size_bytes) {
+                    (Some(lh), Some(ps)) if !lh.is_empty() => {
+                        lh.eq_ignore_ascii_case(&crate::syncplay::hash_filesize(ps))
+                    }
+                    _ => false,
+                },
+            },
+        },
     };
 
-    let name_matches = if !l.is_hashed && !p.is_hashed {
+    let name_matches = if l.is_hashed == p.is_hashed {
         l.name.eq_ignore_ascii_case(&p.name)
+    } else if l.is_hashed {
+        l.name
+            .eq_ignore_ascii_case(&crate::syncplay::hash_filename(&p.name))
     } else {
-        l.name == p.name
+        crate::syncplay::hash_filename(&l.name).eq_ignore_ascii_case(&p.name)
     };
 
     if size_matches && name_matches {
         return FileMatchStatus::Matched;
     }
 
-    // Fix 07: When duration is known and matches within tolerance (e.g. 1080p vs 720p encode),
-    // report SameLengthDifferentEncode instead of alarming DifferentFile.
+    // When duration matches within tolerance (e.g. different encodes or similar-length episodes),
+    // report SameLengthDifferentEncode (which the UI warns the user to double-check).
     if let (Some(ld), Some(pd)) = (l.duration_secs, p.duration_secs) {
         if ld.is_finite() && pd.is_finite() && (ld - pd).abs() <= DURATION_TOLERANCE_SECS {
             return FileMatchStatus::SameLengthDifferentEncode;
@@ -66,6 +84,7 @@ mod tests {
         FileIdentity {
             name: name.to_string(),
             size_bytes: size,
+            size_hash: None,
             duration_secs: dur,
             is_hashed: hashed,
         }
@@ -86,10 +105,26 @@ mod tests {
     }
 
     #[test]
-    fn test_privacy_hashed_file_match() {
-        let a = id("a1b2c3d4e5f6", Some(1_000_000), Some(5400.0), true);
-        let b = id("a1b2c3d4e5f6", Some(1_000_000), Some(5400.0), true);
+    fn test_privacy_hashed_file_match_including_hashed_size() {
+        let a = FileIdentity {
+            name: crate::syncplay::hash_filename("Show.S01E01.mkv"),
+            size_bytes: Some(1_000_000),
+            size_hash: Some(crate::syncplay::hash_filesize(1_000_000)),
+            duration_secs: Some(1440.0),
+            is_hashed: true,
+        };
+        let b = FileIdentity {
+            name: crate::syncplay::hash_filename("Show.S01E01.mkv"),
+            size_bytes: None,
+            size_hash: Some(crate::syncplay::hash_filesize(1_000_000)),
+            duration_secs: Some(1440.0),
+            is_hashed: true,
+        };
         assert_eq!(compare_files(Some(&a), Some(&b)), FileMatchStatus::Matched);
+
+        // Cross-check hashed local vs unhashed peer
+        let c = id("Show.S01E01.mkv", Some(1_000_000), Some(1440.0), false);
+        assert_eq!(compare_files(Some(&a), Some(&c)), FileMatchStatus::Matched);
     }
 
     #[test]

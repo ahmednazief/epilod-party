@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build && npm run installer:build",
+    "preview": "vite preview",
+    "installer:dev": "vite --config installer/vite.config.ts",
+    "installer:build": "tsc -p installer/tsconfig.json --noEmit && vite build --config installer/vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.5",

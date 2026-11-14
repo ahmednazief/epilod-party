@@ -40,6 +40,8 @@ impl Default for PlayerSnapshot {
 pub struct WireFileInfo {
     pub name: String,
     pub size: Option<u64>,
+    #[serde(default)]
+    pub size_hash: Option<String>,
     pub duration: Option<f64>,
 }
 
@@ -97,6 +99,9 @@ pub enum SetUpdate {
         username: String,
         file: WireFileInfo,
     },
+    FileCleared {
+        username: String,
+    },
     UserLeft {
         username: String,
     },
@@ -129,6 +134,7 @@ pub enum ServerMessage {
 pub enum SyncAction {
     SetPaused(bool),
     Seek(f64),
+    SetSpeed(f64),
     ServerOverride { set_by: Option<String> },
 }
 
@@ -528,12 +534,22 @@ pub fn parse_server_line(line: &str) -> Result<ServerMessage, SyncplayParseError
                         });
                     }
                 }
-                if let Some(file_obj) = uinfo.get("file").and_then(|v| v.as_object()) {
-                    if let Some(file) = parse_wire_file(file_obj) {
-                        updates.push(SetUpdate::File {
+                if let Some(file_val) = uinfo.get("file") {
+                    if file_val.is_null() {
+                        updates.push(SetUpdate::FileCleared {
                             username: username.clone(),
-                            file,
                         });
+                    } else if let Some(file_obj) = file_val.as_object() {
+                        if let Some(file) = parse_wire_file(file_obj) {
+                            updates.push(SetUpdate::File {
+                                username: username.clone(),
+                                file,
+                            });
+                        } else {
+                            updates.push(SetUpdate::FileCleared {
+                                username: username.clone(),
+                            });
+                        }
                     }
                 }
                 if let Some(ready_val) = uinfo.get("isReady").and_then(|v| v.as_bool()) {
@@ -590,10 +606,22 @@ fn parse_wire_file(obj: &Map<String, Value>) -> Option<WireFileInfo> {
     let name = obj
         .get("name")
         .and_then(|v| v.as_str())
-        .map(|s| clean_wire_string(s, 260))?;
+        .map(|s| clean_wire_string(s, 260))
+        .filter(|s| !s.trim().is_empty())?;
+    let mut size_hash = None;
     let size = obj.get("size").and_then(|v| match v {
         Value::Number(n) => n.as_u64(),
-        Value::String(s) => s.parse::<u64>().ok(),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if let Ok(num) = trimmed.parse::<u64>() {
+                Some(num)
+            } else if trimmed.len() == 12 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+                size_hash = Some(trimmed.to_ascii_lowercase());
+                None
+            } else {
+                None
+            }
+        }
         _ => None,
     });
     let duration = obj
@@ -603,9 +631,13 @@ fn parse_wire_file(obj: &Map<String, Value>) -> Option<WireFileInfo> {
     Some(WireFileInfo {
         name,
         size,
+        size_hash,
         duration,
     })
 }
+
+pub const SOFT_DRIFT_ENGAGE_SECS: f64 = 0.6;
+pub const SOFT_DRIFT_CLEAR_SECS: f64 = 0.25;
 
 #[derive(Debug, Clone)]
 pub struct SyncStateMachine {
@@ -617,6 +649,7 @@ pub struct SyncStateMachine {
     pub pending_do_seek: bool,
     pub last_latency_calculation: Option<f64>,
     pub rtt_secs: f64,
+    pub soft_speed: f64,
 }
 
 impl Default for SyncStateMachine {
@@ -644,7 +677,16 @@ impl SyncStateMachine {
             pending_do_seek: false,
             last_latency_calculation: None,
             rtt_secs: 0.0,
+            soft_speed: 1.0,
         }
+    }
+
+    pub fn reset_for_new_file(&mut self) {
+        self.local_pos = 0.0;
+        self.local_paused = true;
+        self.ignoring_client = 0;
+        self.pending_do_seek = false;
+        self.soft_speed = 1.0;
     }
 
     pub fn set_local_username(&mut self, username: String) {
@@ -713,7 +755,7 @@ impl SyncStateMachine {
         }
 
         if let Some(ref ps) = state.playstate {
-            // Fix 10: Detect authoritative server override (e.g., managed/controller-locked room)
+            // Detect authoritative server override (e.g., managed/controller-locked room)
             // when the server explicitly pushes another user's or server's state with `ignoringOnTheFly.server`
             // or a differing `setBy` while our local command wasn't accepted.
             let from_other_or_server = match (&ps.set_by, &self.local_username) {
@@ -752,10 +794,32 @@ impl SyncStateMachine {
                 actions.push(SyncAction::SetPaused(ps.paused));
             }
 
-            let drift = (self.local_pos - target_pos).abs();
+            let signed_drift = self.local_pos - target_pos;
+            let drift = signed_drift.abs();
             if ps.do_seek || server_override || drift > DRIFT_SEEK_THRESHOLD_SECS {
+                if (self.soft_speed - 1.0).abs() > 1e-3 {
+                    self.soft_speed = 1.0;
+                    actions.push(SyncAction::SetSpeed(1.0));
+                }
                 self.local_pos = target_pos.max(0.0);
                 actions.push(SyncAction::Seek(self.local_pos));
+            } else if !ps.paused {
+                let desired_speed = if signed_drift > SOFT_DRIFT_ENGAGE_SECS {
+                    0.95
+                } else if signed_drift < -SOFT_DRIFT_ENGAGE_SECS {
+                    1.05
+                } else if drift <= SOFT_DRIFT_CLEAR_SECS {
+                    1.0
+                } else {
+                    self.soft_speed
+                };
+                if (desired_speed - self.soft_speed).abs() > 1e-3 {
+                    self.soft_speed = desired_speed;
+                    actions.push(SyncAction::SetSpeed(desired_speed));
+                }
+            } else if (self.soft_speed - 1.0).abs() > 1e-3 {
+                self.soft_speed = 1.0;
+                actions.push(SyncAction::SetSpeed(1.0));
             }
         }
 
@@ -1187,5 +1251,107 @@ mod tests {
             ServerMessage::State(_)
         ));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn test_hashed_wire_size_and_file_cleared() {
+        let sz_hash = hash_filesize(987654321);
+        let msg = parse_server_line(&format!(
+            r#"{{"Set":{{"user":{{"Bob":{{"file":{{"name":"a1b2c3d4e5f6","size":"{sz_hash}","duration":1440.0}}}}}}}}}}"#
+        ))
+        .unwrap();
+        match msg {
+            ServerMessage::Set(updates) => {
+                assert_eq!(updates.len(), 1);
+                match &updates[0] {
+                    SetUpdate::File { username, file } => {
+                        assert_eq!(username, "Bob");
+                        assert_eq!(file.name, "a1b2c3d4e5f6");
+                        assert_eq!(file.size, None);
+                        assert_eq!(file.size_hash.as_deref(), Some(sz_hash.as_str()));
+                    }
+                    other => panic!("unexpected update: {other:?}"),
+                }
+            }
+            other => panic!("unexpected msg: {other:?}"),
+        }
+
+        let cleared_empty = parse_server_line(r#"{"Set":{"user":{"Bob":{"file":{}}}}}"#).unwrap();
+        assert_eq!(
+            cleared_empty,
+            ServerMessage::Set(vec![SetUpdate::FileCleared {
+                username: "Bob".into(),
+            }])
+        );
+
+        let cleared_null = parse_server_line(r#"{"Set":{"user":{"Bob":{"file":null}}}}"#).unwrap();
+        assert_eq!(
+            cleared_null,
+            ServerMessage::Set(vec![SetUpdate::FileCleared {
+                username: "Bob".into(),
+            }])
+        );
+    }
+
+    #[test]
+    fn test_soft_speed_drift_correction_and_reset_for_new_file() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 101.2,
+            paused: false,
+        });
+
+        // Ahead by 1.2s while playing -> slow down to 0.95x
+        let ahead = ServerState {
+            playstate: Some(Playstate {
+                position: 100.0,
+                paused: false,
+                do_seek: false,
+                set_by: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            sm.handle_server_state(&ahead, 10.0),
+            vec![SyncAction::SetSpeed(0.95)]
+        );
+
+        // Once caught back within 0.25s -> restore 1.0x
+        sm.update_local_player(100.1, false);
+        assert_eq!(
+            sm.handle_server_state(&ahead, 11.0),
+            vec![SyncAction::SetSpeed(1.0)]
+        );
+
+        // Behind by 1.2s while playing -> speed up to 1.05x
+        sm.update_local_player(98.8, false);
+        assert_eq!(
+            sm.handle_server_state(&ahead, 12.0),
+            vec![SyncAction::SetSpeed(1.05)]
+        );
+
+        // Pausing resets soft speed back to 1.0x
+        let paused_state = ServerState {
+            playstate: Some(Playstate {
+                position: 100.0,
+                paused: true,
+                do_seek: false,
+                set_by: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            sm.handle_server_state(&paused_state, 13.0),
+            vec![SyncAction::SetPaused(true), SyncAction::SetSpeed(1.0)]
+        );
+
+        // reset_for_new_file clears position, paused, pending_do_seek, ignoring_client, and soft_speed
+        sm.on_user_seek(250.0);
+        sm.soft_speed = 1.05;
+        sm.reset_for_new_file();
+        assert_eq!(sm.local_pos, 0.0);
+        assert!(sm.local_paused);
+        assert_eq!(sm.ignoring_client, 0);
+        assert!(!sm.pending_do_seek);
+        assert_eq!(sm.soft_speed, 1.0);
     }
 }

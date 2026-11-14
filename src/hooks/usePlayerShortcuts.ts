@@ -12,7 +12,7 @@ import {
 import { shouldReplayFromStart } from "../lib/playbackEnd";
 import { SeekAccumulator } from "../lib/seekCoalesce";
 import { isTextEntryElement } from "../lib/shortcuts";
-import { getControllerLockState } from "../lib/syncController";
+import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
 import { canChangePlaybackSpeed } from "../lib/syncSpeedGuard";
 import { canToggleReady, resolveReadyToggleTarget } from "../lib/syncReady";
 import { syncSetReady, syncUserPause, syncUserPlay, syncUserSeek } from "../lib/syncplay";
@@ -101,10 +101,11 @@ export function usePlayerShortcuts({
       }
 
       const syncConnected = sync.status.state === "connected";
+      const effectiveUsername = resolveEffectiveUsername(sync.status, appState.username);
       const ctrlLock = getControllerLockState(
         syncConnected,
         sync.participants,
-        appState.username,
+        effectiveUsername,
       );
 
       if (e.code === "KeyF") {

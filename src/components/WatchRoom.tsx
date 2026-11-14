@@ -19,6 +19,7 @@ import {
   mpvAddSubtitle,
   mpvLoad,
   mpvResize,
+  mpvSeek,
   mpvSetPause,
   mpvSetSpeed,
   mpvSetSubDelay,
@@ -26,6 +27,7 @@ import {
   mpvSetVisible,
   mpvStart,
   mpvStop,
+  onMpvCommandWarning,
   onMpvDuration,
   onMpvEnded,
   onMpvError,
@@ -38,15 +40,17 @@ import {
   onWindowFullscreen,
   onWindowRestored,
   setAllowNetworkShares,
+  subtitleCancelAutoSync,
   windowIsFullscreen,
   windowSetFullscreen,
 } from "../lib/mpv";
-import { classifyMpvEnd } from "../lib/playbackEnd";
+import { classifyMpvEnd, shouldReplayFromStart } from "../lib/playbackEnd";
 import { checkDropDuringDialog, handlePlayerCrashSync } from "../lib/playerLifecycle";
 import { resetMpvPlaybackDefaults } from "../lib/playbackReset";
 import {
   formatControllerOverrideNotice,
   getControllerLockState,
+  resolveEffectiveUsername,
 } from "../lib/syncController";
 import { shouldAnnounceFile } from "../lib/syncFileAnnounce";
 import { shouldAutoReadyOnFileLoad } from "../lib/syncReady";
@@ -63,6 +67,7 @@ import {
   syncSetReady,
   syncUserPause,
   syncUserPlay,
+  syncUserSeek,
 } from "../lib/syncplay";
 import { useViewportRect } from "../lib/useViewportRect";
 import { ViewportSyncTracker } from "../lib/viewportSync";
@@ -94,6 +99,7 @@ export function WatchRoom() {
     serverEndpoint,
     serverPassword,
     allowNetworkShares,
+    hashFilenames,
     settingsOpen,
     shortcutsOpen,
     selectedFilePath,
@@ -106,6 +112,7 @@ export function WatchRoom() {
       serverEndpoint: s.serverEndpoint,
       serverPassword: s.serverPassword,
       allowNetworkShares: s.allowNetworkShares,
+      hashFilenames: s.hashFilenames,
       settingsOpen: s.settingsOpen,
       shortcutsOpen: s.shortcutsOpen,
       selectedFilePath: s.selectedFilePath,
@@ -141,6 +148,8 @@ export function WatchRoom() {
   const autoReadyMarkedRef = useRef(false);
   const dialogOpenRef = useRef(false);
   const leavingRef = useRef(false);
+  const loadGenRef = useRef(0);
+  const pendingReloadOnRestartRef = useRef(false);
 
   const rect = useViewportRect(viewportRef, viewportTick);
 
@@ -166,13 +175,18 @@ export function WatchRoom() {
   // Load media + subtitle files safely
   const loadVideoPath = useCallback(
     async (path: string) => {
+      const gen = ++loadGenRef.current;
       const displayName = getFileDisplayName(path);
+      void subtitleCancelAutoSync().catch(() => undefined);
       setSelectedFile(path, displayName);
       autoReadyMarkedRef.current = false;
+      announcedFileKeyRef.current = null;
       try {
         await mpvLoad(path);
+        if (loadGenRef.current !== gen) return;
         const subState = useSubtitleStore.getState();
         await resetMpvPlaybackDefaults(useSyncStore.getState().status.state === "connected");
+        if (loadGenRef.current !== gen) return;
         await mpvSetSubStyle({
           font: subState.font,
           fontSize: subState.fontSize,
@@ -182,10 +196,14 @@ export function WatchRoom() {
           visible: subState.visible,
           overrideAss: subState.overrideAssStyle,
         });
-        usePlayerStore.getState().setLoaded(true);
+        if (loadGenRef.current !== gen) return;
+        if (!isDesktop()) {
+          usePlayerStore.getState().setLoaded(true);
+        }
         usePlayerStore.getState().setPlayerError(null);
         usePlayerStore.getState().flashFeedback(`Loaded ${displayName}`);
       } catch (err) {
+        if (loadGenRef.current !== gen) return;
         const msg = formatUserError(err, "Failed opening video file.");
         usePlayerStore.getState().setPlayerError(msg);
         pushNote("error", msg);
@@ -261,6 +279,10 @@ export function WatchRoom() {
   const connectRoom = useCallback(
     (endpoint: string, password: string) => {
       void enqueueSyncLifecycle(async () => {
+        const syncState = useSyncStore.getState();
+        syncState.setParticipants([]);
+        syncState.setServerOverrideNotice(null);
+        syncState.setLastError(null);
         try {
           await syncConnect({
             endpoint,
@@ -340,6 +362,9 @@ export function WatchRoom() {
         onMpvTracks((tracks) => {
           if (active) usePlayerStore.getState().setTracks(tracks);
         }),
+        onMpvCommandWarning((msg) => {
+          if (active) pushNote("warn", msg);
+        }),
         onMpvError((msg) => {
           if (!active) return;
           const p = usePlayerStore.getState();
@@ -366,8 +391,31 @@ export function WatchRoom() {
           const app = useAppStore.getState();
           if (!p.loaded) return;
           const connected = s.status.state === "connected";
-          const lock = getControllerLockState(connected, s.participants, app.username);
+          const lock = getControllerLockState(
+            connected,
+            s.participants,
+            resolveEffectiveUsername(s.status, app.username),
+          );
           if (lock.lockedForLocalUser) return;
+          if (
+            shouldReplayFromStart({
+              endedAtEof: p.endedAtEof,
+              paused: p.paused,
+              positionSecs: p.positionSecs,
+              durationSecs: p.durationSecs,
+            })
+          ) {
+            p.setPositionSecs(0);
+            p.setEndedAtEof(false);
+            p.setPaused(false);
+            void mpvSeek(0);
+            void mpvSetPause(false);
+            if (connected) {
+              void syncUserSeek(0);
+              void syncUserPlay(0);
+            }
+            return;
+          }
           const nextPaused = !p.paused;
           p.setPaused(nextPaused);
           void mpvSetPause(nextPaused);
@@ -496,11 +544,22 @@ export function WatchRoom() {
     if (!mpvStartedRef.current) {
       if (rect.width > 0 && rect.height > 0) {
         mpvStartedRef.current = true;
-        void mpvStart(rect).catch((err) => {
-          mpvStartedRef.current = false;
-          const msg = formatUserError(err, "Failed starting mpv playback engine.");
-          usePlayerStore.getState().setPlayerError(msg);
-        });
+        void mpvStart(rect)
+          .then(() => {
+            if (pendingReloadOnRestartRef.current) {
+              pendingReloadOnRestartRef.current = false;
+              const currentFile = useAppStore.getState().selectedFilePath;
+              if (currentFile) {
+                void loadVideoPath(currentFile);
+              }
+            }
+          })
+          .catch((err) => {
+            mpvStartedRef.current = false;
+            pendingReloadOnRestartRef.current = false;
+            const msg = formatUserError(err, "Failed starting mpv playback engine.");
+            usePlayerStore.getState().setPlayerError(msg);
+          });
       }
       return;
     }
@@ -509,7 +568,7 @@ export function WatchRoom() {
     if (plan.send) {
       void mpvResize(rect, plan.forceFlag);
     }
-  }, [rect]);
+  }, [loadVideoPath, rect]);
 
   // Hide child HWND whenever modals overlay or player fails (Fix 16)
   useEffect(() => {
@@ -531,6 +590,7 @@ export function WatchRoom() {
       fileName: selectedFileName,
       loaded,
       durationSecs,
+      hashIdentity: hashFilenames,
     });
     announcedFileKeyRef.current = decision.nextKey;
 
@@ -539,6 +599,7 @@ export function WatchRoom() {
         name: selectedFileName,
         path: selectedFilePath,
         durationSecs,
+        hashIdentity: hashFilenames,
       });
     }
 
@@ -560,6 +621,7 @@ export function WatchRoom() {
     }
   }, [
     durationSecs,
+    hashFilenames,
     loaded,
     roomCode,
     selectedFileName,
@@ -589,7 +651,7 @@ export function WatchRoom() {
       {chrome.showTopBar && (
         <header className="h-11 shrink-0 flex items-center justify-between px-3 bg-chrome border-b border-hairline select-none">
           <div className="flex items-center gap-2.5 min-w-0">
-            <LogoMark size={24} />
+            <LogoMark variant="party" size={26} />
             <div className="flex items-center gap-2 min-w-0">
               <StatusDot
                 tone={
@@ -611,7 +673,7 @@ export function WatchRoom() {
             {feedback && (
               <span
                 key={feedback.id}
-                className="anim-pop-in px-2 py-0.5 text-[11px] font-medium bg-raised text-accent border border-hairline rounded-[var(--radius-ui)]"
+                className="anim-pop-in px-2 py-0.5 text-[11px] font-medium bg-raised text-accent-soft border border-hairline rounded-[var(--radius-ui)]"
               >
                 {feedback.text}
               </span>
@@ -625,7 +687,7 @@ export function WatchRoom() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={openSettings}
+              onClick={() => openSettings()}
               aria-label="Open settings"
               title="Settings"
             >
@@ -669,9 +731,14 @@ export function WatchRoom() {
             playerError={playerError}
             onChooseFile={() => void handleChooseFile()}
             onRetryPlayer={() => {
-              usePlayerStore.getState().setPlayerError(null);
-              mpvStartedRef.current = false;
-              setViewportTick((t) => t + 1);
+              void (async () => {
+                usePlayerStore.getState().setPlayerError(null);
+                pendingReloadOnRestartRef.current = Boolean(useAppStore.getState().selectedFilePath);
+                await mpvStop().catch(() => undefined);
+                viewportTrackerRef.current.markInvalidated();
+                mpvStartedRef.current = false;
+                setViewportTick((t) => t + 1);
+              })();
             }}
           />
         </div>

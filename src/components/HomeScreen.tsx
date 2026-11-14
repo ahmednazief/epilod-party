@@ -1,7 +1,8 @@
-import { ArrowRight, KeyRound, Plus, Settings } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { ArrowRight, Download, KeyRound, Plus, Settings } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
+import { useUpdaterStore } from "../store/useUpdaterStore";
 import { Button } from "./ui/Button";
 import { LogoMark } from "./ui/LogoMark";
 import { TextField } from "./ui/TextField";
@@ -29,15 +30,34 @@ export function HomeScreen() {
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const literalRoomStored = useAppStore((s) => s.literalRoom);
+  const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const setUsername = useAppStore((s) => s.setUsername);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const enterRoom = useAppStore((s) => s.enterRoom);
   const openSettings = useAppStore((s) => s.openSettings);
 
+  const updateStatus = useUpdaterStore((s) => s.status);
+  const hasCheckedStartup = useUpdaterStore((s) => s.hasCheckedStartup);
+  const initUpdater = useUpdaterStore((s) => s.init);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+
   const [joinInput, setJoinInput] = useState("");
   const [standardRoomName, setStandardRoomName] = useState(literalRoomStored);
   const [showPassword, setShowPassword] = useState(Boolean(serverPassword));
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      await initUpdater();
+      if (active && autoCheckUpdates && !hasCheckedStartup) {
+        await checkForUpdates(true);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [autoCheckUpdates, hasCheckedStartup, initUpdater, checkForUpdates]);
 
   const ensureValidName = (): boolean => {
     const clean = sanitizeUsername(username);
@@ -70,29 +90,50 @@ export function HomeScreen() {
     enterRoom(cleaned, standardRoomName);
   };
 
+  const hasPendingUpdate =
+    updateStatus?.availability === "updateAvailable" ||
+    updateStatus?.availability === "downloadedReady";
+
   return (
     <div className="min-h-full w-full flex flex-col bg-canvas text-primary">
       <header className="flex items-center justify-between px-6 py-4 border-b border-hairline">
         <div className="flex items-center gap-2.5">
-          <LogoMark size={30} />
+          <LogoMark size={32} />
           <div>
             <h1 className="text-sm font-semibold tracking-tight text-primary">Epilod Party</h1>
             <p className="text-[11px] text-muted">{serverEndpoint}</p>
           </div>
         </div>
-        <Button variant="ghost" size="sm" onClick={openSettings}>
-          <Settings className="h-4 w-4" />
-          Settings
-        </Button>
+        <div className="flex items-center gap-2">
+          {hasPendingUpdate && updateStatus?.availableRelease && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => openSettings("updates")}
+            >
+              <Download className="h-3.5 w-3.5 text-accent-soft" />
+              {updateStatus.availability === "downloadedReady"
+                ? `Restart to v${updateStatus.availableRelease.version}`
+                : `Update v${updateStatus.availableRelease.version}`}
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => openSettings()}>
+            <Settings className="h-4 w-4" />
+            Settings
+          </Button>
+        </div>
       </header>
 
       <main className="flex-1 flex items-center justify-center p-6">
         <div className="anim-fade-slide-up w-full max-w-md bg-chrome border border-hairline rounded-[var(--radius-ui)] p-6 space-y-6">
-          <div className="space-y-1">
-            <h2 className="text-lg font-medium tracking-tight text-primary">Watch together locally</h2>
-            <p className="text-xs text-secondary leading-relaxed">
-              Synchronize playback cleanly across local copies of your video with optional Arabic & multi-language auto-synced subtitles.
-            </p>
+          <div className="flex items-start gap-3.5">
+            <LogoMark variant="party" size={40} className="mt-0.5" />
+            <div className="space-y-1 min-w-0">
+              <h2 className="text-lg font-medium tracking-tight text-primary">Watch together locally</h2>
+              <p className="text-xs text-secondary leading-relaxed">
+                Synchronize playback cleanly across local copies of your video with optional Arabic &amp; multi-language auto-synced subtitles.
+              </p>
+            </div>
           </div>
 
           <TextField

@@ -90,6 +90,10 @@ export async function mpvAddSubtitle(
   await safeInvoke("mpv_add_subtitle", { path, encodingHint });
 }
 
+export async function mpvRemoveSubtitle(sid: number): Promise<void> {
+  await safeInvoke("mpv_remove_subtitle", { sid });
+}
+
 export interface SubStyleParams {
   font: string;
   fontSize: number;
@@ -221,6 +225,11 @@ export async function onMpvTracks(cb: (tracks: MpvTrack[]) => void): Promise<Unl
 export async function onMpvError(cb: (message: string) => void): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<{ message: string }>("mpv://error", (e) => cb(e.payload.message));
+}
+
+export async function onMpvCommandWarning(cb: (message: string) => void): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<{ message: string }>("mpv://command-warning", (e) => cb(e.payload.message));
 }
 
 export async function onMpvSurfaceClick(cb: () => void): Promise<UnlistenFn> {

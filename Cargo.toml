@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/epilod-core", "src-tauri"]
+members = ["crates/epilod-core", "crates/epilod-installer-core", "src-tauri", "src-installer"]
 
 [profile.release]
 lto = true

@@ -86,12 +86,14 @@ export async function syncSetFile(params: {
   path?: string | null;
   sizeBytes?: number | null;
   durationSecs: number;
+  hashIdentity?: boolean;
 }): Promise<void> {
   await safeInvoke("sync_set_file", {
     name: params.name,
     path: params.path ?? null,
     sizeBytes: params.sizeBytes ?? null,
     durationSecs: params.durationSecs,
+    hashIdentity: params.hashIdentity ?? false,
   });
 }
 
@@ -109,6 +111,10 @@ export async function syncUserPause(position: number): Promise<void> {
 
 export async function syncUserSeek(position: number): Promise<void> {
   await safeInvoke("sync_user_seek", { position });
+}
+
+export async function syncSetScrubbing(scrubbing: boolean): Promise<void> {
+  await safeInvoke("sync_set_scrubbing", { scrubbing });
 }
 
 function noopUnlisten(): UnlistenFn {

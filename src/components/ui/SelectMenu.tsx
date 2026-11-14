@@ -90,12 +90,12 @@ export function SelectMenu<T extends string = string>({
                 }}
                 className={`w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left text-xs transition-colors duration-100 cursor-pointer ${
                   active
-                    ? "bg-hover text-accent font-medium"
+                    ? "bg-hover text-accent-soft font-medium"
                     : "text-primary hover:bg-hover"
                 }`}
               >
                 <span className="truncate">{opt.label}</span>
-                {active && <Check className="h-3.5 w-3.5 text-accent shrink-0" />}
+                {active && <Check className="h-3.5 w-3.5 text-accent-soft shrink-0" />}
               </button>
             );
           })}

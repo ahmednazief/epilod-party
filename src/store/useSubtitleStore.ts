@@ -43,6 +43,7 @@ interface SubtitleState {
   overrideAssStyle: boolean;
   encodingHint: SubtitleEncodingHint;
   delaySecs: number;
+  sessionGen: number;
   autoSyncBusy: boolean;
   autoSyncOutcome: AutoSyncResult | null;
   autoSyncError: string | null;
@@ -76,6 +77,7 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
   overrideAssStyle: false,
   encodingHint: "auto",
   delaySecs: 0,
+  sessionGen: 0,
   autoSyncBusy: false,
   autoSyncOutcome: null,
   autoSyncError: null,
@@ -109,13 +111,15 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
     })),
 
   clearLoadedTrack: () =>
-    set({
+    set((s) => ({
       loadedFilePath: null,
       originalFilePath: null,
       delaySecs: 0,
+      sessionGen: s.sessionGen + 1,
+      autoSyncBusy: false,
       autoSyncOutcome: null,
       autoSyncError: null,
-    }),
+    })),
 
   setAutoSyncBusy: (autoSyncBusy) => set({ autoSyncBusy }),
   setAutoSyncResult: (autoSyncOutcome) =>

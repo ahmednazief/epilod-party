@@ -15,6 +15,7 @@ import { formatUserError } from "../lib/errors";
 import { getFileDisplayName } from "../lib/fileDrop";
 import {
   mpvAddSubtitle,
+  mpvRemoveSubtitle,
   mpvSetSubDelay,
   mpvSetSubStyle,
   mpvSetSubTrack,
@@ -157,6 +158,9 @@ export function SubtitlePanel() {
     const targetPath = originalFilePath || loadedFilePath;
     if (loaded && targetPath) {
       try {
+        if (selectedSub?.external) {
+          await mpvRemoveSubtitle(selectedSub.id).catch(() => undefined);
+        }
         await mpvAddSubtitle(targetPath, hint);
         applyStyleNow();
         pushNote("info", `Reloaded subtitle with ${hint} encoding.`);
@@ -168,6 +172,8 @@ export function SubtitlePanel() {
 
   const handleAutoSync = async () => {
     if (!videoPath || autoSyncBusy) return;
+    const startGen = useSubtitleStore.getState().sessionGen;
+    const startVideoPath = videoPath;
     setAutoSyncBusy(true);
     setAutoSyncError(null);
     try {
@@ -183,6 +189,18 @@ export function SubtitlePanel() {
         encodingHint,
         lowPower: lowPowerMode,
       });
+      if (
+        useSubtitleStore.getState().sessionGen !== startGen ||
+        useAppStore.getState().selectedFilePath !== startVideoPath
+      ) {
+        return;
+      }
+      const activeSub = usePlayerStore
+        .getState()
+        .tracks.find((t) => t.type === "sub" && t.selected);
+      if (activeSub?.external) {
+        await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
+      }
       await mpvAddSubtitle(result.syncedSubtitlePath, "utf8");
       await mpvSetSubDelay(0);
       setDelaySecs(0);
@@ -194,6 +212,12 @@ export function SubtitlePanel() {
         `Subtitle auto-synced (offset ${result.offsetSecs >= 0 ? "+" : ""}${result.offsetSecs.toFixed(2)}s, z=${result.confidenceZ.toFixed(1)}).`,
       );
     } catch (err) {
+      if (
+        useSubtitleStore.getState().sessionGen !== startGen ||
+        useAppStore.getState().selectedFilePath !== startVideoPath
+      ) {
+        return;
+      }
       const msg = formatUserError(err, "Auto-sync could not find a confident alignment.");
       setAutoSyncError(msg);
       pushNote("error", msg);
@@ -220,6 +244,8 @@ export function SubtitlePanel() {
       pushNote("error", "Enter valid non-negative second timestamps for both anchor points.");
       return;
     }
+    const startGen = useSubtitleStore.getState().sessionGen;
+    const startVideoPath = videoPath;
     try {
       const result = await subtitleTwoAnchorSync({
         subtitlePath: targetSub,
@@ -229,6 +255,18 @@ export function SubtitlePanel() {
         dstBSecs: b2,
         encodingHint,
       });
+      if (
+        useSubtitleStore.getState().sessionGen !== startGen ||
+        useAppStore.getState().selectedFilePath !== startVideoPath
+      ) {
+        return;
+      }
+      const activeSub = usePlayerStore
+        .getState()
+        .tracks.find((t) => t.type === "sub" && t.selected);
+      if (activeSub?.external) {
+        await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
+      }
       await mpvAddSubtitle(result.syncedSubtitlePath, "utf8");
       await mpvSetSubDelay(0);
       setDelaySecs(0);
@@ -237,6 +275,12 @@ export function SubtitlePanel() {
       applyStyleNow();
       pushNote("success", "Applied 2-point subtitle timing calibration.");
     } catch (err) {
+      if (
+        useSubtitleStore.getState().sessionGen !== startGen ||
+        useAppStore.getState().selectedFilePath !== startVideoPath
+      ) {
+        return;
+      }
       pushNote("error", formatUserError(err, "Two-anchor calibration failed."));
     }
   };

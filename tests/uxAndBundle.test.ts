@@ -128,3 +128,10 @@ test("Fix 22: compact static TTF fonts exist for mpv under 350 KB installer budg
   );
 });
 
+test("Main app uses Royal Purple branding (#7C3AED/#8B5CF6) with zero legacy amber accents", () => {
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.equal(/#E5A93C|#F0B94E/i.test(globalsCss), false, "Legacy amber accent remains in globals.css");
+  assert.equal(globalsCss.includes("#7C3AED"), true);
+  assert.equal(globalsCss.includes("#8B5CF6"), true);
+});
+

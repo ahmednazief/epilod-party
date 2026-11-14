@@ -387,3 +387,72 @@ test("Fix 20 & 21: usePlayerShortcuts source uses physical e.code and 100ms seek
   assert.equal(sent[sent.length - 1], 150);
 });
 
+test("Watch-room hardening: resolveEffectiveUsername, store resets, and zero-duration announcement", async () => {
+  const ctrl = await loadModules<typeof import("../src/lib/syncController")>(
+    "src/lib/syncController.ts",
+  );
+  assert.equal(
+    ctrl.resolveEffectiveUsername(
+      {
+        state: "connected",
+        endpoint: "syncplay.pl:8999",
+        tls: true,
+        username: "Ahmed_1",
+      },
+      "Ahmed",
+    ),
+    "Ahmed_1",
+  );
+  assert.equal(ctrl.resolveEffectiveUsername({ state: "disconnected" }, "Ahmed"), "Ahmed");
+
+  const playerStoreMod = await loadModules<typeof import("../src/store/usePlayerStore")>(
+    "src/store/usePlayerStore.ts",
+  );
+  playerStoreMod.usePlayerStore.getState().setLoaded(true);
+  playerStoreMod.usePlayerStore.getState().setPaused(false);
+  playerStoreMod.usePlayerStore.getState().setPositionSecs(42);
+  playerStoreMod.usePlayerStore.getState().setDurationSecs(1200);
+  playerStoreMod.usePlayerStore.getState().resetForNewFile();
+  assert.equal(playerStoreMod.usePlayerStore.getState().loaded, false);
+  assert.equal(playerStoreMod.usePlayerStore.getState().paused, true);
+  assert.equal(playerStoreMod.usePlayerStore.getState().positionSecs, 0);
+  assert.equal(playerStoreMod.usePlayerStore.getState().durationSecs, 0);
+
+  const subStoreMod = await loadModules<typeof import("../src/store/useSubtitleStore")>(
+    "src/store/useSubtitleStore.ts",
+  );
+  const prevGen = subStoreMod.useSubtitleStore.getState().sessionGen;
+  subStoreMod.useSubtitleStore.getState().setAutoSyncBusy(true);
+  subStoreMod.useSubtitleStore.getState().clearLoadedTrack();
+  assert.equal(subStoreMod.useSubtitleStore.getState().sessionGen, prevGen + 1);
+  assert.equal(subStoreMod.useSubtitleStore.getState().autoSyncBusy, false);
+
+  const announceMod = await loadModules<typeof import("../src/lib/syncFileAnnounce")>(
+    "src/lib/syncFileAnnounce.ts",
+  );
+  const zeroDur = announceMod.shouldAnnounceFile(null, {
+    syncConnected: true,
+    endpoint: "syncplay.pl:8999",
+    username: "Ahmed",
+    roomCode: "ROOM-1",
+    fileName: "episode_02.mkv",
+    loaded: true,
+    durationSecs: 0,
+  });
+  assert.equal(zeroDur.announce, true);
+  assert.ok(zeroDur.nextKey);
+
+  const unloaded = announceMod.shouldAnnounceFile(zeroDur.nextKey, {
+    syncConnected: true,
+    endpoint: "syncplay.pl:8999",
+    username: "Ahmed",
+    roomCode: "ROOM-1",
+    fileName: "episode_02.mkv",
+    loaded: false,
+    durationSecs: 0,
+  });
+  assert.equal(unloaded.announce, false);
+  assert.equal(unloaded.nextKey, null);
+});
+
+

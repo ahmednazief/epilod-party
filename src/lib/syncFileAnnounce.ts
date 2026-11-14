@@ -6,6 +6,7 @@ export interface FileAnnouncementInput {
   fileName: string | null;
   loaded: boolean;
   durationSecs: number;
+  hashIdentity?: boolean;
 }
 
 /**
@@ -16,11 +17,11 @@ export function buildFileAnnouncementKey(input: FileAnnouncementInput): string |
   if (!input.syncConnected || !input.loaded || !input.fileName) {
     return null;
   }
-  const roundedDuration = Math.max(0, Math.round(input.durationSecs));
-  if (roundedDuration <= 0) {
-    return null;
-  }
-  return `${input.endpoint}|${input.roomCode}|${input.username}|${input.fileName}|${roundedDuration}`;
+  const roundedDuration =
+    Number.isFinite(input.durationSecs) && input.durationSecs >= 0
+      ? Math.round(input.durationSecs)
+      : 0;
+  return `${input.endpoint}|${input.roomCode}|${input.username}|${input.fileName}|${roundedDuration}${input.hashIdentity ? "|h" : ""}`;
 }
 
 export function shouldAnnounceFile(
@@ -33,7 +34,7 @@ export function shouldAnnounceFile(
   }
   const nextKey = buildFileAnnouncementKey(input);
   if (!nextKey) {
-    return { announce: false, nextKey: previousKey };
+    return { announce: false, nextKey: null };
   }
   if (nextKey === previousKey) {
     return { announce: false, nextKey };

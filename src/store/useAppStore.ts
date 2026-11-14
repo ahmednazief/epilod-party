@@ -37,6 +37,7 @@ function applyReducedMotionAttribute(enabled: boolean): void {
 }
 
 export type AppScreen = "home" | "room";
+export type SettingsTab = "server" | "prefs" | "updates" | "logs";
 
 interface AppState {
   screen: AppScreen;
@@ -48,9 +49,12 @@ interface AppState {
   serverPassword: string;
   allowNetworkShares: boolean;
   hideParticipants: boolean;
+  hashFilenames: boolean;
   reducedMotion: boolean;
   lowPowerMode: boolean;
+  autoCheckUpdates: boolean;
   settingsOpen: boolean;
+  settingsTab: SettingsTab;
   shortcutsOpen: boolean;
   selectedFilePath: string | null;
   selectedFileName: string | null;
@@ -61,9 +65,12 @@ interface AppState {
   setServerPassword: (password: string) => void;
   setAllowNetworkShares: (allow: boolean) => void;
   setHideParticipants: (hide: boolean) => void;
+  setHashFilenames: (hash: boolean) => void;
   setReducedMotion: (reduced: boolean) => void;
   setLowPowerMode: (lowPower: boolean) => void;
-  openSettings: () => void;
+  setAutoCheckUpdates: (autoCheck: boolean) => void;
+  openSettings: (tab?: SettingsTab) => void;
+  setSettingsTab: (tab: SettingsTab) => void;
   closeSettings: () => void;
   openShortcuts: () => void;
   closeShortcuts: () => void;
@@ -75,9 +82,11 @@ interface AppState {
 const initialUsername = sanitizeUsername(readStorage("ep.username", "")) || "Viewer";
 const initialServer = sanitizeCustomServerEndpoint(readStorage("ep.server", DEFAULT_ENDPOINT)) || DEFAULT_ENDPOINT;
 const initialHideParticipants = readStorage("ep.hideViewers", "false") === "true";
+const initialHashFilenames = readStorage("ep.hashFilenames", "false") === "true";
 const initialReducedMotion = readStorage("ep.reducedMotion", "false") === "true";
 const initialLowPowerMode = readStorage("ep.lowPowerMode", "false") === "true";
 const initialAllowShares = readStorage("ep.allowNetworkShares", "false") === "true";
+const initialAutoCheckUpdates = readStorage("ep.autoCheckUpdates", "true") !== "false";
 
 applyReducedMotionAttribute(initialReducedMotion);
 
@@ -90,9 +99,12 @@ export const useAppStore = create<AppState>((set) => ({
   serverPassword: "",
   allowNetworkShares: initialAllowShares,
   hideParticipants: initialHideParticipants,
+  hashFilenames: initialHashFilenames,
   reducedMotion: initialReducedMotion,
   lowPowerMode: initialLowPowerMode,
+  autoCheckUpdates: initialAutoCheckUpdates,
   settingsOpen: false,
+  settingsTab: "server",
   shortcutsOpen: false,
   selectedFilePath: null,
   selectedFileName: null,
@@ -128,6 +140,11 @@ export const useAppStore = create<AppState>((set) => ({
     set({ hideParticipants });
   },
 
+  setHashFilenames: (hashFilenames) => {
+    writeStorage("ep.hashFilenames", hashFilenames ? "true" : "false");
+    set({ hashFilenames });
+  },
+
   setReducedMotion: (reducedMotion) => {
     writeStorage("ep.reducedMotion", reducedMotion ? "true" : "false");
     applyReducedMotionAttribute(reducedMotion);
@@ -139,7 +156,18 @@ export const useAppStore = create<AppState>((set) => ({
     set({ lowPowerMode });
   },
 
-  openSettings: () => set({ settingsOpen: true, shortcutsOpen: false }),
+  setAutoCheckUpdates: (autoCheckUpdates) => {
+    writeStorage("ep.autoCheckUpdates", autoCheckUpdates ? "true" : "false");
+    set({ autoCheckUpdates });
+  },
+
+  openSettings: (tab) =>
+    set({
+      settingsOpen: true,
+      shortcutsOpen: false,
+      settingsTab: typeof tab === "string" ? tab : "server",
+    }),
+  setSettingsTab: (settingsTab) => set({ settingsTab }),
   closeSettings: () => set({ settingsOpen: false }),
   openShortcuts: () => set({ shortcutsOpen: true, settingsOpen: false }),
   closeShortcuts: () => set({ shortcutsOpen: false }),
@@ -172,6 +200,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   setSelectedFile: (path, name) => {
     usePlayerStore.getState().resetForNewFile();
+    useSyncStore.getState().setLocalReady(false);
     useSubtitleStore.getState().clearLoadedTrack();
     set({
       selectedFilePath: path,

@@ -11,10 +11,12 @@ use hwnd::{
 use process::{resolve_fonts_dir, resolve_mpv_exe, spawn_mpv};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 use tokio::sync::mpsc;
+
+static MPV_PIPE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub struct MpvRuntime {
     pub hwnd: isize,
@@ -24,8 +26,10 @@ pub struct MpvRuntime {
 }
 
 pub struct MpvController {
-    runtime: Mutex<Option<MpvRuntime>>,
+    runtime: Arc<Mutex<Option<MpvRuntime>>>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
+    loading_media: Arc<AtomicBool>,
+    pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
     next_req_id: AtomicU64,
     shutting_down: Arc<AtomicBool>,
 }
@@ -39,8 +43,10 @@ impl Default for MpvController {
 impl MpvController {
     pub fn new() -> Self {
         Self {
-            runtime: Mutex::new(None),
+            runtime: Arc::new(Mutex::new(None)),
             snapshot: Arc::new(Mutex::new(PlayerSnapshot::default())),
+            loading_media: Arc::new(AtomicBool::new(false)),
+            pending_seek: Arc::new(Mutex::new(None)),
             next_req_id: AtomicU64::new(100),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -52,6 +58,43 @@ impl MpvController {
 
     pub fn snapshot(&self) -> PlayerSnapshot {
         self.snapshot.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    pub fn prepare_for_load(&self) {
+        self.loading_media.store(true, Ordering::SeqCst);
+        if let Ok(mut ps) = self.pending_seek.lock() {
+            *ps = None;
+        }
+        if let Ok(mut snap) = self.snapshot.lock() {
+            *snap = PlayerSnapshot {
+                position: 0.0,
+                paused: true,
+            };
+        }
+    }
+
+    pub fn clear_loading_flag(&self) {
+        self.loading_media.store(false, Ordering::SeqCst);
+    }
+
+    pub fn note_seek_target(&self, target_secs: f64) {
+        let safe = if target_secs.is_finite() && target_secs >= 0.0 {
+            target_secs
+        } else {
+            0.0
+        };
+        if let Ok(mut ps) = self.pending_seek.lock() {
+            *ps = Some((safe, Instant::now()));
+        }
+        if let Ok(mut snap) = self.snapshot.lock() {
+            snap.position = safe;
+        }
+    }
+
+    pub fn note_paused(&self, paused: bool) {
+        if let Ok(mut snap) = self.snapshot.lock() {
+            snap.paused = paused;
+        }
     }
 
     pub fn start(
@@ -71,11 +114,16 @@ impl MpvController {
         }
 
         self.shutting_down.store(false, Ordering::SeqCst);
+        self.loading_media.store(false, Ordering::SeqCst);
+        if let Ok(mut ps) = self.pending_seek.lock() {
+            *ps = None;
+        }
 
         let mpv_exe = resolve_mpv_exe(app)?;
         let fonts_dir = resolve_fonts_dir(app);
         let child_hwnd = create_child_hwnd(parent_hwnd, rect, app.clone())?;
-        let pipe_name = format!("epilod-mpv-{}", std::process::id());
+        let seq = MPV_PIPE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let pipe_name = format!("epilod-mpv-{}-{seq}", std::process::id());
 
         let child = match spawn_mpv(
             &mpv_exe,
@@ -91,18 +139,6 @@ impl MpvController {
         };
 
         let (tx, rx) = mpsc::channel::<String>(128);
-        let app_clone = app.clone();
-        let snap_clone = Arc::clone(&self.snapshot);
-        let shutdown_flag = Arc::clone(&self.shutting_down);
-        tokio::spawn(async move {
-            ipc::connect_and_run_ipc(pipe_name, app_clone.clone(), rx, snap_clone).await;
-            if !shutdown_flag.load(Ordering::SeqCst) {
-                let _ = app_clone.emit(
-                    "mpv://error",
-                    serde_json::json!({ "message": "Playback engine stopped unexpectedly." }),
-                );
-            }
-        });
 
         // Fix 15: Only cache last_rect if viewport dimensions are non-zero (not minimized).
         let cached_rect = if rect.width > 0 && rect.height > 0 {
@@ -111,16 +147,57 @@ impl MpvController {
             None
         };
 
-        let mut guard = self
-            .runtime
-            .lock()
-            .map_err(|_| "Mpv state poisoned".to_string())?;
-        *guard = Some(MpvRuntime {
-            hwnd: child_hwnd,
-            child,
-            tx,
-            last_rect: cached_rect,
+        {
+            let mut guard = self
+                .runtime
+                .lock()
+                .map_err(|_| "Mpv state poisoned".to_string())?;
+            *guard = Some(MpvRuntime {
+                hwnd: child_hwnd,
+                child,
+                tx,
+                last_rect: cached_rect,
+            });
+        }
+
+        let app_clone = app.clone();
+        let runtime_clone = Arc::clone(&self.runtime);
+        let snap_clone = Arc::clone(&self.snapshot);
+        let loading_clone = Arc::clone(&self.loading_media);
+        let pending_seek_clone = Arc::clone(&self.pending_seek);
+        let shutdown_flag = Arc::clone(&self.shutting_down);
+        tokio::spawn(async move {
+            ipc::connect_and_run_ipc(
+                pipe_name,
+                app_clone.clone(),
+                rx,
+                Arc::clone(&snap_clone),
+                Arc::clone(&loading_clone),
+                Arc::clone(&pending_seek_clone),
+            )
+            .await;
+            if !shutdown_flag.load(Ordering::SeqCst) {
+                let taken = runtime_clone.lock().ok().and_then(|mut g| g.take());
+                if let Some(mut rt) = taken {
+                    drop(rt.tx);
+                    let _ = rt.child.start_kill();
+                    let _ = tokio::time::timeout(Duration::from_millis(250), rt.child.wait()).await;
+                    destroy_child_hwnd(rt.hwnd);
+                }
+                loading_clone.store(false, Ordering::SeqCst);
+                if let Ok(mut ps) = pending_seek_clone.lock() {
+                    *ps = None;
+                }
+                if let Ok(mut snap) = snap_clone.lock() {
+                    *snap = PlayerSnapshot::default();
+                }
+                let _ = app_clone.emit(
+                    "mpv://error",
+                    serde_json::json!({ "message": "Playback engine stopped unexpectedly." }),
+                );
+            }
         });
+
         Ok(())
     }
 
@@ -172,6 +249,10 @@ impl MpvController {
     /// Fix 18: Cleanly stop and await child exit up to 500ms before destroying HWND.
     pub async fn stop_and_clear(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        self.loading_media.store(false, Ordering::SeqCst);
+        if let Ok(mut ps) = self.pending_seek.lock() {
+            *ps = None;
+        }
         let taken = {
             if let Ok(mut guard) = self.runtime.lock() {
                 guard.take()

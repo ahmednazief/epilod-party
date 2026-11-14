@@ -56,7 +56,7 @@ export function PlaybackPanel() {
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-secondary">Playback Speed</span>
           {syncConnected && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-accent">
+            <span className="inline-flex items-center gap-1 text-[11px] text-accent-soft">
               <Lock className="h-3 w-3" />
               Locked 1.0×
             </span>

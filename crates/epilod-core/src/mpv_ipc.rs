@@ -28,6 +28,7 @@ pub enum MpvEvent {
     TimePos(f64),
     Duration(f64),
     Paused(bool),
+    EofReached(bool),
     FileLoaded,
     EndFile {
         reason: Option<String>,
@@ -106,7 +107,7 @@ pub fn set_property_cmd(request_id: u64, name: &str, value: Value) -> String {
 
 pub fn set_volume_cmd(request_id: u64, volume: f64) -> String {
     let clamped = if volume.is_finite() {
-        volume.clamp(0.0, 100.0)
+        volume.clamp(0.0, 130.0)
     } else {
         100.0
     };
@@ -146,6 +147,10 @@ pub fn sub_add_cmd(request_id: u64, path: &str) -> String {
         request_id,
         &[json!("sub-add"), json!(path), json!("select")],
     )
+}
+
+pub fn sub_remove_cmd(request_id: u64, sid: u64) -> String {
+    encode_command(request_id, &[json!("sub-remove"), json!(sid)])
 }
 
 pub fn sub_reload_cmd(request_id: u64) -> String {
@@ -192,8 +197,8 @@ pub fn set_sub_style_cmds(
     } else {
         2.0
     };
-    let safe_pos = pos.clamp(50, 100);
-    let ass_override = if override_ass { "force" } else { "yes" };
+    let safe_pos = pos.clamp(5, 100);
+    let ass_override = if override_ass { "force" } else { "no" };
     vec![
         set_property_cmd(first_request_id, "sub-font", json!(font)),
         set_property_cmd(first_request_id + 1, "sub-font-size", json!(safe_size)),
@@ -254,6 +259,11 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
                     "pause" => {
                         if let Some(p) = data.and_then(|v| v.as_bool()) {
                             return Ok(MpvMessage::Event(MpvEvent::Paused(p)));
+                        }
+                    }
+                    "eof-reached" => {
+                        if let Some(eof) = data.and_then(|v| v.as_bool()) {
+                            return Ok(MpvMessage::Event(MpvEvent::EofReached(eof)));
                         }
                     }
                     "track-list" => {
@@ -558,7 +568,9 @@ mod tests {
     #[test]
     fn test_volume_and_mute_commands() {
         let v = set_volume_cmd(1, 150.0);
-        assert!(v.contains("100"));
+        assert!(v.contains("130"));
+        let v_boost = set_volume_cmd(1, 120.0);
+        assert!(v_boost.contains("120"));
         let m = set_mute_cmd(2, true);
         assert!(m.contains("\"mute\"") && m.contains("true"));
     }
@@ -577,11 +589,32 @@ mod tests {
     fn test_subtitle_commands_and_rtl_paths() {
         let add = sub_add_cmd(1, r"C:\Subs\العربية.srt");
         assert!(add.contains("sub-add"));
-        let cmds = set_sub_style_cmds(10, "Noto Sans Arabic", 48, "#FFFFFF", 2.0, 95, true, true);
-        assert_eq!(cmds.len(), 7);
-        assert!(cmds
+        let rem = sub_remove_cmd(2, 4);
+        assert!(rem.contains("sub-remove") && rem.contains("4"));
+        let cmds_forced =
+            set_sub_style_cmds(10, "Noto Sans Arabic", 48, "#FFFFFF", 2.0, 95, true, true);
+        assert_eq!(cmds_forced.len(), 7);
+        assert!(cmds_forced
             .iter()
             .any(|c| c.contains("sub-ass-override") && c.contains("force")));
+
+        let cmds_unforced =
+            set_sub_style_cmds(20, "Noto Sans Arabic", 48, "#FFFFFF", 2.0, 25, true, false);
+        assert!(cmds_unforced
+            .iter()
+            .any(|c| c.contains("sub-ass-override") && c.contains("\"no\"")));
+        assert!(cmds_unforced
+            .iter()
+            .any(|c| c.contains("sub-pos") && c.contains("25")));
+    }
+
+    #[test]
+    fn test_parse_eof_reached_property_change() {
+        assert_eq!(
+            parse_line(r#"{"event":"property-change","id":5,"name":"eof-reached","data":true}"#)
+                .unwrap(),
+            MpvMessage::Event(MpvEvent::EofReached(true))
+        );
     }
 
     #[test]

@@ -4,9 +4,12 @@ pub mod autosync;
 pub mod mpv;
 #[cfg(windows)]
 pub mod syncplay;
+#[cfg(windows)]
+pub mod updater;
 
 use epilod_core::rate_limit::CommandRateGuard;
 use epilod_core::validation::LocalPathOptions;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -55,6 +58,36 @@ pub fn check_sync_connect_allowed(
     guard.allow(&key, 6, Duration::from_secs(10), now)
 }
 
+pub fn resolve_update_target_dir(
+    exe_dir: Option<&Path>,
+    registry_dir: Option<&Path>,
+    default_dir: &Path,
+) -> PathBuf {
+    if let Some(dir) = exe_dir {
+        let norm = dir
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        let is_cargo_dev = norm.ends_with("/target/debug") || norm.ends_with("/target/release");
+        if !is_cargo_dev
+            && (dir.join("epilod-install-manifest.json").is_file()
+                || dir.join("Epilod Party.exe").is_file()
+                || dir.join("epilod-party.exe").is_file())
+        {
+            return dir.to_path_buf();
+        }
+    }
+
+    if let Some(reg) = registry_dir {
+        if !reg.as_os_str().is_empty() {
+            return reg.to_path_buf();
+        }
+    }
+
+    default_dir.to_path_buf()
+}
+
 #[cfg(windows)]
 mod windows_app {
     use super::*;
@@ -68,7 +101,7 @@ mod windows_app {
     use epilod_core::mpv_ipc::{
         loadfile_cmd, seek_absolute_cmd, set_aid_cmd, set_aspect_cmd, set_loop_cmd, set_mute_cmd,
         set_pause_cmd, set_sid_cmd, set_speed_cmd, set_sub_delay_cmd, set_sub_style_cmds,
-        set_volume_cmd, sub_add_cmd,
+        set_volume_cmd, sub_add_cmd, sub_remove_cmd,
     };
     use epilod_core::room_code::BACKUP_ENDPOINT;
     use epilod_core::subtitle_sync::{decode_subtitle_bytes_with_hint, SubtitleEncodingHint};
@@ -77,9 +110,12 @@ mod windows_app {
         sanitize_username, validate_existing_local_file_with_options,
     };
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
     use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+
+    static DECODED_SUB_SEQ: AtomicU64 = AtomicU64::new(1);
 
     pub struct AppState {
         pub mpv: Arc<MpvController>,
@@ -88,6 +124,7 @@ mod windows_app {
         pub logger: Arc<Mutex<RingLogger>>,
         pub rate_guard: Arc<Mutex<CommandRateGuard>>,
         pub network_policy: Arc<NetworkSharePolicy>,
+        pub updater: Arc<crate::updater::UpdaterState>,
     }
 
     fn log_backend(state: &AppState, level: LogLevel, target: &str, code: Option<&str>, msg: &str) {
@@ -191,13 +228,21 @@ mod windows_app {
             }
         }
 
+        state.autosync.cancel();
+        state.mpv.prepare_for_load();
+        let pause_req = state.mpv.next_request_id();
+        let _ = state.mpv.send_command(set_pause_cmd(pause_req, true));
+
         let req = state.mpv.next_request_id();
         if let Err(e) = state.mpv.send_command(loadfile_cmd(req, &path_str)) {
+            state.mpv.clear_loading_flag();
             if let Ok(mut rg) = state.rate_guard.lock() {
                 rg.clear_dedup_if_matches("mpv_load", &path_str);
             }
             return Err(e);
         }
+        state.sync.reset_for_new_file();
+
         log_backend(
             &state,
             LogLevel::Info,
@@ -216,14 +261,16 @@ mod windows_app {
 
     #[tauri::command]
     async fn mpv_set_pause(state: State<'_, AppState>, paused: bool) -> Result<(), String> {
-        check_rate(&state, "mpv_ctl", 30, Duration::from_secs(2))?;
+        check_rate(&state, "mpv_transport", 40, Duration::from_secs(2))?;
+        state.mpv.note_paused(paused);
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_pause_cmd(req, paused))
     }
 
     #[tauri::command]
     async fn mpv_seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
-        check_rate(&state, "mpv_ctl", 30, Duration::from_secs(2))?;
+        check_rate(&state, "mpv_transport", 40, Duration::from_secs(2))?;
+        state.mpv.note_seek_target(seconds);
         let req = state.mpv.next_request_id();
         state.mpv.send_command(seek_absolute_cmd(req, seconds))
     }
@@ -237,14 +284,14 @@ mod windows_app {
 
     #[tauri::command]
     async fn mpv_set_volume(state: State<'_, AppState>, volume: f64) -> Result<(), String> {
-        check_rate(&state, "mpv_ctl", 40, Duration::from_secs(2))?;
+        check_rate(&state, "mpv_volume", 60, Duration::from_secs(2))?;
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_volume_cmd(req, volume))
     }
 
     #[tauri::command]
     async fn mpv_set_mute(state: State<'_, AppState>, muted: bool) -> Result<(), String> {
-        check_rate(&state, "mpv_ctl", 30, Duration::from_secs(2))?;
+        check_rate(&state, "mpv_volume", 60, Duration::from_secs(2))?;
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_mute_cmd(req, muted))
     }
@@ -267,6 +314,35 @@ mod windows_app {
         let safe = sanitize_aspect_mode(&aspect).map_err(|e| e.to_string())?;
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_aspect_cmd(req, safe))
+    }
+
+    fn prune_decoded_subs_dir(sub_dir: &Path, keep_latest: usize) {
+        let Ok(entries) = std::fs::read_dir(sub_dir) else {
+            return;
+        };
+        let mut files: Vec<(SystemTime, PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let p = e.path();
+                let name = p.file_name()?.to_str()?;
+                if !name.starts_with("decoded_") {
+                    return None;
+                }
+                let modified = e
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                Some((modified, p))
+            })
+            .collect();
+        if files.len() <= keep_latest {
+            return;
+        }
+        files.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, old_path) in files.into_iter().skip(keep_latest) {
+            let _ = std::fs::remove_file(old_path);
+        }
     }
 
     #[tauri::command]
@@ -292,9 +368,11 @@ mod windows_app {
                     std::fs::create_dir_all(&sub_dir)
                         .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
                     let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
-                    let out = sub_dir.join(format!("decoded.{ext}"));
+                    let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let out = sub_dir.join(format!("decoded_{}_{seq}.{ext}", std::process::id()));
                     std::fs::write(&out, decoded.as_bytes())
                         .map_err(|e| format!("Failed writing decoded UTF-8 subtitle: {e}"))?;
+                    prune_decoded_subs_dir(&sub_dir, 10);
                     out.to_string_lossy().into_owned()
                 } else {
                     valid.to_string_lossy().into_owned()
@@ -305,6 +383,12 @@ mod windows_app {
 
         let req = state.mpv.next_request_id();
         state.mpv.send_command(sub_add_cmd(req, &load_path))
+    }
+
+    #[tauri::command]
+    async fn mpv_remove_subtitle(state: State<'_, AppState>, sid: u64) -> Result<(), String> {
+        let req = state.mpv.next_request_id();
+        state.mpv.send_command(sub_remove_cmd(req, sid))
     }
 
     #[tauri::command]
@@ -537,6 +621,7 @@ mod windows_app {
         path: Option<String>,
         size_bytes: Option<u64>,
         duration_secs: f64,
+        hash_identity: Option<bool>,
     ) -> Result<(), String> {
         let resolved_size = size_bytes.or_else(|| {
             path.as_deref()
@@ -547,7 +632,7 @@ mod windows_app {
             name,
             size_bytes: resolved_size,
             duration_secs,
-            hash_identity: true,
+            hash_identity: hash_identity.unwrap_or(false),
         }));
         Ok(())
     }
@@ -584,6 +669,12 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn sync_set_scrubbing(state: State<'_, AppState>, scrubbing: bool) -> Result<(), String> {
+        state.sync.set_scrubbing(scrubbing);
+        Ok(())
+    }
+
+    #[tauri::command]
     async fn log_frontend_event(
         state: State<'_, AppState>,
         level: String,
@@ -613,7 +704,129 @@ mod windows_app {
         Ok(guard.snapshot(limit.unwrap_or(150)))
     }
 
+    #[tauri::command]
+    async fn update_get_status(
+        state: State<'_, AppState>,
+    ) -> Result<crate::updater::AppUpdateStatusDto, String> {
+        let updater = Arc::clone(&state.updater);
+        tokio::task::spawn_blocking(move || crate::updater::get_app_update_status(&updater))
+            .await
+            .map_err(|e| format!("Failed checking cached update status: {e}"))
+    }
+
+    #[tauri::command]
+    async fn update_check(
+        state: State<'_, AppState>,
+    ) -> Result<crate::updater::AppUpdateStatusDto, String> {
+        let res = crate::updater::check_for_updates(&state.updater).await;
+        if let Err(ref e) = res {
+            log_backend(
+                &state,
+                LogLevel::Warn,
+                "updater.check",
+                Some("WARN_UPDATE_CHECK"),
+                e,
+            );
+        }
+        res
+    }
+
+    #[tauri::command]
+    async fn update_download(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        manifest: Option<epilod_core::updater::ReleaseManifest>,
+    ) -> Result<crate::updater::AppUpdateStatusDto, String> {
+        crate::updater::download_update(app, &state.updater, manifest).await
+    }
+
+    #[tauri::command]
+    async fn update_cancel_download(state: State<'_, AppState>) -> Result<(), String> {
+        state.updater.cancel_download.store(true, Ordering::SeqCst);
+        state.updater.cancel_notify.notify_waiters();
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn update_apply_and_restart(
+        app: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        let cache_dir = crate::updater::update_cache_dir();
+        let cache_clone = cache_dir.clone();
+        let (setup_exe, install_dir, manifest, needs_elevation) =
+            tokio::task::spawn_blocking(move || {
+                crate::updater::prepare_verified_updater_launch(&cache_clone)
+            })
+            .await
+            .map_err(|e| format!("Updater pre-launch verification failed: {e}"))??;
+
+        log_backend(
+            &state,
+            LogLevel::Info,
+            "updater.apply",
+            None,
+            &format!(
+                "Launching verified updater v{} for {} (elevated={})",
+                manifest.version,
+                install_dir.display(),
+                needs_elevation
+            ),
+        );
+
+        if needs_elevation {
+            let setup_clone = setup_exe.clone();
+            let dir_clone = install_dir.clone();
+            let cache_clone = cache_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::updater::spawn_elevated_updater(&setup_clone, &dir_clone, &cache_clone)
+            })
+            .await
+            .map_err(|e| format!("Updater elevation task failed: {e}"))??;
+        } else {
+            let mut child = crate::updater::spawn_downloaded_updater(
+                &setup_exe,
+                &install_dir,
+                &cache_dir,
+                false,
+            )?;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            if let Ok(Some(exit_status)) = child.try_wait() {
+                if !exit_status.success() {
+                    let mut silent_child = crate::updater::spawn_downloaded_updater(
+                        &setup_exe,
+                        &install_dir,
+                        &cache_dir,
+                        true,
+                    )?;
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    if let Ok(Some(silent_status)) = silent_child.try_wait() {
+                        if !silent_status.success() {
+                            return Err(format!(
+                                "Updater exited prematurely (code {:?}); please run the downloaded installer from {}.",
+                                silent_status.code(),
+                                cache_dir.display()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        state.autosync.cancel();
+        state.mpv.stop_and_clear().await;
+        state.sync.disconnect().await;
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            app.exit(0);
+        });
+        Ok(())
+    }
+
     pub fn run() {
+        crate::updater::spawn_startup_cache_cleanup();
+
         let log_path: Option<PathBuf> = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .map(|p| p.join("EpilodParty").join("logs").join("epilod-party.log"));
@@ -625,6 +838,7 @@ mod windows_app {
             logger: Arc::new(Mutex::new(RingLogger::new(log_path, 512 * 1024))),
             rate_guard: Arc::new(Mutex::new(CommandRateGuard::new())),
             network_policy: Arc::new(NetworkSharePolicy::new(false)),
+            updater: Arc::new(crate::updater::UpdaterState::new()),
         };
 
         tauri::Builder::default()
@@ -667,6 +881,7 @@ mod windows_app {
                 mpv_set_loop,
                 mpv_set_aspect_mode,
                 mpv_add_subtitle,
+                mpv_remove_subtitle,
                 mpv_set_sub_style,
                 mpv_set_sub_delay,
                 mpv_set_audio_track,
@@ -686,8 +901,14 @@ mod windows_app {
                 sync_user_play,
                 sync_user_pause,
                 sync_user_seek,
+                sync_set_scrubbing,
                 log_frontend_event,
                 get_logs_snapshot,
+                update_get_status,
+                update_check,
+                update_download,
+                update_cancel_download,
+                update_apply_and_restart,
             ])
             .run(tauri::generate_context!())
             .expect("error while running Epilod Party");
@@ -705,6 +926,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_network_share_policy_defaults_off_and_toggles() {
@@ -760,5 +983,43 @@ mod tests {
             true,
             t0 + Duration::from_millis(800),
         ));
+    }
+
+    #[test]
+    fn test_resolve_update_target_dir_prefers_portable_or_installed_dir_and_skips_cargo_target() {
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("epilod-upd-dir-{uniq}"));
+        let portable_dir = root.join("CustomPortable");
+        let cargo_release = root.join("target").join("release");
+        let reg_dir = root.join("RegistryInstall");
+        let default_dir = root.join("DefaultLocalAppData");
+
+        fs::create_dir_all(&portable_dir).unwrap();
+        fs::create_dir_all(&cargo_release).unwrap();
+        fs::write(portable_dir.join("epilod-install-manifest.json"), "{}").unwrap();
+        fs::write(cargo_release.join("epilod-party.exe"), "dev").unwrap();
+
+        // Installed / portable directory with manifest wins over registry & default
+        assert_eq!(
+            resolve_update_target_dir(Some(&portable_dir), Some(&reg_dir), &default_dir),
+            portable_dir
+        );
+
+        // Cargo build directory is ignored so updates target registry install folder
+        assert_eq!(
+            resolve_update_target_dir(Some(&cargo_release), Some(&reg_dir), &default_dir),
+            reg_dir
+        );
+
+        // Falls back cleanly to default dir when neither exe_dir nor registry applies
+        assert_eq!(
+            resolve_update_target_dir(None, None, &default_dir),
+            default_dir
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

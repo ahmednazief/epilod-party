@@ -735,10 +735,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "epilod-installer-core"
+version = "0.1.0"
+dependencies = [
+ "epilod-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "epilod-party"
 version = "0.1.0"
 dependencies = [
  "epilod-core",
+ "epilod-installer-core",
  "native-tls",
  "serde",
  "serde_json",
@@ -747,6 +759,21 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "tokio-native-tls",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "epilod-setup"
+version = "0.1.0"
+dependencies = [
+ "epilod-installer-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tokio",
+ "windows",
  "windows-sys 0.59.0",
 ]
 

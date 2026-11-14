@@ -1,10 +1,20 @@
-import type { Participant } from "./syncplay";
+import type { Participant, SyncStatusPayload } from "./syncplay";
 
 export interface ControllerLockState {
   hasControllers: boolean;
   localIsController: boolean;
   lockedForLocalUser: boolean;
   controllers: string[];
+}
+
+export function resolveEffectiveUsername(
+  syncStatus: SyncStatusPayload,
+  configuredUsername: string,
+): string {
+  if (syncStatus.state === "connected" && syncStatus.username.trim()) {
+    return syncStatus.username;
+  }
+  return configuredUsername;
 }
 
 /**
