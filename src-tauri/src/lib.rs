@@ -133,15 +133,14 @@ mod windows_app {
             width,
             height,
         };
-        state.mpv.start(&app, hwnd, rect).map_err(|e| {
+        state.mpv.start(&app, hwnd, rect).inspect_err(|e| {
             log_backend(
                 &state,
                 LogLevel::Error,
                 "mpv.start",
                 Some("ERR_MPV_START"),
-                &e,
+                e,
             );
-            e
         })
     }
 

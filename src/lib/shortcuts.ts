@@ -41,7 +41,3 @@ export function isTextEntryElement(target: EventTarget | null): boolean {
   const role = el.getAttribute?.("role");
   return role === "textbox" || role === "combobox";
 }
-
-export function formatShortcutCaps(keys: readonly string[]): string {
-  return keys.join(" / ");
-}

@@ -78,6 +78,7 @@ impl SyncController {
         Self::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         &self,
         app: AppHandle,
@@ -272,7 +273,7 @@ async fn read_unbuffered_line_async(stream: &mut TcpStream) -> Result<String, St
 
 enum WireStream {
     Plain(TcpStream),
-    Tls(tokio_native_tls::TlsStream<TcpStream>),
+    Tls(Box<tokio_native_tls::TlsStream<TcpStream>>),
 }
 
 async fn establish_connection(endpoint: &str) -> Result<(WireStream, bool), String> {
@@ -312,7 +313,7 @@ async fn establish_connection(endpoint: &str) -> Result<(WireStream, bool), Stri
                 .await
                 .map_err(|_| "TLS handshake timed out.".to_string())?
                 .map_err(|e| format!("TLS handshake failed for {sni}: {e}"))?;
-        Ok((WireStream::Tls(tls_stream), true))
+        Ok((WireStream::Tls(Box::new(tls_stream)), true))
     } else {
         Ok((WireStream::Plain(tcp), false))
     }
