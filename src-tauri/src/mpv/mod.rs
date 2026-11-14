@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 static MPV_PIPE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub struct MpvRuntime {
+    pub app: AppHandle,
     pub hwnd: isize,
     pub child: Child,
     pub tx: mpsc::Sender<String>,
@@ -32,6 +33,8 @@ pub struct MpvController {
     pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
     next_req_id: AtomicU64,
     shutting_down: Arc<AtomicBool>,
+    has_media: Arc<AtomicBool>,
+    ui_visible: AtomicBool,
 }
 
 impl Default for MpvController {
@@ -49,6 +52,8 @@ impl MpvController {
             pending_seek: Arc::new(Mutex::new(None)),
             next_req_id: AtomicU64::new(100),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            has_media: Arc::new(AtomicBool::new(false)),
+            ui_visible: AtomicBool::new(true),
         }
     }
 
@@ -115,6 +120,7 @@ impl MpvController {
 
         self.shutting_down.store(false, Ordering::SeqCst);
         self.loading_media.store(false, Ordering::SeqCst);
+        self.has_media.store(false, Ordering::SeqCst);
         if let Ok(mut ps) = self.pending_seek.lock() {
             *ps = None;
         }
@@ -133,7 +139,7 @@ impl MpvController {
         ) {
             Ok(c) => c,
             Err(e) => {
-                destroy_child_hwnd(child_hwnd);
+                destroy_child_hwnd(app, child_hwnd);
                 return Err(e);
             }
         };
@@ -153,11 +159,15 @@ impl MpvController {
                 .lock()
                 .map_err(|_| "Mpv state poisoned".to_string())?;
             *guard = Some(MpvRuntime {
+                app: app.clone(),
                 hwnd: child_hwnd,
                 child,
                 tx,
                 last_rect: cached_rect,
             });
+        }
+        if self.has_media.load(Ordering::SeqCst) && self.ui_visible.load(Ordering::SeqCst) {
+            set_child_visible(app, child_hwnd, true);
         }
 
         let app_clone = app.clone();
@@ -166,6 +176,7 @@ impl MpvController {
         let loading_clone = Arc::clone(&self.loading_media);
         let pending_seek_clone = Arc::clone(&self.pending_seek);
         let shutdown_flag = Arc::clone(&self.shutting_down);
+        let has_media_clone = Arc::clone(&self.has_media);
         tokio::spawn(async move {
             ipc::connect_and_run_ipc(
                 pipe_name,
@@ -182,8 +193,9 @@ impl MpvController {
                     drop(rt.tx);
                     let _ = rt.child.start_kill();
                     let _ = tokio::time::timeout(Duration::from_millis(250), rt.child.wait()).await;
-                    destroy_child_hwnd(rt.hwnd);
+                    destroy_child_hwnd(&rt.app, rt.hwnd);
                 }
+                has_media_clone.store(false, Ordering::SeqCst);
                 loading_clone.store(false, Ordering::SeqCst);
                 if let Ok(mut ps) = pending_seek_clone.lock() {
                     *ps = None;
@@ -218,19 +230,31 @@ impl MpvController {
             return Ok(());
         }
         rt.last_rect = Some(rect);
-        resize_child_hwnd(rt.hwnd, rect);
+        resize_child_hwnd(&rt.app, rt.hwnd, rect);
         Ok(())
     }
 
     pub fn set_visible(&self, visible: bool) -> Result<(), String> {
+        self.ui_visible.store(visible, Ordering::SeqCst);
+        let effective = visible && self.has_media.load(Ordering::SeqCst);
         let guard = self
             .runtime
             .lock()
             .map_err(|_| "Mpv state poisoned".to_string())?;
         if let Some(ref rt) = *guard {
-            set_child_visible(rt.hwnd, visible);
+            set_child_visible(&rt.app, rt.hwnd, effective);
         }
         Ok(())
+    }
+
+    pub fn set_media_loaded(&self, loaded: bool) {
+        self.has_media.store(loaded, Ordering::SeqCst);
+        let effective = loaded && self.ui_visible.load(Ordering::SeqCst);
+        if let Ok(guard) = self.runtime.lock() {
+            if let Some(ref rt) = *guard {
+                set_child_visible(&rt.app, rt.hwnd, effective);
+            }
+        }
     }
 
     pub fn send_command(&self, cmd_line: String) -> Result<(), String> {
@@ -250,6 +274,7 @@ impl MpvController {
     pub async fn stop_and_clear(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         self.loading_media.store(false, Ordering::SeqCst);
+        self.has_media.store(false, Ordering::SeqCst);
         if let Ok(mut ps) = self.pending_seek.lock() {
             *ps = None;
         }
@@ -268,7 +293,7 @@ impl MpvController {
             drop(rt.tx);
             let _ = rt.child.start_kill();
             let _ = tokio::time::timeout(Duration::from_millis(500), rt.child.wait()).await;
-            destroy_child_hwnd(rt.hwnd);
+            destroy_child_hwnd(&rt.app, rt.hwnd);
         }
     }
 }

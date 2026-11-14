@@ -19,6 +19,7 @@ import {
   mpvSetSubDelay,
   mpvSetSubStyle,
   mpvSetSubTrack,
+  mpvSetVisible,
   subtitleAutoSync,
   subtitleCancelAutoSync,
   subtitleTwoAnchorSync,
@@ -133,14 +134,23 @@ export function SubtitlePanel() {
       pushNote("warn", "File dialog is only available in the Windows desktop app.");
       return;
     }
-    const chosen = await open({
-      multiple: false,
-      title: "Choose Subtitle File",
-      filters: [
-        { name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub", "idx", "*"] },
-      ],
-    });
-    if (typeof chosen !== "string" || !chosen) return;
+    let chosen: string | null = null;
+    try {
+      await mpvSetVisible(false);
+      const picked = await open({
+        multiple: false,
+        title: "Choose Subtitle File",
+        filters: [
+          { name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub", "idx", "*"] },
+        ],
+      });
+      if (typeof picked === "string" && picked) {
+        chosen = picked;
+      }
+    } finally {
+      void mpvSetVisible(true);
+    }
+    if (!chosen) return;
     try {
       await mpvAddSubtitle(chosen, encodingHint);
       await mpvSetSubDelay(0);

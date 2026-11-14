@@ -252,6 +252,9 @@ export function WatchRoom() {
     }
     dialogOpenRef.current = true;
     try {
+      if (mpvStartedRef.current) {
+        await mpvSetVisible(false);
+      }
       const chosen = await open({
         multiple: false,
         title: "Choose Video File",
@@ -267,6 +270,11 @@ export function WatchRoom() {
       }
     } finally {
       dialogOpenRef.current = false;
+      if (mpvStartedRef.current) {
+        const appState = useAppStore.getState();
+        const pState = usePlayerStore.getState();
+        void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+      }
     }
   }, [loadVideoPath, pushNote]);
 

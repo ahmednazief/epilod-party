@@ -241,6 +241,7 @@ mod windows_app {
             }
             return Err(e);
         }
+        state.mpv.set_media_loaded(true);
         state.sync.reset_for_new_file();
 
         log_backend(
@@ -339,7 +340,7 @@ mod windows_app {
         if files.len() <= keep_latest {
             return;
         }
-        files.sort_by(|a, b| b.0.cmp(&a.0));
+        files.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (_, old_path) in files.into_iter().skip(keep_latest) {
             let _ = std::fs::remove_file(old_path);
         }

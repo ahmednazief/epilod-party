@@ -1,7 +1,7 @@
 #![cfg(windows)]
 
 use std::ffi::c_void;
-use std::sync::Once;
+use std::sync::{mpsc, Once};
 use tauri::{AppHandle, Emitter};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH};
@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_DBLCLKS, GWLP_USERDATA, HWND_TOP,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WM_PARENTNOTIFY, WNDCLASSEXW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,44 +104,55 @@ pub fn create_child_hwnd(
     rect: PhysicalRect,
     app: AppHandle,
 ) -> Result<isize, String> {
-    ensure_surface_class();
-    let cls = class_name_wide();
-    let title: Vec<u16> = "EpilodVideoSurface\0".encode_utf16().collect();
-    let w = rect.width.max(1);
-    let h = rect.height.max(1);
+    let (tx, rx) = mpsc::sync_channel::<Result<isize, String>>(1);
+    let app_for_ctx = app.clone();
 
-    unsafe {
-        let hinstance = GetModuleHandleW(std::ptr::null());
-        let hwnd = CreateWindowExW(
-            0,
-            cls.as_ptr(),
-            title.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-            rect.x,
-            rect.y,
-            w,
-            h,
-            parent_hwnd as HWND,
-            std::ptr::null_mut(),
-            hinstance,
-            std::ptr::null::<c_void>(),
-        );
-        if hwnd.is_null() {
-            return Err("CreateWindowExW failed to create mpv host surface.".to_string());
-        }
-        let ctx = Box::new(SurfaceContext { app });
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
-        Ok(hwnd as isize)
-    }
+    app.run_on_main_thread(move || {
+        ensure_surface_class();
+        let cls = class_name_wide();
+        let title: Vec<u16> = "EpilodVideoSurface\0".encode_utf16().collect();
+        let w = rect.width.max(1);
+        let h = rect.height.max(1);
+
+        let res = unsafe {
+            let hinstance = GetModuleHandleW(std::ptr::null());
+            let hwnd = CreateWindowExW(
+                0,
+                cls.as_ptr(),
+                title.as_ptr(),
+                WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                rect.x,
+                rect.y,
+                w,
+                h,
+                parent_hwnd as HWND,
+                std::ptr::null_mut(),
+                hinstance,
+                std::ptr::null::<c_void>(),
+            );
+            if hwnd.is_null() {
+                Err("CreateWindowExW failed to create mpv host surface.".to_string())
+            } else {
+                let ctx = Box::new(SurfaceContext { app: app_for_ctx });
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
+                Ok(hwnd as isize)
+            }
+        };
+        let _ = tx.send(res);
+    })
+    .map_err(|e| format!("Failed dispatching child HWND creation to main UI thread: {e}"))?;
+
+    rx.recv()
+        .map_err(|_| "Main UI thread dropped child HWND creation result.".to_string())?
 }
 
-pub fn resize_child_hwnd(hwnd: isize, rect: PhysicalRect) {
+pub fn resize_child_hwnd(app: &AppHandle, hwnd: isize, rect: PhysicalRect) {
     if hwnd == 0 {
         return;
     }
     let w = rect.width.max(1);
     let h = rect.height.max(1);
-    unsafe {
+    let _ = app.run_on_main_thread(move || unsafe {
         SetWindowPos(
             hwnd as HWND,
             HWND_TOP,
@@ -151,14 +162,14 @@ pub fn resize_child_hwnd(hwnd: isize, rect: PhysicalRect) {
             h,
             SWP_NOACTIVATE | SWP_NOZORDER,
         );
-    }
+    });
 }
 
-pub fn set_child_visible(hwnd: isize, visible: bool) {
+pub fn set_child_visible(app: &AppHandle, hwnd: isize, visible: bool) {
     if hwnd == 0 {
         return;
     }
-    unsafe {
+    let _ = app.run_on_main_thread(move || unsafe {
         ShowWindow(
             hwnd as HWND,
             if visible { SW_SHOWNOACTIVATE } else { SW_HIDE },
@@ -174,14 +185,14 @@ pub fn set_child_visible(hwnd: isize, visible: bool) {
                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
             );
         }
-    }
+    });
 }
 
-pub fn destroy_child_hwnd(hwnd: isize) {
+pub fn destroy_child_hwnd(app: &AppHandle, hwnd: isize) {
     if hwnd == 0 {
         return;
     }
-    unsafe {
+    let _ = app.run_on_main_thread(move || unsafe {
         DestroyWindow(hwnd as HWND);
-    }
+    });
 }

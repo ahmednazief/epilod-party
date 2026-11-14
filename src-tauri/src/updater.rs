@@ -926,7 +926,7 @@ pub fn spawn_elevated_updater(
             w_exe.as_ptr(),
             w_params.as_ptr(),
             w_dir.as_ptr(),
-            SW_SHOWNORMAL as i32,
+            SW_SHOWNORMAL,
         )
     };
     let code = hinst as isize;
@@ -1495,6 +1495,7 @@ async fn stream_https_download_resumable(
         let offset = resume_from.unwrap_or(0);
         let mut f = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(part_path)
             .map_err(|e| format!("Cannot open partial update file: {e}"))?;
@@ -1518,13 +1519,13 @@ async fn stream_https_download_resumable(
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     let mut decoder = ChunkedDecoder::default();
 
-    let mut push_bytes = |chunk: &[u8]| -> Result<(), String> {
+    let mut push_bytes = |downloaded: &mut u64, chunk: &[u8]| -> Result<(), String> {
         if chunk.is_empty() {
             return Ok(());
         }
-        downloaded = downloaded.saturating_add(chunk.len() as u64);
-        if downloaded > MAX_INSTALLER_BYTES
-            || downloaded > expected_size.saturating_add(1024 * 1024)
+        *downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if *downloaded > MAX_INSTALLER_BYTES
+            || *downloaded > expected_size.saturating_add(1024 * 1024)
         {
             return Err("Downloaded stream exceeded declared installer size.".to_string());
         }
@@ -1535,9 +1536,9 @@ async fn stream_https_download_resumable(
 
     if head.chunked {
         let decoded = decoder.push(&leftover).map_err(|e| e.to_string())?;
-        push_bytes(&decoded)?;
+        push_bytes(&mut downloaded, &decoded)?;
     } else {
-        push_bytes(&leftover)?;
+        push_bytes(&mut downloaded, &leftover)?;
     }
 
     let mut buf = vec![0u8; 64 * 1024];
@@ -1567,9 +1568,9 @@ async fn stream_https_download_resumable(
 
         if head.chunked {
             let decoded = decoder.push(&buf[..n]).map_err(|e| e.to_string())?;
-            push_bytes(&decoded)?;
+            push_bytes(&mut downloaded, &decoded)?;
         } else {
-            push_bytes(&buf[..n])?;
+            push_bytes(&mut downloaded, &buf[..n])?;
         }
 
         let now = Instant::now();

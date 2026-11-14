@@ -223,7 +223,7 @@ Would you like to open Microsoft's WebView2 Runtime download page now?";
                 wurl.as_ptr(),
                 ptr::null(),
                 ptr::null(),
-                SW_SHOWNORMAL as i32,
+                SW_SHOWNORMAL,
             );
         }
     }
