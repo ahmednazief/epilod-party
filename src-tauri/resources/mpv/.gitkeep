@@ -1,0 +1,1 @@
+# Place Windows mpv.exe (and optional ffmpeg.exe) here via scripts/fetch-mpv.ps1 before running `npm run tauri build`.

@@ -1,0 +1,9 @@
+{
+  "mpv": {
+    "repository": "shinchiro/mpv-winbuild-cmake",
+    "version": "pinned-on-windows-build",
+    "assetPattern": "mpv-x86_64-*.7z",
+    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases",
+    "sha256": "REPLACE_WITH_VERIFIED_ARCHIVE_SHA256"
+  }
+}

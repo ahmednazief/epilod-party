@@ -1,0 +1,11 @@
+Written Offer for Corresponding Source Code (GPL-3.0 Section 6)
+================================================================
+
+Epilod Party is distributed under the GNU General Public License v3.0.
+If you received a binary distribution of Epilod Party containing mpv.exe
+and/or FFmpeg binaries without the accompanying source archive, you may obtain
+the complete corresponding machine-readable source code from the official
+Epilod Party repository and upstream pinned build manifest in `scripts/mpv.lock`.
+
+- Epilod Party Source: https://github.com/ahmednazief/epilod-party
+- Upstream mpv Win32 Builds: https://github.com/shinchiro/mpv-winbuild-cmake/releases

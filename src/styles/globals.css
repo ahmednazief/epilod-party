@@ -1,0 +1,156 @@
+@import "tailwindcss";
+@import "./fonts.css";
+
+@theme {
+  --color-canvas: #070708;
+  --color-chrome: #0E0E11;
+  --color-raised: #15151A;
+  --color-hover: #1C1C23;
+  --color-hairline: #1D1D24;
+  --color-primary: #F4F4F6;
+  --color-secondary: #A1A1AE;
+  --color-muted: #6E6E7D;
+  --color-accent: #E5A93C;
+  --color-accent-hover: #F0B94E;
+  --color-ok: #4ADE80;
+  --color-warn: #FBBF24;
+  --color-bad: #F87171;
+  --font-sans: "Inter", "Segoe UI Variable Display", system-ui, sans-serif;
+  --font-arabic: "Noto Sans Arabic", "Inter", system-ui, sans-serif;
+  --radius-ui: 6px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--color-canvas);
+    color: var(--color-primary);
+    font-family: var(--font-sans);
+  }
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes ep-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ep-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ep-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ep-fade-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ep-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes ep-drop-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.anim-pop-in {
+  animation: ep-pop-in 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-backdrop-in {
+  animation: ep-backdrop-in 140ms ease-out both;
+}
+
+.anim-modal-in {
+  animation: ep-modal-in 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-fade-slide-up {
+  animation: ep-fade-slide-up 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-tab-in {
+  animation: ep-fade-slide-up 140ms ease-out both;
+}
+
+.anim-drawer-in {
+  animation: ep-drawer-in 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-icon-pop {
+  animation: ep-pop-in 140ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-drop-float {
+  animation: ep-drop-float 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-pop-in,
+  .anim-backdrop-in,
+  .anim-modal-in,
+  .anim-fade-slide-up,
+  .anim-tab-in,
+  .anim-drawer-in,
+  .anim-icon-pop,
+  .anim-drop-float {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+:root[data-reduced-motion="true"] *,
+:root[data-reduced-motion="true"] *::before,
+:root[data-reduced-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}

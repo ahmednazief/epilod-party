@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <clipPath id="logo-bucket-clip">
+      <path d="M142 232 L370 232 L350 418 Q256 440 162 418 Z" />
+    </clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0E0E11" />
+  <g stroke="#E3A63A" stroke-width="10" stroke-linejoin="round" fill="#FDEBB0">
+    <circle cx="190" cy="196" r="44" />
+    <circle cx="246" cy="164" r="48" />
+    <circle cx="308" cy="170" r="44" />
+    <circle cx="344" cy="206" r="36" />
+    <circle cx="164" cy="218" r="30" />
+    <rect x="150" y="196" width="212" height="52" rx="14" stroke="none" />
+  </g>
+  <path d="M222 190 q14 -14 28 0 q-14 8 -28 0z M312 184 q12 -12 24 0 q-12 8 -24 0z" fill="#E3A63A" />
+  <path d="M142 232 L370 232 L350 418 Q256 440 162 418 Z" fill="#E8456B" />
+  <g clip-path="url(#logo-bucket-clip)">
+    <rect x="178" y="220" width="30" height="220" fill="#FFE3E8" transform="skewX(-3)" />
+    <rect x="232" y="220" width="30" height="220" fill="#F7708F" />
+    <rect x="296" y="220" width="30" height="220" fill="#C21F4A" />
+    <rect x="340" y="220" width="30" height="220" fill="#F7708F" />
+  </g>
+  <path d="M142 232 L370 232 L350 418 Q256 440 162 418 Z" fill="none" stroke="#8E1634" stroke-width="12" stroke-linejoin="round" />
+  <path d="M138 236 Q256 256 374 236" fill="none" stroke="#8E1634" stroke-width="14" stroke-linecap="round" />
+  <path d="M222 286 L222 372 Q222 380 230 376 L298 336 Q306 330 298 324 L230 282 Q222 278 222 286Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round" />
+</svg>
