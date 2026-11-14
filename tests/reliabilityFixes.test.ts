@@ -302,3 +302,88 @@ test("Stores keep RAM-only serverPassword, default localReady=false, and reset t
   subStoreMod.useSubtitleStore.getState().nudgeDelay(0.15);
   assert.equal(subStoreMod.useSubtitleStore.getState().delaySecs, 0.15);
 });
+
+test("Fix 16 & 17: dialog drop gate and mid-movie mpv crash Syncplay recovery", async () => {
+  const pl = await loadModules<typeof import("../src/lib/playerLifecycle")>(
+    "src/lib/playerLifecycle.ts",
+  );
+  assert.equal(pl.checkDropDuringDialog(false).allowed, true);
+  const blocked = pl.checkDropDuringDialog(true);
+  assert.equal(blocked.allowed, false);
+  assert.match(blocked.notice || "", /dialog/i);
+
+  const calls: string[] = [];
+  let localReady = true;
+  let cleared = false;
+  await pl.handlePlayerCrashSync({
+    syncConnected: true,
+    wasPaused: false,
+    positionSecs: 142.5,
+    setLocalReady: (r) => {
+      localReady = r;
+    },
+    syncSetReady: async (r, manual) => {
+      calls.push(`ready:${r}:${manual}`);
+    },
+    syncUserPause: async (pos) => {
+      calls.push(`pause:${pos}`);
+    },
+    clearAnnouncementCache: () => {
+      cleared = true;
+    },
+  });
+
+  assert.equal(localReady, false);
+  assert.equal(cleared, true);
+  assert.deepEqual(calls, ["ready:false:false", "pause:142.5"]);
+});
+
+test("Fix 20 & 21: usePlayerShortcuts source uses physical e.code and 100ms seek throttle", async () => {
+  const hookSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/hooks/usePlayerShortcuts.ts"),
+    "utf8",
+  );
+  // Physical e.code ensures Arabic keyboard layouts (e.key='ب','ئ','س') trigger identical bindings
+  for (const code of [
+    "KeyF",
+    "KeyR",
+    "Space",
+    "KeyK",
+    "KeyJ",
+    "KeyL",
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "ArrowDown",
+    "KeyM",
+    "KeyV",
+    "KeyS",
+    "KeyZ",
+    "KeyX",
+    "BracketLeft",
+    "BracketRight",
+    "Escape",
+  ]) {
+    assert.equal(hookSrc.includes(`"${code}"`), true, `Missing physical code ${code}`);
+  }
+  assert.equal(hookSrc.includes("createLeadingTrailingThrottle"), true);
+
+  const th = await loadModules<typeof import("../src/lib/throttle")>("src/lib/throttle.ts");
+  const sk = await loadModules<typeof import("../src/lib/seekCoalesce")>("src/lib/seekCoalesce.ts");
+  const sent: number[] = [];
+  const throttled = th.createLeadingTrailingThrottle((target: number) => {
+    sent.push(target);
+  }, 100);
+  const acc = new sk.SeekAccumulator(450);
+
+  let latest = 0;
+  for (let i = 0; i < 10; i++) {
+    latest = acc.step(5, 100, 600, 1000 + i * 10);
+    throttled.call(latest);
+  }
+  throttled.flush();
+  assert.equal(latest, 150);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[sent.length - 1], 150);
+});
+

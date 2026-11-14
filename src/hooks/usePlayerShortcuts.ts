@@ -16,6 +16,7 @@ import { getControllerLockState } from "../lib/syncController";
 import { canChangePlaybackSpeed } from "../lib/syncSpeedGuard";
 import { canToggleReady, resolveReadyToggleTarget } from "../lib/syncReady";
 import { syncSetReady, syncUserPause, syncUserPlay, syncUserSeek } from "../lib/syncplay";
+import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
   formatDelaySigned,
   formatTrackAnnouncement,
@@ -39,6 +40,16 @@ export function usePlayerShortcuts({
   const seekAccRef = useRef(new SeekAccumulator(450));
 
   useEffect(() => {
+    const throttledSeek = createLeadingTrailingThrottle(
+      (target: number, synced: boolean) => {
+        void mpvSeek(target);
+        if (synced) {
+          void syncUserSeek(target);
+        }
+      },
+      100,
+    );
+
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.altKey || e.metaKey) {
         return;
@@ -187,10 +198,7 @@ export function usePlayerShortcuts({
         player.setEndedAtEof(false);
         player.setPositionSecs(target);
         player.flashFeedback(`${seekDelta > 0 ? "+" : ""}${seekDelta}s`);
-        void mpvSeek(target);
-        if (syncConnected) {
-          void syncUserSeek(target);
-        }
+        throttledSeek.call(target, syncConnected);
         return;
       }
 
@@ -287,6 +295,9 @@ export function usePlayerShortcuts({
     };
 
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      throttledSeek.cancel();
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [onExitFullscreen, onToggleFullscreen]);
 }

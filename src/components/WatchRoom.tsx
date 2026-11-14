@@ -42,6 +42,7 @@ import {
   windowSetFullscreen,
 } from "../lib/mpv";
 import { classifyMpvEnd } from "../lib/playbackEnd";
+import { checkDropDuringDialog, handlePlayerCrashSync } from "../lib/playerLifecycle";
 import { resetMpvPlaybackDefaults } from "../lib/playbackReset";
 import {
   formatControllerOverrideNotice,
@@ -138,6 +139,8 @@ export function WatchRoom() {
   const mpvStartedRef = useRef(false);
   const announcedFileKeyRef = useRef<string | null>(null);
   const autoReadyMarkedRef = useRef(false);
+  const dialogOpenRef = useRef(false);
+  const leavingRef = useRef(false);
 
   const rect = useViewportRect(viewportRef, viewportTick);
 
@@ -226,18 +229,26 @@ export function WatchRoom() {
       pushNote("warn", "File dialog requires the Windows desktop app.");
       return;
     }
-    const chosen = await open({
-      multiple: false,
-      title: "Choose Video File",
-      filters: [
-        {
-          name: "Video Files",
-          extensions: ["mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "*"],
-        },
-      ],
-    });
-    if (typeof chosen === "string" && chosen) {
-      await loadVideoPath(chosen);
+    if (dialogOpenRef.current) {
+      return;
+    }
+    dialogOpenRef.current = true;
+    try {
+      const chosen = await open({
+        multiple: false,
+        title: "Choose Video File",
+        filters: [
+          {
+            name: "Video Files",
+            extensions: ["mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "*"],
+          },
+        ],
+      });
+      if (typeof chosen === "string" && chosen) {
+        await loadVideoPath(chosen);
+      }
+    } finally {
+      dialogOpenRef.current = false;
     }
   }, [loadVideoPath, pushNote]);
 
@@ -308,8 +319,22 @@ export function WatchRoom() {
             usePlayerStore.getState().setEndedAtEof(true);
             usePlayerStore.getState().setPaused(true);
           } else if (decision.kind === "error") {
-            usePlayerStore.getState().setPlayerError(decision.message);
+            const p = usePlayerStore.getState();
+            const s = useSyncStore.getState();
+            p.setPlayerError(decision.message);
             pushNote("error", decision.message);
+            void handlePlayerCrashSync({
+              syncConnected: s.status.state === "connected",
+              wasPaused: p.paused,
+              positionSecs: p.positionSecs,
+              setLocalReady: s.setLocalReady,
+              syncSetReady,
+              syncUserPause,
+              clearAnnouncementCache: () => {
+                announcedFileKeyRef.current = null;
+                autoReadyMarkedRef.current = false;
+              },
+            });
           }
         }),
         onMpvTracks((tracks) => {
@@ -317,8 +342,22 @@ export function WatchRoom() {
         }),
         onMpvError((msg) => {
           if (!active) return;
-          usePlayerStore.getState().setPlayerError(msg);
+          const p = usePlayerStore.getState();
+          const s = useSyncStore.getState();
+          p.setPlayerError(msg);
           pushNote("error", msg);
+          void handlePlayerCrashSync({
+            syncConnected: s.status.state === "connected",
+            wasPaused: p.paused,
+            positionSecs: p.positionSecs,
+            setLocalReady: s.setLocalReady,
+            syncSetReady,
+            syncUserPause,
+            clearAnnouncementCache: () => {
+              announcedFileKeyRef.current = null;
+              autoReadyMarkedRef.current = false;
+            },
+          });
         }),
         onMpvSurfaceClick(() => {
           if (!active) return;
@@ -390,7 +429,7 @@ export function WatchRoom() {
     };
   }, [pushNote, toggleFullscreen]);
 
-  // Tauri native drag-and-drop (Fix 19)
+  // Tauri native drag-and-drop (Fixes 16 & 19)
   useEffect(() => {
     if (!isDesktop()) return;
     let disposed = false;
@@ -412,6 +451,11 @@ export function WatchRoom() {
           }
           if (payload.type === "drop") {
             setIsDragActive(false);
+            const dropGate = checkDropDuringDialog(dialogOpenRef.current);
+            if (!dropGate.allowed) {
+              if (dropGate.notice) pushNote("info", dropGate.notice);
+              return;
+            }
             const split = splitDroppedFiles(payload.paths || []);
             if (split.directorySuspected) {
               pushNote("warn", "Folders cannot be played directly — drop a video or subtitle file.");
@@ -420,6 +464,9 @@ export function WatchRoom() {
             }
             if (split.extraVideoCount > 0) {
               pushNote("info", `Loaded first video; ignored ${split.extraVideoCount} extra video(s).`);
+            }
+            if (split.extraSubtitleCount > 0) {
+              pushNote("info", `Loaded first subtitle; ignored ${split.extraSubtitleCount} extra subtitle(s).`);
             }
             if (split.videoPath) {
               await loadVideoPath(split.videoPath);
@@ -530,6 +577,10 @@ export function WatchRoom() {
   });
 
   const handleLeaveRoom = () => {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    announcedFileKeyRef.current = null;
+    autoReadyMarkedRef.current = false;
     leaveRoom();
   };
 
