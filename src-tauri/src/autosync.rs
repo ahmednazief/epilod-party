@@ -490,6 +490,8 @@ mod windows_impl {
             || !dst_b_secs.is_finite()
             || src_a_secs < 0.0
             || dst_a_secs < 0.0
+            || src_b_secs < 0.0
+            || dst_b_secs < 0.0
         {
             return Err("Invalid anchor timestamps for two-point calibration.".to_string());
         }

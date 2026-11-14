@@ -104,7 +104,7 @@ impl SyncController {
         let local_file = Arc::clone(&self.local_file);
         let local_ready = Arc::clone(&self.local_ready);
 
-        let task = tauri::async_runtime::spawn(async move {
+        let task = tokio::spawn(async move {
             run_sync_loop(
                 app,
                 mpv,
@@ -168,7 +168,7 @@ impl SyncController {
         };
         let local_file = Arc::clone(&self.local_file);
         let local_ready = Arc::clone(&self.local_ready);
-        let task = tauri::async_runtime::spawn(async move {
+        let task = tokio::spawn(async move {
             run_sync_loop(
                 app,
                 mpv,

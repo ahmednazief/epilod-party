@@ -9,7 +9,7 @@ use hwnd::{
     create_child_hwnd, destroy_child_hwnd, resize_child_hwnd, set_child_visible, PhysicalRect,
 };
 use process::{resolve_fonts_dir, resolve_mpv_exe, spawn_mpv};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -27,6 +27,7 @@ pub struct MpvController {
     runtime: Mutex<Option<MpvRuntime>>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
     next_req_id: AtomicU64,
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl Default for MpvController {
@@ -41,6 +42,7 @@ impl MpvController {
             runtime: Mutex::new(None),
             snapshot: Arc::new(Mutex::new(PlayerSnapshot::default())),
             next_req_id: AtomicU64::new(100),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -68,6 +70,8 @@ impl MpvController {
             }
         }
 
+        self.shutting_down.store(false, Ordering::SeqCst);
+
         let mpv_exe = resolve_mpv_exe(app)?;
         let fonts_dir = resolve_fonts_dir(app);
         let child_hwnd = create_child_hwnd(parent_hwnd, rect, app.clone())?;
@@ -89,12 +93,15 @@ impl MpvController {
         let (tx, rx) = mpsc::channel::<String>(128);
         let app_clone = app.clone();
         let snap_clone = Arc::clone(&self.snapshot);
-        tauri::async_runtime::spawn(async move {
+        let shutdown_flag = Arc::clone(&self.shutting_down);
+        tokio::spawn(async move {
             ipc::connect_and_run_ipc(pipe_name, app_clone.clone(), rx, snap_clone).await;
-            let _ = app_clone.emit(
-                "mpv://error",
-                serde_json::json!({ "message": "Playback engine stopped unexpectedly." }),
-            );
+            if !shutdown_flag.load(Ordering::SeqCst) {
+                let _ = app_clone.emit(
+                    "mpv://error",
+                    serde_json::json!({ "message": "Playback engine stopped unexpectedly." }),
+                );
+            }
         });
 
         // Fix 15: Only cache last_rect if viewport dimensions are non-zero (not minimized).
@@ -164,6 +171,7 @@ impl MpvController {
 
     /// Fix 18: Cleanly stop and await child exit up to 500ms before destroying HWND.
     pub async fn stop_and_clear(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         let taken = {
             if let Ok(mut guard) = self.runtime.lock() {
                 guard.take()
