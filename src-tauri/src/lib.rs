@@ -978,6 +978,7 @@ mod windows_app {
                     {
                         return Err(format!("Blocked unexpected WebView origin: {url_str}").into());
                     }
+                    let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 }
 
                 // Lightweight UI-thread heartbeat watchdog: detects and logs main-thread stalls.

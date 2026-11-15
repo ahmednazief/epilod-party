@@ -291,4 +291,24 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   assert.equal(bottomRowSrc.includes("handleToggleReady"), false);
   assert.equal(bottomRowSrc.includes("openShortcuts"), false);
   assert.equal(bottomRowSrc.includes("openSettings"), false);
+
+  // Full-bleed video backdrop: play bar & title bar float over the video with zero black-bar flex squeezing
+  assert.match(watchRoomSrc, /ref=\{viewportRef\}\s*className=\{`absolute inset-0 z-0/);
+  assert.match(watchRoomSrc, /className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">\s*<TransportBar/);
+  assert.match(watchRoomSrc, /classList\.toggle\("ep-video-active", showVideoBackdrop\)/);
+  assert.equal(
+    transportSrc.includes("flex justify-center select-none bg-canvas"),
+    false,
+    "TransportBar outer wrapper must remain transparent so it floats over the film",
+  );
+  const hwndRs = fs.readFileSync(
+    path.join(REPO_ROOT, "src-tauri/src/mpv/hwnd.rs"),
+    "utf8",
+  );
+  assert.equal(
+    hwndRs.includes("WS_CLIPSIBLINGS"),
+    false,
+    "mpv child HWND must not clip the sibling WebView2 overlay",
+  );
+  assert.ok(hwndRs.includes("HWND_BOTTOM"), "mpv child HWND must sit behind WebView2");
 });

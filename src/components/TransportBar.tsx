@@ -365,8 +365,8 @@ export const TransportBar = memo(function TransportBar({
   const isExtended = activeTab !== null && Boolean(expandedDrawer);
 
   return (
-    <div className="shrink-0 w-full px-4 pb-3 pt-1 flex justify-center select-none bg-canvas">
-      <div className="ep-glass-capsule anim-fade-slide-up w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2">
+    <div className="w-full px-4 pb-4 pt-2 flex justify-center select-none pointer-events-none">
+      <div className="ep-glass-capsule pointer-events-auto anim-fade-slide-up w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2">
         {isExtended && (
           <div className="anim-fade-slide-up pb-1.5 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2 px-1">

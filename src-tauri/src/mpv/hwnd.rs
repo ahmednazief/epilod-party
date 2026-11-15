@@ -10,10 +10,10 @@ use windows_sys::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindow, RegisterClassExW,
-    SetWindowLongPtrW, SetWindowPos, CS_DBLCLKS, GWLP_USERDATA, HWND_TOP, SWP_ASYNCWINDOWPOS,
+    SetWindowLongPtrW, SetWindowPos, CS_DBLCLKS, GWLP_USERDATA, HWND_BOTTOM, SWP_ASYNCWINDOWPOS,
     SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SWP_SHOWWINDOW, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WM_PARENTNOTIFY, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_CHILD, WS_CLIPCHILDREN,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +143,7 @@ pub fn create_child_hwnd(
                 0,
                 cls.as_ptr(),
                 title.as_ptr(),
-                WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                WS_CHILD | WS_CLIPCHILDREN,
                 rect.x,
                 rect.y,
                 w,
@@ -161,6 +161,15 @@ pub fn create_child_hwnd(
                     closing: AtomicBool::new(false),
                 });
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
+                SetWindowPos(
+                    hwnd,
+                    HWND_BOTTOM,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                );
                 Ok(hwnd as isize)
             }
         };
@@ -238,7 +247,7 @@ pub fn set_child_visible(app: &AppHandle, hwnd: isize, visible: bool) {
         if visible {
             SetWindowPos(
                 hwnd as HWND,
-                HWND_TOP,
+                HWND_BOTTOM,
                 0,
                 0,
                 0,

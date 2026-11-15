@@ -169,6 +169,7 @@ export function WatchRoom() {
   const loadSubtitlePathRef = useRef<((path: string) => Promise<void>) | null>(null);
   const selectEpisodeAtIndexRef = useRef<((index: number) => Promise<void>) | null>(null);
   const lastPeerFileRef = useRef<string | null>(null);
+  const surfaceClickTimerRef = useRef<number | null>(null);
 
   panelOpenRef.current = panelOpen;
 
@@ -208,6 +209,46 @@ export function WatchRoom() {
     if (!usePlayerStore.getState().isFullscreen) return;
     usePlayerStore.getState().setIsFullscreen(false);
     void windowSetFullscreen(false).catch(() => undefined);
+  }, []);
+
+  const toggleViewportPlayback = useCallback(() => {
+    const p = usePlayerStore.getState();
+    const s = useSyncStore.getState();
+    const app = useAppStore.getState();
+    if (!p.loaded) return;
+    const connected = s.status.state === "connected";
+    const lock = getControllerLockState(
+      connected,
+      s.participants,
+      resolveEffectiveUsername(s.status, app.username),
+    );
+    if (lock.lockedForLocalUser) return;
+    if (
+      shouldReplayFromStart({
+        endedAtEof: p.endedAtEof,
+        paused: p.paused,
+        positionSecs: p.positionSecs,
+        durationSecs: p.durationSecs,
+      })
+    ) {
+      p.setPositionSecs(0);
+      p.setEndedAtEof(false);
+      p.setPaused(false);
+      void mpvSeek(0);
+      void mpvSetPause(false);
+      if (connected) {
+        void syncUserSeek(0);
+        void syncUserPlay(0);
+      }
+      return;
+    }
+    const nextPaused = !p.paused;
+    p.setPaused(nextPaused);
+    void mpvSetPause(nextPaused);
+    if (connected) {
+      if (nextPaused) void syncUserPause(p.positionSecs);
+      else void syncUserPlay(p.positionSecs);
+    }
   }, []);
 
   usePlayerShortcuts({
@@ -764,44 +805,7 @@ export function WatchRoom() {
           });
         }),
         onMpvSurfaceClick(() => {
-          if (!active) return;
-          const p = usePlayerStore.getState();
-          const s = useSyncStore.getState();
-          const app = useAppStore.getState();
-          if (!p.loaded) return;
-          const connected = s.status.state === "connected";
-          const lock = getControllerLockState(
-            connected,
-            s.participants,
-            resolveEffectiveUsername(s.status, app.username),
-          );
-          if (lock.lockedForLocalUser) return;
-          if (
-            shouldReplayFromStart({
-              endedAtEof: p.endedAtEof,
-              paused: p.paused,
-              positionSecs: p.positionSecs,
-              durationSecs: p.durationSecs,
-            })
-          ) {
-            p.setPositionSecs(0);
-            p.setEndedAtEof(false);
-            p.setPaused(false);
-            void mpvSeek(0);
-            void mpvSetPause(false);
-            if (connected) {
-              void syncUserSeek(0);
-              void syncUserPlay(0);
-            }
-            return;
-          }
-          const nextPaused = !p.paused;
-          p.setPaused(nextPaused);
-          void mpvSetPause(nextPaused);
-          if (connected) {
-            if (nextPaused) void syncUserPause(p.positionSecs);
-            else void syncUserPlay(p.positionSecs);
-          }
+          if (active) toggleViewportPlayback();
         }),
         onMpvSurfaceDblClick(() => {
           if (active) toggleFullscreen();
@@ -852,9 +856,13 @@ export function WatchRoom() {
 
     return () => {
       active = false;
+      if (surfaceClickTimerRef.current !== null) {
+        window.clearTimeout(surfaceClickTimerRef.current);
+        surfaceClickTimerRef.current = null;
+      }
       unlisteners.forEach((fn) => fn());
     };
-  }, [pushNote, toggleFullscreen]);
+  }, [pushNote, toggleFullscreen, toggleViewportPlayback]);
 
   // Tauri native drag-and-drop (Fixes 16 & 19)
   useEffect(() => {
@@ -1063,6 +1071,15 @@ export function WatchRoom() {
 
   const showFloatingCapsule = chrome.showTransportBar && !chromeIdle;
   const showWindowBar = !isFullscreen && !chromeIdle;
+  const showVideoBackdrop = loaded && !playerError && !settingsOpen && !shortcutsOpen;
+
+  useEffect(() => {
+    const rootEl = document.documentElement;
+    rootEl.classList.toggle("ep-video-active", showVideoBackdrop);
+    return () => {
+      rootEl.classList.remove("ep-video-active");
+    };
+  }, [showVideoBackdrop]);
 
   const handleToggleCapsuleTab = (tab: SideTab) => {
     wakeChrome();
@@ -1090,38 +1107,50 @@ export function WatchRoom() {
     <div
       onMouseMove={wakeChrome}
       onPointerDown={wakeChrome}
-      className="h-full w-full flex flex-col bg-canvas text-primary overflow-hidden"
+      className={`relative h-full w-full text-primary overflow-hidden ${
+        showVideoBackdrop ? "bg-transparent" : "bg-canvas"
+      }`}
     >
       <NotificationStrip />
 
       {showWindowBar ? (
-        <TitleBar
-          leftSlot={
-            <div
-              data-tauri-drag-region
-              className="flex items-center gap-2.5 min-w-0"
-            >
-              <LogoMark size={20} />
-              {activePlaylistItem?.episodeBadge && (
-                <span className="shrink-0 rounded-full bg-accent/18 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-accent-soft border border-accent/30">
-                  {activePlaylistItem.episodeBadge}
+        <div
+          className={`absolute top-0 inset-x-0 z-30 ${
+            showVideoBackdrop ? "[text-shadow:0_1px_6px_rgba(0,0,0,0.9)]" : ""
+          }`}
+        >
+          <TitleBar
+            leftSlot={
+              <div
+                data-tauri-drag-region
+                className={`flex items-center gap-2.5 min-w-0 ${
+                  showVideoBackdrop
+                    ? "rounded-full bg-canvas/55 px-2.5 py-1 border border-white/10"
+                    : ""
+                }`}
+              >
+                <LogoMark size={20} />
+                {activePlaylistItem?.episodeBadge && (
+                  <span className="shrink-0 rounded-full bg-accent/18 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-accent-soft border border-accent/30">
+                    {activePlaylistItem.episodeBadge}
+                  </span>
+                )}
+                <span className="text-xs font-medium text-primary truncate max-w-[300px]">
+                  {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
                 </span>
-              )}
-              <span className="text-xs font-medium text-primary truncate max-w-[300px]">
-                {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
-              </span>
-              {roomCode ? (
-                <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full truncate max-w-[140px]">
-                  {roomCode}
-                </span>
-              ) : (
-                <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full">
-                  Solo
-                </span>
-              )}
-            </div>
-          }
-        />
+                {roomCode ? (
+                  <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full truncate max-w-[140px]">
+                    {roomCode}
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full">
+                    Solo
+                  </span>
+                )}
+              </div>
+            }
+          />
+        </div>
       ) : (
         !isFullscreen && (
           <div
@@ -1130,15 +1159,17 @@ export function WatchRoom() {
             onMouseMove={wakeChrome}
             onClick={wakeChrome}
             title="Move mouse here to show window controls"
-            className="h-1.5 w-full shrink-0 bg-canvas cursor-pointer"
+            className="absolute top-0 inset-x-0 h-2.5 z-20 cursor-pointer"
           />
         )
       )}
 
-      {/* Full-window video viewport (borderless frameless bar hides cleanly during playback for 100% pure video) */}
+      {/* Full-window video viewport: title bar and glass play bar float directly over the film */}
       <div
         ref={viewportRef}
-        className="relative flex-1 min-w-0 min-h-0 bg-canvas"
+        className={`absolute inset-0 z-0 ${
+          showVideoBackdrop ? "bg-transparent" : "bg-canvas"
+        }`}
       >
         <ViewportPlaceholder
           loaded={loaded}
@@ -1163,6 +1194,31 @@ export function WatchRoom() {
             })();
           }}
         />
+        {showVideoBackdrop && !panelOpen && (
+          <div
+            className={`absolute inset-0 z-10 ${
+              chromeIdle ? "cursor-none" : "cursor-default"
+            }`}
+            onClick={(e) => {
+              if (e.detail > 1) return;
+              if (surfaceClickTimerRef.current !== null) {
+                window.clearTimeout(surfaceClickTimerRef.current);
+              }
+              surfaceClickTimerRef.current = window.setTimeout(() => {
+                surfaceClickTimerRef.current = null;
+                toggleViewportPlayback();
+              }, 180);
+            }}
+            onDoubleClick={() => {
+              if (surfaceClickTimerRef.current !== null) {
+                window.clearTimeout(surfaceClickTimerRef.current);
+                surfaceClickTimerRef.current = null;
+              }
+              toggleFullscreen();
+            }}
+            aria-hidden="true"
+          />
+        )}
         {panelOpen && (
           <div
             className="absolute inset-0 z-20"
@@ -1173,62 +1229,64 @@ export function WatchRoom() {
       </div>
 
       {showFloatingCapsule ? (
-        <TransportBar
-          activeTab={panelOpen ? sideTab : null}
-          onToggleTab={handleToggleCapsuleTab}
-          onCloseDrawer={() => setPanelOpen(false)}
-          onChooseFile={() => void handleChooseFile()}
-          onLeaveRoom={handleLeaveRoom}
-          onHideControls={() => setChromeIdle(true)}
-          onToggleFullscreen={toggleFullscreen}
-          onPrevEpisode={handlePrevEpisode}
-          onNextEpisode={handleNextEpisode}
-          drawerTabs={
-            panelOpen ? (
-              <SegmentedTabs
-                ariaLabel="Inspector panel"
-                value={sideTab}
-                onChange={setSideTab}
-                className="w-full max-w-[420px]"
-                items={[
-                  { value: "room", label: "Party" },
-                  {
-                    value: "episodes",
-                    label:
-                      playlistItems.length > 1
-                        ? `Episodes (${playlistItems.length})`
-                        : "Episodes",
-                  },
-                  { value: "playback", label: "Playback" },
-                  { value: "subtitles", label: "Subtitles" },
-                ]}
-              />
-            ) : null
-          }
-          expandedDrawer={
-            panelOpen ? (
-              <>
-                {sideTab === "room" && <RoomPanel />}
-                {sideTab === "episodes" && (
-                  <EpisodesPanel
-                    onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
-                    onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
-                    onAddEpisodes={() => void handleChooseFile(true)}
-                  />
-                )}
-                {sideTab === "playback" && <PlaybackPanel />}
-                {sideTab === "subtitles" && <SubtitlePanel />}
-              </>
-            ) : null
-          }
-        />
+        <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">
+          <TransportBar
+            activeTab={panelOpen ? sideTab : null}
+            onToggleTab={handleToggleCapsuleTab}
+            onCloseDrawer={() => setPanelOpen(false)}
+            onChooseFile={() => void handleChooseFile()}
+            onLeaveRoom={handleLeaveRoom}
+            onHideControls={() => setChromeIdle(true)}
+            onToggleFullscreen={toggleFullscreen}
+            onPrevEpisode={handlePrevEpisode}
+            onNextEpisode={handleNextEpisode}
+            drawerTabs={
+              panelOpen ? (
+                <SegmentedTabs
+                  ariaLabel="Inspector panel"
+                  value={sideTab}
+                  onChange={setSideTab}
+                  className="w-full max-w-[420px]"
+                  items={[
+                    { value: "room", label: "Party" },
+                    {
+                      value: "episodes",
+                      label:
+                        playlistItems.length > 1
+                          ? `Episodes (${playlistItems.length})`
+                          : "Episodes",
+                    },
+                    { value: "playback", label: "Playback" },
+                    { value: "subtitles", label: "Subtitles" },
+                  ]}
+                />
+              ) : null
+            }
+            expandedDrawer={
+              panelOpen ? (
+                <>
+                  {sideTab === "room" && <RoomPanel />}
+                  {sideTab === "episodes" && (
+                    <EpisodesPanel
+                      onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
+                      onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
+                      onAddEpisodes={() => void handleChooseFile(true)}
+                    />
+                  )}
+                  {sideTab === "playback" && <PlaybackPanel />}
+                  {sideTab === "subtitles" && <SubtitlePanel />}
+                </>
+              ) : null
+            }
+          />
+        </div>
       ) : (
         <div
           onMouseEnter={wakeChrome}
           onMouseMove={wakeChrome}
           onClick={wakeChrome}
           title="Move mouse here to show controls"
-          className="h-2 w-full shrink-0 bg-canvas cursor-pointer"
+          className="absolute bottom-0 inset-x-0 h-3 z-20 cursor-pointer"
         />
       )}
 
