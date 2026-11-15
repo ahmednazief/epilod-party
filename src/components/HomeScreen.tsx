@@ -5,7 +5,6 @@ import {
   Check,
   ClipboardPaste,
   Copy,
-  Download,
   KeyRound,
   Pencil,
   RefreshCw,
@@ -58,7 +57,6 @@ export function HomeScreen() {
   const enterRoom = useAppStore((s) => s.enterRoom);
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
 
-  const updateStatus = useUpdaterStore((s) => s.status);
   const initUpdater = useUpdaterStore((s) => s.init);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
 
@@ -241,10 +239,6 @@ export function HomeScreen() {
     enterRoom(cleaned, standardRoomName);
   };
 
-  const hasPendingUpdate =
-    updateStatus?.availability === "updateAvailable" ||
-    updateStatus?.availability === "downloadedReady";
-
   const hasJoinCode = joinInput.trim().length > 0;
 
   return (
@@ -258,6 +252,7 @@ export function HomeScreen() {
       {/* Borderless frameless titlebar with floating profile & preferences pills */}
       <div ref={profileRef} className="relative z-20">
         <TitleBar
+          onOpenUpdates={() => openSettings("updates")}
           leftSlot={
             <button
               type="button"
@@ -276,32 +271,15 @@ export function HomeScreen() {
             </button>
           }
           rightActions={
-            <>
-              {hasPendingUpdate && updateStatus?.availableRelease && (
-                <button
-                  type="button"
-                  onClick={() => openSettings("updates")}
-                  className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-accent-soft hover:text-white cursor-pointer"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  <span>
-                    {updateStatus.availability === "downloadedReady"
-                      ? `Restart to v${updateStatus.availableRelease.version}`
-                      : `Update v${updateStatus.availableRelease.version}`}
-                  </span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => openSettings("prefs")}
-                aria-label="Preferences"
-                className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
-              >
-                <Settings className="h-3.5 w-3.5" />
-                <span>Preferences</span>
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={() => openSettings("prefs")}
+              aria-label="Preferences"
+              className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
+            >
+              <Settings className="h-3.5 w-3.5" />
+              <span>Preferences</span>
+            </button>
           }
         />
 

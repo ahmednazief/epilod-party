@@ -1,9 +1,12 @@
 import { create } from "zustand";
+import { isDesktop } from "../lib/bridge";
 import {
   applyAndRestartUpdate,
   cancelUpdateDownload,
   checkForUpdates,
   downloadUpdate,
+  getPreviewDownloadingProgress,
+  getUpdatePreviewMode,
   getUpdateStatus,
   onUpdateProgress,
   type AppUpdateStatus,
@@ -18,12 +21,15 @@ interface UpdaterStoreState {
   isPaused: boolean;
   isApplying: boolean;
   hasCheckedStartup: boolean;
+  userPausedVersion: string | null;
+  autoDownloadedVersion: string | null;
   error: string | null;
   init: () => Promise<void>;
   checkForUpdates: (quiet?: boolean) => Promise<void>;
   startDownload: () => Promise<void>;
   cancelDownload: () => Promise<void>;
   applyAndRestart: () => Promise<void>;
+  markAutoDownloadAttempted: (version: string) => void;
   clearError: () => void;
 }
 
@@ -45,17 +51,25 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
   isPaused: false,
   isApplying: false,
   hasCheckedStartup: false,
+  userPausedVersion: null,
+  autoDownloadedVersion: null,
   error: null,
 
   init: async () => {
     if (!unlistenProgressPromise) {
       unlistenProgressPromise = onUpdateProgress((evt) => {
         if (evt.stage === "paused") {
-          set({ progress: evt, isDownloading: false, isPaused: true, error: null });
+          set({
+            progress: evt,
+            isDownloading: false,
+            isPaused: true,
+            userPausedVersion: get().status?.availableRelease?.version ?? null,
+            error: null,
+          });
           return;
         }
         if (evt.stage === "ready") {
-          set({ progress: evt, isDownloading: false, isPaused: false });
+          set({ progress: evt, isDownloading: false, isPaused: false, userPausedVersion: null });
           return;
         }
         set({ progress: evt, isPaused: false });
@@ -75,7 +89,13 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
         // Never overwrite a newer status fetched concurrently by checkForUpdates / downloadUpdate
         if (statusRevision === revBefore && !get().status) {
           statusRevision += 1;
-          set({ status });
+          const previewDownloading = !isDesktop() && getUpdatePreviewMode() === "downloading";
+          set({
+            status,
+            ...(previewDownloading
+              ? { isDownloading: true, progress: getPreviewDownloadingProgress() }
+              : {}),
+          });
         }
       } catch {
         // Ignore initialization errors when offline/preview
@@ -118,6 +138,8 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
     set({
       isDownloading: true,
       isPaused: false,
+      userPausedVersion: null,
+      autoDownloadedVersion: manifest.version,
       error: null,
       progress: {
         stage: "downloading",
@@ -136,6 +158,7 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
         status: updated,
         isDownloading: false,
         isPaused: false,
+        userPausedVersion: null,
         error: null,
       });
     } catch (err) {
@@ -144,6 +167,7 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
         set({
           isDownloading: false,
           isPaused: true,
+          userPausedVersion: manifest.version,
           error: null,
         });
       } else {
@@ -159,6 +183,12 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
 
   cancelDownload: async () => {
     if (!get().isDownloading) return;
+    const ver = get().status?.availableRelease?.version ?? null;
+    set({ userPausedVersion: ver });
+    if (!isDesktop()) {
+      set({ isDownloading: false, isPaused: true, error: null });
+      return;
+    }
     try {
       await cancelUpdateDownload();
     } catch (err) {
@@ -172,9 +202,18 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
     try {
       await applyAndRestartUpdate();
     } catch (err) {
-      set({ isApplying: false, error: toErrorMessage(err) });
+      const message = toErrorMessage(err);
+      try {
+        const refreshed = await getUpdateStatus();
+        statusRevision += 1;
+        set({ status: refreshed, isApplying: false, error: message });
+      } catch {
+        set({ isApplying: false, error: message });
+      }
     }
   },
+
+  markAutoDownloadAttempted: (version) => set({ autoDownloadedVersion: version }),
 
   clearError: () => set({ error: null }),
 }));

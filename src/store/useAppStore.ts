@@ -59,6 +59,7 @@ interface AppState {
   reducedMotion: boolean;
   lowPowerMode: boolean;
   autoCheckUpdates: boolean;
+  autoDownloadUpdates: boolean;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
   shortcutsOpen: boolean;
@@ -76,6 +77,7 @@ interface AppState {
   setReducedMotion: (reduced: boolean) => void;
   setLowPowerMode: (lowPower: boolean) => void;
   setAutoCheckUpdates: (autoCheck: boolean) => void;
+  setAutoDownloadUpdates: (autoDownload: boolean) => void;
   openSettings: (tab?: SettingsTab) => void;
   setSettingsTab: (tab: SettingsTab) => void;
   closeSettings: () => void;
@@ -96,6 +98,7 @@ const initialReducedMotion = readStorage("ep.reducedMotion", "false") === "true"
 const initialLowPowerMode = readStorage("ep.lowPowerMode", "false") === "true";
 const initialAllowShares = readStorage("ep.allowNetworkShares", "false") === "true";
 const initialAutoCheckUpdates = readStorage("ep.autoCheckUpdates", "true") !== "false";
+const initialAutoDownloadUpdates = readStorage("ep.autoDownloadUpdates", "true") !== "false";
 
 applyReducedMotionAttribute(initialReducedMotion);
 
@@ -113,6 +116,7 @@ export const useAppStore = create<AppState>((set) => ({
   reducedMotion: initialReducedMotion,
   lowPowerMode: initialLowPowerMode,
   autoCheckUpdates: initialAutoCheckUpdates,
+  autoDownloadUpdates: initialAutoDownloadUpdates,
   settingsOpen: false,
   settingsTab: "server",
   shortcutsOpen: false,
@@ -174,6 +178,16 @@ export const useAppStore = create<AppState>((set) => ({
   setAutoCheckUpdates: (autoCheckUpdates) => {
     writeStorage("ep.autoCheckUpdates", autoCheckUpdates ? "true" : "false");
     set({ autoCheckUpdates });
+  },
+
+  setAutoDownloadUpdates: (autoDownloadUpdates) => {
+    writeStorage("ep.autoDownloadUpdates", autoDownloadUpdates ? "true" : "false");
+    if (autoDownloadUpdates) {
+      writeStorage("ep.autoCheckUpdates", "true");
+      set({ autoDownloadUpdates: true, autoCheckUpdates: true });
+    } else {
+      set({ autoDownloadUpdates: false });
+    }
   },
 
   openSettings: (tab) =>

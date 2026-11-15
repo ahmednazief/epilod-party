@@ -1,15 +1,38 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, X } from "lucide-react";
+import { Download, Minus, RefreshCw, RotateCw, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isDesktop } from "../lib/bridge";
+import { useAppStore } from "../store/useAppStore";
+import { useUpdaterStore } from "../store/useUpdaterStore";
 
 interface TitleBarProps {
   leftSlot: ReactNode;
   rightActions?: ReactNode;
+  onOpenUpdates?: () => void;
 }
 
-export function TitleBar({ leftSlot, rightActions }: TitleBarProps) {
+export function TitleBar({ leftSlot, rightActions, onOpenUpdates }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
+
+  const openSettings = useAppStore((s) => s.openSettings);
+  const updateStatus = useUpdaterStore((s) => s.status);
+  const updateProgress = useUpdaterStore((s) => s.progress);
+  const isDownloadingUpdate = useUpdaterStore((s) => s.isDownloading);
+  const isUpdatePaused = useUpdaterStore((s) => s.isPaused);
+  const isApplyingUpdate = useUpdaterStore((s) => s.isApplying);
+  const updateError = useUpdaterStore((s) => s.error);
+  const applyAndRestartUpdate = useUpdaterStore((s) => s.applyAndRestart);
+
+  const handleOpenUpdates = () => {
+    if (onOpenUpdates) {
+      onOpenUpdates();
+    } else {
+      openSettings("updates");
+    }
+  };
+
+  const availableRelease = updateStatus?.availableRelease ?? null;
+  const availability = updateStatus?.availability;
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -77,6 +100,60 @@ export function TitleBar({ leftSlot, rightActions }: TitleBarProps) {
       />
 
       <div className="flex items-center gap-2 h-full shrink-0">
+        {isDownloadingUpdate ? (
+          <button
+            type="button"
+            onClick={handleOpenUpdates}
+            title={updateProgress?.message || "Downloading update in background"}
+            className="ep-glass-pill ep-press border border-accent-soft/45 bg-accent/18 hover:bg-accent/28 inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-white cursor-pointer"
+          >
+            <RefreshCw className="h-3.5 w-3.5 text-accent-soft animate-spin shrink-0" />
+            <span>
+              {updateProgress?.stage === "verifying"
+                ? "Verifying Update..."
+                : `Updating · ${Math.max(0, Math.min(100, Math.round(updateProgress?.percent ?? 0)))}%`}
+            </span>
+          </button>
+        ) : availability === "downloadedReady" && availableRelease ? (
+          <div className="ep-glass-pill inline-flex items-center gap-1.5 pl-2.5 pr-1 py-0.5 rounded-full border border-ok/40 bg-ok/14">
+            <button
+              type="button"
+              onClick={handleOpenUpdates}
+              title={`View Epilod Party v${availableRelease.version} release details`}
+              className="ep-press inline-flex items-center gap-1.5 text-[11.5px] font-medium text-white hover:text-accent-soft cursor-pointer"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-ok animate-pulse shrink-0" />
+              <span>Update Ready · v{availableRelease.version}</span>
+            </button>
+            <button
+              type="button"
+              disabled={isApplyingUpdate}
+              onClick={() => void applyAndRestartUpdate()}
+              title={`Restart now and install Epilod Party v${availableRelease.version}`}
+              className="ep-press inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-ok/30 hover:bg-ok/45 border border-ok/45 text-[11px] font-semibold text-white cursor-pointer disabled:opacity-60"
+            >
+              <RotateCw className={`h-3 w-3 ${isApplyingUpdate ? "animate-spin" : ""}`} />
+              <span>{isApplyingUpdate ? "Restarting..." : "Restart"}</span>
+            </button>
+          </div>
+        ) : availability === "updateAvailable" && availableRelease ? (
+          <button
+            type="button"
+            onClick={handleOpenUpdates}
+            title={`Update available: Epilod Party v${availableRelease.version}`}
+            className="ep-glass-pill ep-press border border-accent-soft/45 bg-accent/18 hover:bg-accent/28 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium text-white cursor-pointer"
+          >
+            <Download className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+            <span>
+              {isUpdatePaused
+                ? `Update Paused · v${availableRelease.version}`
+                : updateError
+                  ? `Update Retry · v${availableRelease.version}`
+                  : `Update Available · v${availableRelease.version}`}
+            </span>
+          </button>
+        ) : null}
+
         {rightActions && (
           <div className="flex items-center gap-2">
             {rightActions}

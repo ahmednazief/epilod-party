@@ -801,6 +801,7 @@ mod windows_app {
         app: AppHandle,
         state: State<'_, AppState>,
     ) -> Result<(), String> {
+        let apply_guard = state.updater.try_begin_apply()?;
         let cache_dir = crate::updater::update_cache_dir();
         let cache_clone = cache_dir.clone();
         let (setup_exe, install_dir, manifest, needs_elevation) =
@@ -866,6 +867,7 @@ mod windows_app {
         state.mpv.stop_and_clear().await;
         state.sync.disconnect().await;
 
+        apply_guard.disarm();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
             app.exit(0);

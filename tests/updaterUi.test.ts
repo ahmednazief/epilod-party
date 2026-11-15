@@ -26,12 +26,13 @@ async function bundleAndImport<T>(entryRel: string): Promise<T> {
   }
 }
 
-test("useAppStore supports Updates tab navigation and auto-check preference without MouseEvent corruption", async () => {
+test("useAppStore supports Updates tab navigation, auto-check, and automatic-download preferences", async () => {
   const { useAppStore } = await bundleAndImport<typeof import("../src/store/useAppStore")>(
     "src/store/useAppStore.ts",
   );
 
   assert.equal(useAppStore.getState().autoCheckUpdates, true);
+  assert.equal(useAppStore.getState().autoDownloadUpdates, true);
   assert.equal(useAppStore.getState().settingsTab, "server");
 
   useAppStore.getState().openSettings("updates");
@@ -45,8 +46,16 @@ test("useAppStore supports Updates tab navigation and auto-check preference with
   useAppStore.getState().openSettings({ type: "click" } as unknown as "updates");
   assert.equal(useAppStore.getState().settingsTab, "server");
 
+  useAppStore.getState().setAutoDownloadUpdates(false);
+  assert.equal(useAppStore.getState().autoDownloadUpdates, false);
+
   useAppStore.getState().setAutoCheckUpdates(false);
   assert.equal(useAppStore.getState().autoCheckUpdates, false);
+
+  // Enabling Automatic Updates automatically enables auto-checking too
+  useAppStore.getState().setAutoDownloadUpdates(true);
+  assert.equal(useAppStore.getState().autoDownloadUpdates, true);
+  assert.equal(useAppStore.getState().autoCheckUpdates, true);
 });
 
 test("useUpdaterStore and updater formatters behave safely outside Tauri runtime", async () => {
@@ -118,7 +127,46 @@ test("useUpdaterStore prevents concurrent init overwrites and clears stale non-p
   assert.equal(useUpdaterStore.getState().progress, null);
 });
 
-test("SettingsModal and HomeScreen expose updater UI cleanly without breaking invariants", () => {
+test("useUpdaterStore transitions cleanly through startDownload and pause in preview runtime", async () => {
+  const { useUpdaterStore } = await bundleAndImport<typeof import("../src/store/useUpdaterStore")>(
+    "src/store/useUpdaterStore.ts",
+  );
+
+  useUpdaterStore.setState({
+    status: {
+      currentVersion: "0.1.0",
+      availability: "updateAvailable",
+      availableRelease: {
+        version: "0.2.0",
+        releasedAt: "2026-11-15T12:00:00Z",
+        notes: "Test",
+        downloadUrl: "https://github.com/ahmednazief/epilod-party/releases/download/v0.2.0/Epilod.Party.Setup.exe",
+        sha256: "a".repeat(64),
+        sizeBytes: 96_400_000,
+      },
+      downloadedInstallerPath: null,
+      cacheDir: String.raw`C:\Temp\updates`,
+      checkedAtUnix: 12345,
+      signatureVerified: true,
+      message: "Update available: Epilod Party v0.2.0",
+    },
+    isDownloading: true,
+    isPaused: false,
+  });
+
+  await useUpdaterStore.getState().cancelDownload();
+  assert.equal(useUpdaterStore.getState().isDownloading, false);
+  assert.equal(useUpdaterStore.getState().isPaused, true);
+  assert.equal(useUpdaterStore.getState().userPausedVersion, "0.2.0");
+
+  await useUpdaterStore.getState().startDownload();
+  assert.equal(useUpdaterStore.getState().isDownloading, false);
+  assert.equal(useUpdaterStore.getState().userPausedVersion, null);
+  assert.equal(useUpdaterStore.getState().autoDownloadedVersion, "0.2.0");
+  assert.equal(useUpdaterStore.getState().status?.availability, "downloadedReady");
+});
+
+test("TitleBar, SettingsModal, HomeScreen, and App expose TitleBar update pill & Automatic Updates", () => {
   const settingsSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
     "utf8",
@@ -126,9 +174,19 @@ test("SettingsModal and HomeScreen expose updater UI cleanly without breaking in
   assert.equal(settingsSrc.includes('{ value: "updates", label: "Updates" }'), true);
   assert.equal(settingsSrc.includes("Restart & Update to v"), true);
   assert.equal(settingsSrc.includes("scaleX("), true);
+  assert.equal(settingsSrc.includes("Automatic updates"), true);
   assert.equal(settingsSrc.includes("Check for updates automatically"), true);
   assert.equal(settingsSrc.includes("Ed25519 Signed"), true);
   assert.equal(settingsSrc.includes("SHA-256 Verified:"), true);
+
+  const titleBarSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TitleBar.tsx"),
+    "utf8",
+  );
+  assert.equal(titleBarSrc.includes("Update Ready"), true);
+  assert.equal(titleBarSrc.includes("Update Available"), true);
+  assert.equal(titleBarSrc.includes("Updating"), true);
+  assert.equal(titleBarSrc.includes("applyAndRestartUpdate"), true);
 
   const homeSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/HomeScreen.tsx"),
@@ -136,4 +194,11 @@ test("SettingsModal and HomeScreen expose updater UI cleanly without breaking in
   );
   assert.equal(homeSrc.includes('openSettings("updates")'), true);
   assert.equal(homeSrc.includes("checkForUpdates(true)"), true);
+
+  const appSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/App.tsx"),
+    "utf8",
+  );
+  assert.equal(appSrc.includes("autoDownloadUpdates"), true);
+  assert.equal(appSrc.includes("PERIODIC_UPDATE_CHECK_MS"), true);
 });

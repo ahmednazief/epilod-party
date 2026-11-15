@@ -59,6 +59,8 @@ const UNINSTALL_REG_SUBKEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\EpilodParty";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(25);
+const MAX_DIRECT_MANIFEST_ATTEMPTS: usize = 2;
+const MAX_DIRECT_STREAM_ATTEMPTS: usize = 4;
 const USER_AGENT: &str = concat!("EpilodParty/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +106,7 @@ struct PartResumeMetadata {
 
 pub struct UpdaterState {
     pub downloading: Mutex<bool>,
+    pub applying: AtomicBool,
     pub cancel_download: Arc<AtomicBool>,
     pub cancel_notify: Arc<Notify>,
     pub latest_release: Mutex<Option<ReleaseManifest>>,
@@ -114,6 +117,7 @@ impl Default for UpdaterState {
     fn default() -> Self {
         Self {
             downloading: Mutex::new(false),
+            applying: AtomicBool::new(false),
             cancel_download: Arc::new(AtomicBool::new(false)),
             cancel_notify: Arc::new(Notify::new()),
             latest_release: Mutex::new(None),
@@ -122,9 +126,48 @@ impl Default for UpdaterState {
     }
 }
 
+pub struct ApplyGuard<'a>(&'a AtomicBool);
+
+impl ApplyGuard<'_> {
+    pub fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for ApplyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, AtomicOrdering::SeqCst);
+    }
+}
+
 impl UpdaterState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn is_downloading(&self) -> bool {
+        self.downloading.lock().map(|g| *g).unwrap_or(false)
+    }
+
+    pub fn try_begin_apply(&self) -> Result<ApplyGuard<'_>, String> {
+        if self.is_downloading() {
+            return Err(
+                "Wait for the active update download to finish before applying.".to_string(),
+            );
+        }
+        if self
+            .applying
+            .compare_exchange(
+                false,
+                true,
+                AtomicOrdering::SeqCst,
+                AtomicOrdering::SeqCst,
+            )
+            .is_err()
+        {
+            return Err("Update installer is already launching.".to_string());
+        }
+        Ok(ApplyGuard(&self.applying))
     }
 }
 
@@ -322,6 +365,9 @@ fn find_verified_cached_update(
                 if replace {
                     best = Some((meta.manifest, exe_path, sig_verified));
                 }
+            } else if deep_verify {
+                let _ = fs::remove_file(&exe_path);
+                let _ = fs::remove_file(&path);
             }
         }
     }
@@ -874,11 +920,26 @@ pub fn prepare_verified_updater_launch(
                 .to_string()
         })?;
 
-    // Strict pre-execution integrity & optional Authenticode re-check right before spawning
-    verify_downloaded_installer(&setup_exe, manifest.size_bytes, &manifest.sha256)
-        .map_err(|e| e.to_string())?;
-    verify_sfx_payload_matches(&setup_exe, &manifest.version)?;
-    verify_authenticode_if_signed(&setup_exe)?;
+    // Strict pre-execution integrity & optional Authenticode re-check right before spawning.
+    // Self-heal by purging the cached binary & ready sidecar if any verification fails.
+    let purge_corrupt_cache = || {
+        let _ = fs::remove_file(&setup_exe);
+        let _ = fs::remove_file(ready_meta_path(cache_dir, &manifest.version));
+    };
+
+    if let Err(err) = verify_downloaded_installer(&setup_exe, manifest.size_bytes, &manifest.sha256)
+    {
+        purge_corrupt_cache();
+        return Err(err.to_string());
+    }
+    if let Err(err) = verify_sfx_payload_matches(&setup_exe, &manifest.version) {
+        purge_corrupt_cache();
+        return Err(err);
+    }
+    if let Err(err) = verify_authenticode_if_signed(&setup_exe) {
+        purge_corrupt_cache();
+        return Err(err);
+    }
 
     let exe_dir = std::env::current_exe()
         .ok()
@@ -890,6 +951,17 @@ pub fn prepare_verified_updater_launch(
 
     let install_dir =
         crate::resolve_update_target_dir(exe_dir.as_deref(), reg_dir.as_deref(), &default_dir);
+
+    let needed_install_free = manifest.size_bytes.saturating_add(64 * 1024 * 1024);
+    if let Some(free) = query_free_disk_bytes(&install_dir) {
+        if free < needed_install_free {
+            return Err(format!(
+                "Not enough free disk space in {} to apply update (need at least {} MB).",
+                install_dir.display(),
+                needed_install_free / (1024 * 1024)
+            ));
+        }
+    }
 
     let needs_elevation = check_directory_acl_writable(&install_dir).is_err();
 
@@ -1364,17 +1436,36 @@ async fn open_https_get(
     ))
 }
 
+fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
 async fn fetch_https_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>, (Option<u16>, String)> {
-    match fetch_https_bytes_direct(url, max_bytes).await {
-        Ok(bytes) => Ok(bytes),
-        Err((None, direct_err)) => match fetch_via_windows_proxy_fallback(url, max_bytes).await {
+    let mut last_err: Option<(Option<u16>, String)> = None;
+    for attempt in 0..MAX_DIRECT_MANIFEST_ATTEMPTS {
+        match fetch_https_bytes_direct(url, max_bytes).await {
+            Ok(bytes) => return Ok(bytes),
+            Err((status, msg)) => {
+                let retryable = status.is_none() || status.is_some_and(is_retryable_status);
+                last_err = Some((status, msg));
+                if !retryable || attempt + 1 >= MAX_DIRECT_MANIFEST_ATTEMPTS {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(350)).await;
+            }
+        }
+    }
+
+    match last_err {
+        Some((None, direct_err)) => match fetch_via_windows_proxy_fallback(url, max_bytes).await {
             Ok(bytes) => Ok(bytes),
             Err((Some(status), proxy_err)) => Err((Some(status), proxy_err)),
             Err((None, proxy_err)) => {
                 Err((None, format!("{direct_err} (Proxy fallback: {proxy_err})")))
             }
         },
-        Err(http_err) => Err(http_err),
+        Some((Some(status), direct_err)) => Err((Some(status), direct_err)),
+        None => Err((None, "Release manifest fetch failed.".to_string())),
     }
 }
 
@@ -1467,6 +1558,12 @@ async fn fetch_https_bytes_direct(
     Ok(body)
 }
 
+enum StreamAttemptError {
+    Paused,
+    Retryable(String),
+    Fatal(String),
+}
+
 async fn stream_https_download_resumable(
     release: &ReleaseManifest,
     part_path: &Path,
@@ -1474,6 +1571,80 @@ async fn stream_https_download_resumable(
     cancel_notify: &Notify,
     app: &AppHandle,
 ) -> Result<(), String> {
+    let mut last_err = String::from("Update download failed.");
+    for attempt in 0..MAX_DIRECT_STREAM_ATTEMPTS {
+        if cancel_flag.load(AtomicOrdering::SeqCst) {
+            return Err("Download paused cleanly.".to_string());
+        }
+
+        match stream_https_download_once(release, part_path, cancel_flag, cancel_notify, app).await {
+            Ok(()) => return Ok(()),
+            Err(StreamAttemptError::Paused) => {
+                return Err("Download paused cleanly.".to_string());
+            }
+            Err(StreamAttemptError::Fatal(msg)) => {
+                return Err(msg);
+            }
+            Err(StreamAttemptError::Retryable(msg)) => {
+                last_err = msg;
+                if cancel_flag.load(AtomicOrdering::SeqCst) {
+                    return Err("Download paused cleanly.".to_string());
+                }
+                if attempt + 1 >= MAX_DIRECT_STREAM_ATTEMPTS {
+                    break;
+                }
+                let backoff_ms = 500u64.saturating_mul(1u64 << attempt);
+                let saved = fs::metadata(part_path).map(|m| m.len()).unwrap_or(0);
+                let pct = if release.size_bytes > 0 {
+                    ((saved as f64 / release.size_bytes as f64) * 98.0).clamp(0.0, 98.0)
+                } else {
+                    0.0
+                };
+                emit_progress(
+                    app,
+                    "downloading",
+                    saved,
+                    release.size_bytes,
+                    pct,
+                    0,
+                    format!(
+                        "Connection interrupted — resuming automatically (attempt {}/{})...",
+                        attempt + 2,
+                        MAX_DIRECT_STREAM_ATTEMPTS
+                    ),
+                );
+                if await_or_cancel(cancel_flag, cancel_notify, async {
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    Ok(())
+                })
+                .await
+                .is_err()
+                {
+                    return Err("Download paused cleanly.".to_string());
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn stream_https_download_once(
+    release: &ReleaseManifest,
+    part_path: &Path,
+    cancel_flag: &AtomicBool,
+    cancel_notify: &Notify,
+    app: &AppHandle,
+) -> Result<(), StreamAttemptError> {
+    let classify_open_err = |(status_opt, msg): (Option<u16>, String)| {
+        if cancel_flag.load(AtomicOrdering::SeqCst) {
+            return StreamAttemptError::Paused;
+        }
+        match status_opt {
+            Some(sc) if !is_retryable_status(sc) => StreamAttemptError::Fatal(msg),
+            _ => StreamAttemptError::Retryable(msg),
+        }
+    };
+
     let url = release.download_url.as_str();
     let expected_size = release.size_bytes;
     let p_meta_path = part_meta_path(part_path);
@@ -1482,7 +1653,7 @@ async fn stream_https_download_resumable(
     let (mut head, mut leftover, mut tls) =
         open_https_get(url, resume_from, cancel_flag, cancel_notify)
             .await
-            .map_err(|(_, e)| e)?;
+            .map_err(classify_open_err)?;
 
     if head.status == 416 && resume_from.is_some() {
         let _ = fs::remove_file(part_path);
@@ -1490,7 +1661,7 @@ async fn stream_https_download_resumable(
         resume_from = None;
         let retry = open_https_get(url, None, cancel_flag, cancel_notify)
             .await
-            .map_err(|(_, e)| e)?;
+            .map_err(classify_open_err)?;
         head = retry.0;
         leftover = retry.1;
         tls = retry.2;
@@ -1504,7 +1675,7 @@ async fn stream_https_download_resumable(
             resume_from = None;
             let retry = open_https_get(url, None, cancel_flag, cancel_notify)
                 .await
-                .map_err(|(_, e)| e)?;
+                .map_err(classify_open_err)?;
             head = retry.0;
             leftover = retry.1;
             tls = retry.2;
@@ -1512,15 +1683,20 @@ async fn stream_https_download_resumable(
     } else if head.status == 200 {
         if let Some(cl) = head.content_length {
             if cl != expected_size {
-                return Err(format!(
+                return Err(StreamAttemptError::Fatal(format!(
                     "Download server reported unexpected size ({cl} != {expected_size})."
-                ));
+                )));
             }
         }
     }
 
     if head.status != 200 && head.status != 206 {
-        return Err(format!("Download server returned HTTP {}", head.status));
+        let msg = format!("Download server returned HTTP {}", head.status);
+        return Err(if is_retryable_status(head.status) {
+            StreamAttemptError::Retryable(msg)
+        } else {
+            StreamAttemptError::Fatal(msg)
+        });
     }
 
     let mut file = if head.status == 206 && resume_from.is_some() {
@@ -1530,16 +1706,17 @@ async fn stream_https_download_resumable(
             .truncate(false)
             .write(true)
             .open(part_path)
-            .map_err(|e| format!("Cannot open partial update file: {e}"))?;
+            .map_err(|e| StreamAttemptError::Fatal(format!("Cannot open partial update file: {e}")))?;
         f.set_len(offset)
             .and_then(|()| f.seek(SeekFrom::Start(offset)))
-            .map_err(|e| format!("Failed seeking partial update file: {e}"))?;
+            .map_err(|e| StreamAttemptError::Fatal(format!("Failed seeking partial update file: {e}")))?;
         f
     } else {
-        File::create(part_path).map_err(|e| format!("Cannot create update file: {e}"))?
+        File::create(part_path)
+            .map_err(|e| StreamAttemptError::Fatal(format!("Cannot create update file: {e}")))?
     };
 
-    write_part_metadata_atomic(release, part_path)?;
+    write_part_metadata_atomic(release, part_path).map_err(StreamAttemptError::Fatal)?;
 
     let mut downloaded: u64 = if head.status == 206 {
         resume_from.unwrap_or(0)
@@ -1551,7 +1728,7 @@ async fn stream_https_download_resumable(
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     let mut decoder = ChunkedDecoder::default();
 
-    let mut push_bytes = |downloaded: &mut u64, chunk: &[u8]| -> Result<(), String> {
+    let mut push_bytes = |downloaded: &mut u64, chunk: &[u8]| -> Result<(), StreamAttemptError> {
         if chunk.is_empty() {
             return Ok(());
         }
@@ -1559,15 +1736,19 @@ async fn stream_https_download_resumable(
         if *downloaded > MAX_INSTALLER_BYTES
             || *downloaded > expected_size.saturating_add(1024 * 1024)
         {
-            return Err("Downloaded stream exceeded declared installer size.".to_string());
+            return Err(StreamAttemptError::Fatal(
+                "Downloaded stream exceeded declared installer size.".to_string(),
+            ));
         }
         file.write_all(chunk)
-            .map_err(|e| format!("Disk write error during update download: {e}"))?;
+            .map_err(|e| StreamAttemptError::Fatal(format!("Disk write error during update download: {e}")))?;
         Ok(())
     };
 
     if head.chunked {
-        let decoded = decoder.push(&leftover).map_err(|e| e.to_string())?;
+        let decoded = decoder
+            .push(&leftover)
+            .map_err(|e| StreamAttemptError::Retryable(e.to_string()))?;
         push_bytes(&mut downloaded, &decoded)?;
     } else {
         push_bytes(&mut downloaded, &leftover)?;
@@ -1577,7 +1758,7 @@ async fn stream_https_download_resumable(
     while downloaded < expected_size && !(head.chunked && decoder.is_finished()) {
         if cancel_flag.load(AtomicOrdering::SeqCst) {
             let _ = file.flush();
-            return Err("Download paused cleanly.".to_string());
+            return Err(StreamAttemptError::Paused);
         }
 
         let n = match await_or_cancel(cancel_flag, cancel_notify, async {
@@ -1591,7 +1772,10 @@ async fn stream_https_download_resumable(
             Ok(n) => n,
             Err((_, e)) => {
                 let _ = file.flush();
-                return Err(e);
+                if cancel_flag.load(AtomicOrdering::SeqCst) {
+                    return Err(StreamAttemptError::Paused);
+                }
+                return Err(StreamAttemptError::Retryable(e));
             }
         };
         if n == 0 {
@@ -1599,7 +1783,9 @@ async fn stream_https_download_resumable(
         }
 
         if head.chunked {
-            let decoded = decoder.push(&buf[..n]).map_err(|e| e.to_string())?;
+            let decoded = decoder
+                .push(&buf[..n])
+                .map_err(|e| StreamAttemptError::Retryable(e.to_string()))?;
             push_bytes(&mut downloaded, &decoded)?;
         } else {
             push_bytes(&mut downloaded, &buf[..n])?;
@@ -1634,12 +1820,12 @@ async fn stream_https_download_resumable(
     }
 
     file.flush()
-        .map_err(|e| format!("Failed flushing downloaded installer: {e}"))?;
+        .map_err(|e| StreamAttemptError::Fatal(format!("Failed flushing downloaded installer: {e}")))?;
 
     if downloaded != expected_size {
-        return Err(format!(
+        return Err(StreamAttemptError::Retryable(format!(
             "Download ended early ({downloaded} of {expected_size} bytes received)."
-        ));
+        )));
     }
 
     Ok(())
@@ -2085,5 +2271,102 @@ fn read_hkcu_install_location() -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use epilod_core::updater::compute_file_sha256_hex;
+    use epilod_installer_core::archive::{attach_payload_sfx, pack_directory_with_version};
+
+    fn make_test_sfx_installer(dir: &Path, version: &str) -> (PathBuf, ReleaseManifest) {
+        let src = dir.join("payload_src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("Epilod Party.exe"), vec![0x5Au8; 70 * 1024]).unwrap();
+
+        let pkg = dir.join("payload.epkg");
+        pack_directory_with_version(&src, &pkg, version).unwrap();
+
+        let stub = dir.join("stub.exe");
+        let mut stub_bytes = vec![0x4Du8, 0x5Au8];
+        stub_bytes.resize(70 * 1024, 0x90u8);
+        fs::write(&stub, stub_bytes).unwrap();
+
+        let exe_path = installer_exe_path(dir, version);
+        attach_payload_sfx(&stub, &pkg, &exe_path).unwrap();
+
+        let (size_bytes, sha256) = compute_file_sha256_hex(&exe_path).unwrap();
+        let manifest = ReleaseManifest {
+            version: version.to_string(),
+            released_at: "2026-11-15T12:00:00Z".to_string(),
+            notes: "Test update".to_string(),
+            download_url: "https://github.com/ahmednazief/epilod-party/releases/download/v9.9.9/Epilod.Party.Setup.exe".to_string(),
+            sha256,
+            size_bytes,
+            min_supported_version: Some("0.1.0".to_string()),
+            file_name: Some("Epilod Party Setup.exe".to_string()),
+            signature: None,
+        };
+        (exe_path, manifest)
+    }
+
+    #[test]
+    fn updater_state_guards_concurrent_apply_and_active_download() {
+        let state = UpdaterState::new();
+        {
+            let mut dl = state.downloading.lock().unwrap();
+            *dl = true;
+        }
+        assert!(state.try_begin_apply().is_err());
+
+        {
+            let mut dl = state.downloading.lock().unwrap();
+            *dl = false;
+        }
+
+        let guard = state.try_begin_apply().expect("first apply should acquire guard");
+        assert!(state.try_begin_apply().is_err());
+        drop(guard);
+
+        let guard2 = state.try_begin_apply().expect("dropping guard frees apply slot");
+        guard2.disarm();
+        assert!(state.try_begin_apply().is_err());
+    }
+
+    #[test]
+    fn prepare_verified_updater_launch_purges_tampered_cached_installer() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let cache_dir = std::env::temp_dir().join(format!("epilod_updater_self_heal_{nanos}"));
+        fs::create_dir_all(&cache_dir).unwrap();
+
+        let (exe_path, manifest) = make_test_sfx_installer(&cache_dir, "9.9.9");
+        write_ready_metadata_atomic(&cache_dir, &manifest, &exe_path, 1_700_000_000).unwrap();
+        let ready_meta = ready_meta_path(&cache_dir, "9.9.9");
+
+        // Verified installer passes pre-launch inspection cleanly
+        let ok = prepare_verified_updater_launch(&cache_dir);
+        assert!(ok.is_ok(), "Expected verified cache to pass: {ok:?}");
+
+        // Tamper with one byte inside the cached binary while preserving exact byte size
+        let mut raw = fs::read(&exe_path).unwrap();
+        let idx = raw.len() / 2;
+        raw[idx] ^= 0xFF;
+        fs::write(&exe_path, &raw).unwrap();
+
+        let err = prepare_verified_updater_launch(&cache_dir).unwrap_err();
+        assert!(
+            err.contains("No verified downloaded update")
+                || err.contains("verification")
+                || err.contains("SHA-256"),
+            "Unexpected error: {err}"
+        );
+        assert!(!exe_path.exists(), "Corrupted installer must be purged automatically");
+        assert!(!ready_meta.exists(), "Corrupted ready sidecar must be purged automatically");
+
+        let _ = fs::remove_dir_all(&cache_dir);
     }
 }

@@ -88,6 +88,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
+  const autoDownloadUpdates = useAppStore((s) => s.autoDownloadUpdates);
 
   const setUsername = useAppStore((s) => s.setUsername);
   const setAvatarId = useAppStore((s) => s.setAvatarId);
@@ -99,6 +100,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setReducedMotion = useAppStore((s) => s.setReducedMotion);
   const setLowPowerMode = useAppStore((s) => s.setLowPowerMode);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
+  const setAutoDownloadUpdates = useAppStore((s) => s.setAutoDownloadUpdates);
   const pushNote = useNotificationStore((s) => s.push);
 
   const updateStatus = useUpdaterStore((s) => s.status);
@@ -488,10 +490,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </div>
                 </div>
 
-                <div className="pt-1">
+                <div className="pt-1 space-y-0.5">
+                  <ComfortSwitchRow
+                    title="Automatic updates"
+                    description="Automatically download and verify new updates in the background so they are ready to install in one click."
+                    checked={autoDownloadUpdates}
+                    onChange={setAutoDownloadUpdates}
+                  />
                   <ComfortSwitchRow
                     title="Check for updates automatically"
-                    description="Quietly check GitHub Releases on launch with verified installation."
+                    description="Quietly check GitHub Releases on launch and periodically while the app is open."
                     checked={autoCheckUpdates}
                     onChange={setAutoCheckUpdates}
                   />

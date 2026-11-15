@@ -60,40 +60,65 @@ export function formatTransferSpeed(bps: number): string {
   return `${Math.round(bps / 1024)} KB/s`;
 }
 
-function getPreviewFallbackStatus(): AppUpdateStatus {
+export function getUpdatePreviewMode(): "available" | "downloading" | "ready" | null {
   const params =
     typeof window !== "undefined"
       ? new URLSearchParams(window.location.search)
       : null;
   const mode = (params?.get("updatePreview") ?? "").trim().toLowerCase();
+  if (mode === "available" || mode === "downloading" || mode === "ready") {
+    return mode;
+  }
+  return null;
+}
 
-  if (mode === "available" || mode === "ready") {
-    const release: ReleaseManifest = {
-      version: "0.2.0",
-      releasedAt: "2026-11-15T12:00:00Z",
-      notes: "Improved embedded mpv sync stability and incremental SHA-256 updater.",
-      downloadUrl:
-        "https://github.com/ahmednazief/epilod-party/releases/download/v0.2.0/Epilod.Party.Setup.exe",
-      sha256: "a".repeat(64),
-      sizeBytes: 96_400_000,
-      minSupportedVersion: "0.1.0",
-      fileName: "Epilod Party Setup.exe",
-    };
+export function getPreviewDownloadingProgress(): UpdateProgressEvent {
+  return {
+    stage: "downloading",
+    downloadedBytes: 61_696_000,
+    totalBytes: 96_400_000,
+    percent: 64,
+    speedBps: 5_872_025,
+    message: "Downloading update (58.8 / 91.9 MB)",
+  };
+}
+
+function getPreviewRelease(): ReleaseManifest {
+  return {
+    version: "0.2.0",
+    releasedAt: "2026-11-15T12:00:00Z",
+    notes: "Improved embedded mpv sync stability and incremental SHA-256 updater.",
+    downloadUrl:
+      "https://github.com/ahmednazief/epilod-party/releases/download/v0.2.0/Epilod.Party.Setup.exe",
+    sha256: "a".repeat(64),
+    sizeBytes: 96_400_000,
+    minSupportedVersion: "0.1.0",
+    fileName: "Epilod Party Setup.exe",
+  };
+}
+
+function getPreviewFallbackStatus(
+  forcedAvailability?: "available" | "ready",
+  releaseOverride?: ReleaseManifest | null,
+): AppUpdateStatus {
+  const mode = forcedAvailability ?? getUpdatePreviewMode();
+
+  if (mode === "available" || mode === "downloading" || mode === "ready") {
+    const release = releaseOverride ?? getPreviewRelease();
+    const isReady = mode === "ready";
     return {
       currentVersion: "0.1.0",
-      availability: mode === "ready" ? "downloadedReady" : "updateAvailable",
+      availability: isReady ? "downloadedReady" : "updateAvailable",
       availableRelease: release,
-      downloadedInstallerPath:
-        mode === "ready"
-          ? String.raw`%LocalAppData%\EpilodParty\updates\Epilod Party Setup-0.2.0.exe`
-          : null,
+      downloadedInstallerPath: isReady
+        ? String.raw`%LocalAppData%\EpilodParty\updates\Epilod Party Setup-${release.version}.exe`
+        : null,
       cacheDir: String.raw`%LocalAppData%\EpilodParty\updates`,
       checkedAtUnix: Math.floor(Date.now() / 1000),
       signatureVerified: false,
-      message:
-        mode === "ready"
-          ? "Epilod Party v0.2.0 downloaded and verified — ready to install"
-          : "Update available: Epilod Party v0.2.0",
+      message: isReady
+        ? `Epilod Party v${release.version} downloaded and verified — ready to install`
+        : `Update available: Epilod Party v${release.version}`,
     };
   }
 
@@ -127,7 +152,7 @@ export async function downloadUpdate(
   manifest?: ReleaseManifest | null,
 ): Promise<AppUpdateStatus> {
   if (!isDesktop()) {
-    return getPreviewFallbackStatus();
+    return getPreviewFallbackStatus("ready", manifest);
   }
   return safeInvoke<AppUpdateStatus>("update_download", {
     manifest: manifest ?? null,
