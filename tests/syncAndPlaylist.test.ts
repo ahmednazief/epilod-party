@@ -261,4 +261,34 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
     watchRoomSrc,
     /if \(!useAppStore\.getState\(\)\.roomCode\) \{\s*usePlayerStore\.getState\(\)\.setPaused\(false\);\s*await mpvSetPause\(false\);/,
   );
+
+  // Party mode also auto-plays when not locked and no peer file is active, and room transitions keep mpv alive
+  assert.match(
+    watchRoomSrc,
+    /if \(!lockNow\.lockedForLocalUser && otherPeersWithFile\.length === 0\) \{\s*usePlayerStore\.getState\(\)\.setPaused\(false\);\s*await mpvSetPause\(false\);[\s\S]*?syncUserPlay\(0\)/,
+  );
+  const roomEffectBlock =
+    watchRoomSrc.match(/useEffect\(\(\) => \{\s*const timer = roomCode[\s\S]*?\}, \[roomCode\]\);/)?.[0] ??
+    "";
+  assert.ok(roomEffectBlock.length > 0);
+  assert.equal(roomEffectBlock.includes("mpvStop()"), false, "Switching Solo <-> Party must not kill mpv");
+  assert.equal(
+    /if \(!panelOpenRef\.current/.test(watchRoomSrc),
+    false,
+    "File/folder pickers must always restore mpv HWND visibility",
+  );
+
+  // TransportBar collapsed bottom bar stays clean; extra options live inside extended drawer opened by Users icon
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  const extendedIdx = transportSrc.indexOf("{isExtended && (");
+  const bottomRowIdx = transportSrc.indexOf("onClick={() => onToggleTab(activeTab ?? \"room\")}");
+  assert.ok(extendedIdx > 0 && bottomRowIdx > extendedIdx);
+  const bottomRowSrc = transportSrc.slice(bottomRowIdx);
+  assert.equal(bottomRowSrc.includes("ResyncButton"), false);
+  assert.equal(bottomRowSrc.includes("handleToggleReady"), false);
+  assert.equal(bottomRowSrc.includes("openShortcuts"), false);
+  assert.equal(bottomRowSrc.includes("openSettings"), false);
 });

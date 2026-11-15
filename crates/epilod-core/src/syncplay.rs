@@ -702,10 +702,12 @@ impl SyncStateMachine {
     }
 
     pub fn update_local_player(&mut self, position: f64, paused: bool) {
-        if position.is_finite() && position >= 0.0 {
+        if position.is_finite() && position >= 0.0 && self.ignoring_client == 0 {
             self.local_pos = position;
         }
-        self.local_paused = paused;
+        if self.ignoring_client == 0 && self.last_server_playstate.is_none() {
+            self.local_paused = paused;
+        }
     }
 
     pub fn on_user_play(&mut self, position: f64) {
@@ -1477,5 +1479,35 @@ mod tests {
         );
         assert_eq!(sm.ignoring_client, 0);
         assert_eq!(sm.soft_speed, 1.0);
+    }
+
+    #[test]
+    fn test_update_local_player_does_not_clobber_inflight_user_play_or_pause() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 12.0,
+            paused: true,
+        });
+        // Establish server playstate as paused
+        let paused_srv = ServerState {
+            playstate: Some(Playstate {
+                position: 12.0,
+                paused: true,
+                do_seek: false,
+                set_by: None,
+            }),
+            ..Default::default()
+        };
+        assert!(sm.handle_server_state(&paused_srv, 10.0).is_empty());
+
+        // Pre-UserPlay snapshot with paused=false must not trick handle_server_state into SetPaused(true)
+        sm.update_local_player(12.0, false);
+        assert!(sm.local_paused);
+        assert!(sm.handle_server_state(&paused_srv, 10.2).is_empty());
+
+        // In-flight UserPlay must not be clobbered back to paused=true by a loading snapshot
+        sm.on_user_play(25.0);
+        sm.update_local_player(0.0, true);
+        assert!(!sm.local_paused);
+        assert_eq!(sm.local_pos, 25.0);
     }
 }

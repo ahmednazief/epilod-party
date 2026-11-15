@@ -510,6 +510,7 @@ fn apply_sync_actions(
                 mpv.note_paused(p);
                 let req = mpv.next_request_id();
                 let _ = mpv.send_command(set_pause_cmd(req, p));
+                let _ = app.emit("mpv://paused", serde_json::json!({ "paused": p }));
             }
             SyncAction::Seek(pos) => {
                 if !is_scrubbing {
@@ -591,14 +592,14 @@ where
                             }),
                         );
 
-                        // Fix 08: Emit initial readiness accurately on connect / reconnect
-                        let is_ready = local_ready.lock().map(|g| *g).unwrap_or(false);
-                        let ready_msg = encode_set_ready(is_ready, false);
-                        let _ = writer.write_all(ready_msg.as_bytes()).await;
-
-                        // Re-announce loaded local file if one is active
+                        // Fix 08: Emit initial file and readiness accurately on connect / reconnect
                         let current_file = local_file.lock().ok().and_then(|g| g.clone());
-                        if let Some(f) = current_file {
+                        if current_file.is_some() {
+                            if let Ok(mut guard) = local_ready.lock() {
+                                *guard = true;
+                            }
+                        }
+                        if let Some(ref f) = current_file {
                             let file_msg = encode_set_file(
                                 &f.name,
                                 f.size_bytes,
@@ -606,6 +607,25 @@ where
                                 f.hash_identity,
                             );
                             let _ = writer.write_all(file_msg.as_bytes()).await;
+                        }
+
+                        let is_ready = local_ready.lock().map(|g| *g).unwrap_or(false);
+                        let ready_msg = encode_set_ready(is_ready, false);
+                        let _ = writer.write_all(ready_msg.as_bytes()).await;
+
+                        let snap = mpv.snapshot();
+                        if !snap.paused {
+                            if let Ok(mut guard) = local_ready.lock() {
+                                *guard = true;
+                            }
+                            let ready_true = encode_set_ready(true, false);
+                            let _ = writer.write_all(ready_true.as_bytes()).await;
+                            sm.on_user_play(snap.position);
+                            if snap.position > 0.5 {
+                                sm.on_user_seek(snap.position);
+                            }
+                            let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
+                            let _ = writer.write_all(hb.as_bytes()).await;
                         }
 
                         let list_req = "{\"List\":null}\r\n";
@@ -741,8 +761,20 @@ where
                             if writer.write_all(wire.as_bytes()).await.is_err() {
                                 return Err("Failed sending file info to Syncplay.".to_string());
                             }
+                            let is_ready = local_ready.lock().map(|g| *g).unwrap_or(true);
+                            let ready_wire = encode_set_ready(is_ready, false);
+                            if writer.write_all(ready_wire.as_bytes()).await.is_err() {
+                                return Err("Failed refreshing ready status after setting file.".to_string());
+                            }
                             emit_participants(app, &participants, local_file);
-                            if participants.len() > 1 && sm.last_server_playstate.is_some() {
+                            let peer_has_file = participants
+                                .values()
+                                .any(|p| p.username != active_username && p.file.is_some());
+                            if participants.len() > 1
+                                && peer_has_file
+                                && sm.ignoring_client == 0
+                                && sm.last_server_playstate.is_some()
+                            {
                                 let actions = sm.force_resync(start_instant.elapsed().as_secs_f64());
                                 apply_sync_actions(app, mpv, actions, is_scrubbing);
                             }
@@ -758,13 +790,26 @@ where
                         }
                     }
                     SyncCommand::UserPlay(pos) => {
+                        if let Ok(mut guard) = local_ready.lock() {
+                            *guard = true;
+                        }
+                        mpv.note_paused(false);
+                        let pause_req = mpv.next_request_id();
+                        let _ = mpv.send_command(set_pause_cmd(pause_req, false));
+                        let _ = app.emit("mpv://paused", serde_json::json!({ "paused": false }));
                         sm.on_user_play(pos);
                         if connected_emitted {
+                            let ready_wire = encode_set_ready(true, true);
+                            let _ = writer.write_all(ready_wire.as_bytes()).await;
                             let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
                             let _ = writer.write_all(hb.as_bytes()).await;
                         }
                     }
                     SyncCommand::UserPause(pos) => {
+                        mpv.note_paused(true);
+                        let pause_req = mpv.next_request_id();
+                        let _ = mpv.send_command(set_pause_cmd(pause_req, true));
+                        let _ = app.emit("mpv://paused", serde_json::json!({ "paused": true }));
                         sm.on_user_pause(pos);
                         if connected_emitted {
                             let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());

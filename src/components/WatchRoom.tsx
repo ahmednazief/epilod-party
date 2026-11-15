@@ -1,6 +1,5 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { usePlayerShortcuts } from "../hooks/usePlayerShortcuts";
@@ -312,10 +311,31 @@ export function WatchRoom() {
           overrideAss: subState.overrideAssStyle,
         });
         if (loadGenRef.current !== gen) return;
+        const appNow = useAppStore.getState();
         if (!useAppStore.getState().roomCode) {
           usePlayerStore.getState().setPaused(false);
           await mpvSetPause(false);
           if (loadGenRef.current !== gen) return;
+        } else {
+          const syncNow = useSyncStore.getState();
+          const syncConnNow = syncNow.status.state === "connected";
+          const effUserNow = resolveEffectiveUsername(syncNow.status, appNow.username);
+          const lockNow = getControllerLockState(syncConnNow, syncNow.participants, effUserNow);
+          const otherPeersWithFile = syncNow.participants.filter(
+            (p) =>
+              p.username.trim().toLowerCase() !== effUserNow.trim().toLowerCase() &&
+              Boolean(p.fileName),
+          );
+          if (!lockNow.lockedForLocalUser && otherPeersWithFile.length === 0) {
+            usePlayerStore.getState().setPaused(false);
+            await mpvSetPause(false);
+            if (loadGenRef.current !== gen) return;
+            if (syncConnNow) {
+              useSyncStore.getState().setLocalReady(true);
+              void syncSetReady(true, true);
+              void syncUserPlay(0);
+            }
+          }
         }
         if (!isDesktop()) {
           const pendingSub = pendingPairedSubRef.current;
@@ -505,9 +525,7 @@ export function WatchRoom() {
         if (mpvStartedRef.current) {
           const appState = useAppStore.getState();
           const pState = usePlayerStore.getState();
-          if (!panelOpenRef.current || !pState.loaded) {
-            void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
-          }
+          void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
         }
       }
     },
@@ -540,9 +558,7 @@ export function WatchRoom() {
       if (mpvStartedRef.current) {
         const appState = useAppStore.getState();
         const pState = usePlayerStore.getState();
-        if (!panelOpenRef.current || !pState.loaded) {
-          void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
-        }
+        void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
       }
     }
   }, [loadMediaInputs, pushNote]);
@@ -626,12 +642,26 @@ export function WatchRoom() {
       if (timer !== null) {
         window.clearTimeout(timer);
       }
-      if (!roomSessionStartedRef.current && !mpvStartedRef.current) {
+      if (!roomSessionStartedRef.current) {
         return;
       }
       roomSessionStartedRef.current = false;
       void enqueueSyncLifecycle(async () => {
         await syncDisconnect();
+      });
+    };
+    // Initial room mount + room transition lifecycle; server config changes use onApplyServerConfig
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomCode]);
+
+  // Stop embedded mpv child HWND only when leaving WatchRoom completely
+  useEffect(() => {
+    return () => {
+      void enqueueSyncLifecycle(async () => {
+        if (roomSessionStartedRef.current) {
+          roomSessionStartedRef.current = false;
+          await syncDisconnect();
+        }
         if (mpvStartedRef.current) {
           mpvStartedRef.current = false;
           mpvStartPromiseRef.current = null;
@@ -639,9 +669,7 @@ export function WatchRoom() {
         }
       });
     };
-    // Initial room mount + unmount cleanup; server config changes use onApplyServerConfig
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomCode]);
+  }, []);
 
   // Subscribe to mpv, window, and syncplay backend events
   useEffect(() => {
@@ -1148,51 +1176,49 @@ export function WatchRoom() {
         <TransportBar
           activeTab={panelOpen ? sideTab : null}
           onToggleTab={handleToggleCapsuleTab}
+          onCloseDrawer={() => setPanelOpen(false)}
           onChooseFile={() => void handleChooseFile()}
           onLeaveRoom={handleLeaveRoom}
           onHideControls={() => setChromeIdle(true)}
           onToggleFullscreen={toggleFullscreen}
           onPrevEpisode={handlePrevEpisode}
           onNextEpisode={handleNextEpisode}
+          drawerTabs={
+            panelOpen ? (
+              <SegmentedTabs
+                ariaLabel="Inspector panel"
+                value={sideTab}
+                onChange={setSideTab}
+                className="w-full max-w-[420px]"
+                items={[
+                  { value: "room", label: "Party" },
+                  {
+                    value: "episodes",
+                    label:
+                      playlistItems.length > 1
+                        ? `Episodes (${playlistItems.length})`
+                        : "Episodes",
+                  },
+                  { value: "playback", label: "Playback" },
+                  { value: "subtitles", label: "Subtitles" },
+                ]}
+              />
+            ) : null
+          }
           expandedDrawer={
             panelOpen ? (
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between gap-3 px-1">
-                  <SegmentedTabs
-                    ariaLabel="Inspector panel"
-                    value={sideTab}
-                    onChange={setSideTab}
-                    className="w-full max-w-[380px]"
-                    items={[
-                      { value: "room", label: "Party" },
-                      { value: "episodes", label: "Episodes" },
-                      { value: "playback", label: "Playback" },
-                      { value: "subtitles", label: "Subtitles" },
-                    ]}
+              <>
+                {sideTab === "room" && <RoomPanel />}
+                {sideTab === "episodes" && (
+                  <EpisodesPanel
+                    onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
+                    onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
+                    onAddEpisodes={() => void handleChooseFile(true)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setPanelOpen(false)}
-                    aria-label="Close popover"
-                    title="Collapse play bar (Esc)"
-                    className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div className="max-h-[42vh] overflow-visible">
-                  {sideTab === "room" && <RoomPanel />}
-                  {sideTab === "episodes" && (
-                    <EpisodesPanel
-                      onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
-                      onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
-                      onAddEpisodes={() => void handleChooseFile(true)}
-                    />
-                  )}
-                  {sideTab === "playback" && <PlaybackPanel />}
-                  {sideTab === "subtitles" && <SubtitlePanel />}
-                </div>
-              </div>
+                )}
+                {sideTab === "playback" && <PlaybackPanel />}
+                {sideTab === "subtitles" && <SubtitlePanel />}
+              </>
             ) : null
           }
         />
