@@ -12,6 +12,7 @@ import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening
 import { useAppStore } from "../store/useAppStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { LogoMark } from "./ui/LogoMark";
+import { TitleBar } from "./TitleBar";
 
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -112,11 +113,11 @@ export function HomeScreen() {
   const avatarInitial = (sanitizeUsername(username) || "V").slice(0, 1).toUpperCase();
 
   return (
-    <div className="ep-amethyst-canvas min-h-full w-full flex flex-col justify-between p-5 text-primary select-none">
-      {/* Top corner floating presence & preferences — zero top header slab */}
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          {editingName ? (
+    <div className="ep-amethyst-canvas min-h-full w-full flex flex-col justify-between text-primary select-none">
+      {/* Borderless frameless titlebar with floating profile & preferences pills */}
+      <TitleBar
+        leftSlot={
+          editingName ? (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -156,7 +157,7 @@ export function HomeScreen() {
               type="button"
               onClick={() => setEditingName(true)}
               title="Click to change your display name"
-              className="ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3.5 py-1.5 rounded-full cursor-pointer"
+              className="ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3.5 py-1 rounded-full cursor-pointer"
             >
               <span className="h-6 w-6 rounded-full bg-accent text-white text-xs font-semibold flex items-center justify-center shrink-0">
                 {avatarInitial}
@@ -166,39 +167,40 @@ export function HomeScreen() {
               </span>
               <span className="h-1.5 w-1.5 rounded-full bg-ok" />
             </button>
-          )}
-        </div>
+          )
+        }
+        rightActions={
+          <>
+            {hasPendingUpdate && updateStatus?.availableRelease && (
+              <button
+                type="button"
+                onClick={() => openSettings("updates")}
+                className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-accent-soft hover:text-white cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>
+                  {updateStatus.availability === "downloadedReady"
+                    ? `Restart to v${updateStatus.availableRelease.version}`
+                    : `Update v${updateStatus.availableRelease.version}`}
+                </span>
+              </button>
+            )}
 
-        <div className="flex items-center gap-2">
-          {hasPendingUpdate && updateStatus?.availableRelease && (
             <button
               type="button"
-              onClick={() => openSettings("updates")}
-              className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium text-accent-soft hover:text-white cursor-pointer"
+              onClick={() => openSettings("prefs")}
+              aria-label="Preferences"
+              className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
             >
-              <Download className="h-3.5 w-3.5" />
-              <span>
-                {updateStatus.availability === "downloadedReady"
-                  ? `Restart to v${updateStatus.availableRelease.version}`
-                  : `Update v${updateStatus.availableRelease.version}`}
-              </span>
+              <Settings className="h-3.5 w-3.5" />
+              <span>Preferences</span>
             </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => openSettings("prefs")}
-            aria-label="Preferences"
-            className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
-          >
-            <Settings className="h-3.5 w-3.5" />
-            <span>Preferences</span>
-          </button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* Centered IINA/Raycast-style single unified console (zero boxed cards) */}
-      <main className="flex-1 flex flex-col items-center justify-center px-4 py-6">
+      <main className="flex-1 flex flex-col items-center justify-center px-5 py-6">
         <div className="anim-fade-slide-up w-full max-w-[440px] flex flex-col items-center gap-6">
           <div className="flex flex-col items-center text-center gap-2.5">
             <LogoMark size={42} />

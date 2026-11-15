@@ -75,8 +75,10 @@ import { RoomPanel } from "./RoomPanel";
 import { SettingsModal } from "./SettingsModal";
 import { ShortcutsModal } from "./ShortcutsModal";
 import { SubtitlePanel } from "./SubtitlePanel";
+import { TitleBar } from "./TitleBar";
 import { TransportBar, type CapsuleTab } from "./TransportBar";
 import { ViewportPlaceholder } from "./ViewportPlaceholder";
+import { LogoMark } from "./ui/LogoMark";
 import { NotificationStrip } from "./ui/NotificationStrip";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 
@@ -720,6 +722,7 @@ export function WatchRoom() {
   });
 
   const showFloatingCapsule = chrome.showTransportBar && !chromeIdle;
+  const showWindowBar = !isFullscreen && !chromeIdle;
 
   const handleToggleCapsuleTab = (tab: SideTab) => {
     wakeChrome();
@@ -747,7 +750,39 @@ export function WatchRoom() {
     >
       <NotificationStrip />
 
-      {/* Full-window video viewport (zero fixed header slab, zero permanent sidebar) */}
+      {showWindowBar ? (
+        <TitleBar
+          leftSlot={
+            <div
+              data-tauri-drag-region
+              className="flex items-center gap-2.5 min-w-0"
+            >
+              <LogoMark size={20} />
+              <span className="text-xs font-medium text-primary truncate max-w-[300px]">
+                {selectedFileName || "Watch Theater"}
+              </span>
+              {roomCode && (
+                <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full truncate max-w-[140px]">
+                  {roomCode}
+                </span>
+              )}
+            </div>
+          }
+        />
+      ) : (
+        !isFullscreen && (
+          <div
+            data-tauri-drag-region
+            onMouseEnter={wakeChrome}
+            onMouseMove={wakeChrome}
+            onClick={wakeChrome}
+            title="Move mouse here to show window controls"
+            className="h-1.5 w-full shrink-0 bg-canvas cursor-pointer"
+          />
+        )
+      )}
+
+      {/* Full-window video viewport (borderless frameless bar hides cleanly during playback for 100% pure video) */}
       <div
         ref={viewportRef}
         className="relative flex-1 min-w-0 min-h-0 bg-canvas"
