@@ -7,7 +7,6 @@ import {
   Eye,
   EyeOff,
   FolderOpen,
-  Keyboard,
   ListVideo,
   Maximize,
   Minimize,
@@ -254,7 +253,6 @@ export const TransportBar = memo(function TransportBar({
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const setHideParticipants = useAppStore((s) => s.setHideParticipants);
   const openSettings = useAppStore((s) => s.openSettings);
-  const openShortcuts = useAppStore((s) => s.openShortcuts);
   const pushNote = useNotificationStore((s) => s.push);
 
   const playlistItems = usePlaylistStore((s) => s.items);
@@ -655,7 +653,7 @@ export const TransportBar = memo(function TransportBar({
             )}
           </div>
 
-          {/* Right: Open File + (Episodes when folder selected) + CC + Audio + Hide + Shortcuts + Settings + Fullscreen */}
+          {/* Right: Open File + (Episodes when folder selected) + CC + Audio + Hide + Settings + Fullscreen */}
           <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
@@ -729,16 +727,6 @@ export const TransportBar = memo(function TransportBar({
                 <ChevronDown className="h-3.5 w-3.5" />
               </button>
             )}
-
-            <button
-              type="button"
-              onClick={openShortcuts}
-              aria-label="Keyboard shortcuts"
-              title="Keyboard shortcuts (?)"
-              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
-            >
-              <Keyboard className="h-3.5 w-3.5" />
-            </button>
 
             <button
               type="button"

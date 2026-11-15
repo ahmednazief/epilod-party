@@ -326,5 +326,7 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   assert.match(watchRoomSrc, /<TitleBar\s+glassControls/);
   assert.match(watchRoomSrc, /className="ep-glass-pill h-8 pl-1\.5 pr-3 rounded-full/);
   assert.match(watchRoomSrc, /<ContextMenu/);
+  assert.match(watchRoomSrc, /Keyboard Shortcuts/);
+  assert.equal(transportSrc.includes("openShortcuts"), false, "Shortcuts button belongs in right-click ContextMenu, not TransportBar");
   assert.match(globalsCss, /\.ep-orb-play[\s\S]*backdrop-filter:/);
 });
