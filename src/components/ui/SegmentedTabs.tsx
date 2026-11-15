@@ -42,12 +42,12 @@ export function SegmentedTabs<T extends string>({
       ref={containerRef}
       role="tablist"
       aria-label={ariaLabel}
-      className={`relative inline-flex items-center p-0.5 bg-canvas border border-hairline rounded-[var(--radius-ui)] ${className}`}
+      className={`ep-glass-input relative inline-flex items-center p-1 rounded-full ${className}`}
     >
       {indicator.width > 0 && (
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute top-0.5 bottom-0.5 left-0 bg-hover border border-accent/35 rounded-[4px] transition-[transform,width] duration-200 ease-out"
+          className="ep-droplet-indicator pointer-events-none absolute top-1 bottom-1 left-0 rounded-full transition-[transform,width] duration-300 ease-out"
           style={{
             width: `${indicator.width}px`,
             transform: `translateX(${indicator.left}px)`,
@@ -66,8 +66,8 @@ export function SegmentedTabs<T extends string>({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(item.value)}
-            className={`relative z-10 flex-1 px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent rounded-[4px] ${
-              active ? "text-[#C4B5FD]" : "text-muted hover:text-secondary"
+            className={`ep-press relative z-10 flex-1 px-3 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent rounded-full ${
+              active ? "text-white" : "text-muted hover:text-secondary"
             }`}
           >
             {item.label}

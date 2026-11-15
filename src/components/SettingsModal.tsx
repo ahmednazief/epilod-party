@@ -1,4 +1,16 @@
-import { Download, Pause, RefreshCw, RotateCw, ShieldCheck, X } from "lucide-react";
+import {
+  ChevronDown,
+  Download,
+  Pause,
+  RefreshCw,
+  RotateCw,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
+  Terminal,
+  Wrench,
+  X,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { setAllowNetworkShares } from "../lib/mpv";
@@ -9,7 +21,6 @@ import { useAppStore, type SettingsTab } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { Button } from "./ui/Button";
-import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { TextField } from "./ui/TextField";
 
 interface SettingsModalProps {
@@ -18,10 +29,55 @@ interface SettingsModalProps {
   onApplyServerConfig?: (endpoint: string, password: string) => void;
 }
 
+const PRIMARY_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
+  { value: "prefs", label: "Comfort & Privacy" },
+  { value: "updates", label: "Updates" },
+];
+
+const ADVANCED_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
+  { value: "server", label: "Connection & Server" },
+  { value: "logs", label: "Diagnostics" },
+];
+
+function ComfortSwitchRow({
+  title,
+  description,
+  checked,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="ep-menu-row ep-press w-full px-3 py-3 flex items-center justify-between gap-4 text-left cursor-pointer"
+    >
+      <div className="min-w-0">
+        <div className="text-[13px] font-medium text-white">{title}</div>
+        <div className="text-xs text-secondary leading-relaxed mt-0.5">{description}</div>
+      </div>
+      <span
+        className={`ep-switch-track w-10 h-6 rounded-full p-0.5 flex items-center transition-colors shrink-0 ${
+          checked ? "bg-accent justify-end" : "bg-white/18 justify-start"
+        }`}
+      >
+        <span className="ep-switch-thumb h-5 w-5 rounded-full bg-white shadow" />
+      </span>
+    </button>
+  );
+}
+
 export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsModalProps) {
   const tab = useAppStore((s) => s.settingsTab);
   const setTab = useAppStore((s) => s.setSettingsTab);
 
+  const username = useAppStore((s) => s.username);
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const allowNetworkShares = useAppStore((s) => s.allowNetworkShares);
@@ -31,6 +87,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
 
+  const setUsername = useAppStore((s) => s.setUsername);
   const setServerEndpoint = useAppStore((s) => s.setServerEndpoint);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const setStoreAllowShares = useAppStore((s) => s.setAllowNetworkShares);
@@ -57,6 +114,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const [endpointDraft, setEndpointDraft] = useState(serverEndpoint);
   const [passwordDraft, setPasswordDraft] = useState(serverPassword);
   const [endpointError, setEndpointError] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsPath, setLogsPath] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -66,9 +124,12 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       setEndpointDraft(serverEndpoint);
       setPasswordDraft(serverPassword);
       setEndpointError(null);
+      if (tab === "server" || tab === "logs") {
+        setAdvancedOpen(true);
+      }
       void initUpdater();
     }
-  }, [open, serverEndpoint, serverPassword, initUpdater]);
+  }, [open, serverEndpoint, serverPassword, initUpdater, tab]);
 
   const loadLogs = async () => {
     setLogsLoading(true);
@@ -99,7 +160,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     setServerEndpoint(check.endpoint);
     setServerPassword(passwordDraft);
     onApplyServerConfig?.(check.endpoint, passwordDraft);
-    pushNote("success", `Server updated to ${check.endpoint}.`);
+    pushNote("success", `Connection updated to ${check.endpoint}.`);
     onClose();
   };
 
@@ -115,369 +176,411 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   return (
     <div
-      className="anim-backdrop-in fixed inset-0 z-50 flex items-center justify-center bg-canvas/85 p-4"
+      className="ep-modal-backdrop anim-backdrop-in fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Settings"
+      aria-label="Preferences"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="anim-modal-in w-full max-w-lg bg-chrome border border-hairline rounded-[var(--radius-ui)] overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-hairline">
-          <h2 className="text-sm font-medium text-primary">Settings</h2>
-          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close settings">
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className="px-4 pt-3">
-          <SegmentedTabs<SettingsTab>
-            ariaLabel="Settings sections"
-            value={tab}
-            onChange={setTab}
-            className="w-full"
-            items={[
-              { value: "server", label: "Server" },
-              { value: "prefs", label: "Preferences" },
-              { value: "updates", label: "Updates" },
-              { value: "logs", label: "Diagnostics" },
-            ]}
-          />
-        </div>
-
-        <div className="p-4 max-h-[68vh] overflow-y-auto">
-          {tab === "server" && (
-            <div className="anim-tab-in space-y-4">
-              <TextField
-                label="Syncplay Server Endpoint"
-                value={endpointDraft}
-                placeholder={DEFAULT_ENDPOINT}
-                onChange={(e) => {
-                  setEndpointDraft(e.target.value);
-                  if (endpointError) setEndpointError(null);
-                }}
-                error={endpointError}
-                hint="Default: syncplay.pl:8999 (backup: syncplay.pl:8998)"
-              />
-
-              <TextField
-                label="Server / Room Password (Optional)"
-                type="password"
-                value={passwordDraft}
-                maxLength={128}
-                placeholder="Kept in memory for this session only"
-                onChange={(e) => setPasswordDraft(e.target.value)}
-                hint="Never written to disk or localStorage."
-              />
-
-              <div className="flex items-center justify-between pt-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setEndpointDraft(DEFAULT_ENDPOINT);
-                    setEndpointError(null);
-                  }}
-                >
-                  Reset Default
-                </Button>
-                <div className="flex items-center gap-2">
-                  <Button variant="secondary" size="sm" onClick={onClose}>
-                    Cancel
-                  </Button>
-                  <Button variant="primary" size="sm" onClick={handleSaveServer}>
-                    Save Server
-                  </Button>
-                </div>
-              </div>
+      <div className="ep-glass-sheet anim-modal-in w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[26px] overflow-hidden grid grid-cols-12">
+        {/* Left Navigation Rail (borderless tonal separation) */}
+        <aside className="col-span-4 bg-black/25 p-3.5 flex flex-col justify-between min-h-0">
+          <div className="space-y-4">
+            <div className="px-2.5 pt-1 flex items-center justify-between">
+              <h2 className="text-sm font-semibold tracking-tight text-white">Preferences</h2>
             </div>
-          )}
 
-          {tab === "prefs" && (
-            <div className="anim-tab-in space-y-4">
-              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
-                <div>
-                  <p className="text-xs font-medium text-primary">Allow Network Shares (UNC / SMB)</p>
-                  <p className="text-[11px] text-secondary mt-0.5">
-                    Enable loading videos or subtitles from mapped LAN paths (\\server\share\...).
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={allowNetworkShares}
-                  onChange={(e) => {
-                    const allow = e.target.checked;
-                    setStoreAllowShares(allow);
-                    void setAllowNetworkShares(allow);
-                  }}
-                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
-                />
-              </label>
+            <nav className="space-y-1" aria-label="Preference sections">
+              {PRIMARY_NAV.map((item) => {
+                const active = tab === item.value;
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    data-active={active}
+                    onClick={() => setTab(item.value)}
+                    className={`ep-menu-row ep-press w-full px-3 py-2 flex items-center gap-2.5 text-left text-xs cursor-pointer ${
+                      active ? "text-white font-medium" : "text-secondary hover:text-white"
+                    }`}
+                  >
+                    {item.value === "prefs" ? (
+                      <Sparkles className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+                    )}
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
 
-              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
-                <div>
-                  <p className="text-xs font-medium text-primary">Privacy Mode (Hide Participants)</p>
-                  <p className="text-[11px] text-secondary mt-0.5">
-                    Collapse viewer names in the Room panel for cleaner screen recordings.
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={hideParticipants}
-                  onChange={(e) => setHideParticipants(e.target.checked)}
-                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
-                />
-              </label>
+          {/* Tucked-away Discord-style Advanced section */}
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((o) => !o)}
+              className="ep-press w-full px-2.5 py-1.5 flex items-center justify-between text-[11px] font-medium text-muted hover:text-secondary cursor-pointer"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Wrench className="h-3 w-3" />
+                Advanced
+              </span>
+              <ChevronDown
+                className={`h-3 w-3 transition-transform duration-200 ${
+                  advancedOpen ? "rotate-180" : ""
+                }`}
+              />
+            </button>
 
-              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
-                <div>
-                  <p className="text-xs font-medium text-primary">
-                    Privacy Mode: Hash Shared Filenames
-                  </p>
-                  <p className="text-[11px] text-secondary mt-0.5">
-                    Send SHA-256 hashed filenames and sizes to the Syncplay server instead of plain titles.
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={hashFilenames}
-                  onChange={(e) => setHashFilenames(e.target.checked)}
-                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
-                />
-              </label>
-
-              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
-                <div>
-                  <p className="text-xs font-medium text-primary">Reduced Motion</p>
-                  <p className="text-[11px] text-secondary mt-0.5">
-                    Minimize transitions and animations throughout the interface.
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={reducedMotion}
-                  onChange={(e) => setReducedMotion(e.target.checked)}
-                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
-                />
-              </label>
-
-              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
-                <div>
-                  <p className="text-xs font-medium text-primary">Low-Power Auto-Sync Extraction</p>
-                  <p className="text-[11px] text-secondary mt-0.5">
-                    Run audio extraction at Below-Normal CPU priority during long MKV subtitle syncs.
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={lowPowerMode}
-                  onChange={(e) => setLowPowerMode(e.target.checked)}
-                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
-                />
-              </label>
-            </div>
-          )}
-
-          {tab === "updates" && (
-            <div className="anim-tab-in space-y-4">
-              <div className="p-3.5 bg-canvas border border-hairline rounded-[var(--radius-ui)] space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-block h-2 w-2 rounded-full ${
-                        availability === "downloadedReady"
-                          ? "bg-ok"
-                          : availability === "updateAvailable"
-                            ? "bg-accent"
-                            : availability === "unsupportedUpgrade"
-                              ? "bg-bad"
-                              : "bg-muted"
+            {advancedOpen && (
+              <div className="anim-fade-slide-up space-y-1">
+                {ADVANCED_NAV.map((item) => {
+                  const active = tab === item.value;
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      data-active={active}
+                      onClick={() => setTab(item.value)}
+                      className={`ep-menu-row ep-press w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs cursor-pointer ${
+                        active ? "text-white font-medium" : "text-muted hover:text-white"
                       }`}
-                    />
-                    <span className="text-xs font-medium text-primary">
-                      Installed: v{updateStatus?.currentVersion ?? "0.1.0"}
+                    >
+                      {item.value === "server" ? (
+                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <Terminal className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Right Content Pane — Zero boxed cards per row; pure clean dividers */}
+        <div className="col-span-8 flex flex-col min-h-0">
+          <div className="px-6 pt-4 pb-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-muted">
+              {tab === "prefs" && "Comfort & Privacy"}
+              {tab === "updates" && "App Updates"}
+              {tab === "server" && "Connection & Shared Folders"}
+              {tab === "logs" && "Session Diagnostics"}
+            </span>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close settings"
+              className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="ep-hairline-divider mx-6" />
+
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            {tab === "prefs" && (
+              <div className="anim-tab-in space-y-3">
+                <div className="pb-2">
+                  <TextField
+                    label="Display Name"
+                    value={username}
+                    maxLength={32}
+                    placeholder="Viewer"
+                    onChange={(e) => setUsername(e.target.value)}
+                  />
+                </div>
+
+                <div className="ep-hairline-divider" />
+
+                <ComfortSwitchRow
+                  title="Streamer Mode (Hide Profile Icons)"
+                  description="Hide friend names and profile avatars while streaming or sharing your screen."
+                  checked={hideParticipants}
+                  onChange={setHideParticipants}
+                />
+
+                <div className="ep-hairline-divider mx-3" />
+
+                <ComfortSwitchRow
+                  title="Private File Titles"
+                  description="Keep your local movie filename private from party servers."
+                  checked={hashFilenames}
+                  onChange={setHashFilenames}
+                />
+
+                <div className="ep-hairline-divider mx-3" />
+
+                <ComfortSwitchRow
+                  title="Calm Motion"
+                  description="Replace bouncy spring transitions with gentle fades."
+                  checked={reducedMotion}
+                  onChange={setReducedMotion}
+                />
+
+                <div className="ep-hairline-divider mx-3" />
+
+                <ComfortSwitchRow
+                  title="Quiet Background Sync"
+                  description="Keep subtitle alignment gentle on fans and battery during long movies."
+                  checked={lowPowerMode}
+                  onChange={setLowPowerMode}
+                />
+              </div>
+            )}
+
+            {tab === "updates" && (
+              <div className="anim-tab-in space-y-5">
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-block h-2 w-2 rounded-full ${
+                          availability === "downloadedReady"
+                            ? "bg-ok"
+                            : availability === "updateAvailable"
+                              ? "bg-accent"
+                              : availability === "unsupportedUpgrade"
+                                ? "bg-bad"
+                                : "bg-muted"
+                        }`}
+                      />
+                      <span className="text-xs font-medium text-white">
+                        Installed: v{updateStatus?.currentVersion ?? "0.1.0"}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-muted">
+                      {lastCheckedLabel ? `Checked at ${lastCheckedLabel}` : "Official GitHub Releases"}
                     </span>
                   </div>
-                  <span className="text-[11px] text-muted">
-                    {lastCheckedLabel ? `Checked at ${lastCheckedLabel}` : "Official GitHub Releases"}
-                  </span>
-                </div>
 
-                <p className="text-xs text-secondary leading-relaxed">
-                  {updateStatus?.message ?? "Check GitHub Releases for SHA-256 verified updates."}
-                </p>
+                  <p className="text-xs text-secondary leading-relaxed">
+                    {updateStatus?.message ?? "Check GitHub Releases for verified updates."}
+                  </p>
 
-                {availableRelease && (
-                  <div className="rounded-[var(--radius-ui)] bg-chrome border border-hairline p-3 space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-medium text-primary">
-                        Epilod Party v{availableRelease.version}
-                      </span>
-                      <span className="text-[11px] font-mono text-muted">
-                        {formatBytesCompact(availableRelease.sizeBytes)}
-                      </span>
-                    </div>
-                    {availableRelease.notes && (
-                      <p className="text-[11px] text-secondary leading-relaxed whitespace-pre-line">
-                        {availableRelease.notes}
-                      </p>
-                    )}
-                    <div className="flex items-center gap-1.5 pt-1 text-[10.5px] font-mono text-muted">
-                      <ShieldCheck className="h-3 w-3 text-ok shrink-0" />
-                      <span className="truncate">
-                        {updateStatus?.signatureVerified
-                          ? `Ed25519 Signed · SHA-256: ${availableRelease.sha256.slice(0, 16)}...`
-                          : `SHA-256 Verified: ${availableRelease.sha256.slice(0, 16)}...`}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {(isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
-                  updateProgress && (
-                    <div className="space-y-1.5 pt-1">
-                      <div className="flex items-center justify-between gap-2 text-[11px]">
-                        <span className="text-secondary truncate">{updateProgress.message}</span>
-                        <span className="font-mono text-muted shrink-0">
-                          {updateProgress.speedBps > 0
-                            ? `${formatTransferSpeed(updateProgress.speedBps)} · `
-                            : ""}
-                          {Math.round(updateProgress.percent)}%
+                  {availableRelease && (
+                    <div className="rounded-2xl bg-white/5 p-3.5 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-white">
+                          Epilod Party v{availableRelease.version}
+                        </span>
+                        <span className="text-[11px] font-mono text-muted">
+                          {formatBytesCompact(availableRelease.sizeBytes)}
                         </span>
                       </div>
-                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-chrome border border-hairline">
-                        <div
-                          className="h-full w-full origin-left bg-accent transition-transform duration-150 ease-out"
-                          style={{ transform: `scaleX(${progressFraction})` }}
-                        />
-                      </div>
-                      {updateProgress.totalBytes > 0 && (
-                        <div className="flex justify-between text-[10.5px] font-mono text-muted">
-                          <span>{formatBytesCompact(updateProgress.downloadedBytes)}</span>
-                          <span>{formatBytesCompact(updateProgress.totalBytes)}</span>
-                        </div>
+                      {availableRelease.notes && (
+                        <p className="text-[11px] text-secondary leading-relaxed whitespace-pre-line">
+                          {availableRelease.notes}
+                        </p>
                       )}
+                      <div className="flex items-center gap-1.5 pt-1 text-[10.5px] font-mono text-muted">
+                        <ShieldCheck className="h-3 w-3 text-ok shrink-0" />
+                        <span className="truncate">
+                          {updateStatus?.signatureVerified
+                            ? `Ed25519 Signed · SHA-256: ${availableRelease.sha256.slice(0, 16)}...`
+                            : `SHA-256 Verified: ${availableRelease.sha256.slice(0, 16)}...`}
+                        </span>
+                      </div>
                     </div>
                   )}
 
-                {updateError && (
-                  <p className="text-[11px] text-bad bg-chrome border border-bad/40 rounded-[var(--radius-ui)] px-2.5 py-2">
-                    {updateError}
-                  </p>
-                )}
-
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={isCheckingUpdates || isDownloadingUpdate || isApplyingUpdate}
-                    onClick={() => void checkForUpdates(false)}
-                  >
-                    <RefreshCw
-                      className={`h-3.5 w-3.5 ${isCheckingUpdates ? "animate-spin" : ""}`}
-                    />
-                    {isCheckingUpdates ? "Checking..." : "Check for Updates"}
-                  </Button>
-
-                  <div className="flex items-center gap-2">
-                    {isDownloadingUpdate && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => void cancelUpdateDownload()}
-                      >
-                        <Pause className="h-3.5 w-3.5" />
-                        Pause
-                      </Button>
+                  {(isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
+                    updateProgress && (
+                      <div className="space-y-1.5 pt-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="text-secondary truncate">{updateProgress.message}</span>
+                          <span className="font-mono text-muted shrink-0">
+                            {updateProgress.speedBps > 0
+                              ? `${formatTransferSpeed(updateProgress.speedBps)} · `
+                              : ""}
+                            {Math.round(updateProgress.percent)}%
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
+                          <div
+                            className="ep-scrubber-fill h-full w-full origin-left transition-transform duration-150 ease-out"
+                            style={{ transform: `scaleX(${progressFraction})` }}
+                          />
+                        </div>
+                        {updateProgress.totalBytes > 0 && (
+                          <div className="flex justify-between text-[10.5px] font-mono text-muted">
+                            <span>{formatBytesCompact(updateProgress.downloadedBytes)}</span>
+                            <span>{formatBytesCompact(updateProgress.totalBytes)}</span>
+                          </div>
+                        )}
+                      </div>
                     )}
 
-                    {!isDownloadingUpdate && availability === "updateAvailable" && availableRelease && (
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        onClick={() => void startUpdateDownload()}
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        {isUpdatePaused ? "Resume Download" : "Download Update"}
-                      </Button>
-                    )}
+                  {updateError && (
+                    <p className="text-[11px] text-bad bg-bad/10 rounded-xl px-3 py-2">
+                      {updateError}
+                    </p>
+                  )}
 
-                    {availability === "downloadedReady" && availableRelease && (
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        disabled={isApplyingUpdate}
-                        onClick={() => void applyAndRestartUpdate()}
-                      >
-                        <RotateCw
-                          className={`h-3.5 w-3.5 ${isApplyingUpdate ? "animate-spin" : ""}`}
-                        />
-                        {isApplyingUpdate
-                          ? "Launching Updater..."
-                          : `Restart & Update to v${availableRelease.version}`}
-                      </Button>
-                    )}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={isCheckingUpdates || isDownloadingUpdate || isApplyingUpdate}
+                      onClick={() => void checkForUpdates(false)}
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${isCheckingUpdates ? "animate-spin" : ""}`}
+                      />
+                      {isCheckingUpdates ? "Checking..." : "Check for Updates"}
+                    </Button>
+
+                    <div className="flex items-center gap-2">
+                      {isDownloadingUpdate && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => void cancelUpdateDownload()}
+                        >
+                          <Pause className="h-3.5 w-3.5" />
+                          Pause
+                        </Button>
+                      )}
+
+                      {!isDownloadingUpdate && availability === "updateAvailable" && availableRelease && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          onClick={() => void startUpdateDownload()}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          {isUpdatePaused ? "Resume Download" : "Download Update"}
+                        </Button>
+                      )}
+
+                      {availability === "downloadedReady" && availableRelease && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={isApplyingUpdate}
+                          onClick={() => void applyAndRestartUpdate()}
+                        >
+                          <RotateCw
+                            className={`h-3.5 w-3.5 ${isApplyingUpdate ? "animate-spin" : ""}`}
+                          />
+                          {isApplyingUpdate
+                            ? "Launching Updater..."
+                            : `Restart & Update to v${availableRelease.version}`}
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <label className="flex items-start justify-between gap-3 p-3 bg-canvas border border-hairline rounded-[var(--radius-ui)] cursor-pointer">
-                <div>
-                  <p className="text-xs font-medium text-primary">
-                    Check for updates automatically
-                  </p>
-                  <p className="text-[11px] text-secondary mt-0.5">
-                    Quietly check GitHub Releases on launch with SHA-256 verification before installing.
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
+                <div className="ep-hairline-divider" />
+
+                <ComfortSwitchRow
+                  title="Check for updates automatically"
+                  description="Quietly check GitHub Releases on launch with verified installation."
                   checked={autoCheckUpdates}
-                  onChange={(e) => setAutoCheckUpdates(e.target.checked)}
-                  className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
+                  onChange={setAutoCheckUpdates}
                 />
-              </label>
-            </div>
-          )}
-
-          {tab === "logs" && (
-            <div className="anim-tab-in space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] text-muted truncate">
-                  {logsPath || "In-memory session ring buffer (latest 150 entries)"}
-                </p>
-                <Button variant="secondary" size="sm" onClick={() => void loadLogs()}>
-                  <RefreshCw className={`h-3.5 w-3.5 ${logsLoading ? "animate-spin" : ""}`} />
-                  Refresh
-                </Button>
               </div>
+            )}
 
-              <div className="h-60 overflow-y-auto bg-canvas border border-hairline rounded-[var(--radius-ui)] p-2 font-mono text-[11px] space-y-1">
-                {logs.length === 0 ? (
-                  <p className="text-muted p-2">No diagnostic events recorded in this session yet.</p>
-                ) : (
-                  logs.map((entry, idx) => (
-                    <div key={`${entry.tsMs}-${idx}`} className="flex items-start gap-2 leading-snug">
-                      <span
-                        className={`uppercase shrink-0 w-10 ${
-                          entry.level === "error"
-                            ? "text-bad"
-                            : entry.level === "warn"
-                              ? "text-warn"
-                              : "text-muted"
-                        }`}
-                      >
-                        {entry.level}
-                      </span>
-                      <span className="text-secondary shrink-0">[{entry.target}]</span>
-                      <span className="text-primary break-all">{entry.message}</span>
-                    </div>
-                  ))
-                )}
+            {tab === "server" && (
+              <div className="anim-tab-in space-y-4">
+                <TextField
+                  label="Syncplay Server Address"
+                  value={endpointDraft}
+                  placeholder={DEFAULT_ENDPOINT}
+                  onChange={(e) => {
+                    setEndpointDraft(e.target.value);
+                    if (endpointError) setEndpointError(null);
+                  }}
+                  error={endpointError}
+                  hint="Default: syncplay.pl:8999 (backup: syncplay.pl:8998)"
+                />
+
+                <TextField
+                  label="Server / Room Password (Optional)"
+                  type="password"
+                  value={passwordDraft}
+                  maxLength={128}
+                  placeholder="Kept in memory for this session only"
+                  onChange={(e) => setPasswordDraft(e.target.value)}
+                  hint="Never saved to disk."
+                />
+
+                <div className="flex items-center justify-between pt-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setEndpointDraft(DEFAULT_ENDPOINT);
+                      setEndpointError(null);
+                    }}
+                  >
+                    Reset Default
+                  </Button>
+                  <Button variant="primary" size="sm" onClick={handleSaveServer}>
+                    Save Connection
+                  </Button>
+                </div>
+
+                <div className="ep-hairline-divider" />
+
+                <ComfortSwitchRow
+                  title="Allow Shared LAN Folders (UNC / SMB)"
+                  description="Permit opening movies from mapped network paths on your home Wi-Fi."
+                  checked={allowNetworkShares}
+                  onChange={(allow) => {
+                    setStoreAllowShares(allow);
+                    void setAllowNetworkShares(allow);
+                  }}
+                />
               </div>
-            </div>
-          )}
+            )}
+
+            {tab === "logs" && (
+              <div className="anim-tab-in space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] text-muted truncate">
+                    {logsPath || "In-memory session log (latest 150 events)"}
+                  </p>
+                  <Button variant="secondary" size="sm" onClick={() => void loadLogs()}>
+                    <RefreshCw className={`h-3.5 w-3.5 ${logsLoading ? "animate-spin" : ""}`} />
+                    Refresh
+                  </Button>
+                </div>
+
+                <div className="ep-glass-input h-64 overflow-y-auto rounded-2xl p-3 font-mono text-[11px] space-y-1">
+                  {logs.length === 0 ? (
+                    <p className="text-muted p-2">No diagnostic events recorded yet.</p>
+                  ) : (
+                    logs.map((entry, idx) => (
+                      <div key={`${entry.tsMs}-${idx}`} className="flex items-start gap-2 leading-snug">
+                        <span
+                          className={`uppercase shrink-0 w-10 ${
+                            entry.level === "error"
+                              ? "text-bad"
+                              : entry.level === "warn"
+                                ? "text-warn"
+                                : "text-muted"
+                          }`}
+                        >
+                          {entry.level}
+                        </span>
+                        <span className="text-secondary shrink-0">[{entry.target}]</span>
+                        <span className="text-primary break-all">{entry.message}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

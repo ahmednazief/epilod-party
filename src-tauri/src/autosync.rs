@@ -306,7 +306,10 @@ mod windows_impl {
                 });
             }
 
-            let cur_size = fs::metadata(watched_output).map(|m| m.len()).unwrap_or(0);
+            let cur_size = tokio::fs::metadata(watched_output)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
             match watchdog.poll(cur_size, Instant::now()) {
                 WatchdogStatus::Continue => {}
                 WatchdogStatus::Stalled => {
@@ -343,18 +346,35 @@ mod windows_impl {
         let job_seq = AUTOSYNC_JOB_SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
 
-        let video_pb = validate_existing_local_file_with_options(video_path, path_opts)
-            .map_err(|e| e.to_string())?;
-        let work_dir = temp_work_dir();
-        fs::create_dir_all(&work_dir)
-            .map_err(|e| format!("Failed creating auto-sync temp directory: {e}"))?;
+        let app_clone = app.clone();
+        let video_owned = video_path.to_string();
+        let sub_owned = subtitle_path.map(|s| s.to_string());
+        let (video_pb, work_dir, ffmpeg_exe, mpv_exe, external_sub_pb) =
+            tokio::task::spawn_blocking(move || {
+                let video_pb = validate_existing_local_file_with_options(&video_owned, path_opts)
+                    .map_err(|e| e.to_string())?;
+                let work_dir = temp_work_dir();
+                fs::create_dir_all(&work_dir)
+                    .map_err(|e| format!("Failed creating auto-sync temp directory: {e}"))?;
+                let ffmpeg_exe = resolve_ffmpeg_exe(&app_clone);
+                let mpv_exe = resolve_mpv_exe(&app_clone)?;
+                let ext_sub = match sub_owned {
+                    Some(sp) => Some(
+                        validate_existing_local_file_with_options(&sp, path_opts)
+                            .map_err(|e| e.to_string())?,
+                    ),
+                    None => None,
+                };
+                Ok::<_, String>((video_pb, work_dir, ffmpeg_exe, mpv_exe, ext_sub))
+            })
+            .await
+            .map_err(|e| format!("Auto-sync preparation failed: {e}"))??;
 
-        let ffmpeg_exe = resolve_ffmpeg_exe(app);
         let mut temp_extracted_sub: Option<PathBuf> = None;
 
         // Resolve external or embedded subtitle source
-        let sub_pb = if let Some(sp) = subtitle_path {
-            validate_existing_local_file_with_options(sp, path_opts).map_err(|e| e.to_string())?
+        let sub_pb = if let Some(sp) = external_sub_pb {
+            sp
         } else if let Some(sub_idx) = embedded_sub_idx {
             if is_bitmap_subtitle_codec(embedded_sub_codec) {
                 return Err(
@@ -385,9 +405,8 @@ mod windows_impl {
         };
 
         let pcm_path = work_dir.join(format!("audio_{pid}_{job_seq}.pcm"));
-        let _ = fs::remove_file(&pcm_path);
+        let _ = tokio::fs::remove_file(&pcm_path).await;
 
-        let mpv_exe = resolve_mpv_exe(app)?;
         let mpv_args = autosync_extract_args_mpv(
             video_pb.to_string_lossy().as_ref(),
             pcm_path.to_string_lossy().as_ref(),
@@ -397,7 +416,8 @@ mod windows_impl {
             run_command_with_watchdog(&mpv_exe, &mpv_args, &pcm_path, &cancel, low_power).await;
 
         let extracted_ok = mpv_res.is_ok()
-            && fs::metadata(&pcm_path)
+            && tokio::fs::metadata(&pcm_path)
+                .await
                 .map(|m| m.len() > 16_000)
                 .unwrap_or(false);
 
@@ -429,70 +449,79 @@ mod windows_impl {
             }
         }
 
-        // Stream PCM into envelope builder
-        let sub_bytes = match fs::read(&sub_pb) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = fs::remove_file(&pcm_path);
-                return Err(format!("Failed reading subtitle file: {e}"));
-            }
-        };
-        let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, encoding_hint) {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = fs::remove_file(&pcm_path);
-                return Err(e.to_string());
-            }
-        };
-        let cues = match parse_subtitles(&decoded) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = fs::remove_file(&pcm_path);
-                return Err(e.to_string());
-            }
-        };
-
-        let mut pcm_file = match fs::File::open(&pcm_path) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = fs::remove_file(&pcm_path);
-                return Err(format!("Failed opening extracted audio PCM: {e}"));
-            }
-        };
-        let mut builder = AudioEnvelopeBuilder::new();
-        let mut buf = vec![0u8; 65_536];
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                let _ = fs::remove_file(&pcm_path);
-                return Err("Auto-sync cancelled.".to_string());
-            }
-            let n = match pcm_file.read(&mut buf) {
-                Ok(n) => n,
+        // Stream PCM, decode/parse subtitles, and run CPU-bound alignment off the async executor
+        let cancel_clone = Arc::clone(&cancel);
+        let sub_pb_clone = sub_pb.clone();
+        let pcm_path_clone = pcm_path.clone();
+        let work_dir_clone = work_dir.clone();
+        let (outcome, audio_duration_secs, synced_pb) = tokio::task::spawn_blocking(move || {
+            let sub_bytes = match fs::read(&sub_pb_clone) {
+                Ok(b) => b,
                 Err(e) => {
-                    let _ = fs::remove_file(&pcm_path);
-                    return Err(format!("Failed reading extracted PCM: {e}"));
+                    let _ = fs::remove_file(&pcm_path_clone);
+                    return Err(format!("Failed reading subtitle file: {e}"));
                 }
             };
-            if n == 0 {
-                break;
+            let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, encoding_hint) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = fs::remove_file(&pcm_path_clone);
+                    return Err(e.to_string());
+                }
+            };
+            let cues = match parse_subtitles(&decoded) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = fs::remove_file(&pcm_path_clone);
+                    return Err(e.to_string());
+                }
+            };
+
+            let mut pcm_file = match fs::File::open(&pcm_path_clone) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = fs::remove_file(&pcm_path_clone);
+                    return Err(format!("Failed opening extracted audio PCM: {e}"));
+                }
+            };
+            let mut builder = AudioEnvelopeBuilder::new();
+            let mut buf = vec![0u8; 65_536];
+            loop {
+                if cancel_clone.load(Ordering::SeqCst) {
+                    let _ = fs::remove_file(&pcm_path_clone);
+                    return Err("Auto-sync cancelled.".to_string());
+                }
+                let n = match pcm_file.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = fs::remove_file(&pcm_path_clone);
+                        return Err(format!("Failed reading extracted PCM: {e}"));
+                    }
+                };
+                if n == 0 {
+                    break;
+                }
+                builder.push_pcm_s16le_bytes(&buf[..n]);
             }
-            builder.push_pcm_s16le_bytes(&buf[..n]);
-        }
-        let _ = fs::remove_file(&pcm_path);
+            let _ = fs::remove_file(&pcm_path_clone);
 
-        let envelope = builder.finish().map_err(|e| e.to_string())?;
-        let audio_duration_secs = envelope.len() as f64 / 100.0;
-        let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
-            .map_err(|e| e.to_string())?;
+            let envelope = builder.finish().map_err(|e| e.to_string())?;
+            let audio_duration_secs = envelope.len() as f64 / 100.0;
+            let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
+                .map_err(|e| e.to_string())?;
 
-        let synced_pb = write_rescaled_subtitle_file(
-            &sub_pb,
-            &work_dir,
-            outcome.scale,
-            outcome.anchor_ms,
-            outcome.offset_ms,
-            encoding_hint,
-        )?;
+            let synced_pb = write_rescaled_subtitle_file(
+                &sub_pb_clone,
+                &work_dir_clone,
+                outcome.scale,
+                outcome.anchor_ms,
+                outcome.offset_ms,
+                encoding_hint,
+            )?;
+            Ok((outcome, audio_duration_secs, synced_pb))
+        })
+        .await
+        .map_err(|e| format!("Auto-sync worker failed: {e}"))??;
 
         Ok(AutoSyncResultDto {
             offset_secs: outcome.offset_ms as f64 / 1000.0,

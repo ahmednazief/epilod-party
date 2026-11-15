@@ -2,10 +2,10 @@ import { X } from "lucide-react";
 import { useNotificationStore, type NotificationKind } from "../../store/useNotificationStore";
 
 const KIND_STYLES: Record<NotificationKind, string> = {
-  info: "border-hairline bg-chrome text-primary",
-  success: "border-ok/40 bg-chrome text-ok",
-  warn: "border-warn/40 bg-chrome text-warn",
-  error: "border-bad/40 bg-chrome text-bad",
+  info: "text-primary",
+  success: "text-ok",
+  warn: "text-warn",
+  error: "text-bad",
 };
 
 export function NotificationStrip() {
@@ -17,12 +17,12 @@ export function NotificationStrip() {
   }
 
   return (
-    <div className="flex flex-col gap-1 px-3 py-1.5 bg-canvas border-b border-hairline">
+    <div className="pointer-events-none fixed top-4 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-1.5 max-w-md w-full px-4">
       {items.map((item) => (
         <div
           key={item.id}
           role="status"
-          className={`anim-fade-slide-up flex items-center justify-between gap-3 px-3 py-1.5 text-xs border rounded-[var(--radius-ui)] ${KIND_STYLES[item.kind]}`}
+          className={`pointer-events-auto anim-fade-slide-up ep-glass-pill flex items-center justify-between gap-3 px-4 py-2 text-xs rounded-full ${KIND_STYLES[item.kind]}`}
         >
           <span className="truncate">{item.message}</span>
           <button

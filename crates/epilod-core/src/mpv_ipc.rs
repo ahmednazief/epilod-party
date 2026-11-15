@@ -358,7 +358,9 @@ pub fn launch_args_with_fonts(
         "--no-config".to_string(),
         "--load-scripts=no".to_string(),
         "--ytdl=no".to_string(),
-        "--force-window=yes".to_string(),
+        "--msg-level=all=warn".to_string(),
+        "--demuxer-max-bytes=150MiB".to_string(),
+        "--demuxer-max-back-bytes=50MiB".to_string(),
     ];
     if let Some(dir) = sub_fonts_dir {
         let trimmed = dir.trim();
@@ -368,6 +370,54 @@ pub fn launch_args_with_fonts(
         }
     }
     args
+}
+
+/// Rate-limits high-frequency `time-pos` events sent to the WebView UI while still
+/// allowing immediate updates after seeks or resets.
+#[derive(Debug, Clone)]
+pub struct TimePosThrottle {
+    min_interval: std::time::Duration,
+    jump_bypass_secs: f64,
+    last_emit_at: Option<std::time::Instant>,
+    last_emitted_pos: Option<f64>,
+}
+
+impl TimePosThrottle {
+    pub fn new(min_interval: std::time::Duration, jump_bypass_secs: f64) -> Self {
+        Self {
+            min_interval,
+            jump_bypass_secs,
+            last_emit_at: None,
+            last_emitted_pos: None,
+        }
+    }
+
+    pub fn ui_default() -> Self {
+        Self::new(std::time::Duration::from_millis(250), 1.5)
+    }
+
+    pub fn reset(&mut self) {
+        self.last_emit_at = None;
+        self.last_emitted_pos = None;
+    }
+
+    pub fn should_emit(&mut self, position: f64, now: std::time::Instant) -> bool {
+        let Some(last_at) = self.last_emit_at else {
+            self.last_emit_at = Some(now);
+            self.last_emitted_pos = Some(position);
+            return true;
+        };
+        let jumped = self
+            .last_emitted_pos
+            .map(|prev| (position - prev).abs() >= self.jump_bypass_secs)
+            .unwrap_or(true);
+        if jumped || now.duration_since(last_at) >= self.min_interval {
+            self.last_emit_at = Some(now);
+            self.last_emitted_pos = Some(position);
+            return true;
+        }
+        false
+    }
 }
 
 pub fn autosync_extract_args_mpv(
@@ -631,5 +681,19 @@ mod tests {
         }
         assert!(set_aid_cmd(1, None).contains("\"no\""));
         assert!(set_sid_cmd(2, Some(3)).contains("3"));
+    }
+
+    #[test]
+    fn test_time_pos_throttle_limits_steady_playback_and_bypasses_seeks() {
+        let mut th = TimePosThrottle::ui_default();
+        let t0 = std::time::Instant::now();
+        assert!(th.should_emit(0.0, t0));
+        // Frame-rate updates within 250ms are throttled
+        assert!(!th.should_emit(0.016, t0 + std::time::Duration::from_millis(16)));
+        assert!(!th.should_emit(0.200, t0 + std::time::Duration::from_millis(200)));
+        // After 250ms passes, emit again
+        assert!(th.should_emit(0.250, t0 + std::time::Duration::from_millis(250)));
+        // A jump >= 1.5s (seek) bypasses throttle immediately
+        assert!(th.should_emit(12.0, t0 + std::time::Duration::from_millis(266)));
     }
 }

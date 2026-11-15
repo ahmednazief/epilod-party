@@ -51,6 +51,9 @@ pub fn spawn_mpv(
     let args = launch_args_with_fonts(wid, pipe_name, fonts_str);
     let mut cmd = Command::new(mpv_path);
     cmd.args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .creation_flags(CREATE_NO_WINDOW);
     cmd.spawn()

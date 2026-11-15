@@ -20,12 +20,14 @@ export function ViewportPlaceholder({
   if (loaded && !playerError) return null;
 
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-canvas select-none">
+    <div className="ep-amethyst-canvas absolute inset-0 flex flex-col items-center justify-center p-6 select-none">
       {playerError ? (
-        <div className="anim-fade-slide-up max-w-md w-full p-5 bg-chrome border border-bad/40 rounded-[var(--radius-ui)] text-center flex flex-col items-center gap-3">
-          <AlertTriangle className="h-7 w-7 text-bad" />
-          <div className="space-y-1">
-            <h3 className="text-sm font-medium text-primary">Playback Engine Issue</h3>
+        <div className="ep-glass-sheet anim-fade-slide-up max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5">
+          <div className="h-11 w-11 rounded-full bg-bad/15 text-bad flex items-center justify-center">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div className="space-y-1.5">
+            <h3 className="text-sm font-medium text-white">Playback Engine Issue</h3>
             <p className="text-xs text-secondary leading-relaxed">{playerError}</p>
           </div>
           <div className="flex items-center gap-2 pt-1">
@@ -41,31 +43,29 @@ export function ViewportPlaceholder({
         </div>
       ) : (
         <div
-          className={`max-w-md w-full p-6 border border-dashed rounded-[var(--radius-ui)] text-center flex flex-col items-center gap-3 transition-colors duration-150 ${
-            isDragActive
-              ? "border-accent bg-chrome"
-              : "border-hairline bg-chrome/60"
+          className={`max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-all duration-300 ${
+            isDragActive ? "ep-glass-sheet scale-[1.02]" : ""
           }`}
         >
           <div className={isDragActive ? "anim-drop-float" : ""}>
             <LogoMark
               variant="party"
-              size={52}
-              className={`transition-transform duration-150 ${
+              size={56}
+              className={`transition-transform duration-200 ${
                 isDragActive ? "scale-105 opacity-100" : "opacity-95"
               }`}
             />
           </div>
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-primary">
-              {isDragActive ? "Drop your video or subtitle file" : "Drop a video file here"}
+          <div className="space-y-1.5">
+            <p className="text-base font-medium tracking-tight text-white">
+              {isDragActive ? "Drop your video or subtitle file" : "Drop a movie file here"}
             </p>
-            <p className="text-xs text-secondary">
-              Plays locally via mpv — nothing is uploaded. Drag an .srt / .ass / .vtt file too if needed.
+            <p className="text-xs text-secondary leading-relaxed max-w-xs mx-auto">
+              Plays directly from your device — drag an .srt, .ass, or .vtt file anytime.
             </p>
           </div>
-          <Button variant="primary" size="sm" onClick={onChooseFile}>
-            <FolderOpen className="h-3.5 w-3.5" />
+          <Button variant="primary" size="md" onClick={onChooseFile}>
+            <FolderOpen className="h-4 w-4" />
             Choose Video File
           </Button>
         </div>

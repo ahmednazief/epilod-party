@@ -2,9 +2,15 @@
 resolver = "2"
 members = ["crates/epilod-core", "crates/epilod-installer-core", "src-tauri", "src-installer"]
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 lto = true
 opt-level = "s"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = "symbols"

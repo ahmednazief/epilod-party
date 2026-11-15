@@ -42,6 +42,35 @@ pub fn is_zero_viewport(width: i32, height: i32) -> bool {
     width <= 0 || height <= 0
 }
 
+/// Tracks minimize/restore and fullscreen state transitions so `on_window_event`
+/// only emits `window://restored` or `window://fullscreen` on actual transitions,
+/// preventing IPC storms during drag-resizing and focus changes.
+#[derive(Debug, Default)]
+pub struct WindowTransitionTracker {
+    was_minimized: AtomicBool,
+    last_fullscreen: AtomicBool,
+}
+
+impl WindowTransitionTracker {
+    pub fn on_resize(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            self.was_minimized.store(true, Ordering::Release);
+            false
+        } else {
+            self.was_minimized.swap(false, Ordering::AcqRel)
+        }
+    }
+
+    pub fn on_fullscreen_sample(&self, is_fullscreen: bool) -> Option<bool> {
+        let prev = self.last_fullscreen.swap(is_fullscreen, Ordering::AcqRel);
+        if prev != is_fullscreen {
+            Some(is_fullscreen)
+        } else {
+            None
+        }
+    }
+}
+
 /// Fix 18: Exempt explicit backup switches and distinct room/endpoint transitions
 /// from aggressive `sync_connect` rate lockouts while still bounding abusive repeats.
 pub fn check_sync_connect_allowed(
@@ -170,7 +199,7 @@ mod windows_app {
             width,
             height,
         };
-        state.mpv.start(&app, hwnd, rect).inspect_err(|e| {
+        state.mpv.start(&app, hwnd, rect).await.inspect_err(|e| {
             log_backend(
                 &state,
                 LogLevel::Error,
@@ -209,8 +238,11 @@ mod windows_app {
     #[tauri::command]
     async fn mpv_load(state: State<'_, AppState>, path: String) -> Result<(), String> {
         let opts = state.network_policy.options();
-        let valid_path =
-            validate_existing_local_file_with_options(&path, opts).map_err(|e| e.to_string())?;
+        let valid_path = tokio::task::spawn_blocking(move || {
+            validate_existing_local_file_with_options(&path, opts).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("Failed validating video path: {e}"))??;
         let path_str = valid_path.to_string_lossy().into_owned();
 
         {
@@ -353,34 +385,40 @@ mod windows_app {
         encoding_hint: Option<SubtitleEncodingHint>,
     ) -> Result<(), String> {
         let opts = state.network_policy.options();
-        let valid =
-            validate_existing_local_file_with_options(&path, opts).map_err(|e| e.to_string())?;
         let hint = encoding_hint.unwrap_or_default();
 
         // Fix 25: Convert legacy non-UTF8 or explicit-hint subtitle files to clean UTF-8 temp file for libass.
-        let load_path = match std::fs::read(&valid) {
-            Ok(bytes) => {
-                let needs_transcode =
-                    hint != SubtitleEncodingHint::Auto || std::str::from_utf8(&bytes).is_err();
-                if needs_transcode {
-                    let decoded =
-                        decode_subtitle_bytes_with_hint(&bytes, hint).map_err(|e| e.to_string())?;
-                    let sub_dir = std::env::temp_dir().join("epilod-subs");
-                    std::fs::create_dir_all(&sub_dir)
-                        .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
-                    let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
-                    let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
-                    let out = sub_dir.join(format!("decoded_{}_{seq}.{ext}", std::process::id()));
-                    std::fs::write(&out, decoded.as_bytes())
-                        .map_err(|e| format!("Failed writing decoded UTF-8 subtitle: {e}"))?;
-                    prune_decoded_subs_dir(&sub_dir, 10);
-                    out.to_string_lossy().into_owned()
-                } else {
-                    valid.to_string_lossy().into_owned()
+        // Run all filesystem & decoding work off the async executor so UNC/large files never stall IPC.
+        let load_path = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let valid = validate_existing_local_file_with_options(&path, opts)
+                .map_err(|e| e.to_string())?;
+            match std::fs::read(&valid) {
+                Ok(bytes) => {
+                    let needs_transcode =
+                        hint != SubtitleEncodingHint::Auto || std::str::from_utf8(&bytes).is_err();
+                    if needs_transcode {
+                        let decoded = decode_subtitle_bytes_with_hint(&bytes, hint)
+                            .map_err(|e| e.to_string())?;
+                        let sub_dir = std::env::temp_dir().join("epilod-subs");
+                        std::fs::create_dir_all(&sub_dir)
+                            .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
+                        let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
+                        let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
+                        let out =
+                            sub_dir.join(format!("decoded_{}_{seq}.{ext}", std::process::id()));
+                        std::fs::write(&out, decoded.as_bytes())
+                            .map_err(|e| format!("Failed writing decoded UTF-8 subtitle: {e}"))?;
+                        prune_decoded_subs_dir(&sub_dir, 10);
+                        Ok(out.to_string_lossy().into_owned())
+                    } else {
+                        Ok(valid.to_string_lossy().into_owned())
+                    }
                 }
+                Err(_) => Ok(valid.to_string_lossy().into_owned()),
             }
-            Err(_) => valid.to_string_lossy().into_owned(),
-        };
+        })
+        .await
+        .map_err(|e| format!("Subtitle processing task failed: {e}"))??;
 
         let req = state.mpv.next_request_id();
         state.mpv.send_command(sub_add_cmd(req, &load_path))
@@ -486,15 +524,20 @@ mod windows_app {
         encoding_hint: Option<SubtitleEncodingHint>,
     ) -> Result<AutoSyncResultDto, String> {
         let opts = state.network_policy.options();
-        execute_two_anchor_sync(
-            &subtitle_path,
-            src_a_secs,
-            dst_a_secs,
-            src_b_secs,
-            dst_b_secs,
-            encoding_hint.unwrap_or_default(),
-            opts,
-        )
+        let hint = encoding_hint.unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            execute_two_anchor_sync(
+                &subtitle_path,
+                src_a_secs,
+                dst_a_secs,
+                src_b_secs,
+                dst_b_secs,
+                hint,
+                opts,
+            )
+        })
+        .await
+        .map_err(|e| format!("Two-anchor sync task failed: {e}"))?
     }
 
     #[tauri::command]
@@ -624,11 +667,16 @@ mod windows_app {
         duration_secs: f64,
         hash_identity: Option<bool>,
     ) -> Result<(), String> {
-        let resolved_size = size_bytes.or_else(|| {
-            path.as_deref()
-                .and_then(|p| std::fs::metadata(p).ok())
-                .map(|m| m.len())
-        });
+        let resolved_size = match (size_bytes, path) {
+            (Some(s), _) => Some(s),
+            (None, Some(p)) => {
+                tokio::task::spawn_blocking(move || std::fs::metadata(p).ok().map(|m| m.len()))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            (None, None) => None,
+        };
         state.sync.set_local_file(Some(LocalFileMeta {
             name,
             size_bytes: resolved_size,
@@ -832,11 +880,39 @@ mod windows_app {
             .map(PathBuf::from)
             .map(|p| p.join("EpilodParty").join("logs").join("epilod-party.log"));
 
+        let logger = Arc::new(Mutex::new(RingLogger::new_async(log_path, 512 * 1024)));
+        let logger_for_panic = Arc::clone(&logger);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let thread_name = std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_string();
+            let msg = format!("PANIC on thread '{thread_name}': {info}");
+            if let Ok(mut lg) = logger_for_panic.lock() {
+                lg.log(
+                    LogLevel::Error,
+                    "rust.panic",
+                    Some("ERR_PANIC"),
+                    &msg,
+                    SystemTime::now(),
+                    Instant::now(),
+                );
+            }
+            prev_hook(info);
+        }));
+
+        let watchdog_stop = Arc::new(AtomicBool::new(false));
+        let watchdog_stop_for_event = Arc::clone(&watchdog_stop);
+        let transitions = Arc::new(WindowTransitionTracker::default());
+        let transitions_for_event = Arc::clone(&transitions);
+        let logger_for_watchdog = Arc::clone(&logger);
+
         let app_state = AppState {
             mpv: Arc::new(MpvController::new()),
             sync: Arc::new(SyncController::new()),
             autosync: Arc::new(AutoSyncController::new()),
-            logger: Arc::new(Mutex::new(RingLogger::new(log_path, 512 * 1024))),
+            logger,
             rate_guard: Arc::new(Mutex::new(CommandRateGuard::new())),
             network_policy: Arc::new(NetworkSharePolicy::new(false)),
             updater: Arc::new(crate::updater::UpdaterState::new()),
@@ -845,18 +921,36 @@ mod windows_app {
         tauri::Builder::default()
             .plugin(tauri_plugin_dialog::init())
             .manage(app_state)
-            .on_window_event(|window, event| {
-                if let tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(true) = event {
+            .on_window_event(move |window, event| match event {
+                tauri::WindowEvent::Resized(size) => {
                     if let Ok(fs) = window.is_fullscreen() {
-                        let _ = window.emit(
-                            "window://fullscreen",
-                            serde_json::json!({ "fullscreen": fs }),
-                        );
+                        if let Some(changed) = transitions_for_event.on_fullscreen_sample(fs) {
+                            let _ = window.emit(
+                                "window://fullscreen",
+                                serde_json::json!({ "fullscreen": changed }),
+                            );
+                        }
                     }
-                    let _ = window.emit("window://restored", ());
+                    if transitions_for_event.on_resize(size.width, size.height) {
+                        let _ = window.emit("window://restored", ());
+                    }
                 }
+                tauri::WindowEvent::Focused(true) => {
+                    if let Ok(fs) = window.is_fullscreen() {
+                        if let Some(changed) = transitions_for_event.on_fullscreen_sample(fs) {
+                            let _ = window.emit(
+                                "window://fullscreen",
+                                serde_json::json!({ "fullscreen": changed }),
+                            );
+                        }
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    watchdog_stop_for_event.store(true, Ordering::Release);
+                }
+                _ => {}
             })
-            .setup(|app| {
+            .setup(move |app| {
                 if let Some(win) = app.get_webview_window("main") {
                     let url_str = win.url().map(|u| u.to_string()).unwrap_or_default();
                     if !url_str.is_empty()
@@ -866,6 +960,71 @@ mod windows_app {
                         return Err(format!("Blocked unexpected WebView origin: {url_str}").into());
                     }
                 }
+
+                // Lightweight UI-thread heartbeat watchdog: detects and logs main-thread stalls.
+                let app_handle = app.handle().clone();
+                let stop_flag = Arc::clone(&watchdog_stop);
+                let wd_logger = Arc::clone(&logger_for_watchdog);
+                let _ = std::thread::Builder::new()
+                    .name("epilod-ui-watchdog".to_string())
+                    .spawn(move || {
+                        while !stop_flag.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_secs(2));
+                            if stop_flag.load(Ordering::Acquire) {
+                                break;
+                            }
+                            let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+                            let sent_at = Instant::now();
+                            if app_handle
+                                .run_on_main_thread(move || {
+                                    let _ = tx.send(());
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            match rx.recv_timeout(Duration::from_secs(5)) {
+                                Ok(()) => {
+                                    let rtt = sent_at.elapsed();
+                                    if rtt >= Duration::from_millis(400) {
+                                        let lvl = if rtt >= Duration::from_secs(2) {
+                                            LogLevel::Error
+                                        } else {
+                                            LogLevel::Warn
+                                        };
+                                        if let Ok(mut lg) = wd_logger.lock() {
+                                            lg.log(
+                                                lvl,
+                                                "ui.watchdog",
+                                                Some("WARN_UI_STALL"),
+                                                &format!(
+                                                    "Main UI thread stalled for {} ms",
+                                                    rtt.as_millis()
+                                                ),
+                                                SystemTime::now(),
+                                                Instant::now(),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                    if !stop_flag.load(Ordering::Acquire) {
+                                        if let Ok(mut lg) = wd_logger.lock() {
+                                            lg.log(
+                                                LogLevel::Error,
+                                                "ui.watchdog",
+                                                Some("ERR_UI_HANG"),
+                                                "Main UI thread unresponsive for >5000 ms",
+                                                SystemTime::now(),
+                                                Instant::now(),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                    });
                 Ok(())
             })
             .invoke_handler(tauri::generate_handler![
@@ -1022,5 +1181,24 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_window_transition_tracker_filters_redundant_events() {
+        let tracker = WindowTransitionTracker::default();
+        // Normal resizes do not trigger restore
+        assert!(!tracker.on_resize(1360, 820));
+        assert!(!tracker.on_resize(1400, 850));
+        // Minimizing to 0x0 records minimized state without firing restore
+        assert!(!tracker.on_resize(0, 0));
+        // Restoring from 0x0 fires restore exactly once
+        assert!(tracker.on_resize(1360, 820));
+        assert!(!tracker.on_resize(1360, 820));
+
+        // Fullscreen only emits on state transitions
+        assert_eq!(tracker.on_fullscreen_sample(false), None);
+        assert_eq!(tracker.on_fullscreen_sample(true), Some(true));
+        assert_eq!(tracker.on_fullscreen_sample(true), None);
+        assert_eq!(tracker.on_fullscreen_sample(false), Some(false));
     }
 }

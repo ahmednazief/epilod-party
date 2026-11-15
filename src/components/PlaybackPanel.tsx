@@ -1,4 +1,5 @@
 import { Lock, Repeat } from "lucide-react";
+import { memo } from "react";
 import {
   mpvSetAspectMode,
   mpvSetAudioTrack,
@@ -11,7 +12,6 @@ import { buildAudioTrackOptions, selectAudioTrack } from "../lib/tracks";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
-import { Button } from "./ui/Button";
 import { SelectMenu, type SelectMenuOption } from "./ui/SelectMenu";
 
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 2.0] as const;
@@ -24,7 +24,7 @@ const ASPECT_OPTIONS: ReadonlyArray<SelectMenuOption<AspectMode>> = [
   { value: "fill", label: "Stretch / Fill" },
 ];
 
-export function PlaybackPanel() {
+export const PlaybackPanel = memo(function PlaybackPanel() {
   const loaded = usePlayerStore((s) => s.loaded);
   const speed = usePlayerStore((s) => s.speed);
   const looping = usePlayerStore((s) => s.looping);
@@ -43,7 +43,7 @@ export function PlaybackPanel() {
 
   const handleSpeedClick = (nextSpeed: number) => {
     if (!canChangePlaybackSpeed(syncConnected, nextSpeed)) {
-      pushNote("info", "Playback speed stays locked to 1.0× while synced with peers.");
+      pushNote("info", "Playback speed stays synced at 1.0× while watching with peers.");
       return;
     }
     setSpeed(nextSpeed);
@@ -51,35 +51,41 @@ export function PlaybackPanel() {
   };
 
   return (
-    <div className="anim-tab-in p-3 space-y-4">
+    <div className="anim-tab-in px-4 py-3.5 space-y-4">
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-secondary">Playback Speed</span>
+          <span className="text-xs font-medium text-secondary">Speed</span>
           {syncConnected && (
             <span className="inline-flex items-center gap-1 text-[11px] text-accent-soft">
               <Lock className="h-3 w-3" />
-              Locked 1.0×
+              Synced 1.0×
             </span>
           )}
         </div>
-        <div className="grid grid-cols-5 gap-1">
+        <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1">
           {SPEED_PRESETS.map((preset) => {
             const active = Math.abs(speed - preset) < 0.01;
             const disabled = !loaded || (syncConnected && preset !== 1.0);
             return (
-              <Button
+              <button
                 key={preset}
-                variant={active ? "primary" : "secondary"}
-                size="sm"
+                type="button"
                 disabled={disabled}
                 onClick={() => handleSpeedClick(preset)}
+                className={`ep-press h-7 rounded-full text-xs font-medium num transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                  active
+                    ? "ep-droplet-indicator text-white"
+                    : "text-muted hover:text-primary"
+                }`}
               >
-                <span className="num">{preset === 1 ? "1×" : `${preset}×`}</span>
-              </Button>
+                {preset === 1 ? "1×" : `${preset}×`}
+              </button>
             );
           })}
         </div>
       </div>
+
+      <div className="ep-hairline-divider" />
 
       <div className="space-y-1.5">
         <span className="text-xs font-medium text-secondary block">Audio Track</span>
@@ -96,7 +102,7 @@ export function PlaybackPanel() {
       </div>
 
       <div className="space-y-1.5">
-        <span className="text-xs font-medium text-secondary block">Aspect Ratio</span>
+        <span className="text-xs font-medium text-secondary block">Picture Frame</span>
         <SelectMenu
           ariaLabel="Aspect Ratio"
           disabled={!loaded}
@@ -109,22 +115,30 @@ export function PlaybackPanel() {
         />
       </div>
 
-      <div className="flex items-center justify-between pt-1">
-        <span className="text-xs font-medium text-secondary">Loop Video</span>
-        <Button
-          variant={looping ? "primary" : "secondary"}
-          size="sm"
-          disabled={!loaded}
-          onClick={() => {
-            const next = !looping;
-            setLooping(next);
-            void mpvSetLoop(next);
-          }}
+      <div className="ep-hairline-divider" />
+
+      <button
+        type="button"
+        disabled={!loaded}
+        onClick={() => {
+          const next = !looping;
+          setLooping(next);
+          void mpvSetLoop(next);
+        }}
+        className="ep-menu-row ep-press w-full px-2.5 py-2 flex items-center justify-between gap-3 cursor-pointer disabled:opacity-45 disabled:pointer-events-none"
+      >
+        <span className="inline-flex items-center gap-2 text-xs font-medium text-primary">
+          <Repeat className="h-3.5 w-3.5 text-secondary" />
+          Loop Video
+        </span>
+        <span
+          className={`ep-switch-track w-10 h-6 rounded-full p-0.5 flex items-center transition-colors ${
+            looping ? "bg-accent justify-end" : "bg-white/18 justify-start"
+          }`}
         >
-          <Repeat className="h-3.5 w-3.5" />
-          <span>{looping ? "Looping" : "Off"}</span>
-        </Button>
-      </div>
+          <span className="ep-switch-thumb h-5 w-5 rounded-full bg-white shadow" />
+        </span>
+      </button>
     </div>
   );
-}
+});

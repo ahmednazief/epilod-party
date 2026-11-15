@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_RING_ENTRIES: usize = 500;
@@ -156,8 +158,9 @@ pub struct RingLogger {
     max_entries: usize,
     log_path: Option<PathBuf>,
     max_file_bytes: u64,
-    dropped_file_writes: u64,
+    dropped_file_writes: Arc<AtomicU64>,
     limiter: LogRateLimiter,
+    async_tx: Option<mpsc::SyncSender<String>>,
 }
 
 impl RingLogger {
@@ -167,8 +170,51 @@ impl RingLogger {
             max_entries: MAX_RING_ENTRIES,
             log_path,
             max_file_bytes: max_file_bytes.max(4096),
-            dropped_file_writes: 0,
+            dropped_file_writes: Arc::new(AtomicU64::new(0)),
             limiter: LogRateLimiter::new(40, Duration::from_secs(2)),
+            async_tx: None,
+        }
+    }
+
+    /// Creates a logger whose disk I/O runs asynchronously on a dedicated writer thread,
+    /// batching writes so callers holding the logger lock never stall on filesystem operations.
+    pub fn new_async(log_path: Option<PathBuf>, max_file_bytes: u64) -> Self {
+        let clamped_bytes = max_file_bytes.max(4096);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let async_tx = log_path.clone().and_then(|path| {
+            let (tx, rx) = mpsc::sync_channel::<String>(512);
+            let dropped_clone = Arc::clone(&dropped);
+            let spawn_res = std::thread::Builder::new()
+                .name("epilod-logger".to_string())
+                .spawn(move || {
+                    let mut dir_created = false;
+                    while let Ok(first) = rx.recv() {
+                        let mut batch = String::with_capacity(first.len() + 256);
+                        batch.push_str(&first);
+                        while let Ok(next) = rx.try_recv() {
+                            batch.push_str(&next);
+                            if batch.len() >= 32 * 1024 {
+                                break;
+                            }
+                        }
+                        if !write_batch_to_disk(&path, clamped_bytes, &batch, &mut dir_created) {
+                            dropped_clone.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            match spawn_res {
+                Ok(_) => Some(tx),
+                Err(_) => None,
+            }
+        });
+        Self {
+            entries: VecDeque::with_capacity(MAX_RING_ENTRIES),
+            max_entries: MAX_RING_ENTRIES,
+            log_path,
+            max_file_bytes: clamped_bytes,
+            dropped_file_writes: dropped,
+            limiter: LogRateLimiter::new(40, Duration::from_secs(2)),
+            async_tx,
         }
     }
 
@@ -218,39 +264,16 @@ impl RingLogger {
         let Some(ref path) = self.log_path else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                self.dropped_file_writes += 1;
-                return;
+        let line = format_log_line(entry);
+        if let Some(ref tx) = self.async_tx {
+            if tx.try_send(line).is_err() {
+                self.dropped_file_writes.fetch_add(1, Ordering::Relaxed);
             }
+            return;
         }
-        if let Ok(meta) = fs::metadata(path) {
-            if meta.len() >= self.max_file_bytes {
-                let backup = backup_path(path);
-                let _ = fs::remove_file(&backup);
-                if fs::rename(path, &backup).is_err() {
-                    let _ = File::create(path);
-                }
-            }
-        }
-        match OpenOptions::new().create(true).append(true).open(path) {
-            Ok(mut f) => {
-                let code_part = entry
-                    .code
-                    .as_deref()
-                    .map(|c| format!(" [{c}]"))
-                    .unwrap_or_default();
-                let line = format!(
-                    "[{}] [{:?}] [{}]{} {}\n",
-                    entry.timestamp, entry.level, entry.target, code_part, entry.message
-                );
-                if f.write_all(line.as_bytes()).is_err() {
-                    self.dropped_file_writes += 1;
-                }
-            }
-            Err(_) => {
-                self.dropped_file_writes += 1;
-            }
+        let mut dir_created = false;
+        if !write_batch_to_disk(path, self.max_file_bytes, &line, &mut dir_created) {
+            self.dropped_file_writes.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -262,9 +285,50 @@ impl RingLogger {
                 .log_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
-            dropped_file_writes: self.dropped_file_writes,
+            dropped_file_writes: self.dropped_file_writes.load(Ordering::Relaxed),
             entries: self.entries.iter().skip(skip).cloned().collect(),
         }
+    }
+}
+
+fn format_log_line(entry: &LogEntry) -> String {
+    let code_part = entry
+        .code
+        .as_deref()
+        .map(|c| format!(" [{c}]"))
+        .unwrap_or_default();
+    format!(
+        "[{}] [{:?}] [{}]{} {}\n",
+        entry.timestamp, entry.level, entry.target, code_part, entry.message
+    )
+}
+
+fn write_batch_to_disk(
+    path: &Path,
+    max_file_bytes: u64,
+    batch: &str,
+    dir_created: &mut bool,
+) -> bool {
+    if !*dir_created {
+        if let Some(parent) = path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return false;
+            }
+        }
+        *dir_created = true;
+    }
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() >= max_file_bytes {
+            let backup = backup_path(path);
+            let _ = fs::remove_file(&backup);
+            if fs::rename(path, &backup).is_err() {
+                let _ = File::create(path);
+            }
+        }
+    }
+    match OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => f.write_all(batch.as_bytes()).is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -334,6 +398,49 @@ mod tests {
         assert_eq!(snap.entries.len(), 10);
         assert_eq!(snap.dropped_file_writes, 0);
         assert!(backup_path(&log_file).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_async_logger_batches_and_flushes_to_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "epilod_async_log_test_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let log_file = dir.join("epilod-async.log");
+        {
+            let mut logger = RingLogger::new_async(Some(log_file.clone()), 64 * 1024);
+            let t0 = Instant::now();
+            for i in 0..10 {
+                logger.log(
+                    LogLevel::Info,
+                    "async.test",
+                    None,
+                    &format!("async entry {i}"),
+                    UNIX_EPOCH + Duration::from_secs(i),
+                    t0 + Duration::from_secs(i),
+                );
+            }
+            assert_eq!(logger.snapshot(10).entries.len(), 10);
+        }
+        // Wait briefly for background thread to flush remaining batch after sender drop
+        for _ in 0..20 {
+            if log_file.is_file() {
+                if let Ok(content) = fs::read_to_string(&log_file) {
+                    if content.contains("async entry 9") {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let content = fs::read_to_string(&log_file).unwrap_or_default();
+        assert!(content.contains("async entry 0"));
+        assert!(content.contains("async entry 9"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

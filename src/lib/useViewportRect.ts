@@ -19,7 +19,10 @@ export function useViewportRect(ref: RefObject<HTMLElement | null>, refreshSigna
   const [rect, setRect] = useState<PhysicalRect>({ x: 0, y: 0, width: 0, height: 0 });
 
   useEffect(() => {
-    const update = () => {
+    let rafId: number | null = null;
+    let trailingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const commit = () => {
       const next = measurePhysicalRect(ref.current);
       setRect((prev) =>
         prev.x === next.x &&
@@ -31,29 +34,47 @@ export function useViewportRect(ref: RefObject<HTMLElement | null>, refreshSigna
       );
     };
 
-    update();
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    const scheduleMeasure = () => {
+      if (rafId === null && typeof requestAnimationFrame === "function") {
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          commit();
+        });
+      }
+      if (trailingTimer !== null) {
+        clearTimeout(trailingTimer);
+      }
+      trailingTimer = setTimeout(() => {
+        trailingTimer = null;
+        commit();
+      }, 60);
+    };
+
+    commit();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(scheduleMeasure) : null;
     if (ro && ref.current) {
       ro.observe(ref.current);
     }
 
-    window.addEventListener("resize", update);
-    window.addEventListener("focus", update);
-    document.addEventListener("visibilitychange", update);
+    window.addEventListener("resize", scheduleMeasure);
 
     const dpr = window.devicePixelRatio || 1;
     const mq =
       typeof window.matchMedia === "function"
         ? window.matchMedia(`(resolution: ${dpr}dppx)`)
         : null;
-    mq?.addEventListener?.("change", update);
+    mq?.addEventListener?.("change", scheduleMeasure);
 
     return () => {
+      if (rafId !== null && typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(rafId);
+      }
+      if (trailingTimer !== null) {
+        clearTimeout(trailingTimer);
+      }
       ro?.disconnect();
-      window.removeEventListener("resize", update);
-      window.removeEventListener("focus", update);
-      document.removeEventListener("visibilitychange", update);
-      mq?.removeEventListener?.("change", update);
+      window.removeEventListener("resize", scheduleMeasure);
+      mq?.removeEventListener?.("change", scheduleMeasure);
     };
   }, [ref, refreshSignal]);
 

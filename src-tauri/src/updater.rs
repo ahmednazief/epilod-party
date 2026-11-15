@@ -141,18 +141,18 @@ pub fn cleanup_update_cache_on_startup() {
     cleanup_stale_update_cache(&dir, CURRENT_APP_VERSION, unix_now());
 }
 
-/// Runs startup cache cleanup asynchronously with retry backoff so a briefly locked
-/// Setup.exe exiting after an in-place upgrade does not leave stale installers behind.
+/// Runs startup cache cleanup asynchronously once the updates cache folder exists.
 pub fn spawn_startup_cache_cleanup() {
-    std::thread::spawn(|| {
-        let delays_ms = [0u64, 500, 1500, 4000];
-        for delay in delays_ms {
-            if delay > 0 {
-                std::thread::sleep(Duration::from_millis(delay));
-            }
+    let dir = update_cache_dir();
+    if !dir.exists() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("epilod-cache-cleanup".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
             cleanup_update_cache_on_startup();
-        }
-    });
+        });
 }
 
 fn unix_now() -> u64 {
@@ -406,7 +406,11 @@ pub fn get_app_update_status(state: &UpdaterState) -> AppUpdateStatusDto {
 
 pub async fn check_for_updates(state: &UpdaterState) -> Result<AppUpdateStatusDto, String> {
     let cache_dir = update_cache_dir();
-    cleanup_stale_update_cache(&cache_dir, CURRENT_APP_VERSION, unix_now());
+    let cache_for_cleanup = cache_dir.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        cleanup_stale_update_cache(&cache_for_cleanup, CURRENT_APP_VERSION, unix_now());
+    })
+    .await;
 
     let manifest_bytes = match fetch_https_bytes(DEFAULT_MANIFEST_URL, MAX_MANIFEST_BYTES).await {
         Ok(bytes) => bytes,
@@ -485,52 +489,79 @@ pub async fn check_for_updates(state: &UpdaterState) -> Result<AppUpdateStatusDt
         *ts = Some(now);
     }
 
-    match parse_and_validate_manifest_with_signature(&manifest_bytes, CURRENT_APP_VERSION) {
-        Ok((manifest, mut availability, sig_verified)) => {
-            // Prune any older superseded cached updates when a newer release becomes latest
-            cleanup_update_cache_with_keep(
-                &cache_dir,
-                CURRENT_APP_VERSION,
-                Some(&manifest.version),
-                now,
-            );
+    let cache_for_verify = cache_dir.clone();
+    let verify_outcome = tokio::task::spawn_blocking(move || {
+        let parsed =
+            parse_and_validate_manifest_with_signature(&manifest_bytes, CURRENT_APP_VERSION);
+        match parsed {
+            Ok((manifest, mut availability, sig_verified)) => {
+                // Prune any older superseded cached updates when a newer release becomes latest
+                cleanup_update_cache_with_keep(
+                    &cache_for_verify,
+                    CURRENT_APP_VERSION,
+                    Some(&manifest.version),
+                    now,
+                );
 
+                let mut downloaded_path: Option<String> = None;
+                let mut message = match availability {
+                    UpdateAvailability::UpToDate => {
+                        format!("Epilod Party v{CURRENT_APP_VERSION} is up to date")
+                    }
+                    UpdateAvailability::UpdateAvailable => {
+                        format!("Update available: Epilod Party v{}", manifest.version)
+                    }
+                    UpdateAvailability::DownloadedReady => {
+                        format!("Epilod Party v{} ready to install", manifest.version)
+                    }
+                    UpdateAvailability::UnsupportedUpgrade => {
+                        "Manual reinstall required for this release".to_string()
+                    }
+                };
+
+                if availability == UpdateAvailability::UpdateAvailable {
+                    let candidate = installer_exe_path(&cache_for_verify, &manifest.version);
+                    if verify_downloaded_installer(
+                        &candidate,
+                        manifest.size_bytes,
+                        &manifest.sha256,
+                    )
+                    .is_ok()
+                        && verify_sfx_payload_matches(&candidate, &manifest.version).is_ok()
+                    {
+                        let _ = write_ready_metadata_atomic(
+                            &cache_for_verify,
+                            &manifest,
+                            &candidate,
+                            now,
+                        );
+                        availability = UpdateAvailability::DownloadedReady;
+                        downloaded_path = Some(candidate.to_string_lossy().into_owned());
+                        message = format!(
+                            "Epilod Party v{} already downloaded and verified — ready to install",
+                            manifest.version
+                        );
+                    }
+                }
+                Ok(Ok((
+                    manifest,
+                    availability,
+                    sig_verified,
+                    downloaded_path,
+                    message,
+                )))
+            }
+            Err(e) => Ok(Err(e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("Update verification task failed: {e}"))?;
+
+    match verify_outcome {
+        Ok(Ok((manifest, availability, sig_verified, downloaded_path, message))) => {
             if let Ok(mut rel) = state.latest_release.lock() {
                 *rel = Some(manifest.clone());
             }
-
-            let mut downloaded_path: Option<String> = None;
-            let mut message = match availability {
-                UpdateAvailability::UpToDate => {
-                    format!("Epilod Party v{CURRENT_APP_VERSION} is up to date")
-                }
-                UpdateAvailability::UpdateAvailable => {
-                    format!("Update available: Epilod Party v{}", manifest.version)
-                }
-                UpdateAvailability::DownloadedReady => {
-                    format!("Epilod Party v{} ready to install", manifest.version)
-                }
-                UpdateAvailability::UnsupportedUpgrade => {
-                    "Manual reinstall required for this release".to_string()
-                }
-            };
-
-            if availability == UpdateAvailability::UpdateAvailable {
-                let candidate = installer_exe_path(&cache_dir, &manifest.version);
-                if verify_downloaded_installer(&candidate, manifest.size_bytes, &manifest.sha256)
-                    .is_ok()
-                    && verify_sfx_payload_matches(&candidate, &manifest.version).is_ok()
-                {
-                    let _ = write_ready_metadata_atomic(&cache_dir, &manifest, &candidate, now);
-                    availability = UpdateAvailability::DownloadedReady;
-                    downloaded_path = Some(candidate.to_string_lossy().into_owned());
-                    message = format!(
-                        "Epilod Party v{} already downloaded and verified — ready to install",
-                        manifest.version
-                    );
-                }
-            }
-
             Ok(AppUpdateStatusDto {
                 current_version: CURRENT_APP_VERSION.to_string(),
                 availability,
@@ -546,11 +577,11 @@ pub async fn check_for_updates(state: &UpdaterState) -> Result<AppUpdateStatusDt
                 message,
             })
         }
-        Err(epilod_core::updater::UpdateError::UnsupportedDirectUpgrade {
+        Ok(Err(epilod_core::updater::UpdateError::UnsupportedDirectUpgrade {
             current,
             target,
             min_req,
-        }) => Ok(AppUpdateStatusDto {
+        })) => Ok(AppUpdateStatusDto {
             current_version: current,
             availability: UpdateAvailability::UnsupportedUpgrade,
             available_release: None,
@@ -562,7 +593,8 @@ pub async fn check_for_updates(state: &UpdaterState) -> Result<AppUpdateStatusDt
                 "Update v{target} requires v{min_req} or newer; download the installer directly from GitHub."
             ),
         }),
-        Err(e) => Err(e.to_string()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e),
     }
 }
 

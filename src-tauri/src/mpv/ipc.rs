@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use epilod_core::mpv_ipc::{encode_observe, parse_line, MpvEvent, MpvMessage};
+use epilod_core::mpv_ipc::{encode_observe, parse_line, MpvEvent, MpvMessage, TimePosThrottle};
 use epilod_core::syncplay::PlayerSnapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,13 +20,13 @@ pub async fn connect_and_run_ipc(
 ) {
     let full_pipe = format!(r"\\.\pipe\{pipe_name}");
     let mut client = None;
-    for _ in 0..50 {
+    for _ in 0..200 {
         match ClientOptions::new().open(&full_pipe) {
             Ok(c) => {
                 client = Some(c);
                 break;
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
         }
     }
 
@@ -66,6 +66,7 @@ pub async fn connect_and_run_ipc(
         }
     });
 
+    let mut ui_time_throttle = TimePosThrottle::ui_default();
     let mut lines = BufReader::new(reader_half).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         match parse_line(&line) {
@@ -75,17 +76,14 @@ pub async fn connect_and_run_ipc(
                         continue;
                     }
                     let skip_stale_seek = {
-                        if let Ok(mut ps) = pending_seek.lock() {
-                            if let Some((target, at)) = *ps {
-                                if at.elapsed() < Duration::from_millis(2500)
-                                    && (position - target).abs() > 1.0
-                                {
-                                    true
-                                } else {
-                                    *ps = None;
-                                    false
-                                }
+                        let mut ps = pending_seek.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some((target, at)) = *ps {
+                            if at.elapsed() < Duration::from_millis(2500)
+                                && (position - target).abs() > 1.0
+                            {
+                                true
                             } else {
+                                *ps = None;
                                 false
                             }
                         } else {
@@ -95,10 +93,13 @@ pub async fn connect_and_run_ipc(
                     if skip_stale_seek {
                         continue;
                     }
-                    if let Ok(mut snap) = snapshot.lock() {
+                    {
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                         snap.position = position;
                     }
-                    let _ = app.emit("mpv://time", serde_json::json!({ "position": position }));
+                    if ui_time_throttle.should_emit(position, Instant::now()) {
+                        let _ = app.emit("mpv://time", serde_json::json!({ "position": position }));
+                    }
                 }
                 MpvEvent::Duration(duration) => {
                     let _ = app.emit(
@@ -110,7 +111,8 @@ pub async fn connect_and_run_ipc(
                     if loading_media.load(Ordering::SeqCst) {
                         continue;
                     }
-                    if let Ok(mut snap) = snapshot.lock() {
+                    {
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                         snap.paused = paused;
                     }
                     let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
@@ -125,6 +127,7 @@ pub async fn connect_and_run_ipc(
                 }
                 MpvEvent::FileLoaded => {
                     loading_media.store(false, Ordering::SeqCst);
+                    ui_time_throttle.reset();
                     let _ = app.emit("mpv://file-loaded", ());
                 }
                 MpvEvent::EndFile { reason, file_error } => {

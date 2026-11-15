@@ -126,15 +126,15 @@ export function Scrubber({
     >
       {formatTooltip && hoverVal !== null && !disabled && (
         <div
-          className="pointer-events-none absolute -top-7 -translate-x-1/2 px-1.5 py-0.5 text-[11px] num bg-raised text-primary border border-hairline rounded-[var(--radius-ui)] whitespace-nowrap"
+          className="anim-pop-in ep-glass-pill pointer-events-none absolute -top-8 -translate-x-1/2 px-2.5 py-0.5 text-[11px] font-medium num text-primary rounded-full whitespace-nowrap"
           style={{ left: `${hoverX}px` }}
         >
           {formatTooltip(hoverVal)}
         </div>
       )}
-      <div className="relative w-full h-1.5 group-hover:h-2 bg-raised rounded-full overflow-hidden transition-[height] duration-150">
+      <div className="relative w-full h-1.5 group-hover:h-2.5 bg-white/14 rounded-full overflow-hidden transition-[height] duration-200 ease-out">
         <div
-          className="absolute inset-0 bg-accent origin-left will-change-transform"
+          className="ep-scrubber-fill absolute inset-0 origin-left will-change-transform rounded-full"
           style={{ transform: `scaleX(${ratio})` }}
         />
       </div>
@@ -143,7 +143,7 @@ export function Scrubber({
           className="w-full"
           style={{ transform: `translateX(${ratio * 100}%)` }}
         >
-          <div className="-ml-1.5 h-3 w-3 rounded-full bg-primary border border-canvas opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity duration-150" />
+          <div className="-ml-1.5 h-3.5 w-3.5 rounded-full bg-white shadow-md opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 scale-90 group-hover:scale-100 transition-all duration-150" />
         </div>
       </div>
     </div>

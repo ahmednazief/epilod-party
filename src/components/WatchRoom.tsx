@@ -1,12 +1,6 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  FolderOpen,
-  LogOut,
-  PanelRightClose,
-  PanelRightOpen,
-  Settings,
-} from "lucide-react";
+import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { usePlayerShortcuts } from "../hooks/usePlayerShortcuts";
@@ -69,7 +63,7 @@ import {
   syncUserPlay,
   syncUserSeek,
 } from "../lib/syncplay";
-import { useViewportRect } from "../lib/useViewportRect";
+import { measurePhysicalRect, useViewportRect } from "../lib/useViewportRect";
 import { ViewportSyncTracker } from "../lib/viewportSync";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
@@ -81,15 +75,12 @@ import { RoomPanel } from "./RoomPanel";
 import { SettingsModal } from "./SettingsModal";
 import { ShortcutsModal } from "./ShortcutsModal";
 import { SubtitlePanel } from "./SubtitlePanel";
-import { TransportBar } from "./TransportBar";
+import { TransportBar, type CapsuleTab } from "./TransportBar";
 import { ViewportPlaceholder } from "./ViewportPlaceholder";
-import { Button } from "./ui/Button";
-import { LogoMark } from "./ui/LogoMark";
 import { NotificationStrip } from "./ui/NotificationStrip";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
-import { StatusDot } from "./ui/StatusDot";
 
-type SideTab = "room" | "playback" | "subtitles";
+type SideTab = CapsuleTab;
 
 export function WatchRoom() {
   const {
@@ -120,36 +111,63 @@ export function WatchRoom() {
     })),
   );
 
-  const openSettings = useAppStore((s) => s.openSettings);
   const closeSettings = useAppStore((s) => s.closeSettings);
   const closeShortcuts = useAppStore((s) => s.closeShortcuts);
   const leaveRoom = useAppStore((s) => s.leaveRoom);
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
 
   const loaded = usePlayerStore((s) => s.loaded);
+  const paused = usePlayerStore((s) => s.paused);
   const durationSecs = usePlayerStore((s) => s.durationSecs);
   const speed = usePlayerStore((s) => s.speed);
   const isFullscreen = usePlayerStore((s) => s.isFullscreen);
   const playerError = usePlayerStore((s) => s.playerError);
-  const feedback = usePlayerStore((s) => s.feedback);
 
   const syncStatus = useSyncStore((s) => s.status);
   const pushNote = useNotificationStore((s) => s.push);
 
   const [sideTab, setSideTab] = useState<SideTab>("room");
-  const [panelOpen, setPanelOpen] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [chromeIdle, setChromeIdle] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
   const mpvStartedRef = useRef(false);
+  const mpvStartPromiseRef = useRef<Promise<void> | null>(null);
+  const roomSessionStartedRef = useRef(false);
+  const panelOpenRef = useRef(false);
+  const idleTimerRef = useRef<number | null>(null);
   const announcedFileKeyRef = useRef<string | null>(null);
   const autoReadyMarkedRef = useRef(false);
   const dialogOpenRef = useRef(false);
   const leavingRef = useRef(false);
   const loadGenRef = useRef(0);
-  const pendingReloadOnRestartRef = useRef(false);
+
+  panelOpenRef.current = panelOpen;
+
+  const wakeChrome = useCallback(() => {
+    setChromeIdle(false);
+    if (idleTimerRef.current !== null) {
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    const p = usePlayerStore.getState();
+    const app = useAppStore.getState();
+    if (
+      p.loaded &&
+      !p.paused &&
+      !panelOpenRef.current &&
+      !app.settingsOpen &&
+      !app.shortcutsOpen &&
+      !p.playerError
+    ) {
+      idleTimerRef.current = window.setTimeout(() => {
+        setChromeIdle(true);
+      }, 2600);
+    }
+  }, []);
 
   const rect = useViewportRect(viewportRef, viewportTick);
 
@@ -172,6 +190,41 @@ export function WatchRoom() {
     onExitFullscreen: exitFullscreen,
   });
 
+  const ensureMpvStarted = useCallback(async () => {
+    if (!isDesktop() || mpvStartedRef.current) return;
+    if (mpvStartPromiseRef.current) {
+      await mpvStartPromiseRef.current;
+      return;
+    }
+
+    const rawRect = measurePhysicalRect(viewportRef.current);
+    const initialRect = {
+      x: rawRect.x,
+      y: rawRect.y,
+      width: Math.max(1, rawRect.width),
+      height: Math.max(1, rawRect.height),
+    };
+
+    const startPromise = mpvStart(initialRect)
+      .then(() => {
+        mpvStartedRef.current = true;
+        viewportTrackerRef.current.markInvalidated();
+        const appState = useAppStore.getState();
+        const playerErr = usePlayerStore.getState().playerError;
+        if (panelOpenRef.current) {
+          void mpvSetVisible(false);
+        } else {
+          void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !playerErr);
+        }
+      })
+      .finally(() => {
+        mpvStartPromiseRef.current = null;
+      });
+
+    mpvStartPromiseRef.current = startPromise;
+    await startPromise;
+  }, []);
+
   // Load media + subtitle files safely
   const loadVideoPath = useCallback(
     async (path: string) => {
@@ -182,6 +235,8 @@ export function WatchRoom() {
       autoReadyMarkedRef.current = false;
       announcedFileKeyRef.current = null;
       try {
+        await ensureMpvStarted();
+        if (loadGenRef.current !== gen) return;
         await mpvLoad(path);
         if (loadGenRef.current !== gen) return;
         const subState = useSubtitleStore.getState();
@@ -210,7 +265,7 @@ export function WatchRoom() {
         void logFrontendEvent("error", "player.load", msg, "ERR_LOAD");
       }
     },
-    [pushNote, setSelectedFile],
+    [ensureMpvStarted, pushNote, setSelectedFile],
   );
 
   const loadSubtitlePath = useCallback(
@@ -273,7 +328,9 @@ export function WatchRoom() {
       if (mpvStartedRef.current) {
         const appState = useAppStore.getState();
         const pState = usePlayerStore.getState();
-        void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+        if (!panelOpenRef.current || !pState.loaded) {
+          void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+        }
       }
     }
   }, [loadVideoPath, pushNote]);
@@ -309,12 +366,23 @@ export function WatchRoom() {
 
   useEffect(() => {
     if (!roomCode) return;
-    connectRoom(serverEndpoint, serverPassword);
+    const timer = window.setTimeout(() => {
+      roomSessionStartedRef.current = true;
+      connectRoom(serverEndpoint, serverPassword);
+    }, 0);
     return () => {
+      window.clearTimeout(timer);
+      if (!roomSessionStartedRef.current && !mpvStartedRef.current) {
+        return;
+      }
+      roomSessionStartedRef.current = false;
       void enqueueSyncLifecycle(async () => {
         await syncDisconnect();
-        await mpvStop();
-        mpvStartedRef.current = false;
+        if (mpvStartedRef.current) {
+          mpvStartedRef.current = false;
+          mpvStartPromiseRef.current = null;
+          await mpvStop();
+        }
       });
     };
     // Initial room mount + unmount cleanup; server config changes use onApplyServerConfig
@@ -546,53 +614,58 @@ export function WatchRoom() {
     };
   }, [loadSubtitlePath, loadVideoPath, pushNote]);
 
-  // Start / resize child mpv HWND inside the viewport container (Fix 15)
+  // Resize child mpv HWND inside the viewport container once started (Fix 15)
   useEffect(() => {
-    if (!isDesktop()) return;
-    if (!mpvStartedRef.current) {
-      if (rect.width > 0 && rect.height > 0) {
-        mpvStartedRef.current = true;
-        void mpvStart(rect)
-          .then(() => {
-            if (pendingReloadOnRestartRef.current) {
-              pendingReloadOnRestartRef.current = false;
-              const currentFile = useAppStore.getState().selectedFilePath;
-              if (currentFile) {
-                void loadVideoPath(currentFile);
-              }
-            }
-          })
-          .catch((err) => {
-            mpvStartedRef.current = false;
-            pendingReloadOnRestartRef.current = false;
-            const msg = formatUserError(err, "Failed starting mpv playback engine.");
-            usePlayerStore.getState().setPlayerError(msg);
-          });
-      }
-      return;
-    }
-
+    if (!isDesktop() || !mpvStartedRef.current) return;
     const plan = viewportTrackerRef.current.planResize(rect);
     if (plan.send) {
       void mpvResize(rect, plan.forceFlag);
     }
-  }, [loadVideoPath, rect]);
+  }, [rect]);
 
-  // Hide child HWND whenever modals overlay or player fails (Fix 16)
+  // Hide child HWND whenever modals/popover overlay live video or player fails (Fix 16)
   useEffect(() => {
     if (!isDesktop() || !mpvStartedRef.current) return;
+    if (panelOpen && loaded) {
+      void mpvSetVisible(false);
+      return;
+    }
     void mpvSetVisible(!settingsOpen && !shortcutsOpen && !playerError);
-  }, [settingsOpen, shortcutsOpen, playerError]);
+  }, [settingsOpen, shortcutsOpen, playerError, panelOpen, loaded]);
+
+  // Wake/auto-hide floating cinema chrome & allow Escape to close floating popover
+  useEffect(() => {
+    wakeChrome();
+    return () => {
+      if (idleTimerRef.current !== null) {
+        window.clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = null;
+      }
+    };
+  }, [loaded, paused, panelOpen, settingsOpen, shortcutsOpen, playerError, wakeChrome]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      wakeChrome();
+      if (e.code === "Escape" && panelOpenRef.current && !useAppStore.getState().settingsOpen && !useAppStore.getState().shortcutsOpen) {
+        setPanelOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [wakeChrome]);
+
+  const syncStatusState = syncStatus.state;
+  const syncActiveEndpoint =
+    syncStatus.state === "disconnected" ? serverEndpoint : syncStatus.endpoint || serverEndpoint;
 
   // Fix 02 + Fix 08 + Fix 09: Announce loaded file per session, auto-ready once loaded, and lock speed 1.0x
   useEffect(() => {
-    const syncConnected = syncStatus.state === "connected";
-    const activeEp =
-      syncStatus.state === "disconnected" ? serverEndpoint : syncStatus.endpoint || serverEndpoint;
+    const syncConnected = syncStatusState === "connected";
 
     const decision = shouldAnnounceFile(announcedFileKeyRef.current, {
       syncConnected,
-      endpoint: activeEp,
+      endpoint: syncActiveEndpoint,
       username,
       roomCode,
       fileName: selectedFileName,
@@ -634,9 +707,9 @@ export function WatchRoom() {
     roomCode,
     selectedFileName,
     selectedFilePath,
-    serverEndpoint,
     speed,
-    syncStatus,
+    syncActiveEndpoint,
+    syncStatusState,
     username,
   ]);
 
@@ -645,6 +718,18 @@ export function WatchRoom() {
     panelOpen,
     modalsOpen: settingsOpen || shortcutsOpen,
   });
+
+  const showFloatingCapsule = chrome.showTransportBar && !chromeIdle;
+
+  const handleToggleCapsuleTab = (tab: SideTab) => {
+    wakeChrome();
+    if (panelOpen && sideTab === tab) {
+      setPanelOpen(false);
+    } else {
+      setSideTab(tab);
+      setPanelOpen(true);
+    }
+  };
 
   const handleLeaveRoom = () => {
     if (leavingRef.current) return;
@@ -655,128 +740,99 @@ export function WatchRoom() {
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-canvas text-primary overflow-hidden">
-      {chrome.showTopBar && (
-        <header className="h-11 shrink-0 flex items-center justify-between px-3 bg-chrome border-b border-hairline select-none">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <LogoMark variant="party" size={26} />
-            <div className="flex items-center gap-2 min-w-0">
-              <StatusDot
-                tone={
-                  syncStatus.state === "connected"
-                    ? "ok"
-                    : syncStatus.state === "error"
-                      ? "bad"
-                      : "warn"
-                }
-                pulse={syncStatus.state === "connecting" || syncStatus.state === "reconnecting"}
-              />
-              <span className="text-xs font-medium text-primary truncate">
-                {selectedFileName || `Room ${roomCode}`}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            {feedback && (
-              <span
-                key={feedback.id}
-                className="anim-pop-in px-2 py-0.5 text-[11px] font-medium bg-raised text-accent-soft border border-hairline rounded-[var(--radius-ui)]"
-              >
-                {feedback.text}
-              </span>
-            )}
-
-            <Button variant="secondary" size="sm" onClick={() => void handleChooseFile()}>
-              <FolderOpen className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Open File</span>
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => openSettings()}
-              aria-label="Open settings"
-              title="Settings"
-            >
-              <Settings className="h-3.5 w-3.5" />
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setPanelOpen((o) => !o)}
-              aria-label={panelOpen ? "Collapse side panel" : "Expand side panel"}
-              title={panelOpen ? "Hide panel" : "Show panel"}
-            >
-              {panelOpen ? (
-                <PanelRightClose className="h-3.5 w-3.5" />
-              ) : (
-                <PanelRightOpen className="h-3.5 w-3.5" />
-              )}
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleLeaveRoom}
-              aria-label="Leave room"
-              title="Leave room"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </header>
-      )}
-
+    <div
+      onMouseMove={wakeChrome}
+      onPointerDown={wakeChrome}
+      className="h-full w-full flex flex-col bg-canvas text-primary overflow-hidden"
+    >
       <NotificationStrip />
 
-      <div className="flex-1 min-h-0 flex">
-        <div ref={viewportRef} className="relative flex-1 min-w-0 min-h-0 bg-canvas">
-          <ViewportPlaceholder
-            loaded={loaded}
-            isDragActive={isDragActive}
-            playerError={playerError}
-            onChooseFile={() => void handleChooseFile()}
-            onRetryPlayer={() => {
-              void (async () => {
-                usePlayerStore.getState().setPlayerError(null);
-                pendingReloadOnRestartRef.current = Boolean(useAppStore.getState().selectedFilePath);
-                await mpvStop().catch(() => undefined);
-                viewportTrackerRef.current.markInvalidated();
-                mpvStartedRef.current = false;
-                setViewportTick((t) => t + 1);
-              })();
-            }}
-          />
-        </div>
-
-        {chrome.showPanel && (
-          <aside className="anim-drawer-in w-72 shrink-0 flex flex-col bg-chrome border-l border-hairline min-h-0">
-            <div className="p-2 border-b border-hairline">
-              <SegmentedTabs
-                ariaLabel="Inspector panel"
-                value={sideTab}
-                onChange={setSideTab}
-                className="w-full"
-                items={[
-                  { value: "room", label: "Room" },
-                  { value: "playback", label: "Playback" },
-                  { value: "subtitles", label: "Subtitles" },
-                ]}
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto min-h-0">
-              {sideTab === "room" && <RoomPanel />}
-              {sideTab === "playback" && <PlaybackPanel />}
-              {sideTab === "subtitles" && <SubtitlePanel />}
-            </div>
-          </aside>
-        )}
+      {/* Full-window video viewport (zero fixed header slab, zero permanent sidebar) */}
+      <div
+        ref={viewportRef}
+        className="relative flex-1 min-w-0 min-h-0 bg-canvas"
+      >
+        <ViewportPlaceholder
+          loaded={loaded}
+          isDragActive={isDragActive}
+          playerError={playerError}
+          onChooseFile={() => void handleChooseFile()}
+          onRetryPlayer={() => {
+            void (async () => {
+              usePlayerStore.getState().setPlayerError(null);
+              await mpvStop().catch(() => undefined);
+              viewportTrackerRef.current.markInvalidated();
+              mpvStartedRef.current = false;
+              mpvStartPromiseRef.current = null;
+              const currentFile = useAppStore.getState().selectedFilePath;
+              if (currentFile) {
+                await loadVideoPath(currentFile);
+              }
+            })();
+          }}
+        />
       </div>
 
-      {chrome.showTransportBar && <TransportBar onToggleFullscreen={toggleFullscreen} />}
+      {/* Floating Smoked-Amethyst Popover (Party / Playback / Subtitles) */}
+      {panelOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-20"
+            onClick={() => setPanelOpen(false)}
+            aria-hidden="true"
+          />
+          <div className="fixed inset-x-0 bottom-26 z-30 flex justify-center px-4 pointer-events-none">
+            <div className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[390px] max-h-[calc(100vh-145px)] rounded-[24px] flex flex-col overflow-hidden">
+              <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
+                <SegmentedTabs
+                  ariaLabel="Inspector panel"
+                  value={sideTab}
+                  onChange={setSideTab}
+                  className="flex-1"
+                  items={[
+                    { value: "room", label: "Party" },
+                    { value: "playback", label: "Playback" },
+                    { value: "subtitles", label: "Subtitles" },
+                  ]}
+                />
+                <button
+                  type="button"
+                  onClick={() => setPanelOpen(false)}
+                  aria-label="Close popover"
+                  className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="ep-hairline-divider mx-3" />
+              <div className="flex-1 overflow-y-auto min-h-0">
+                {sideTab === "room" && <RoomPanel />}
+                {sideTab === "playback" && <PlaybackPanel />}
+                {sideTab === "subtitles" && <SubtitlePanel />}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {showFloatingCapsule ? (
+        <TransportBar
+          activeTab={panelOpen ? sideTab : null}
+          onToggleTab={handleToggleCapsuleTab}
+          onChooseFile={() => void handleChooseFile()}
+          onLeaveRoom={handleLeaveRoom}
+          onHideControls={() => setChromeIdle(true)}
+          onToggleFullscreen={toggleFullscreen}
+        />
+      ) : (
+        <div
+          onMouseEnter={wakeChrome}
+          onMouseMove={wakeChrome}
+          onClick={wakeChrome}
+          title="Move mouse here to show controls"
+          className="h-2 w-full shrink-0 bg-canvas cursor-pointer"
+        />
+      )}
 
       <SettingsModal
         open={settingsOpen}

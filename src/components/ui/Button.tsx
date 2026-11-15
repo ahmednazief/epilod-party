@@ -10,20 +10,18 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
-  primary:
-    "bg-accent text-white font-medium hover:bg-accent-hover active:translate-y-px border border-transparent",
-  secondary:
-    "bg-raised text-primary hover:bg-hover border border-hairline active:translate-y-px",
+  primary: "ep-glass-primary-pill ep-press text-white font-medium",
+  secondary: "ep-glass-pill ep-press text-primary hover:bg-hover/80",
   ghost:
-    "bg-transparent text-secondary hover:text-primary hover:bg-hover border border-transparent",
+    "ep-press bg-transparent text-secondary hover:text-primary hover:bg-accent/12",
   danger:
-    "bg-raised text-bad hover:bg-hover border border-bad/40 active:translate-y-px",
+    "ep-glass-pill ep-press text-bad hover:bg-bad/15",
 };
 
 const SIZE_CLASSES: Record<ButtonSize, string> = {
-  sm: "h-7 px-2.5 text-xs rounded-[var(--radius-ui)] gap-1.5",
-  md: "h-9 px-3.5 text-sm rounded-[var(--radius-ui)] gap-2",
-  lg: "h-10 px-4 text-sm rounded-[var(--radius-ui)] gap-2",
+  sm: "h-7.5 px-3 text-xs rounded-full gap-1.5",
+  md: "h-9 px-4 text-sm rounded-full gap-2",
+  lg: "h-10.5 px-5 text-sm rounded-full gap-2",
 };
 
 export function Button({
@@ -39,7 +37,7 @@ export function Button({
     <button
       type={type}
       disabled={disabled}
-      className={`inline-flex items-center justify-center whitespace-nowrap select-none transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-45 disabled:pointer-events-none cursor-pointer ${VARIANT_CLASSES[variant]} ${SIZE_CLASSES[size]} ${className}`}
+      className={`inline-flex items-center justify-center whitespace-nowrap select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-45 disabled:pointer-events-none cursor-pointer ${VARIANT_CLASSES[variant]} ${SIZE_CLASSES[size]} ${className}`}
       {...rest}
     >
       {children}

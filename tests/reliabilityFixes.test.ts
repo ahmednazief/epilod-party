@@ -455,4 +455,32 @@ test("Watch-room hardening: resolveEffectiveUsername, store resets, and zero-dur
   assert.equal(unloaded.nextKey, null);
 });
 
+test("Responsiveness invariants: lazy mpvStart, throttled playback/subtitle ticks, and ErrorBoundary", () => {
+  const watchRoomSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  assert.match(watchRoomSrc, /const ensureMpvStarted = useCallback/);
+  assert.match(watchRoomSrc, /await ensureMpvStarted\(\)/);
+  assert.doesNotMatch(watchRoomSrc, /useEffect\([\s\S]{0,160}mpvStart\(rect\)/);
+  assert.match(watchRoomSrc, /window\.setTimeout\(\(\) => \{\s*roomSessionStartedRef\.current = true;/);
+
+  const transportSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TransportBar.tsx"), "utf8");
+  const transportBody = transportSrc.slice(transportSrc.indexOf("export const TransportBar = memo("));
+  assert.match(transportSrc, /export const TransportBar = memo\(/);
+  assert.doesNotMatch(transportBody, /const positionSecs = usePlayerStore\(\(s\) => s\.positionSecs\)/);
+  assert.match(transportBody, /usePlayerStore\.getState\(\)\.positionSecs/);
+
+  const subtitleSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"), "utf8");
+  assert.match(subtitleSrc, /export const SubtitlePanel = memo\(/);
+  assert.match(subtitleSrc, /createLeadingTrailingThrottle\(applyStyleNow, 60\)/);
+  assert.match(subtitleSrc, /throttledApplyStyle\.flush\(\)/);
+
+  const viewportHookSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/useViewportRect.ts"), "utf8");
+  assert.match(viewportHookSrc, /scheduleMeasure/);
+  assert.doesNotMatch(viewportHookSrc, /window\.addEventListener\("focus"/);
+
+  const mainSrc = fs.readFileSync(path.join(REPO_ROOT, "src/main.tsx"), "utf8");
+  assert.match(mainSrc, /<ErrorBoundary>/);
+  assert.match(mainSrc, /window\.addEventListener\("unhandledrejection"/);
+});
+
+
 
