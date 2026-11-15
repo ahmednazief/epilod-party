@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
 import { getFileDisplayName } from "../lib/fileDrop";
+import { playSoundCue } from "../lib/soundEffects";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
@@ -167,6 +168,7 @@ export function HomeScreen() {
     try {
       await navigator.clipboard.writeText(draftRoomCode);
       setCopiedDraft(true);
+      playSoundCue("codeCopied");
       setTimeout(() => setCopiedDraft(false), 1600);
     } catch {
       // Clipboard may be restricted outside secure focus
@@ -180,6 +182,7 @@ export function HomeScreen() {
     if (cleaned.length !== 6) return;
     setError(null);
     setVerifyingJoin(true);
+    playSoundCue("codeCopied");
     if (verifyTimerRef.current !== null) {
       window.clearTimeout(verifyTimerRef.current);
     }

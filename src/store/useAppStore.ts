@@ -58,6 +58,7 @@ interface AppState {
   hashFilenames: boolean;
   reducedMotion: boolean;
   lowPowerMode: boolean;
+  soundEffectsEnabled: boolean;
   autoCheckUpdates: boolean;
   autoDownloadUpdates: boolean;
   settingsOpen: boolean;
@@ -76,6 +77,7 @@ interface AppState {
   setHashFilenames: (hash: boolean) => void;
   setReducedMotion: (reduced: boolean) => void;
   setLowPowerMode: (lowPower: boolean) => void;
+  setSoundEffectsEnabled: (enabled: boolean) => void;
   setAutoCheckUpdates: (autoCheck: boolean) => void;
   setAutoDownloadUpdates: (autoDownload: boolean) => void;
   openSettings: (tab?: SettingsTab) => void;
@@ -97,6 +99,7 @@ const initialHashFilenames = readStorage("ep.hashFilenames", "false") === "true"
 const initialReducedMotion = readStorage("ep.reducedMotion", "false") === "true";
 const initialLowPowerMode = readStorage("ep.lowPowerMode", "false") === "true";
 const initialAllowShares = readStorage("ep.allowNetworkShares", "false") === "true";
+const initialSoundEffectsEnabled = readStorage("ep.soundEffects", "true") !== "false";
 const initialAutoCheckUpdates = readStorage("ep.autoCheckUpdates", "true") !== "false";
 const initialAutoDownloadUpdates = readStorage("ep.autoDownloadUpdates", "true") !== "false";
 
@@ -115,6 +118,7 @@ export const useAppStore = create<AppState>((set) => ({
   hashFilenames: initialHashFilenames,
   reducedMotion: initialReducedMotion,
   lowPowerMode: initialLowPowerMode,
+  soundEffectsEnabled: initialSoundEffectsEnabled,
   autoCheckUpdates: initialAutoCheckUpdates,
   autoDownloadUpdates: initialAutoDownloadUpdates,
   settingsOpen: false,
@@ -173,6 +177,11 @@ export const useAppStore = create<AppState>((set) => ({
   setLowPowerMode: (lowPowerMode) => {
     writeStorage("ep.lowPowerMode", lowPowerMode ? "true" : "false");
     set({ lowPowerMode });
+  },
+
+  setSoundEffectsEnabled: (soundEffectsEnabled) => {
+    writeStorage("ep.soundEffects", soundEffectsEnabled ? "true" : "false");
+    set({ soundEffectsEnabled });
   },
 
   setAutoCheckUpdates: (autoCheckUpdates) => {

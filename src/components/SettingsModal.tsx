@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { setAllowNetworkShares } from "../lib/mpv";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
+import { playSoundCue } from "../lib/soundEffects";
 import { formatBytesCompact, formatTransferSpeed } from "../lib/updater";
 import { validateServerEndpointInput } from "../lib/webviewHardening";
 import { useAppStore, type SettingsTab } from "../store/useAppStore";
@@ -87,6 +88,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const hashFilenames = useAppStore((s) => s.hashFilenames);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
+  const soundEffectsEnabled = useAppStore((s) => s.soundEffectsEnabled);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const autoDownloadUpdates = useAppStore((s) => s.autoDownloadUpdates);
 
@@ -99,6 +101,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setHashFilenames = useAppStore((s) => s.setHashFilenames);
   const setReducedMotion = useAppStore((s) => s.setReducedMotion);
   const setLowPowerMode = useAppStore((s) => s.setLowPowerMode);
+  const setSoundEffectsEnabled = useAppStore((s) => s.setSoundEffectsEnabled);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
   const setAutoDownloadUpdates = useAppStore((s) => s.setAutoDownloadUpdates);
   const pushNote = useNotificationStore((s) => s.push);
@@ -342,6 +345,18 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     description="Keep subtitle alignment gentle on fans and battery during long movies."
                     checked={lowPowerMode}
                     onChange={setLowPowerMode}
+                  />
+
+                  <ComfortSwitchRow
+                    title="Subtle Party Sound Cues"
+                    description="Play soft acoustic glass tones when friends join, leave, or ready up (automatically quieter during playback)."
+                    checked={soundEffectsEnabled}
+                    onChange={(enabled) => {
+                      setSoundEffectsEnabled(enabled);
+                      if (enabled) {
+                        playSoundCue("peerJoined", { forcePreview: true });
+                      }
+                    }}
                   />
                 </div>
               </div>

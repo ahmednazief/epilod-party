@@ -49,6 +49,7 @@ import {
 import { shouldAnnounceFile } from "../lib/syncFileAnnounce";
 import { shouldAutoReadyOnFileLoad } from "../lib/syncReady";
 import { shouldResetSpeedForSync } from "../lib/syncSpeedGuard";
+import { playSoundCue, RoomSoundTracker } from "../lib/soundEffects";
 import {
   enqueueSyncLifecycle,
   onSyncError,
@@ -126,6 +127,7 @@ export function WatchRoom() {
   const playerError = usePlayerStore((s) => s.playerError);
 
   const syncStatus = useSyncStore((s) => s.status);
+  const participants = useSyncStore((s) => s.participants);
   const pushNote = useNotificationStore((s) => s.push);
 
   const [sideTab, setSideTab] = useState<SideTab>("room");
@@ -136,6 +138,7 @@ export function WatchRoom() {
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
+  const soundTrackerRef = useRef(new RoomSoundTracker());
   const mpvStartedRef = useRef(false);
   const mpvStartPromiseRef = useRef<Promise<void> | null>(null);
   const roomSessionStartedRef = useRef(false);
@@ -729,6 +732,24 @@ export function WatchRoom() {
     username,
   ]);
 
+  // Subtle room audio cues when joining, peers entering/leaving, or all viewers ready
+  useEffect(() => {
+    soundTrackerRef.current.reset();
+    return () => {
+      soundTrackerRef.current.reset();
+    };
+  }, [roomCode]);
+
+  useEffect(() => {
+    const cues = soundTrackerRef.current.update(syncStatus, participants, username);
+    if (cues.length === 0) return;
+    const player = usePlayerStore.getState();
+    const moviePlaying = player.loaded && !player.paused;
+    for (const cue of cues) {
+      playSoundCue(cue, { moviePlaying });
+    }
+  }, [participants, syncStatus, username]);
+
   const chrome = resolveFullscreenChromeState({
     isFullscreen,
     panelOpen,
@@ -751,6 +772,7 @@ export function WatchRoom() {
   const handleLeaveRoom = () => {
     if (leavingRef.current) return;
     leavingRef.current = true;
+    soundTrackerRef.current.reset();
     announcedFileKeyRef.current = null;
     autoReadyMarkedRef.current = false;
     leaveRoom();

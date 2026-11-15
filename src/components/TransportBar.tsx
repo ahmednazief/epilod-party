@@ -23,6 +23,7 @@ import {
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { mpvSeek, mpvSetMute, mpvSetPause, mpvSetVolume } from "../lib/mpv";
 import { shouldReplayFromStart } from "../lib/playbackEnd";
+import { playSoundCue } from "../lib/soundEffects";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
 import {
   syncSetReady,
@@ -262,6 +263,17 @@ export const TransportBar = memo(function TransportBar({
     if (target !== null) {
       setLocalReady(target);
       void syncSetReady(target, true);
+      const othersAllReady =
+        syncConnected &&
+        participants.length >= 2 &&
+        participants.every(
+          (p) =>
+            p.username.trim().toLowerCase() === effectiveUsername.trim().toLowerCase() ||
+            p.isReady,
+        );
+      if (target && !othersAllReady) {
+        playSoundCue("peerReady", { moviePlaying: loaded && !paused });
+      }
     }
   };
 

@@ -1,0 +1,348 @@
+import { resolveEffectiveUsername } from "./syncController";
+import type { Participant, SyncStatusPayload } from "./syncplay";
+import { useAppStore } from "../store/useAppStore";
+
+export type SoundCue =
+  | "roomConnected"
+  | "peerJoined"
+  | "peerLeft"
+  | "peerReady"
+  | "allReady"
+  | "codeCopied";
+
+export interface PlaySoundOptions {
+  /** Quiets and softens cues automatically when video is actively playing. */
+  moviePlaying?: boolean;
+  /** Preview toggle feedback even before React re-renders. */
+  forcePreview?: boolean;
+}
+
+interface CueNote {
+  freqHz: number;
+  harmonicFreqHz?: number;
+  harmonicRatio?: number;
+  delayMs: number;
+  durationMs: number;
+  gain: number;
+}
+
+interface CueRecipe {
+  cutoffHz: number;
+  notes: readonly CueNote[];
+}
+
+const CUE_RECIPES: Record<SoundCue, CueRecipe> = {
+  // Warm low-velvet ascending fifth (D4 -> A4) with faint D3 body
+  roomConnected: {
+    cutoffHz: 1100,
+    notes: [
+      {
+        freqHz: 293.66,
+        harmonicFreqHz: 146.83,
+        harmonicRatio: 0.35,
+        delayMs: 0,
+        durationMs: 170,
+        gain: 0.052,
+      },
+      {
+        freqHz: 440.0,
+        harmonicFreqHz: 659.25,
+        harmonicRatio: 0.14,
+        delayMs: 70,
+        durationMs: 240,
+        gain: 0.056,
+      },
+    ],
+  },
+  // Airy liquid-glass droplet dyad (E4 -> B4 + subtle F#5 glisten)
+  peerJoined: {
+    cutoffHz: 1250,
+    notes: [
+      {
+        freqHz: 329.63,
+        harmonicFreqHz: 659.25,
+        harmonicRatio: 0.16,
+        delayMs: 0,
+        durationMs: 135,
+        gain: 0.052,
+      },
+      {
+        freqHz: 493.88,
+        harmonicFreqHz: 739.99,
+        harmonicRatio: 0.18,
+        delayMs: 65,
+        durationMs: 220,
+        gain: 0.058,
+      },
+    ],
+  },
+  // Muted warm descending breath (A4 -> E4)
+  peerLeft: {
+    cutoffHz: 820,
+    notes: [
+      {
+        freqHz: 440.0,
+        delayMs: 0,
+        durationMs: 120,
+        gain: 0.036,
+      },
+      {
+        freqHz: 329.63,
+        delayMs: 60,
+        durationMs: 175,
+        gain: 0.034,
+      },
+    ],
+  },
+  // Micro crystal tactile tick (F#4 -> A4)
+  peerReady: {
+    cutoffHz: 1200,
+    notes: [
+      { freqHz: 369.99, delayMs: 0, durationMs: 75, gain: 0.038 },
+      { freqHz: 440.0, delayMs: 38, durationMs: 115, gain: 0.042 },
+    ],
+  },
+  // Lush theater-lights-dimming major add9 shimmer (D4 - F#4 - A4 - E5)
+  allReady: {
+    cutoffHz: 1350,
+    notes: [
+      { freqHz: 293.66, delayMs: 0, durationMs: 240, gain: 0.042 },
+      { freqHz: 369.99, delayMs: 42, durationMs: 240, gain: 0.044 },
+      { freqHz: 440.0, delayMs: 84, durationMs: 250, gain: 0.046 },
+      { freqHz: 659.25, delayMs: 126, durationMs: 260, gain: 0.042 },
+    ],
+  },
+  // Subtle glass tap (G4 -> D5) for code copy / OTP verify
+  codeCopied: {
+    cutoffHz: 1150,
+    notes: [
+      { freqHz: 392.0, delayMs: 0, durationMs: 55, gain: 0.032 },
+      { freqHz: 587.33, delayMs: 28, durationMs: 95, gain: 0.036 },
+    ],
+  },
+};
+
+const PEER_REJOIN_FLAP_MS = 4000;
+const CUE_COOLDOWN_MS = 900;
+
+let sharedAudioCtx: AudioContext | null = null;
+
+function getAudioContext(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const Ctor =
+    window.AudioContext ??
+    (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctor) return null;
+  if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
+    sharedAudioCtx = new Ctor();
+  }
+  return sharedAudioCtx;
+}
+
+function scheduleNote(
+  ctx: AudioContext,
+  destination: AudioNode,
+  baseTime: number,
+  note: CueNote,
+  gainScale: number,
+): void {
+  const start = baseTime + note.delayMs / 1000;
+  const dur = Math.max(0.05, note.durationMs / 1000);
+  const peak = Math.max(0.002, note.gain * gainScale);
+
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.0001, start);
+  env.gain.exponentialRampToValueAtTime(peak, start + 0.01);
+  env.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+  env.connect(destination);
+
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(note.freqHz, start);
+  osc.connect(env);
+  osc.start(start);
+  osc.stop(start + dur + 0.02);
+
+  if (note.harmonicFreqHz && note.harmonicRatio) {
+    const overtoneGain = ctx.createGain();
+    overtoneGain.gain.setValueAtTime(note.harmonicRatio, start);
+    overtoneGain.connect(env);
+
+    const overtone = ctx.createOscillator();
+    overtone.type = "triangle";
+    overtone.frequency.setValueAtTime(note.harmonicFreqHz, start);
+    overtone.connect(overtoneGain);
+    overtone.start(start);
+    overtone.stop(start + dur + 0.02);
+  }
+}
+
+export function playSoundCue(cue: SoundCue, options: PlaySoundOptions = {}): void {
+  if (!options.forcePreview && !useAppStore.getState().soundEffectsEnabled) {
+    return;
+  }
+
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  const recipe = CUE_RECIPES[cue];
+  const moviePlaying = Boolean(options.moviePlaying);
+  const gainScale = moviePlaying ? 0.55 : 1.0;
+  const cutoffHz = moviePlaying ? Math.max(480, recipe.cutoffHz - 200) : recipe.cutoffHz;
+
+  const fire = () => {
+    try {
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(cutoffHz, ctx.currentTime);
+      filter.Q.setValueAtTime(0.7, ctx.currentTime);
+      filter.connect(ctx.destination);
+
+      const now = ctx.currentTime + 0.008;
+      for (const note of recipe.notes) {
+        scheduleNote(ctx, filter, now, note, gainScale);
+      }
+    } catch {
+      // Ignore Web Audio graph failures on suspended/restricted environments
+    }
+  };
+
+  if (ctx.state === "suspended") {
+    void ctx.resume().then(fire).catch(() => undefined);
+  } else {
+    fire();
+  }
+}
+
+interface TrackedPeer {
+  isReady: boolean;
+}
+
+function normalizePeerKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+export class RoomSoundTracker {
+  private wasConnected = false;
+  private initialRosterSeeded = false;
+  private wasAllReady = false;
+  private knownPeers = new Map<string, TrackedPeer>();
+  private recentLeftAtMs = new Map<string, number>();
+  private lastCueAtMs = new Map<SoundCue, number>();
+
+  reset(): void {
+    this.wasConnected = false;
+    this.initialRosterSeeded = false;
+    this.wasAllReady = false;
+    this.knownPeers.clear();
+    this.recentLeftAtMs.clear();
+  }
+
+  private allowCue(cue: SoundCue, nowMs: number): boolean {
+    const prev = this.lastCueAtMs.get(cue);
+    if (prev !== undefined && nowMs - prev < CUE_COOLDOWN_MS) {
+      return false;
+    }
+    this.lastCueAtMs.set(cue, nowMs);
+    return true;
+  }
+
+  update(
+    status: SyncStatusPayload,
+    participants: readonly Participant[],
+    localUsername: string,
+    nowMs = Date.now(),
+  ): SoundCue[] {
+    const cues: SoundCue[] = [];
+    const connected = status.state === "connected";
+
+    if (!connected) {
+      if (this.wasConnected) {
+        this.reset();
+      }
+      return cues;
+    }
+
+    if (!this.wasConnected) {
+      this.wasConnected = true;
+      this.initialRosterSeeded = false;
+      this.wasAllReady = false;
+      this.knownPeers.clear();
+      this.recentLeftAtMs.clear();
+      if (this.allowCue("roomConnected", nowMs)) {
+        cues.push("roomConnected");
+      }
+    }
+
+    const selfKey = normalizePeerKey(resolveEffectiveUsername(status, localUsername));
+    const currentPeers = new Map<string, TrackedPeer>();
+    for (const peer of participants) {
+      const key = normalizePeerKey(peer.username);
+      if (!key || key === selfKey) continue;
+      currentPeers.set(key, { isReady: peer.isReady });
+    }
+
+    const allReadyNow = participants.length >= 2 && participants.every((p) => p.isReady);
+
+    if (!this.initialRosterSeeded) {
+      // Wait for either non-empty participants or explicit roster seed once connected
+      if (participants.length > 0) {
+        this.initialRosterSeeded = true;
+        this.knownPeers = currentPeers;
+        this.wasAllReady = allReadyNow;
+      }
+      return cues;
+    }
+
+    // Expire old reconnect flap markers
+    for (const [key, leftAt] of this.recentLeftAtMs) {
+      if (nowMs - leftAt >= PEER_REJOIN_FLAP_MS) {
+        this.recentLeftAtMs.delete(key);
+      }
+    }
+
+    let joinedDetected = false;
+    let leftDetected = false;
+    let peerBecameReady = false;
+
+    for (const [key, peer] of currentPeers) {
+      const prev = this.knownPeers.get(key);
+      if (!prev) {
+        const leftAt = this.recentLeftAtMs.get(key);
+        if (leftAt === undefined || nowMs - leftAt >= PEER_REJOIN_FLAP_MS) {
+          joinedDetected = true;
+        }
+        this.recentLeftAtMs.delete(key);
+      } else if (!prev.isReady && peer.isReady) {
+        peerBecameReady = true;
+      }
+    }
+
+    for (const key of this.knownPeers.keys()) {
+      if (!currentPeers.has(key)) {
+        this.recentLeftAtMs.set(key, nowMs);
+        leftDetected = true;
+      }
+    }
+
+    this.knownPeers = currentPeers;
+    const becameAllReady = allReadyNow && !this.wasAllReady;
+    this.wasAllReady = allReadyNow;
+
+    if (joinedDetected && this.allowCue("peerJoined", nowMs)) {
+      cues.push("peerJoined");
+    }
+    if (leftDetected && this.allowCue("peerLeft", nowMs)) {
+      cues.push("peerLeft");
+    }
+    if (becameAllReady) {
+      if (this.allowCue("allReady", nowMs)) {
+        cues.push("allReady");
+      }
+    } else if (peerBecameReady && this.allowCue("peerReady", nowMs)) {
+      cues.push("peerReady");
+    }
+
+    return cues;
+  }
+}

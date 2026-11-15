@@ -13,6 +13,7 @@ import { memo, useEffect, useRef, useState, type FormEvent } from "react";
 import { formatUserError } from "../lib/errors";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
 import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
+import { playSoundCue } from "../lib/soundEffects";
 import {
   enqueueSyncLifecycle,
   syncReconnect,
@@ -22,6 +23,7 @@ import {
 import { sanitizeRoomCodeInput } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
+import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { formatRoomCodeDisplay, generateRoomCode } from "./HomeScreen";
 import { Button } from "./ui/Button";
@@ -82,6 +84,8 @@ export const RoomPanel = memo(function RoomPanel() {
     try {
       await navigator.clipboard.writeText(roomCode);
       setCopied(true);
+      const p = usePlayerStore.getState();
+      playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
       setTimeout(() => setCopied(false), 1800);
     } catch {
       pushNote("info", `Room code: ${roomCode}`);
@@ -119,6 +123,8 @@ export const RoomPanel = memo(function RoomPanel() {
     const cleaned = sixDigits.replace(/\D/g, "").slice(0, 6);
     if (cleaned.length !== 6) return;
     setVerifyingJoin(true);
+    const p = usePlayerStore.getState();
+    playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
     if (verifyTimerRef.current !== null) {
       window.clearTimeout(verifyTimerRef.current);
     }
