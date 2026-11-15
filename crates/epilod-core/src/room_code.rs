@@ -8,7 +8,7 @@ pub const MAX_STANDARD_ROOM_CHARS: usize = 64;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RoomCodeError {
-    #[error("A room code has 12 characters, for example K7M4-P9X2-W8N5.")]
+    #[error("A room code has 6 digits, for example 482 915.")]
     InvalidLength,
     #[error("The code contains a character that is not allowed: '{0}'.")]
     InvalidCharacter(char),
@@ -20,28 +20,28 @@ pub enum RoomCodeError {
     Rng,
 }
 
-/// New random code `XXXX-XXXX-XXXX` (60 bits from the OS CSPRNG).
+/// New random 6-digit numeric invite code (e.g. `482915`) from the OS CSPRNG.
 pub fn generate() -> Result<String, RoomCodeError> {
-    let mut bytes = [0u8; 12];
+    let mut bytes = [0u8; 6];
     getrandom::getrandom(&mut bytes).map_err(|_| RoomCodeError::Rng)?;
-    let mut out = String::with_capacity(14);
-    for (i, b) in bytes.iter().enumerate() {
-        if i == 4 || i == 8 {
-            out.push('-');
-        }
-        // 256 % 32 == 0, so masking introduces no bias.
-        out.push(ALPHABET[(b & 0x1F) as usize] as char);
+    let mut out = String::with_capacity(6);
+    for b in bytes.iter() {
+        out.push((b'0' + (b % 10)) as char);
     }
     Ok(out)
 }
 
-/// Accepts any case, spaces and hyphens; returns canonical `XXXX-XXXX-XXXX`.
+/// Accepts 6-digit numeric OTP codes (with spaces/hyphens stripped) returning `DDDDDD`,
+/// as well as legacy 12-character `XXXX-XXXX-XXXX` codes for backwards compatibility.
 pub fn normalize(input: &str) -> Result<String, RoomCodeError> {
     let chars: Vec<char> = input
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
         .map(|c| c.to_ascii_uppercase())
         .collect();
+    if chars.len() == 6 && chars.iter().all(|c| c.is_ascii_digit()) {
+        return Ok(chars.iter().collect());
+    }
     if chars.len() != 12 {
         return Err(RoomCodeError::InvalidLength);
     }
@@ -182,5 +182,26 @@ mod tests {
         assert!(resolve_syncplay_room("K7M4-P9X2-W8N5", false)
             .unwrap()
             .starts_with("ep-"));
+        assert!(resolve_syncplay_room("482915", false)
+            .unwrap()
+            .starts_with("ep-"));
+    }
+
+    #[test]
+    fn six_digit_numeric_otp_codes_normalize_and_hash() {
+        let code = generate().unwrap();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+
+        assert_eq!(normalize("482915").unwrap(), "482915");
+        assert_eq!(normalize("  482 915  ").unwrap(), "482915");
+        assert_eq!(normalize("482-915").unwrap(), "482915");
+
+        let a = syncplay_room_name("482 915").unwrap();
+        let b = syncplay_room_name("482915").unwrap();
+        assert_eq!(a, b);
+        assert!(a.starts_with("ep-"));
+        assert_eq!(a.len(), 23);
+        assert_ne!(a, syncplay_room_name("482916").unwrap());
     }
 }

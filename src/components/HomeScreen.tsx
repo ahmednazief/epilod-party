@@ -12,7 +12,7 @@ import {
   Settings,
   Users,
 } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
 import { getFileDisplayName } from "../lib/fileDrop";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
@@ -20,23 +20,28 @@ import { useAppStore } from "../store/useAppStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
 import { LogoMark } from "./ui/LogoMark";
-
-const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+import { OtpCodeInput } from "./ui/OtpCodeInput";
 
 export function generateRoomCode(): string {
-  const randomBytes = new Uint8Array(12);
+  const randomBytes = new Uint8Array(6);
   if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
     crypto.getRandomValues(randomBytes);
   } else {
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 6; i++) {
       randomBytes[i] = Math.floor(Math.random() * 256);
     }
   }
-  const seg = (start: number) =>
-    Array.from(randomBytes.slice(start, start + 4))
-      .map((b) => CODE_CHARS[b % CODE_CHARS.length])
-      .join("");
-  return `${seg(0)}-${seg(4)}-${seg(8)}`;
+  return Array.from(randomBytes)
+    .map((b) => String(b % 10))
+    .join("");
+}
+
+export function formatRoomCodeDisplay(code: string): string {
+  const trimmed = code.trim();
+  if (/^\d{6}$/.test(trimmed)) {
+    return `${trimmed.slice(0, 3)} ${trimmed.slice(3, 6)}`;
+  }
+  return trimmed;
 }
 
 export function HomeScreen() {
@@ -58,11 +63,21 @@ export function HomeScreen() {
   const [draftRoomCode, setDraftRoomCode] = useState(() => generateRoomCode());
   const [copiedDraft, setCopiedDraft] = useState(false);
   const [joinInput, setJoinInput] = useState("");
+  const [verifyingJoin, setVerifyingJoin] = useState(false);
   const [standardRoomName, setStandardRoomName] = useState(literalRoomStored);
   const [showOptions, setShowOptions] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openingMedia, setOpeningMedia] = useState(false);
+  const verifyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (verifyTimerRef.current !== null) {
+        window.clearTimeout(verifyTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -136,12 +151,41 @@ export function HomeScreen() {
     }
   };
 
+  const handleAutoVerifyOtp = (sixDigits: string) => {
+    if (verifyingJoin) return;
+    if (!ensureValidName()) return;
+    const cleaned = sixDigits.replace(/\D/g, "").slice(0, 6);
+    if (cleaned.length !== 6) return;
+    setError(null);
+    setVerifyingJoin(true);
+    if (verifyTimerRef.current !== null) {
+      window.clearTimeout(verifyTimerRef.current);
+    }
+    verifyTimerRef.current = window.setTimeout(() => {
+      verifyTimerRef.current = null;
+      setVerifyingJoin(false);
+      enterRoom(cleaned, false);
+    }, 220);
+  };
+
   const handlePasteJoin = async () => {
     try {
       const clip = await navigator.clipboard.readText();
-      if (clip) {
-        setJoinInput(sanitizeRoomCodeInput(clip, standardRoomName));
+      if (!clip) return;
+      if (standardRoomName) {
+        setJoinInput(sanitizeRoomCodeInput(clip, true));
         if (error) setError(null);
+        return;
+      }
+      const digits = clip.replace(/\D/g, "").slice(0, 6);
+      if (!digits) {
+        setError("Clipboard does not contain a 6-digit room code.");
+        return;
+      }
+      setJoinInput(digits);
+      if (error) setError(null);
+      if (digits.length === 6) {
+        handleAutoVerifyOtp(digits);
       }
     } catch {
       // Ignore clipboard read error
@@ -162,11 +206,11 @@ export function HomeScreen() {
     e.preventDefault();
     if (!ensureValidName()) return;
     const cleaned = sanitizeRoomCodeInput(joinInput, standardRoomName);
-    if (cleaned.length < (standardRoomName ? 1 : 4)) {
+    if (cleaned.length < (standardRoomName ? 1 : 6)) {
       setError(
         standardRoomName
           ? "Enter the exact Syncplay room name to join."
-          : "Enter a room code (e.g. ABCD-EFGH-JKLM).",
+          : "Enter all 6 digits of your friend's room code.",
       );
       return;
     }
@@ -351,6 +395,11 @@ export function HomeScreen() {
               <button
                 type="button"
                 onClick={() => {
+                  if (verifyTimerRef.current !== null) {
+                    window.clearTimeout(verifyTimerRef.current);
+                    verifyTimerRef.current = null;
+                  }
+                  setVerifyingJoin(false);
                   setLobbyView("entry");
                   setError(null);
                 }}
@@ -373,18 +422,18 @@ export function HomeScreen() {
                   <div className="min-w-0">
                     <div className="text-xs font-medium text-white">Host a New Room</div>
                     <div className="text-[11px] text-secondary">
-                      Instant invite pass ready to share
+                      6-digit invite pass ready to share
                     </div>
                   </div>
-                  <div className="inline-flex items-center gap-1 rounded-full bg-white/[0.06] pl-2.5 pr-1 py-1 shrink-0">
-                    <span className="font-mono text-[11px] font-medium text-accent-soft tracking-wide">
-                      {draftRoomCode}
+                  <div className="inline-flex items-center gap-1 rounded-full bg-white/[0.06] pl-3 pr-1 py-1 shrink-0">
+                    <span className="font-mono text-xs font-semibold text-accent-soft tracking-[0.14em] tabular-nums">
+                      {formatRoomCodeDisplay(draftRoomCode)}
                     </span>
                     <button
                       type="button"
                       onClick={() => setDraftRoomCode(generateRoomCode())}
                       aria-label="Shuffle room code"
-                      title="Generate new code"
+                      title="Generate new 6-digit code"
                       className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
                     >
                       <RefreshCw className="h-3 w-3" />
@@ -393,7 +442,7 @@ export function HomeScreen() {
                       type="button"
                       onClick={() => void handleCopyDraft()}
                       aria-label="Copy room code"
-                      title="Copy invite code"
+                      title="Copy 6-digit code"
                       className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
                     >
                       {copiedDraft ? (
@@ -418,45 +467,64 @@ export function HomeScreen() {
               {/* Join Friend's Room well */}
               <div className="ep-glass-well rounded-[20px] p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs font-medium text-white">
-                    Join a Friend&apos;s Room
+                  <div>
+                    <div className="text-xs font-medium text-white">
+                      {standardRoomName ? "Join Syncplay Room" : "Join with 6-Digit Code"}
+                    </div>
+                    <div className={`text-[11px] ${verifyingJoin ? "text-ok font-medium" : "text-secondary"}`}>
+                      {standardRoomName
+                        ? "Enter the exact room name your friends use"
+                        : verifyingJoin
+                          ? "Verifying 6-digit code…"
+                          : "Type or paste all 6 digits to enter right away"}
+                    </div>
                   </div>
                   <button
                     type="button"
                     onClick={() => void handlePasteJoin()}
-                    className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.07] hover:bg-white/[0.12] text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+                    className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.07] hover:bg-white/[0.12] text-[11px] font-medium text-secondary hover:text-white cursor-pointer shrink-0"
                   >
                     <ClipboardPaste className="h-3 w-3" />
                     <span>Paste Code</span>
                   </button>
                 </div>
 
-                <form onSubmit={handleJoinRoom} className="flex items-center gap-2">
-                  <input
-                    type="text"
+                {standardRoomName ? (
+                  <form onSubmit={handleJoinRoom} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={joinInput}
+                      aria-label="Syncplay Room Name"
+                      placeholder="Exact Syncplay room name…"
+                      onChange={(e) => {
+                        setJoinInput(sanitizeRoomCodeInput(e.target.value, true));
+                        if (error) setError(null);
+                      }}
+                      className="ep-glass-input flex-1 h-10 px-3.5 rounded-xl text-sm font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
+                    />
+                    <button
+                      type="submit"
+                      className={`ep-press h-10 px-4 rounded-xl text-xs font-medium inline-flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                        hasJoinCode
+                          ? "ep-glass-primary-pill text-white"
+                          : "bg-white/[0.08] text-secondary hover:text-white hover:bg-white/[0.14]"
+                      }`}
+                    >
+                      <span>Join</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </button>
+                  </form>
+                ) : (
+                  <OtpCodeInput
                     value={joinInput}
-                    aria-label={standardRoomName ? "Syncplay Room Name" : "Room Code"}
-                    placeholder={
-                      standardRoomName ? "Exact Syncplay room name…" : "XXXX-XXXX-XXXX"
-                    }
-                    onChange={(e) => {
-                      setJoinInput(sanitizeRoomCodeInput(e.target.value, standardRoomName));
+                    verifying={verifyingJoin}
+                    onChange={(digits) => {
+                      setJoinInput(digits);
                       if (error) setError(null);
                     }}
-                    className="ep-glass-input flex-1 h-10 px-3.5 rounded-xl text-sm font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
+                    onComplete={handleAutoVerifyOtp}
                   />
-                  <button
-                    type="submit"
-                    className={`ep-press h-10 px-4 rounded-xl text-xs font-medium inline-flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                      hasJoinCode
-                        ? "ep-glass-primary-pill text-white"
-                        : "bg-white/[0.08] text-secondary hover:text-white hover:bg-white/[0.14]"
-                    }`}
-                  >
-                    <span>Join</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </button>
-                </form>
+                )}
               </div>
             </div>
 
@@ -495,7 +563,10 @@ export function HomeScreen() {
                       onChange={(e) => {
                         const checked = e.target.checked;
                         setStandardRoomName(checked);
-                        setJoinInput((prev) => sanitizeRoomCodeInput(prev, checked));
+                        setVerifyingJoin(false);
+                        setJoinInput((prev) =>
+                          checked ? sanitizeRoomCodeInput(prev, true) : prev.replace(/\D/g, "").slice(0, 6),
+                        );
                       }}
                       className="accent-[var(--color-accent)] h-3.5 w-3.5"
                     />

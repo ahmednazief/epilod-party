@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   Check,
+  ClipboardPaste,
   Copy,
   EyeOff,
   Lock,
@@ -8,7 +9,7 @@ import {
   Server,
   Users,
 } from "lucide-react";
-import { memo, useState, type FormEvent } from "react";
+import { memo, useEffect, useRef, useState, type FormEvent } from "react";
 import { formatUserError } from "../lib/errors";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
 import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
@@ -22,8 +23,9 @@ import { sanitizeRoomCodeInput } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { useSyncStore } from "../store/useSyncStore";
-import { generateRoomCode } from "./HomeScreen";
+import { formatRoomCodeDisplay, generateRoomCode } from "./HomeScreen";
 import { Button } from "./ui/Button";
+import { OtpCodeInput } from "./ui/OtpCodeInput";
 import { StatusDot } from "./ui/StatusDot";
 
 function matchLabel(match: FileMatchStatus): { text: string; className: string } {
@@ -65,6 +67,16 @@ export const RoomPanel = memo(function RoomPanel() {
 
   const [copied, setCopied] = useState(false);
   const [joinCode, setJoinCode] = useState("");
+  const [verifyingJoin, setVerifyingJoin] = useState(false);
+  const verifyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (verifyTimerRef.current !== null) {
+        window.clearTimeout(verifyTimerRef.current);
+      }
+    };
+  }, []);
 
   const endpointSummary = describeSyncEndpoint(status, serverEndpoint);
   const syncConnected = status.state === "connected";
@@ -107,6 +119,43 @@ export const RoomPanel = memo(function RoomPanel() {
     });
   };
 
+  const handleAutoVerifyOtp = (sixDigits: string) => {
+    if (verifyingJoin) return;
+    const cleaned = sixDigits.replace(/\D/g, "").slice(0, 6);
+    if (cleaned.length !== 6) return;
+    setVerifyingJoin(true);
+    if (verifyTimerRef.current !== null) {
+      window.clearTimeout(verifyTimerRef.current);
+    }
+    verifyTimerRef.current = window.setTimeout(() => {
+      verifyTimerRef.current = null;
+      setVerifyingJoin(false);
+      setRoomCode(cleaned);
+    }, 220);
+  };
+
+  const handlePasteMidMovie = async () => {
+    try {
+      const clip = await navigator.clipboard.readText();
+      if (!clip) return;
+      if (literalRoom) {
+        setJoinCode(sanitizeRoomCodeInput(clip, true));
+        return;
+      }
+      const digits = clip.replace(/\D/g, "").slice(0, 6);
+      if (!digits) {
+        pushNote("info", "Clipboard does not contain a 6-digit code.");
+        return;
+      }
+      setJoinCode(digits);
+      if (digits.length === 6) {
+        handleAutoVerifyOtp(digits);
+      }
+    } catch {
+      // Clipboard may be unavailable outside user focus
+    }
+  };
+
   const handleStartPartyMidMovie = () => {
     const code = generateRoomCode();
     try {
@@ -115,13 +164,13 @@ export const RoomPanel = memo(function RoomPanel() {
       // ignore
     }
     setRoomCode(code);
-    pushNote("success", `Watch Party started — invite code ${code}`);
+    pushNote("success", `Watch Party started — invite code ${formatRoomCodeDisplay(code)}`);
   };
 
   const handleJoinPartyMidMovie = (e: FormEvent) => {
     e.preventDefault();
     const cleaned = sanitizeRoomCodeInput(joinCode, literalRoom);
-    if (cleaned.length < (literalRoom ? 1 : 4)) {
+    if (cleaned.length < (literalRoom ? 1 : 6)) {
       pushNote("info", "Enter a valid room code to join.");
       return;
     }
@@ -154,23 +203,53 @@ export const RoomPanel = memo(function RoomPanel() {
           </button>
         </div>
 
-        <div className="ep-glass-well rounded-2xl p-3.5 space-y-2">
-          <span className="text-[11px] font-medium text-secondary block">
-            Or join a friend&apos;s room code
-          </span>
-          <form onSubmit={handleJoinPartyMidMovie} className="flex items-center gap-2">
-            <input
-              type="text"
-              value={joinCode}
-              placeholder="XXXX-XXXX-XXXX"
-              aria-label="Room Code"
-              onChange={(e) => setJoinCode(sanitizeRoomCodeInput(e.target.value, literalRoom))}
-              className="ep-glass-input flex-1 h-9 px-3 rounded-xl text-xs font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
-            />
-            <Button type="submit" variant="secondary" size="sm">
-              Join
-            </Button>
-          </form>
+        <div className="ep-glass-well rounded-2xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-secondary">
+              {literalRoom ? "Join a Syncplay room" : "Join by 6-digit code"}
+            </span>
+            {!literalRoom && (
+              <button
+                type="button"
+                onClick={() => void handlePasteMidMovie()}
+                className="ep-press inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/[0.07] hover:bg-white/[0.12] text-[10px] font-medium text-secondary hover:text-white cursor-pointer"
+              >
+                <ClipboardPaste className="h-3 w-3" />
+                <span>Paste</span>
+              </button>
+            )}
+          </div>
+
+          {literalRoom ? (
+            <form onSubmit={handleJoinPartyMidMovie} className="flex items-center gap-2">
+              <input
+                type="text"
+                value={joinCode}
+                placeholder="Exact Syncplay room name…"
+                aria-label="Room Name"
+                onChange={(e) => setJoinCode(sanitizeRoomCodeInput(e.target.value, true))}
+                className="ep-glass-input flex-1 h-9 px-3 rounded-xl text-xs font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
+              />
+              <Button type="submit" variant="secondary" size="sm">
+                Join
+              </Button>
+            </form>
+          ) : (
+            <div className="space-y-1.5">
+              <OtpCodeInput
+                compact
+                value={joinCode}
+                verifying={verifyingJoin}
+                onChange={setJoinCode}
+                onComplete={handleAutoVerifyOtp}
+              />
+              <div className={`text-[10px] ${verifyingJoin ? "text-ok font-medium" : "text-muted"}`}>
+                {verifyingJoin
+                  ? "Verifying 6-digit pass…"
+                  : "Enters automatically as soon as the 6th digit is filled"}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -182,10 +261,10 @@ export const RoomPanel = memo(function RoomPanel() {
       <div className="ep-glass-well rounded-2xl px-3.5 py-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-muted">
-            {literalRoom ? "Party Room" : "Invite Pass"}
+            {literalRoom ? "Party Room" : "6-Digit Invite Pass"}
           </div>
-          <p className="text-sm font-mono font-medium text-white truncate pt-0.5">
-            {roomCode}
+          <p className="text-sm font-mono font-semibold tracking-wider text-white truncate pt-0.5 tabular-nums">
+            {literalRoom ? roomCode : formatRoomCodeDisplay(roomCode)}
           </p>
         </div>
         <Button
