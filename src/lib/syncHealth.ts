@@ -68,7 +68,9 @@ export function computeRoomSyncHealth(params: {
     if (peer.fileMatch !== "matched" && peer.fileMatch !== "sameLengthDifferentEncode") {
       continue;
     }
-    if (!Number.isFinite(peer.position) || peer.position < 0) {
+    // Syncplay's user list reports position 0 for peers (real position travels only in playstate
+    // messages), so 0 means "unknown" and must not be compared against our own position.
+    if (!Number.isFinite(peer.position) || peer.position <= 0) {
       continue;
     }
     const drift = Math.abs(localPositionSecs - peer.position);

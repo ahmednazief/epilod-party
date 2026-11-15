@@ -130,6 +130,27 @@ test("computeRoomSyncHealth detects drift, ignores self and mismatched files, an
   assert.equal(drifted.needsResync, true);
   assert.ok(Math.abs(drifted.maxDriftSecs - 4.5) < 1e-6);
   assert.equal(drifted.statusLabel, "Drift 4.5s");
+
+  // Syncplay user lists report position 0 for peers: unknown position must not read as drift
+  const unknownPos = computeRoomSyncHealth({
+    syncStatus: connectedStatus,
+    participants: [
+      {
+        username: "Bob",
+        room: "party",
+        position: 0,
+        fileName: "Show.S01E01.mkv",
+        isReady: true,
+        isController: false,
+        fileMatch: "matched",
+      },
+    ],
+    localUsername: "Alice",
+    localLoaded: true,
+    localPositionSecs: 660.0,
+  });
+  assert.equal(unknownPos.needsResync, false);
+  assert.equal(unknownPos.maxDriftSecs, 0);
 });
 
 test("playlist parsing, natural season sorting, subtitle pairing, and cross-encode peer matching", async () => {
@@ -293,7 +314,7 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   );
 
   // TransportBar restores classic direct controls (Start Party/Ready, CC, Audio, Shortcuts, Settings)
-  // while gating the Episodes button strictly on folder / multi-episode selection and floating a vertical right drawer
+  // while gating the Episodes button strictly on folder / multi-episode selection and anchoring its popover above the play bar
   const transportSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
     "utf8",
@@ -304,7 +325,8 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   assert.match(transportSrc, /onClick=\{\(\) => onToggleTab\("playback"\)\}[\s\S]*?>[\s\S]*?Audio/);
   assert.match(transportSrc, /onClick=\{\(\) => openSettings\("prefs"\)\}/);
   assert.match(transportSrc, /const isExtended = activeTab !== null && activeTab !== "episodes" && Boolean\(expandedDrawer\);/);
-  assert.match(watchRoomSrc, /<aside[\s\S]*?aria-label="Season episodes"[\s\S]*?right-4[\s\S]*?<EpisodesPanel/);
+  assert.match(watchRoomSrc, /computeCapsulePopoverLayout/);
+  assert.match(watchRoomSrc, /sideTab === "episodes"[\s\S]*?"Season episodes"[\s\S]*?<EpisodesPanel/);
   const episodesSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/EpisodesPanel.tsx"),
     "utf8",
