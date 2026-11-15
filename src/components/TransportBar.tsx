@@ -1,4 +1,6 @@
 import {
+  AudioLines,
+  Captions,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -7,6 +9,7 @@ import {
   EyeOff,
   FolderOpen,
   Keyboard,
+  ListVideo,
   Maximize,
   Minimize,
   Pause,
@@ -260,6 +263,10 @@ export const TransportBar = memo(function TransportBar({
 
   const playlistItems = usePlaylistStore((s) => s.items);
   const playlistIndex = usePlaylistStore((s) => s.currentIndex);
+  const folderName = usePlaylistStore((s) => s.folderName);
+  const hasFolderEpisodes = Boolean(folderName) || playlistItems.length > 1;
+  const activePlaylistItem =
+    playlistIndex >= 0 && playlistIndex < playlistItems.length ? playlistItems[playlistIndex] : null;
   const hasPrevEpisode = playlistItems.length > 1 && playlistIndex > 0;
   const hasNextEpisode =
     playlistItems.length > 1 && playlistIndex >= 0 && playlistIndex < playlistItems.length - 1;
@@ -362,93 +369,26 @@ export const TransportBar = memo(function TransportBar({
 
   const visiblePeers = participants.slice(0, 3);
   const extraPeerCount = Math.max(0, participants.length - visiblePeers.length);
-  const isExtended = activeTab !== null && Boolean(expandedDrawer);
+  const isExtended = activeTab !== null && activeTab !== "episodes" && Boolean(expandedDrawer);
 
   return (
     <div className="w-full px-4 pb-4 pt-2 flex justify-center select-none pointer-events-none">
       <div className="ep-glass-capsule pointer-events-auto anim-fade-slide-up w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2">
         {isExtended && (
           <div className="anim-fade-slide-up pb-1.5 space-y-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-              <div className="min-w-0 flex-1 max-w-[420px]">{drawerTabs}</div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                {roomCode && (
-                  <>
-                    <button
-                      type="button"
-                      disabled={!canToggleReady(loaded)}
-                      onClick={handleToggleReady}
-                      title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
-                      className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
-                        localReady && loaded
-                          ? "ep-glass-pill-active text-white"
-                          : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
-                      }`}
-                    >
-                      {localReady && loaded ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-ok shrink-0" />
-                      ) : (
-                        <Circle className="h-3.5 w-3.5 text-muted shrink-0" />
-                      )}
-                      <span className="hidden sm:inline whitespace-nowrap">
-                        {localReady && loaded ? "Ready" : "Not Ready"}
-                      </span>
-                    </button>
-
-                    <ResyncButton loaded={loaded} paused={paused} />
-
-                    <button
-                      type="button"
-                      onClick={() => setHideParticipants(!hideParticipants)}
-                      aria-label={hideParticipants ? "Show profile icons" : "Hide profile icons"}
-                      title={
-                        hideParticipants
-                          ? "Show friend profile icons"
-                          : "Hide all profile icons for pure focus"
-                      }
-                      className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
-                    >
-                      {hideParticipants ? (
-                        <EyeOff className="h-3.5 w-3.5 text-accent-soft" />
-                      ) : (
-                        <Eye className="h-3.5 w-3.5" />
-                      )}
-                    </button>
-                  </>
-                )}
-
+            <div className="flex items-center justify-between gap-2 px-1">
+              <div className="min-w-0 flex-1 max-w-[360px]">{drawerTabs}</div>
+              {onCloseDrawer && (
                 <button
                   type="button"
-                  onClick={openShortcuts}
-                  aria-label="Keyboard shortcuts"
-                  title="Keyboard shortcuts (?)"
-                  className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+                  onClick={onCloseDrawer}
+                  aria-label="Close popover"
+                  title="Collapse extended deck (Esc)"
+                  className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
                 >
-                  <Keyboard className="h-3.5 w-3.5" />
+                  <X className="h-3.5 w-3.5" />
                 </button>
-
-                <button
-                  type="button"
-                  onClick={() => openSettings("prefs")}
-                  aria-label="Preferences"
-                  title="Preferences"
-                  className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
-                >
-                  <Settings className="h-3.5 w-3.5" />
-                </button>
-
-                {onCloseDrawer && (
-                  <button
-                    type="button"
-                    onClick={onCloseDrawer}
-                    aria-label="Close popover"
-                    title="Collapse play bar (Esc)"
-                    className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
+              )}
             </div>
             <div className="max-h-[42vh] overflow-visible">{expandedDrawer}</div>
           </div>
@@ -504,67 +444,138 @@ export const TransportBar = memo(function TransportBar({
           )}
         </div>
 
-        {/* Clean regular bottom row: Users trigger + Volume | Transport Cluster | Open + Hide + Fullscreen */}
+        {/* Bottom capsule line: Ready & Avatars / Start Party + Volume | Transport Cluster | File, (Episodes if folder), CC, Audio, Shortcuts, Settings, Fullscreen */}
         <div className="flex items-center justify-between gap-3 pt-0.5">
-          {/* Left: Users trigger (extends play bar on click) + Compact Volume */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => onToggleTab(activeTab ?? "room")}
-              aria-label={isExtended ? "Collapse extended play bar" : "Open party & player options"}
-              title={
-                isExtended
-                  ? "Collapse extended play bar"
-                  : roomCode
-                    ? "Party, episodes, audio, subtitles & room controls"
-                    : "Open Party, episodes, audio, subtitles & settings"
-              }
-              className={`ep-press h-7.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs cursor-pointer transition-colors ${
-                roomCode && !hideParticipants && visiblePeers.length > 0 ? "pl-1.5 pr-2.5" : "w-7.5"
-              } ${
-                isExtended
-                  ? "ep-glass-pill-active text-white"
-                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
-              }`}
-            >
-              {roomCode && !hideParticipants && visiblePeers.length > 0 ? (
-                <>
-                  <span className="flex items-center -space-x-1.5">
-                    {visiblePeers.map((p) => (
-                      <span
-                        key={p.username}
-                        title={`${p.username}${p.isReady ? " · Ready" : ""}`}
-                        className={`h-5 w-5 rounded-full flex items-center justify-center ring-2 ${
-                          p.isReady ? "ring-ok/85" : "ring-canvas/90"
-                        }`}
-                      >
-                        <ProfileAvatar
-                          avatarId={resolvePeerAvatarId(
-                            p.username,
-                            effectiveUsername,
-                            avatarId,
-                          )}
-                          size={20}
-                        />
-                      </span>
-                    ))}
-                    {extraPeerCount > 0 && (
-                      <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90">
-                        +{extraPeerCount}
-                      </span>
+          {/* Left: Ready pill + Resync + Friend Avatars (or Start Party in Solo) + Volume */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {roomCode ? (
+              <>
+                <button
+                  type="button"
+                  disabled={!canToggleReady(loaded)}
+                  onClick={handleToggleReady}
+                  title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
+                  className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
+                    localReady && loaded
+                      ? "ep-glass-pill-active text-white"
+                      : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                  }`}
+                >
+                  {localReady && loaded ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-ok shrink-0" />
+                  ) : (
+                    <Circle className="h-3.5 w-3.5 text-muted shrink-0" />
+                  )}
+                  <span className="hidden sm:inline whitespace-nowrap">
+                    {localReady && loaded ? "Ready" : "Not Ready"}
+                  </span>
+                </button>
+
+                <ResyncButton loaded={loaded} paused={paused} />
+
+                <div className="inline-flex items-center rounded-full bg-white/6 p-0.5 gap-0.5 shrink-0">
+                  {!hideParticipants ? (
+                    <button
+                      type="button"
+                      onClick={() => onToggleTab("room")}
+                      aria-label="Open party lounge"
+                      title="Friends watching together"
+                      className={`ep-press h-6.5 pl-1 pr-2 rounded-full inline-flex items-center gap-1.5 text-xs cursor-pointer transition-colors ${
+                        activeTab === "room"
+                          ? "bg-accent/30 text-white"
+                          : "text-secondary hover:text-white"
+                      }`}
+                    >
+                      {visiblePeers.length > 0 ? (
+                        <>
+                          <span className="flex items-center -space-x-1.5">
+                            {visiblePeers.map((p) => (
+                              <span
+                                key={p.username}
+                                title={`${p.username}${p.isReady ? " · Ready" : ""}`}
+                                className={`h-5 w-5 rounded-full flex items-center justify-center ring-2 ${
+                                  p.isReady ? "ring-ok/85" : "ring-canvas/90"
+                                }`}
+                              >
+                                <ProfileAvatar
+                                  avatarId={resolvePeerAvatarId(
+                                    p.username,
+                                    effectiveUsername,
+                                    avatarId,
+                                  )}
+                                  size={20}
+                                />
+                              </span>
+                            ))}
+                            {extraPeerCount > 0 && (
+                              <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90">
+                                +{extraPeerCount}
+                              </span>
+                            )}
+                          </span>
+                          <span className="hidden lg:inline text-[11px] font-medium num">
+                            {participants.length}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <Users className="h-3.5 w-3.5 text-accent-soft ml-0.5" />
+                          <span className="hidden lg:inline text-[11px]">Party</span>
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onToggleTab("room")}
+                      aria-label="Open party lounge"
+                      title="Party lounge (profile icons hidden)"
+                      className={`ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[11px] cursor-pointer ${
+                        activeTab === "room" ? "bg-accent/30 text-white" : "text-muted hover:text-white"
+                      }`}
+                    >
+                      <Users className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setHideParticipants(!hideParticipants)}
+                    aria-label={hideParticipants ? "Show profile icons" : "Hide profile icons"}
+                    title={
+                      hideParticipants
+                        ? "Show friend profile icons"
+                        : "Hide all profile icons for pure focus"
+                    }
+                    className="ep-press h-6.5 w-6.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+                  >
+                    {hideParticipants ? (
+                      <EyeOff className="h-3 w-3 text-accent-soft" />
+                    ) : (
+                      <Eye className="h-3 w-3" />
                     )}
-                  </span>
-                  <span className="hidden sm:inline text-[11px] font-medium num">
-                    {participants.length}
-                  </span>
-                </>
-              ) : (
-                <Users className={`h-3.5 w-3.5 ${roomCode ? "text-accent-soft" : ""}`} />
-              )}
-            </button>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onToggleTab("room")}
+                aria-label="Open party lounge"
+                title="Start or join a Watch Party"
+                className={`ep-press h-7.5 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+                  activeTab === "room"
+                    ? "ep-glass-pill-active text-white"
+                    : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                }`}
+              >
+                <Users className="h-3.5 w-3.5 text-accent-soft" />
+                <span className="hidden sm:inline">Start Party</span>
+              </button>
+            )}
 
             {/* Compact Volume */}
-            <div className="flex items-center gap-1 shrink-0">
+            <div className="flex items-center gap-1 pl-0.5 shrink-0">
               <button
                 type="button"
                 onClick={() => {
@@ -582,7 +593,7 @@ export const TransportBar = memo(function TransportBar({
                   <Volume2 className="h-3.5 w-3.5" />
                 )}
               </button>
-              <div className="hidden sm:block w-16 shrink-0">
+              <div className="hidden sm:block w-14 shrink-0">
                 <Scrubber
                   ariaLabel="Volume"
                   value={muted ? 0 : volume}
@@ -612,7 +623,7 @@ export const TransportBar = memo(function TransportBar({
 
           {/* Center: Hero Transport Cluster */}
           <div className="flex items-center gap-1.5 shrink-0">
-            {playlistItems.length > 1 && onPrevEpisode && (
+            {hasFolderEpisodes && playlistItems.length > 1 && onPrevEpisode && (
               <button
                 type="button"
                 disabled={!hasPrevEpisode || ctrlLock.lockedForLocalUser}
@@ -668,7 +679,7 @@ export const TransportBar = memo(function TransportBar({
               <RotateCw className="h-3.5 w-3.5" />
             </button>
 
-            {playlistItems.length > 1 && onNextEpisode && (
+            {hasFolderEpisodes && playlistItems.length > 1 && onNextEpisode && (
               <button
                 type="button"
                 disabled={!hasNextEpisode || ctrlLock.lockedForLocalUser}
@@ -682,16 +693,67 @@ export const TransportBar = memo(function TransportBar({
             )}
           </div>
 
-          {/* Right: Essential player controls only (extra options live in the Users extended drawer) */}
+          {/* Right: Open File + (Episodes when folder selected) + CC + Audio + Hide + Shortcuts + Settings + Fullscreen */}
           <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
               onClick={onChooseFile}
               aria-label="Open video file"
               title="Open video file(s)"
-              className="ep-press h-7.5 w-7.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
+              className="ep-press h-7.5 w-7.5 2xl:w-auto 2xl:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs text-secondary hover:text-white hover:bg-white/10 whitespace-nowrap cursor-pointer"
             >
               <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden 2xl:inline">Open</span>
+            </button>
+
+            {hasFolderEpisodes && (
+              <button
+                type="button"
+                onClick={() => onToggleTab("episodes")}
+                aria-label="Episodes drawer"
+                title="Season folder & episodes queue"
+                className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap cursor-pointer ${
+                  activeTab === "episodes"
+                    ? "ep-glass-pill-active text-white"
+                    : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                }`}
+              >
+                <ListVideo className="h-3.5 w-3.5 shrink-0" />
+                <span className="hidden sm:inline">
+                  {activePlaylistItem?.episodeBadge ||
+                    (playlistItems.length > 1 ? `Episodes (${playlistItems.length})` : "Episodes")}
+                </span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => onToggleTab("subtitles")}
+              aria-label="Subtitles popover"
+              title="Subtitles & Magic Sync"
+              className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+                activeTab === "subtitles"
+                  ? "ep-glass-pill-active text-white"
+                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+              }`}
+            >
+              <Captions className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">CC</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onToggleTab("playback")}
+              aria-label="Audio & playback popover"
+              title="Audio & Playback"
+              className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+                activeTab === "playback"
+                  ? "ep-glass-pill-active text-white"
+                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+              }`}
+            >
+              <AudioLines className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Audio</span>
             </button>
 
             {loaded && onHideControls && (
@@ -705,6 +767,26 @@ export const TransportBar = memo(function TransportBar({
                 <ChevronDown className="h-3.5 w-3.5" />
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={openShortcuts}
+              aria-label="Keyboard shortcuts"
+              title="Keyboard shortcuts (?)"
+              className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+            >
+              <Keyboard className="h-3.5 w-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openSettings("prefs")}
+              aria-label="Preferences"
+              title="Preferences"
+              className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+            >
+              <Settings className="h-3.5 w-3.5" />
+            </button>
 
             <button
               type="button"

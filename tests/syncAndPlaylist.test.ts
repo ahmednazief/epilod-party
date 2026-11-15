@@ -278,19 +278,26 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
     "File/folder pickers must always restore mpv HWND visibility",
   );
 
-  // TransportBar collapsed bottom bar stays clean; extra options live inside extended drawer opened by Users icon
+  // TransportBar restores classic direct controls (Start Party/Ready, CC, Audio, Shortcuts, Settings)
+  // while gating the Episodes button strictly on folder / multi-episode selection and floating a vertical right drawer
   const transportSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
     "utf8",
   );
-  const extendedIdx = transportSrc.indexOf("{isExtended && (");
-  const bottomRowIdx = transportSrc.indexOf("onClick={() => onToggleTab(activeTab ?? \"room\")}");
-  assert.ok(extendedIdx > 0 && bottomRowIdx > extendedIdx);
-  const bottomRowSrc = transportSrc.slice(bottomRowIdx);
-  assert.equal(bottomRowSrc.includes("ResyncButton"), false);
-  assert.equal(bottomRowSrc.includes("handleToggleReady"), false);
-  assert.equal(bottomRowSrc.includes("openShortcuts"), false);
-  assert.equal(bottomRowSrc.includes("openSettings"), false);
+  assert.match(transportSrc, /const hasFolderEpisodes = Boolean\(folderName\) \|\| playlistItems\.length > 1;/);
+  assert.match(transportSrc, /\{hasFolderEpisodes && \(\s*<button[\s\S]*?onClick=\{\(\) => onToggleTab\("episodes"\)\}/);
+  assert.match(transportSrc, /onClick=\{\(\) => onToggleTab\("subtitles"\)\}[\s\S]*?>[\s\S]*?CC/);
+  assert.match(transportSrc, /onClick=\{\(\) => onToggleTab\("playback"\)\}[\s\S]*?>[\s\S]*?Audio/);
+  assert.match(transportSrc, /onClick=\{\(\) => openSettings\("prefs"\)\}/);
+  assert.match(transportSrc, /const isExtended = activeTab !== null && activeTab !== "episodes" && Boolean\(expandedDrawer\);/);
+  assert.match(watchRoomSrc, /<aside[\s\S]*?aria-label="Season episodes"[\s\S]*?right-4[\s\S]*?<EpisodesPanel/);
+  const episodesSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/EpisodesPanel.tsx"),
+    "utf8",
+  );
+  assert.equal(episodesSrc.includes("grid-cols-2"), false, "EpisodesPanel must be a vertical list, not a horizontal grid");
+  assert.match(episodesSrc, /ep-episode-active/);
+  assert.match(episodesSrc, /Now Playing/);
 
   // Full-bleed video backdrop: play bar & title bar float over the video with zero black-bar flex squeezing
   assert.match(watchRoomSrc, /ref=\{viewportRef\}\s*className=\{`absolute inset-0 z-0/);

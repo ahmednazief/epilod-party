@@ -181,6 +181,7 @@ export function HomeScreen() {
     if (openingMedia) return;
     setError(null);
     if (!isDesktop()) {
+      usePlaylistStore.getState().clearPlaylist();
       setSelectedFile(
         "C:\\Movies\\Cinema.Showcase.2026.2160p.HDR.mkv",
         "Cinema.Showcase.2026.2160p.HDR.mkv",
@@ -235,9 +236,11 @@ export function HomeScreen() {
           const target = scan.items[idx];
           setSelectedFile(target.path, target.fileName);
         } else {
+          usePlaylistStore.getState().clearPlaylist();
           setSelectedFile(picked[0], getFileDisplayName(picked[0]));
         }
       } catch {
+        usePlaylistStore.getState().clearPlaylist();
         setSelectedFile(picked[0], getFileDisplayName(picked[0]));
       }
       enterRoom("", false);

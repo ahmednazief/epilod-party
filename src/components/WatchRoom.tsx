@@ -139,6 +139,8 @@ export function WatchRoom() {
 
   const playlistItems = usePlaylistStore((s) => s.items);
   const playlistIndex = usePlaylistStore((s) => s.currentIndex);
+  const folderName = usePlaylistStore((s) => s.folderName);
+  const hasFolderEpisodes = Boolean(folderName) || playlistItems.length > 1;
   const followPartyEpisode = usePlaylistStore((s) => s.followPartyEpisode);
   const activePlaylistItem =
     playlistIndex >= 0 && playlistIndex < playlistItems.length
@@ -1081,6 +1083,12 @@ export function WatchRoom() {
     };
   }, [showVideoBackdrop]);
 
+  useEffect(() => {
+    if (!hasFolderEpisodes && panelOpen && sideTab === "episodes") {
+      setPanelOpen(false);
+    }
+  }, [hasFolderEpisodes, panelOpen, sideTab]);
+
   const handleToggleCapsuleTab = (tab: SideTab) => {
     wakeChrome();
     if (panelOpen && sideTab === tab) {
@@ -1228,6 +1236,20 @@ export function WatchRoom() {
         )}
       </div>
 
+      {panelOpen && sideTab === "episodes" && hasFolderEpisodes && (
+        <aside
+          aria-label="Season episodes"
+          className="ep-glass-capsule anim-drawer-in absolute right-4 top-[54px] bottom-[114px] z-30 w-[336px] max-w-[calc(100vw-2rem)] rounded-[24px] p-3.5 flex flex-col overflow-hidden"
+        >
+          <EpisodesPanel
+            onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
+            onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
+            onAddEpisodes={() => void handleChooseFile(true)}
+            onClose={() => setPanelOpen(false)}
+          />
+        </aside>
+      )}
+
       {showFloatingCapsule ? (
         <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">
           <TransportBar
@@ -1241,21 +1263,14 @@ export function WatchRoom() {
             onPrevEpisode={handlePrevEpisode}
             onNextEpisode={handleNextEpisode}
             drawerTabs={
-              panelOpen ? (
+              panelOpen && sideTab !== "episodes" ? (
                 <SegmentedTabs
                   ariaLabel="Inspector panel"
                   value={sideTab}
                   onChange={setSideTab}
-                  className="w-full max-w-[420px]"
+                  className="w-full max-w-[360px]"
                   items={[
                     { value: "room", label: "Party" },
-                    {
-                      value: "episodes",
-                      label:
-                        playlistItems.length > 1
-                          ? `Episodes (${playlistItems.length})`
-                          : "Episodes",
-                    },
                     { value: "playback", label: "Playback" },
                     { value: "subtitles", label: "Subtitles" },
                   ]}
@@ -1263,16 +1278,9 @@ export function WatchRoom() {
               ) : null
             }
             expandedDrawer={
-              panelOpen ? (
+              panelOpen && sideTab !== "episodes" ? (
                 <>
                   {sideTab === "room" && <RoomPanel />}
-                  {sideTab === "episodes" && (
-                    <EpisodesPanel
-                      onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
-                      onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
-                      onAddEpisodes={() => void handleChooseFile(true)}
-                    />
-                  )}
                   {sideTab === "playback" && <PlaybackPanel />}
                   {sideTab === "subtitles" && <SubtitlePanel />}
                 </>
