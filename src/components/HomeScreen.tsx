@@ -8,6 +8,7 @@ import {
   Download,
   Film,
   KeyRound,
+  Pencil,
   RefreshCw,
   Settings,
   Users,
@@ -21,6 +22,7 @@ import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
 import { LogoMark } from "./ui/LogoMark";
 import { OtpCodeInput } from "./ui/OtpCodeInput";
+import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
 
 export function generateRoomCode(): string {
   const randomBytes = new Uint8Array(6);
@@ -46,10 +48,12 @@ export function formatRoomCodeDisplay(code: string): string {
 
 export function HomeScreen() {
   const username = useAppStore((s) => s.username);
+  const avatarId = useAppStore((s) => s.avatarId);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const literalRoomStored = useAppStore((s) => s.literalRoom);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const setUsername = useAppStore((s) => s.setUsername);
+  const setAvatarId = useAppStore((s) => s.setAvatarId);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const openSettings = useAppStore((s) => s.openSettings);
   const enterRoom = useAppStore((s) => s.enterRoom);
@@ -70,6 +74,27 @@ export function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [openingMedia, setOpeningMedia] = useState(false);
   const verifyTimerRef = useRef<number | null>(null);
+  const profileRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!editingName) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setEditingName(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setEditingName(false);
+      }
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [editingName]);
 
   useEffect(() => {
     return () => {
@@ -221,7 +246,6 @@ export function HomeScreen() {
     updateStatus?.availability === "updateAvailable" ||
     updateStatus?.availability === "downloadedReady";
 
-  const avatarInitial = (sanitizeUsername(username) || "V").slice(0, 1).toUpperCase();
   const hasJoinCode = joinInput.trim().length > 0;
 
   return (
@@ -233,60 +257,24 @@ export function HomeScreen() {
       </div>
 
       {/* Borderless frameless titlebar with floating profile & preferences pills */}
-      <div className="relative z-10">
+      <div ref={profileRef} className="relative z-20">
         <TitleBar
           leftSlot={
-            editingName ? (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  setEditingName(false);
-                }}
-                className="ep-glass-pill anim-pop-in inline-flex items-center gap-2 pl-1.5 pr-1.5 py-1 rounded-full"
-              >
-                <span className="h-6 w-6 rounded-full bg-accent text-white text-xs font-semibold flex items-center justify-center shrink-0">
-                  {avatarInitial}
-                </span>
-                <input
-                  type="text"
-                  autoFocus
-                  value={username}
-                  maxLength={32}
-                  placeholder="Your name"
-                  aria-label="Your display name"
-                  onChange={(e) => {
-                    setUsername(e.target.value);
-                    if (error) setError(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setEditingName(false);
-                  }}
-                  className="w-32 bg-transparent text-xs font-medium text-white placeholder:text-muted focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  aria-label="Save display name"
-                  className="ep-press h-6 w-6 rounded-full bg-accent/35 hover:bg-accent/55 text-accent-soft flex items-center justify-center cursor-pointer"
-                >
-                  <Check className="h-3.5 w-3.5" />
-                </button>
-              </form>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setEditingName(true)}
-                title="Click to change your display name"
-                className="ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3.5 py-1 rounded-full cursor-pointer"
-              >
-                <span className="h-6 w-6 rounded-full bg-accent text-white text-xs font-semibold flex items-center justify-center shrink-0">
-                  {avatarInitial}
-                </span>
-                <span className="text-xs font-medium text-primary max-w-[140px] truncate">
-                  {username || "Viewer"}
-                </span>
-                <span className="h-1.5 w-1.5 rounded-full bg-ok" />
-              </button>
-            )
+            <button
+              type="button"
+              onClick={() => setEditingName((v) => !v)}
+              title="Edit your display name and profile avatar"
+              aria-expanded={editingName}
+              className={`ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3 py-1 rounded-full cursor-pointer transition-all ${
+                editingName ? "ring-1 ring-accent/65" : ""
+              }`}
+            >
+              <ProfileAvatar avatarId={avatarId} size={24} className="ring-1 ring-white/20" />
+              <span className="text-xs font-medium text-primary max-w-[140px] truncate">
+                {username || "Viewer"}
+              </span>
+              <Pencil className="h-3 w-3 text-accent-soft opacity-85" />
+            </button>
           }
           rightActions={
             <>
@@ -317,6 +305,66 @@ export function HomeScreen() {
             </>
           }
         />
+
+        {editingName && (
+          <div
+            role="dialog"
+            aria-label="Edit profile and avatar"
+            className="ep-glass-sheet anim-pop-in absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] rounded-[24px] p-4 space-y-3.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <ProfileAvatar
+                  avatarId={avatarId}
+                  size={38}
+                  className="ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-white truncate">
+                    {username || "Viewer"}
+                  </div>
+                  <div className="text-[11px] text-secondary">
+                    Customize how friends see you
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingName(false)}
+                className="ep-btn-ghost ep-press h-7 px-3 rounded-full text-[11px] font-semibold text-accent-soft hover:text-white cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+
+            <label className="block space-y-1.5">
+              <span className="text-[11px] font-medium text-secondary">
+                Display Name
+              </span>
+              <input
+                type="text"
+                autoFocus
+                value={username}
+                maxLength={32}
+                placeholder="Enter your name..."
+                aria-label="Your display name"
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  if (error) setError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === "Escape") {
+                    e.preventDefault();
+                    setEditingName(false);
+                  }
+                }}
+                className="ep-glass-input w-full h-9 px-3 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
+              />
+            </label>
+
+            <AvatarPicker value={avatarId} onChange={setAvatarId} compact />
+          </div>
+        )}
       </div>
 
       {/* Main Centered Lobby */}

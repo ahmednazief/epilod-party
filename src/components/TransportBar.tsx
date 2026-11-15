@@ -37,6 +37,7 @@ import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
 import { StatusDot } from "./ui/StatusDot";
 
@@ -130,13 +131,6 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
   );
 }
 
-const AVATAR_TONES = [
-  "bg-accent text-white",
-  "bg-emerald-500/85 text-slate-950",
-  "bg-amber-400/90 text-slate-950",
-  "bg-sky-400/90 text-slate-950",
-];
-
 interface TransportBarProps {
   activeTab: CapsuleTab | null;
   onToggleTab: (tab: CapsuleTab) => void;
@@ -175,6 +169,7 @@ export const TransportBar = memo(function TransportBar({
   const setLocalReady = useSyncStore((s) => s.setLocalReady);
 
   const username = useAppStore((s) => s.username);
+  const avatarId = useAppStore((s) => s.avatarId);
   const roomCode = useAppStore((s) => s.roomCode);
   const selectedFileName = useAppStore((s) => s.selectedFileName);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
@@ -368,15 +363,22 @@ export const TransportBar = memo(function TransportBar({
                       {visiblePeers.length > 0 ? (
                         <>
                           <span className="flex items-center -space-x-1.5">
-                            {visiblePeers.map((p, idx) => (
+                            {visiblePeers.map((p) => (
                               <span
                                 key={p.username}
                                 title={`${p.username}${p.isReady ? " · Ready" : ""}`}
-                                className={`h-5 w-5 rounded-full text-[10px] font-semibold flex items-center justify-center ring-2 ${
+                                className={`h-5 w-5 rounded-full flex items-center justify-center ring-2 ${
                                   p.isReady ? "ring-ok/85" : "ring-canvas/90"
-                                } ${AVATAR_TONES[idx % AVATAR_TONES.length]}`}
+                                }`}
                               >
-                                {p.username.slice(0, 1).toUpperCase()}
+                                <ProfileAvatar
+                                  avatarId={resolvePeerAvatarId(
+                                    p.username,
+                                    effectiveUsername,
+                                    avatarId,
+                                  )}
+                                  size={20}
+                                />
                               </span>
                             ))}
                             {extraPeerCount > 0 && (

@@ -21,6 +21,7 @@ import { useAppStore, type SettingsTab } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { Button } from "./ui/Button";
+import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
 import { TextField } from "./ui/TextField";
 
 interface SettingsModalProps {
@@ -78,6 +79,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setTab = useAppStore((s) => s.setSettingsTab);
 
   const username = useAppStore((s) => s.username);
+  const avatarId = useAppStore((s) => s.avatarId);
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const allowNetworkShares = useAppStore((s) => s.allowNetworkShares);
@@ -88,6 +90,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
 
   const setUsername = useAppStore((s) => s.setUsername);
+  const setAvatarId = useAppStore((s) => s.setAvatarId);
   const setServerEndpoint = useAppStore((s) => s.setServerEndpoint);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const setStoreAllowShares = useAppStore((s) => s.setAllowNetworkShares);
@@ -285,13 +288,30 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
           <div className="flex-1 overflow-y-auto px-6 py-3">
             {tab === "prefs" && (
               <div className="anim-tab-in space-y-4">
-                <TextField
-                  label="Display Name"
-                  value={username}
-                  maxLength={32}
-                  placeholder="Viewer"
-                  onChange={(e) => setUsername(e.target.value)}
-                />
+                <div className="ep-menu-row rounded-2xl p-3 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <ProfileAvatar
+                      avatarId={avatarId}
+                      size={44}
+                      className="ring-2 ring-accent/55 shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <TextField
+                        label="Display Name"
+                        value={username}
+                        maxLength={32}
+                        placeholder="Viewer"
+                        onChange={(e) => setUsername(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <AvatarPicker
+                    value={avatarId}
+                    onChange={setAvatarId}
+                    compact
+                  />
+                </div>
 
                 <div className="space-y-0.5">
                   <ComfortSwitchRow

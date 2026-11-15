@@ -1,4 +1,9 @@
 import { create } from "zustand";
+import {
+  DEFAULT_AVATAR_ID,
+  isValidAvatarId,
+  type AvatarId,
+} from "../components/ui/ProfileAvatar";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
 import {
   sanitizeCustomServerEndpoint,
@@ -42,6 +47,7 @@ export type SettingsTab = "server" | "prefs" | "updates" | "logs";
 interface AppState {
   screen: AppScreen;
   username: string;
+  avatarId: AvatarId;
   roomCode: string;
   literalRoom: boolean;
   serverEndpoint: string;
@@ -59,6 +65,7 @@ interface AppState {
   selectedFilePath: string | null;
   selectedFileName: string | null;
   setUsername: (name: string) => void;
+  setAvatarId: (avatarId: AvatarId) => void;
   setRoomCode: (code: string) => void;
   setLiteralRoom: (literal: boolean) => void;
   setServerEndpoint: (endpoint: string) => void;
@@ -80,6 +87,8 @@ interface AppState {
 }
 
 const initialUsername = sanitizeUsername(readStorage("ep.username", "")) || "Viewer";
+const rawAvatarId = readStorage("ep.avatarId", DEFAULT_AVATAR_ID);
+const initialAvatarId: AvatarId = isValidAvatarId(rawAvatarId) ? rawAvatarId : DEFAULT_AVATAR_ID;
 const initialServer = sanitizeCustomServerEndpoint(readStorage("ep.server", DEFAULT_ENDPOINT)) || DEFAULT_ENDPOINT;
 const initialHideParticipants = readStorage("ep.hideViewers", "false") === "true";
 const initialHashFilenames = readStorage("ep.hashFilenames", "false") === "true";
@@ -93,6 +102,7 @@ applyReducedMotionAttribute(initialReducedMotion);
 export const useAppStore = create<AppState>((set) => ({
   screen: "home",
   username: initialUsername,
+  avatarId: initialAvatarId,
   roomCode: "",
   literalRoom: false,
   serverEndpoint: initialServer,
@@ -113,6 +123,11 @@ export const useAppStore = create<AppState>((set) => ({
     const clean = sanitizeUsername(name);
     writeStorage("ep.username", clean);
     set({ username: clean });
+  },
+
+  setAvatarId: (avatarId) => {
+    writeStorage("ep.avatarId", avatarId);
+    set({ avatarId });
   },
 
   setRoomCode: (code) =>

@@ -26,6 +26,7 @@ import { useSyncStore } from "../store/useSyncStore";
 import { formatRoomCodeDisplay, generateRoomCode } from "./HomeScreen";
 import { Button } from "./ui/Button";
 import { OtpCodeInput } from "./ui/OtpCodeInput";
+import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import { StatusDot } from "./ui/StatusDot";
 
 function matchLabel(match: FileMatchStatus): { text: string; className: string } {
@@ -43,17 +44,11 @@ function matchLabel(match: FileMatchStatus): { text: string; className: string }
   }
 }
 
-const AVATAR_TONES = [
-  "bg-accent text-white",
-  "bg-emerald-500/85 text-slate-950",
-  "bg-amber-400/90 text-slate-950",
-  "bg-sky-400/90 text-slate-950",
-];
-
 export const RoomPanel = memo(function RoomPanel() {
   const roomCode = useAppStore((s) => s.roomCode);
   const literalRoom = useAppStore((s) => s.literalRoom);
   const username = useAppStore((s) => s.username);
+  const avatarId = useAppStore((s) => s.avatarId);
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
@@ -358,7 +353,7 @@ export const RoomPanel = memo(function RoomPanel() {
           </p>
         ) : (
           <div className="space-y-0.5">
-            {participants.map((p, idx) => {
+            {participants.map((p) => {
               const badge = matchLabel(p.fileMatch);
               const isSelf =
                 p.username.trim().toLowerCase() === effectiveUsername.trim().toLowerCase();
@@ -368,13 +363,11 @@ export const RoomPanel = memo(function RoomPanel() {
                   className="ep-menu-row px-2 py-1.5 flex items-center justify-between gap-2.5"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      className={`h-7 w-7 rounded-full text-xs font-semibold flex items-center justify-center shrink-0 ring-2 ${
-                        p.isReady ? "ring-ok/85" : "ring-white/15"
-                      } ${AVATAR_TONES[idx % AVATAR_TONES.length]}`}
-                    >
-                      {p.username.slice(0, 1).toUpperCase()}
-                    </span>
+                    <ProfileAvatar
+                      avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId)}
+                      size={28}
+                      className={`ring-2 ${p.isReady ? "ring-ok/85" : "ring-white/15"}`}
+                    />
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="text-xs font-medium text-white truncate">
