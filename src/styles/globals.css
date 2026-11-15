@@ -355,24 +355,26 @@ html.ep-video-active #root {
 
 .ep-orb-play {
   position: relative;
-  color: #120C24;
-  background-color: rgba(232, 226, 252, 0.46);
-  background-image: radial-gradient(
-    110% 88% at 30% 18%,
-    rgba(255, 255, 255, 0.88) 0%,
-    rgba(240, 235, 255, 0.42) 46%,
-    rgba(196, 181, 253, 0.14) 76%,
-    rgba(124, 58, 237, 0.22) 100%
+  overflow: hidden;
+  isolation: isolate;
+  color: #FFFFFF;
+  background-color: rgba(255, 255, 255, 0.14);
+  background-image: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.28) 0%,
+    rgba(255, 255, 255, 0.08) 46%,
+    rgba(255, 255, 255, 0.04) 72%,
+    rgba(255, 255, 255, 0.14) 100%
   );
-  backdrop-filter: blur(12px) saturate(185%) brightness(1.08);
-  -webkit-backdrop-filter: blur(12px) saturate(185%) brightness(1.08);
-  border: 1px solid rgba(255, 255, 255, 0.56);
+  backdrop-filter: blur(22px) saturate(185%) brightness(1.14);
+  -webkit-backdrop-filter: blur(22px) saturate(185%) brightness(1.14);
+  border: 1px solid rgba(255, 255, 255, 0.36);
   box-shadow:
-    inset 0 2px 3px 0 rgba(255, 255, 255, 0.85),
-    inset 1px 0 2px 0 rgba(255, 255, 255, 0.36),
-    inset 0 -3px 5px 0 rgba(88, 28, 135, 0.28),
-    0 8px 22px -4px rgba(10, 6, 24, 0.65),
-    0 0 18px -4px rgba(167, 139, 250, 0.36);
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.72),
+    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 0 12px 0 rgba(255, 255, 255, 0.06),
+    0 8px 20px -4px rgba(0, 0, 0, 0.52),
+    0 2px 6px -1px rgba(0, 0, 0, 0.32);
   transition:
     transform 210ms var(--ease-glass),
     background-color 210ms var(--ease-glass),
@@ -381,26 +383,42 @@ html.ep-video-active #root {
     opacity 200ms var(--ease-glass);
 }
 
+.ep-orb-play::before {
+  content: "";
+  position: absolute;
+  inset: 1px 4px auto 4px;
+  height: 42%;
+  border-radius: 9999px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42) 0%, rgba(255, 255, 255, 0) 100%);
+  opacity: 0.72;
+  transition: opacity 210ms var(--ease-glass);
+}
+
 .ep-orb-play:hover:not(:disabled) {
   transform: scale(1.06);
-  background-color: rgba(246, 242, 255, 0.62);
-  border-color: rgba(255, 255, 255, 0.78);
+  background-color: rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.58);
   box-shadow:
-    inset 0 2px 4px 0 rgba(255, 255, 255, 0.95),
-    inset 1px 0 2px 0 rgba(255, 255, 255, 0.46),
-    inset 0 -3px 5px 0 rgba(124, 58, 237, 0.24),
-    0 10px 26px -4px rgba(10, 6, 24, 0.72),
-    0 0 24px -2px rgba(196, 181, 253, 0.52);
+    inset 0 1px 1.5px 0 rgba(255, 255, 255, 0.88),
+    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 0 16px 0 rgba(255, 255, 255, 0.12),
+    0 12px 26px -4px rgba(0, 0, 0, 0.62),
+    0 0 18px -4px rgba(255, 255, 255, 0.22);
+}
+
+.ep-orb-play:hover:not(:disabled)::before {
+  opacity: 0.95;
 }
 
 .ep-orb-play:active:not(:disabled) {
-  transform: scale(0.93);
+  transform: scale(0.94);
   transition-duration: 75ms;
   transition-timing-function: ease-out;
 }
 
 .ep-orb-play:disabled {
-  opacity: 0.56;
+  opacity: 0.45;
 }
 
 .ep-bar-pill {

@@ -621,12 +621,12 @@ export const TransportBar = memo(function TransportBar({
                     ? "Play (Space)"
                     : "Pause (Space)"
               }
-              className="ep-orb-play h-10 w-10 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
+              className="ep-orb-play h-11 w-11 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
             >
               {paused ? (
-                <Play className="h-4 w-4 fill-current ml-0.5" />
+                <Play className="h-[17px] w-[17px] fill-current ml-0.5 relative z-10" />
               ) : (
-                <Pause className="h-4 w-4 fill-current" />
+                <Pause className="h-[17px] w-[17px] fill-current relative z-10" />
               )}
             </button>
 
