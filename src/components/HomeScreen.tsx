@@ -6,12 +6,10 @@ import {
   ClipboardPaste,
   Copy,
   Download,
-  Film,
   KeyRound,
   Pencil,
   RefreshCw,
   Settings,
-  Users,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
@@ -20,6 +18,7 @@ import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening
 import { useAppStore } from "../store/useAppStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
+import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
 import { LogoMark } from "./ui/LogoMark";
 import { OtpCodeInput } from "./ui/OtpCodeInput";
 import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
@@ -392,9 +391,9 @@ export function HomeScreen() {
                   setError(null);
                   setLobbyView("party");
                 }}
-                className="ep-glass-btn-party ep-press h-11 px-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
+                className="ep-glass-btn-party ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
               >
-                <Users className="h-4 w-4 text-accent-soft shrink-0" />
+                <WatchPartyIcon size={24} className="shrink-0" />
                 <span>Watch Party</span>
               </button>
 
@@ -402,9 +401,9 @@ export function HomeScreen() {
                 type="button"
                 disabled={openingMedia}
                 onClick={() => void handleOpenMediaSolo()}
-                className="ep-glass-btn-media ep-press h-11 px-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
+                className="ep-glass-btn-media ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
               >
-                <Film className="h-4 w-4 text-secondary shrink-0" />
+                <OpenMediaIcon size={24} className="shrink-0" />
                 <span>{openingMedia ? "Opening..." : "Open Media"}</span>
               </button>
             </div>
@@ -430,7 +429,7 @@ export function HomeScreen() {
               </button>
 
               <div className="inline-flex items-center gap-2 text-xs text-secondary">
-                <Users className="h-3.5 w-3.5 text-accent-soft" />
+                <WatchPartyIcon size={18} className="shrink-0" />
                 <span className="font-medium text-white">Watch Party</span>
               </div>
             </div>
