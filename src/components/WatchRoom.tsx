@@ -42,6 +42,12 @@ import { classifyMpvEnd, shouldReplayFromStart } from "../lib/playbackEnd";
 import { checkDropDuringDialog, handlePlayerCrashSync } from "../lib/playerLifecycle";
 import { resetMpvPlaybackDefaults } from "../lib/playbackReset";
 import {
+  matchPeerEpisodeInPlaylist,
+  naturalCompare,
+  scanMediaPaths,
+  type PlaylistItem,
+} from "../lib/playlist";
+import {
   formatControllerOverrideNotice,
   getControllerLockState,
   resolveEffectiveUsername,
@@ -69,8 +75,10 @@ import { ViewportSyncTracker } from "../lib/viewportSync";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSubtitleStore } from "../store/useSubtitleStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { EpisodesPanel } from "./EpisodesPanel";
 import { PlaybackPanel } from "./PlaybackPanel";
 import { RoomPanel } from "./RoomPanel";
 import { SettingsModal } from "./SettingsModal";
@@ -130,6 +138,14 @@ export function WatchRoom() {
   const participants = useSyncStore((s) => s.participants);
   const pushNote = useNotificationStore((s) => s.push);
 
+  const playlistItems = usePlaylistStore((s) => s.items);
+  const playlistIndex = usePlaylistStore((s) => s.currentIndex);
+  const followPartyEpisode = usePlaylistStore((s) => s.followPartyEpisode);
+  const activePlaylistItem =
+    playlistIndex >= 0 && playlistIndex < playlistItems.length
+      ? playlistItems[playlistIndex]
+      : null;
+
   const [sideTab, setSideTab] = useState<SideTab>("room");
   const [panelOpen, setPanelOpen] = useState(false);
   const [chromeIdle, setChromeIdle] = useState(false);
@@ -150,6 +166,10 @@ export function WatchRoom() {
   const leavingRef = useRef(false);
   const loadGenRef = useRef(0);
   const initialAutoLoadedRef = useRef(false);
+  const pendingPairedSubRef = useRef<{ videoPath: string; subPath: string } | null>(null);
+  const loadSubtitlePathRef = useRef<((path: string) => Promise<void>) | null>(null);
+  const selectEpisodeAtIndexRef = useRef<((index: number) => Promise<void>) | null>(null);
+  const lastPeerFileRef = useRef<string | null>(null);
 
   panelOpenRef.current = panelOpen;
 
@@ -228,48 +248,6 @@ export function WatchRoom() {
   }, []);
 
   // Load media + subtitle files safely
-  const loadVideoPath = useCallback(
-    async (path: string) => {
-      const gen = ++loadGenRef.current;
-      const displayName = getFileDisplayName(path);
-      void subtitleCancelAutoSync().catch(() => undefined);
-      setSelectedFile(path, displayName);
-      autoReadyMarkedRef.current = false;
-      announcedFileKeyRef.current = null;
-      try {
-        await ensureMpvStarted();
-        if (loadGenRef.current !== gen) return;
-        await mpvLoad(path);
-        if (loadGenRef.current !== gen) return;
-        const subState = useSubtitleStore.getState();
-        await resetMpvPlaybackDefaults(useSyncStore.getState().status.state === "connected");
-        if (loadGenRef.current !== gen) return;
-        await mpvSetSubStyle({
-          font: subState.font,
-          fontSize: subState.fontSize,
-          color: subState.color,
-          borderSize: subState.borderSize,
-          pos: subState.pos,
-          visible: subState.visible,
-          overrideAss: subState.overrideAssStyle,
-        });
-        if (loadGenRef.current !== gen) return;
-        if (!isDesktop()) {
-          usePlayerStore.getState().setLoaded(true);
-        }
-        usePlayerStore.getState().setPlayerError(null);
-        usePlayerStore.getState().flashFeedback(`Loaded ${displayName}`);
-      } catch (err) {
-        if (loadGenRef.current !== gen) return;
-        const msg = formatUserError(err, "Failed opening video file.");
-        usePlayerStore.getState().setPlayerError(msg);
-        pushNote("error", msg);
-        void logFrontendEvent("error", "player.load", msg, "ERR_LOAD");
-      }
-    },
-    [ensureMpvStarted, pushNote, setSelectedFile],
-  );
-
   const loadSubtitlePath = useCallback(
     async (path: string) => {
       if (!usePlayerStore.getState().loaded) {
@@ -298,10 +276,235 @@ export function WatchRoom() {
     },
     [pushNote],
   );
+  loadSubtitlePathRef.current = loadSubtitlePath;
 
-  const handleChooseFile = useCallback(async () => {
+  const loadVideoPath = useCallback(
+    async (path: string, pairedSubPath?: string | null) => {
+      const gen = ++loadGenRef.current;
+      const displayName = getFileDisplayName(path);
+      void subtitleCancelAutoSync().catch(() => undefined);
+      setSelectedFile(path, displayName);
+      usePlaylistStore.getState().selectByPath(path);
+      useSubtitleStore.getState().clearLoadedTrack();
+      pendingPairedSubRef.current = pairedSubPath
+        ? { videoPath: path, subPath: pairedSubPath }
+        : null;
+      autoReadyMarkedRef.current = false;
+      announcedFileKeyRef.current = null;
+      try {
+        await ensureMpvStarted();
+        if (loadGenRef.current !== gen) return;
+        await mpvLoad(path);
+        if (loadGenRef.current !== gen) return;
+        const subState = useSubtitleStore.getState();
+        await resetMpvPlaybackDefaults(useSyncStore.getState().status.state === "connected");
+        if (loadGenRef.current !== gen) return;
+        await mpvSetSubStyle({
+          font: subState.font,
+          fontSize: subState.fontSize,
+          color: subState.color,
+          borderSize: subState.borderSize,
+          pos: subState.pos,
+          visible: subState.visible,
+          overrideAss: subState.overrideAssStyle,
+        });
+        if (loadGenRef.current !== gen) return;
+        if (!isDesktop()) {
+          usePlayerStore.getState().setLoaded(true);
+          const pendingSub = pendingPairedSubRef.current;
+          if (pendingSub && pendingSub.videoPath.toLowerCase() === path.toLowerCase()) {
+            pendingPairedSubRef.current = null;
+            await loadSubtitlePath(pendingSub.subPath);
+          }
+        }
+        usePlayerStore.getState().setPlayerError(null);
+        usePlayerStore.getState().flashFeedback(`Loaded ${displayName}`);
+      } catch (err) {
+        if (loadGenRef.current !== gen) return;
+        pendingPairedSubRef.current = null;
+        const msg = formatUserError(err, "Failed opening video file.");
+        usePlayerStore.getState().setPlayerError(msg);
+        pushNote("error", msg);
+        void logFrontendEvent("error", "player.load", msg, "ERR_LOAD");
+      }
+    },
+    [ensureMpvStarted, loadSubtitlePath, pushNote, setSelectedFile],
+  );
+
+  const selectEpisodeAtIndex = useCallback(
+    async (index: number) => {
+      const pState = usePlaylistStore.getState();
+      if (index < 0 || index >= pState.items.length) return;
+      const s = useSyncStore.getState();
+      const connected = s.status.state === "connected";
+      const ctrlLock = getControllerLockState(
+        connected,
+        s.participants,
+        resolveEffectiveUsername(s.status, useAppStore.getState().username),
+      );
+      if (ctrlLock.lockedForLocalUser) {
+        pushNote("warn", "Episode selection is locked to the room controller.");
+        return;
+      }
+      const target = pState.items[index];
+      pState.setCurrentIndex(index);
+      await loadVideoPath(target.path, target.subtitlePath);
+    },
+    [loadVideoPath, pushNote],
+  );
+  selectEpisodeAtIndexRef.current = selectEpisodeAtIndex;
+
+  const handlePrevEpisode = useCallback(() => {
+    const { currentIndex } = usePlaylistStore.getState();
+    if (currentIndex > 0) {
+      void selectEpisodeAtIndex(currentIndex - 1);
+    }
+  }, [selectEpisodeAtIndex]);
+
+  const handleNextEpisode = useCallback(() => {
+    const { currentIndex, items } = usePlaylistStore.getState();
+    if (currentIndex >= 0 && currentIndex < items.length - 1) {
+      void selectEpisodeAtIndex(currentIndex + 1);
+    }
+  }, [selectEpisodeAtIndex]);
+
+  const loadMediaInputs = useCallback(
+    async (paths: string[], options?: { append?: boolean }) => {
+      const clean = paths.map((p) => p.trim()).filter(Boolean);
+      if (clean.length === 0) return;
+      const scan = await scanMediaPaths(clean);
+
+      if (scan.items.length > 0) {
+        const pStore = usePlaylistStore.getState();
+        if (options?.append && pStore.items.length > 0) {
+          const mergedMap = new Map<string, PlaylistItem>();
+          for (const it of pStore.items) mergedMap.set(it.path.toLowerCase(), it);
+          let addedCount = 0;
+          for (const it of scan.items) {
+            const key = it.path.toLowerCase();
+            if (!mergedMap.has(key)) {
+              mergedMap.set(key, it);
+              addedCount += 1;
+            }
+          }
+          const merged = Array.from(mergedMap.values()).sort((a, b) => {
+            const sa = a.season ?? Number.MAX_SAFE_INTEGER;
+            const sb = b.season ?? Number.MAX_SAFE_INTEGER;
+            if (sa !== sb) return sa - sb;
+            const ea = a.episode ?? Number.MAX_SAFE_INTEGER;
+            const eb = b.episode ?? Number.MAX_SAFE_INTEGER;
+            if (ea !== eb) return ea - eb;
+            return naturalCompare(a.fileName, b.fileName);
+          });
+          const curPath = useAppStore.getState().selectedFilePath?.toLowerCase() ?? "";
+          const keepIdx = merged.findIndex((it) => it.path.toLowerCase() === curPath);
+          const nextIdx = keepIdx !== -1 ? keepIdx : 0;
+          pStore.setPlaylist(merged, nextIdx, scan.folderName ?? pStore.folderName);
+          if (addedCount > 0) {
+            pushNote("success", `Added ${addedCount} episode${addedCount === 1 ? "" : "s"} to queue.`);
+          }
+          if (!usePlayerStore.getState().loaded && merged.length > 0) {
+            await loadVideoPath(merged[nextIdx].path, merged[nextIdx].subtitlePath);
+          }
+          return;
+        }
+
+        let targetIndex = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+        const sState = useSyncStore.getState();
+        if (sState.status.state === "connected" && pStore.followPartyEpisode) {
+          const myName = resolveEffectiveUsername(sState.status, useAppStore.getState().username).toLowerCase();
+          const leader =
+            sState.participants.find((p) => p.isController && p.fileName) ??
+            sState.participants.find((p) => p.username.toLowerCase() !== myName && p.fileName);
+          if (leader?.fileName) {
+            const peerMatch = matchPeerEpisodeInPlaylist(leader.fileName, scan.items);
+            if (peerMatch !== -1) {
+              targetIndex = peerMatch;
+              lastPeerFileRef.current = leader.fileName.trim();
+            }
+          }
+        }
+
+        pStore.setPlaylist(scan.items, targetIndex, scan.folderName);
+        const target = scan.items[targetIndex];
+        const explicitMultiOrFolder = clean.length > 1 || splitDroppedFiles(clean).directorySuspected;
+        if (scan.items.length > 1 && explicitMultiOrFolder) {
+          pushNote(
+            "success",
+            `Queued ${scan.items.length} episodes${scan.folderName ? ` from ${scan.folderName}` : ""}`,
+          );
+        }
+        await loadVideoPath(target.path, target.subtitlePath);
+        if (scan.looseSubtitlePath && !target.subtitlePath) {
+          pendingPairedSubRef.current = { videoPath: target.path, subPath: scan.looseSubtitlePath };
+        }
+        return;
+      }
+
+      if (scan.looseSubtitlePath) {
+        await loadSubtitlePath(scan.looseSubtitlePath);
+        return;
+      }
+
+      const split = splitDroppedFiles(clean);
+      if (split.unsupportedFiles.length > 0) {
+        pushNote("warn", `Unsupported file type: ${split.unsupportedFiles.join(", ")}`);
+      } else {
+        pushNote("warn", "No playable video or subtitle files found.");
+      }
+    },
+    [loadSubtitlePath, loadVideoPath, pushNote],
+  );
+
+  const handleChooseFile = useCallback(
+    async (append = false) => {
+      if (!isDesktop()) {
+        pushNote("warn", "File dialog requires the Windows desktop app.");
+        return;
+      }
+      if (dialogOpenRef.current) {
+        return;
+      }
+      dialogOpenRef.current = true;
+      try {
+        if (mpvStartedRef.current) {
+          await mpvSetVisible(false);
+        }
+        const chosen = await open({
+          multiple: true,
+          title: append ? "Add Episode Files" : "Choose Video File(s)",
+          filters: [
+            {
+              name: "Video Files",
+              extensions: ["mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "*"],
+            },
+          ],
+        });
+        const picked = Array.isArray(chosen)
+          ? chosen
+          : typeof chosen === "string" && chosen
+            ? [chosen]
+            : [];
+        if (picked.length > 0) {
+          await loadMediaInputs(picked, append ? { append: true } : undefined);
+        }
+      } finally {
+        dialogOpenRef.current = false;
+        if (mpvStartedRef.current) {
+          const appState = useAppStore.getState();
+          const pState = usePlayerStore.getState();
+          if (!panelOpenRef.current || !pState.loaded) {
+            void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+          }
+        }
+      }
+    },
+    [loadMediaInputs, pushNote],
+  );
+
+  const handleChooseSeasonFolder = useCallback(async () => {
     if (!isDesktop()) {
-      pushNote("warn", "File dialog requires the Windows desktop app.");
+      pushNote("warn", "Folder picker requires the Windows desktop app.");
       return;
     }
     if (dialogOpenRef.current) {
@@ -313,17 +516,12 @@ export function WatchRoom() {
         await mpvSetVisible(false);
       }
       const chosen = await open({
+        directory: true,
         multiple: false,
-        title: "Choose Video File",
-        filters: [
-          {
-            name: "Video Files",
-            extensions: ["mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "*"],
-          },
-        ],
+        title: "Choose Season Folder",
       });
       if (typeof chosen === "string" && chosen) {
-        await loadVideoPath(chosen);
+        await loadMediaInputs([chosen]);
       }
     } finally {
       dialogOpenRef.current = false;
@@ -335,7 +533,7 @@ export function WatchRoom() {
         }
       }
     }
-  }, [loadVideoPath, pushNote]);
+  }, [loadMediaInputs, pushNote]);
 
   // Sync network share policy on mount
   useEffect(() => {
@@ -367,7 +565,7 @@ export function WatchRoom() {
     [literalRoom, pushNote, roomCode, username],
   );
 
-  // Auto-play preselected file when entering Solo Media Player from Lobby
+  // Auto-play preselected file or season folder when entering WatchRoom
   useEffect(() => {
     if (
       initialAutoLoadedRef.current ||
@@ -379,7 +577,24 @@ export function WatchRoom() {
     }
     initialAutoLoadedRef.current = true;
     const timer = window.setTimeout(() => {
-      void loadVideoPath(selectedFilePath);
+      const pState = usePlaylistStore.getState();
+      const activeItem =
+        pState.items.find((it) => it.path.toLowerCase() === selectedFilePath.toLowerCase()) ??
+        (pState.currentIndex >= 0 ? pState.items[pState.currentIndex] : undefined);
+      if (activeItem) {
+        void loadVideoPath(selectedFilePath, activeItem.subtitlePath);
+      } else {
+        void scanMediaPaths([selectedFilePath]).then((scan) => {
+          if (scan.items.length > 0) {
+            const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+            usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
+            const matched = scan.items[idx];
+            void loadVideoPath(matched.path, matched.subtitlePath);
+          } else {
+            void loadVideoPath(selectedFilePath);
+          }
+        });
+      }
     }, 60);
     return () => window.clearTimeout(timer);
   }, [loadVideoPath, selectedFilePath]);
@@ -432,6 +647,16 @@ export function WatchRoom() {
           if (!active) return;
           usePlayerStore.getState().setLoaded(true);
           usePlayerStore.getState().setPlayerError(null);
+          const pendingSub = pendingPairedSubRef.current;
+          const activePath = useAppStore.getState().selectedFilePath;
+          if (
+            pendingSub &&
+            activePath &&
+            activePath.toLowerCase() === pendingSub.videoPath.toLowerCase()
+          ) {
+            pendingPairedSubRef.current = null;
+            void loadSubtitlePathRef.current?.(pendingSub.subPath);
+          }
         }),
         onMpvEnded((payload) => {
           if (!active) return;
@@ -439,6 +664,17 @@ export function WatchRoom() {
           if (decision.kind === "eof") {
             usePlayerStore.getState().setEndedAtEof(true);
             usePlayerStore.getState().setPaused(true);
+            const playlist = usePlaylistStore.getState();
+            if (
+              playlist.autoPlayNext &&
+              playlist.currentIndex >= 0 &&
+              playlist.currentIndex < playlist.items.length - 1
+            ) {
+              const nextIdx = playlist.currentIndex + 1;
+              const nextEp = playlist.items[nextIdx];
+              pushNote("info", `Up next: ${nextEp.episodeBadge ?? nextEp.cleanTitle}`);
+              void selectEpisodeAtIndexRef.current?.(nextIdx);
+            }
           } else if (decision.kind === "error") {
             const p = usePlayerStore.getState();
             const s = useSyncStore.getState();
@@ -603,24 +839,7 @@ export function WatchRoom() {
               if (dropGate.notice) pushNote("info", dropGate.notice);
               return;
             }
-            const split = splitDroppedFiles(payload.paths || []);
-            if (split.directorySuspected) {
-              pushNote("warn", "Folders cannot be played directly — drop a video or subtitle file.");
-            } else if (split.unsupportedFiles.length > 0 && !split.videoPath && !split.subtitlePath) {
-              pushNote("warn", `Unsupported file type: ${split.unsupportedFiles.join(", ")}`);
-            }
-            if (split.extraVideoCount > 0) {
-              pushNote("info", `Loaded first video; ignored ${split.extraVideoCount} extra video(s).`);
-            }
-            if (split.extraSubtitleCount > 0) {
-              pushNote("info", `Loaded first subtitle; ignored ${split.extraSubtitleCount} extra subtitle(s).`);
-            }
-            if (split.videoPath) {
-              await loadVideoPath(split.videoPath);
-            }
-            if (split.subtitlePath) {
-              await loadSubtitlePath(split.subtitlePath);
-            }
+            await loadMediaInputs(payload.paths || []);
           }
         });
         if (disposed) fn();
@@ -635,7 +854,7 @@ export function WatchRoom() {
       disposed = true;
       unlisten?.();
     };
-  }, [loadSubtitlePath, loadVideoPath, pushNote]);
+  }, [loadMediaInputs, pushNote]);
 
   // Resize child mpv HWND inside the viewport container once started (Fix 15)
   useEffect(() => {
@@ -750,6 +969,48 @@ export function WatchRoom() {
     }
   }, [participants, syncStatus, username]);
 
+  // Follow controller / party member when switching episodes within a loaded season queue
+  useEffect(() => {
+    if (syncStatus.state !== "connected" || !followPartyEpisode || playlistItems.length === 0) {
+      if (syncStatus.state !== "connected") {
+        lastPeerFileRef.current = null;
+      }
+      return;
+    }
+    const myName = resolveEffectiveUsername(syncStatus, username).toLowerCase();
+    const otherPeers = participants.filter(
+      (p) => p.username.toLowerCase() !== myName && Boolean(p.fileName),
+    );
+    if (otherPeers.length === 0) {
+      lastPeerFileRef.current = null;
+      return;
+    }
+    const leader = otherPeers.find((p) => p.isController) ?? otherPeers[0];
+    const peerFile = leader.fileName?.trim() || null;
+    if (!peerFile || peerFile === lastPeerFileRef.current) {
+      return;
+    }
+    lastPeerFileRef.current = peerFile;
+    const matchedIdx = matchPeerEpisodeInPlaylist(peerFile, playlistItems);
+    if (matchedIdx !== -1 && matchedIdx !== playlistIndex) {
+      const target = playlistItems[matchedIdx];
+      pushNote(
+        "info",
+        `Following ${leader.username} to ${target.episodeBadge ?? target.cleanTitle}`,
+      );
+      void selectEpisodeAtIndex(matchedIdx);
+    }
+  }, [
+    followPartyEpisode,
+    participants,
+    playlistIndex,
+    playlistItems,
+    pushNote,
+    selectEpisodeAtIndex,
+    syncStatus,
+    username,
+  ]);
+
   const chrome = resolveFullscreenChromeState({
     isFullscreen,
     panelOpen,
@@ -773,6 +1034,8 @@ export function WatchRoom() {
     if (leavingRef.current) return;
     leavingRef.current = true;
     soundTrackerRef.current.reset();
+    pendingPairedSubRef.current = null;
+    lastPeerFileRef.current = null;
     announcedFileKeyRef.current = null;
     autoReadyMarkedRef.current = false;
     leaveRoom();
@@ -794,6 +1057,11 @@ export function WatchRoom() {
               className="flex items-center gap-2.5 min-w-0"
             >
               <LogoMark size={20} />
+              {activePlaylistItem?.episodeBadge && (
+                <span className="shrink-0 rounded-full bg-accent/18 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-accent-soft border border-accent/30">
+                  {activePlaylistItem.episodeBadge}
+                </span>
+              )}
               <span className="text-xs font-medium text-primary truncate max-w-[300px]">
                 {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
               </span>
@@ -832,6 +1100,7 @@ export function WatchRoom() {
           isDragActive={isDragActive}
           playerError={playerError}
           onChooseFile={() => void handleChooseFile()}
+          onChooseFolder={() => void handleChooseSeasonFolder()}
           onRetryPlayer={() => {
             void (async () => {
               usePlayerStore.getState().setPlayerError(null);
@@ -841,7 +1110,10 @@ export function WatchRoom() {
               mpvStartPromiseRef.current = null;
               const currentFile = useAppStore.getState().selectedFilePath;
               if (currentFile) {
-                await loadVideoPath(currentFile);
+                const matchItem = usePlaylistStore
+                  .getState()
+                  .items.find((it) => it.path.toLowerCase() === currentFile.toLowerCase());
+                await loadVideoPath(currentFile, matchItem?.subtitlePath);
               }
             })();
           }}
@@ -863,6 +1135,8 @@ export function WatchRoom() {
           onLeaveRoom={handleLeaveRoom}
           onHideControls={() => setChromeIdle(true)}
           onToggleFullscreen={toggleFullscreen}
+          onPrevEpisode={handlePrevEpisode}
+          onNextEpisode={handleNextEpisode}
           expandedDrawer={
             panelOpen ? (
               <div className="space-y-2.5">
@@ -871,9 +1145,10 @@ export function WatchRoom() {
                     ariaLabel="Inspector panel"
                     value={sideTab}
                     onChange={setSideTab}
-                    className="w-full max-w-[300px]"
+                    className="w-full max-w-[380px]"
                     items={[
                       { value: "room", label: "Party" },
+                      { value: "episodes", label: "Episodes" },
                       { value: "playback", label: "Playback" },
                       { value: "subtitles", label: "Subtitles" },
                     ]}
@@ -890,6 +1165,13 @@ export function WatchRoom() {
                 </div>
                 <div className="max-h-[42vh] overflow-visible">
                   {sideTab === "room" && <RoomPanel />}
+                  {sideTab === "episodes" && (
+                    <EpisodesPanel
+                      onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
+                      onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
+                      onAddEpisodes={() => void handleChooseFile(true)}
+                    />
+                  )}
                   {sideTab === "playback" && <PlaybackPanel />}
                   {sideTab === "subtitles" && <SubtitlePanel />}
                 </div>

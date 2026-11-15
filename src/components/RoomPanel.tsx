@@ -16,6 +16,7 @@ import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
 import { playSoundCue } from "../lib/soundEffects";
 import {
   enqueueSyncLifecycle,
+  syncForceResync,
   syncReconnect,
   syncSwitchBackup,
   type FileMatchStatus,
@@ -89,6 +90,17 @@ export const RoomPanel = memo(function RoomPanel() {
       setTimeout(() => setCopied(false), 1800);
     } catch {
       pushNote("info", `Room code: ${roomCode}`);
+    }
+  };
+
+  const handleForceResync = async () => {
+    try {
+      await syncForceResync();
+      const p = usePlayerStore.getState();
+      playSoundCue("peerReady", { moviePlaying: p.loaded && !p.paused });
+      p.flashFeedback("Resynced with room");
+    } catch (err) {
+      pushNote("error", formatUserError(err, "Could not resync playback."));
     }
   };
 
@@ -329,6 +341,15 @@ export const RoomPanel = memo(function RoomPanel() {
               )}
             </div>
           )}
+
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void handleForceResync()}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>Resync</span>
+          </Button>
 
           <span className="text-[11px] font-medium text-muted px-1">
             Watching Together ({participants.length})

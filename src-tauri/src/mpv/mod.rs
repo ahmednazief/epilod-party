@@ -32,6 +32,8 @@ pub struct MpvController {
     snapshot: Arc<Mutex<PlayerSnapshot>>,
     loading_media: Arc<AtomicBool>,
     pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
+    deferred_seek: Arc<Mutex<Option<f64>>>,
+    deferred_pause: Arc<Mutex<Option<bool>>>,
     pending_resize: Arc<PendingResize>,
     lifecycle_lock: AsyncMutex<()>,
     next_req_id: AtomicU64,
@@ -53,6 +55,8 @@ impl MpvController {
             snapshot: Arc::new(Mutex::new(PlayerSnapshot::default())),
             loading_media: Arc::new(AtomicBool::new(false)),
             pending_seek: Arc::new(Mutex::new(None)),
+            deferred_seek: Arc::new(Mutex::new(None)),
+            deferred_pause: Arc::new(Mutex::new(None)),
             pending_resize: Arc::new(PendingResize::default()),
             lifecycle_lock: AsyncMutex::new(()),
             next_req_id: AtomicU64::new(100),
@@ -73,6 +77,8 @@ impl MpvController {
     pub fn prepare_for_load(&self) {
         self.loading_media.store(true, Ordering::SeqCst);
         *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = PlayerSnapshot {
             position: 0.0,
             paused: true,
@@ -89,6 +95,9 @@ impl MpvController {
         } else {
             0.0
         };
+        if self.loading_media.load(Ordering::SeqCst) {
+            *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = Some(safe);
+        }
         *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = Some((safe, Instant::now()));
         self.snapshot
             .lock()
@@ -97,6 +106,9 @@ impl MpvController {
     }
 
     pub fn note_paused(&self, paused: bool) {
+        if self.loading_media.load(Ordering::SeqCst) {
+            *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = Some(paused);
+        }
         self.snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -122,6 +134,8 @@ impl MpvController {
         self.has_media.store(false, Ordering::SeqCst);
         self.pending_resize.cancel();
         *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         let app_for_paths = app.clone();
         let (mpv_exe, fonts_dir) = tokio::task::spawn_blocking(move || {
@@ -150,6 +164,7 @@ impl MpvController {
         };
 
         let (tx, rx) = mpsc::channel::<String>(256);
+        let cmd_tx_ipc = tx.clone();
 
         // Fix 15: Only cache last_rect if viewport dimensions are non-zero (not minimized).
         let cached_rect = if rect.width > 0 && rect.height > 0 {
@@ -177,6 +192,8 @@ impl MpvController {
         let snap_clone = Arc::clone(&self.snapshot);
         let loading_clone = Arc::clone(&self.loading_media);
         let pending_seek_clone = Arc::clone(&self.pending_seek);
+        let deferred_seek_clone = Arc::clone(&self.deferred_seek);
+        let deferred_pause_clone = Arc::clone(&self.deferred_pause);
         let pending_resize_clone = Arc::clone(&self.pending_resize);
         let shutdown_flag = Arc::clone(&self.shutting_down);
         let has_media_clone = Arc::clone(&self.has_media);
@@ -184,10 +201,13 @@ impl MpvController {
             ipc::connect_and_run_ipc(
                 pipe_name,
                 app_clone.clone(),
+                cmd_tx_ipc,
                 rx,
                 Arc::clone(&snap_clone),
                 Arc::clone(&loading_clone),
                 Arc::clone(&pending_seek_clone),
+                Arc::clone(&deferred_seek_clone),
+                Arc::clone(&deferred_pause_clone),
             )
             .await;
             if !shutdown_flag.load(Ordering::SeqCst) {
@@ -272,6 +292,8 @@ impl MpvController {
         self.has_media.store(false, Ordering::SeqCst);
         self.pending_resize.cancel();
         *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let taken = self
             .runtime
             .lock()

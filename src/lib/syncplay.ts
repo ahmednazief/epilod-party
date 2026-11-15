@@ -63,6 +63,10 @@ export async function syncReconnect(): Promise<void> {
   await safeInvoke("sync_reconnect");
 }
 
+export async function syncForceResync(): Promise<void> {
+  await safeInvoke("sync_force_resync");
+}
+
 export async function syncDisconnect(): Promise<void> {
   await safeInvoke("sync_disconnect");
 }

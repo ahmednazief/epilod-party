@@ -4,6 +4,7 @@ pub mod matching;
 pub mod models;
 pub mod mpv_ipc;
 pub mod opensubtitles;
+pub mod playlist;
 pub mod rate_limit;
 pub mod room_code;
 pub mod subtitle_sync;

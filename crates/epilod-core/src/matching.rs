@@ -29,7 +29,12 @@ pub fn compare_files(local: Option<&FileIdentity>, peer: Option<&FileIdentity>) 
     };
 
     if let (Some(ld), Some(pd)) = (l.duration_secs, p.duration_secs) {
-        if ld.is_finite() && pd.is_finite() && (ld - pd).abs() > DURATION_TOLERANCE_SECS {
+        if ld.is_finite()
+            && pd.is_finite()
+            && ld > 0.0
+            && pd > 0.0
+            && (ld - pd).abs() > DURATION_TOLERANCE_SECS
+        {
             return FileMatchStatus::DurationMismatch;
         }
     }
@@ -68,7 +73,12 @@ pub fn compare_files(local: Option<&FileIdentity>, peer: Option<&FileIdentity>) 
     // When duration matches within tolerance (e.g. different encodes or similar-length episodes),
     // report SameLengthDifferentEncode (which the UI warns the user to double-check).
     if let (Some(ld), Some(pd)) = (l.duration_secs, p.duration_secs) {
-        if ld.is_finite() && pd.is_finite() && (ld - pd).abs() <= DURATION_TOLERANCE_SECS {
+        if ld.is_finite()
+            && pd.is_finite()
+            && ld > 0.0
+            && pd > 0.0
+            && (ld - pd).abs() <= DURATION_TOLERANCE_SECS
+        {
             return FileMatchStatus::SameLengthDifferentEncode;
         }
     }
@@ -153,6 +163,22 @@ mod tests {
         let b = id("Ep02.mkv", Some(600_000), None, false);
         assert_eq!(
             compare_files(Some(&a), Some(&b)),
+            FileMatchStatus::DifferentFile
+        );
+    }
+
+    #[test]
+    fn test_zero_duration_while_probing_does_not_trigger_false_mismatch() {
+        let probing = id("Show.S01E01.mkv", Some(1_200_000_000), Some(0.0), false);
+        let peer_ready = id("Show.S01E01.mkv", Some(1_200_000_000), Some(1440.0), false);
+        assert_eq!(
+            compare_files(Some(&probing), Some(&peer_ready)),
+            FileMatchStatus::Matched
+        );
+
+        let peer_other = id("Show.S01E02.mkv", Some(1_150_000_000), Some(1440.0), false);
+        assert_eq!(
+            compare_files(Some(&probing), Some(&peer_other)),
             FileMatchStatus::DifferentFile
         );
     }

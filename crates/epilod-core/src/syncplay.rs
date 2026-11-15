@@ -638,6 +638,7 @@ fn parse_wire_file(obj: &Map<String, Value>) -> Option<WireFileInfo> {
 
 pub const SOFT_DRIFT_ENGAGE_SECS: f64 = 0.6;
 pub const SOFT_DRIFT_CLEAR_SECS: f64 = 0.25;
+pub const IGNORING_CLIENT_TIMEOUT_SECS: f64 = 2.5;
 
 #[derive(Debug, Clone)]
 pub struct SyncStateMachine {
@@ -645,9 +646,12 @@ pub struct SyncStateMachine {
     pub local_pos: f64,
     pub local_paused: bool,
     pub ignoring_client: u64,
+    pub ignoring_client_since: Option<f64>,
     pub ignoring_server: Option<u64>,
     pub pending_do_seek: bool,
     pub last_latency_calculation: Option<f64>,
+    pub last_server_playstate: Option<Playstate>,
+    pub last_server_state_at: Option<f64>,
     pub rtt_secs: f64,
     pub soft_speed: f64,
 }
@@ -673,9 +677,12 @@ impl SyncStateMachine {
             },
             local_paused: snapshot.paused,
             ignoring_client: 0,
+            ignoring_client_since: None,
             ignoring_server: None,
             pending_do_seek: false,
             last_latency_calculation: None,
+            last_server_playstate: None,
+            last_server_state_at: None,
             rtt_secs: 0.0,
             soft_speed: 1.0,
         }
@@ -685,6 +692,7 @@ impl SyncStateMachine {
         self.local_pos = 0.0;
         self.local_paused = true;
         self.ignoring_client = 0;
+        self.ignoring_client_since = None;
         self.pending_do_seek = false;
         self.soft_speed = 1.0;
     }
@@ -702,6 +710,7 @@ impl SyncStateMachine {
 
     pub fn on_user_play(&mut self, position: f64) {
         self.ignoring_client = self.ignoring_client.saturating_add(1);
+        self.ignoring_client_since = None;
         if position.is_finite() && position >= 0.0 {
             self.local_pos = position;
         }
@@ -710,6 +719,7 @@ impl SyncStateMachine {
 
     pub fn on_user_pause(&mut self, position: f64) {
         self.ignoring_client = self.ignoring_client.saturating_add(1);
+        self.ignoring_client_since = None;
         if position.is_finite() && position >= 0.0 {
             self.local_pos = position;
         }
@@ -718,10 +728,37 @@ impl SyncStateMachine {
 
     pub fn on_user_seek(&mut self, position: f64) {
         self.ignoring_client = self.ignoring_client.saturating_add(1);
+        self.ignoring_client_since = None;
         if position.is_finite() && position >= 0.0 {
             self.local_pos = position;
         }
         self.pending_do_seek = true;
+    }
+
+    /// Force an immediate hard snap to the most recently observed room state.
+    pub fn force_resync(&mut self, now_secs: f64) -> Vec<SyncAction> {
+        let mut actions = Vec::new();
+        self.ignoring_client = 0;
+        self.ignoring_client_since = None;
+        self.pending_do_seek = false;
+        self.soft_speed = 1.0;
+        actions.push(SyncAction::SetSpeed(1.0));
+
+        if let Some(ref ps) = self.last_server_playstate {
+            let elapsed = self
+                .last_server_state_at
+                .map(|t| (now_secs - t).clamp(0.0, 5.0))
+                .unwrap_or(0.0);
+            let target_pos =
+                (ps.position + if !ps.paused { elapsed + self.rtt_secs / 2.0 } else { 0.0 })
+                    .max(0.0);
+            self.local_paused = ps.paused;
+            self.local_pos = target_pos;
+            actions.push(SyncAction::SetPaused(ps.paused));
+            actions.push(SyncAction::Seek(target_pos));
+        }
+
+        actions
     }
 
     pub fn handle_server_state(&mut self, state: &ServerState, now_secs: f64) -> Vec<SyncAction> {
@@ -749,12 +786,16 @@ impl SyncStateMachine {
             if let Some(cli) = ig.client {
                 if cli >= self.ignoring_client {
                     self.ignoring_client = 0;
+                    self.ignoring_client_since = None;
                     acknowledged_client = true;
                 }
             }
         }
 
         if let Some(ref ps) = state.playstate {
+            self.last_server_playstate = Some(ps.clone());
+            self.last_server_state_at = Some(now_secs);
+
             // Detect authoritative server override (e.g., managed/controller-locked room)
             // when the server explicitly pushes another user's or server's state with `ignoringOnTheFly.server`
             // or a differing `setBy` while our local command wasn't accepted.
@@ -774,11 +815,28 @@ impl SyncStateMachine {
             {
                 server_override = true;
                 self.ignoring_client = 0;
+                self.ignoring_client_since = None;
                 self.pending_do_seek = false;
             }
 
             if self.ignoring_client > 0 && !acknowledged_client && !server_override {
-                return actions;
+                if self.ignoring_client_since.is_none() {
+                    self.ignoring_client_since = Some(now_secs);
+                }
+                if self
+                    .ignoring_client_since
+                    .is_some_and(|since| now_secs - since >= IGNORING_CLIENT_TIMEOUT_SECS)
+                {
+                    self.ignoring_client = 0;
+                    self.ignoring_client_since = None;
+                    self.pending_do_seek = false;
+                } else {
+                    return actions;
+                }
+            }
+
+            if self.ignoring_client == 0 {
+                self.ignoring_client_since = None;
             }
 
             let target_pos = ps.position + if !ps.paused { self.rtt_secs / 2.0 } else { 0.0 };
@@ -827,6 +885,11 @@ impl SyncStateMachine {
     }
 
     pub fn on_heartbeat_tick(&mut self, now_secs: f64) -> String {
+        if self.ignoring_client > 0 && self.ignoring_client_since.is_none() {
+            self.ignoring_client_since = Some(now_secs);
+        } else if self.ignoring_client == 0 {
+            self.ignoring_client_since = None;
+        }
         let do_seek = self.pending_do_seek;
         self.pending_do_seek = false;
         let ig_server = self.ignoring_server.take();
@@ -1352,6 +1415,67 @@ mod tests {
         assert!(sm.local_paused);
         assert_eq!(sm.ignoring_client, 0);
         assert!(!sm.pending_do_seek);
+        assert_eq!(sm.soft_speed, 1.0);
+    }
+
+    #[test]
+    fn test_ignoring_client_auto_expires_after_timeout_preventing_deadlock() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 50.0,
+            paused: true,
+        });
+        sm.on_user_seek(120.0);
+        let _ = sm.on_heartbeat_tick(10.0);
+
+        // Before timeout: server state without client ack is suppressed
+        let unacked_early = ServerState {
+            playstate: Some(Playstate {
+                position: 200.0,
+                paused: false,
+                do_seek: false,
+                set_by: None,
+            }),
+            ..Default::default()
+        };
+        assert!(sm.handle_server_state(&unacked_early, 11.0).is_empty());
+
+        // Past IGNORING_CLIENT_TIMEOUT_SECS: stale ignore lock auto-expires so room state applies
+        let actions = sm.handle_server_state(&unacked_early, 13.0);
+        assert_eq!(
+            actions,
+            vec![SyncAction::SetPaused(false), SyncAction::Seek(200.0)]
+        );
+        assert_eq!(sm.ignoring_client, 0);
+    }
+
+    #[test]
+    fn test_force_resync_snaps_to_latest_server_playstate_with_elapsed_and_rtt() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 10.0,
+            paused: false,
+        });
+        sm.rtt_secs = 0.4;
+        sm.soft_speed = 1.05;
+        sm.last_server_playstate = Some(Playstate {
+            position: 300.0,
+            paused: false,
+            do_seek: false,
+            set_by: Some("Host".into()),
+        });
+        sm.last_server_state_at = Some(100.0);
+        sm.ignoring_client = 3;
+
+        let actions = sm.force_resync(101.0);
+        // elapsed = 1.0s + half RTT (0.2s) -> target = 301.2s
+        assert_eq!(
+            actions,
+            vec![
+                SyncAction::SetSpeed(1.0),
+                SyncAction::SetPaused(false),
+                SyncAction::Seek(301.2),
+            ]
+        );
+        assert_eq!(sm.ignoring_client, 0);
         assert_eq!(sm.soft_speed, 1.0);
     }
 }

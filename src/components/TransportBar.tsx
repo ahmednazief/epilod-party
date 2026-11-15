@@ -9,23 +9,30 @@ import {
   EyeOff,
   FolderOpen,
   Keyboard,
+  ListVideo,
   Maximize,
   Minimize,
   Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Settings,
+  SkipBack,
+  SkipForward,
   Users,
   Volume2,
   VolumeX,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { formatUserError } from "../lib/errors";
 import { mpvSeek, mpvSetMute, mpvSetPause, mpvSetVolume } from "../lib/mpv";
 import { shouldReplayFromStart } from "../lib/playbackEnd";
 import { playSoundCue } from "../lib/soundEffects";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
+import { computeRoomSyncHealth } from "../lib/syncHealth";
 import {
+  syncForceResync,
   syncSetReady,
   syncSetScrubbing,
   syncUserPause,
@@ -37,12 +44,13 @@ import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
 import { StatusDot } from "./ui/StatusDot";
 
-export type CapsuleTab = "room" | "playback" | "subtitles";
+export type CapsuleTab = "room" | "episodes" | "playback" | "subtitles";
 
 export function formatClock(secs: number): string {
   if (!Number.isFinite(secs) || secs < 0) return "0:00";
@@ -132,6 +140,69 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
   );
 }
 
+const ResyncButton = memo(function ResyncButton({
+  loaded,
+  paused,
+}: {
+  loaded: boolean;
+  paused: boolean;
+}) {
+  const syncStatus = useSyncStore((s) => s.status);
+  const participants = useSyncStore((s) => s.participants);
+  const username = useAppStore((s) => s.username);
+  const posFloored = usePlayerStore((s) => Math.floor(s.positionSecs));
+  const flashFeedback = usePlayerStore((s) => s.flashFeedback);
+  const pushNote = useNotificationStore((s) => s.push);
+  const [busy, setBusy] = useState(false);
+
+  const effectiveUser = resolveEffectiveUsername(syncStatus, username);
+  const health = computeRoomSyncHealth({
+    syncStatus,
+    participants,
+    localUsername: effectiveUser,
+    localLoaded: loaded,
+    localPositionSecs: posFloored,
+  });
+
+  const handleResync = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await syncForceResync();
+      playSoundCue("peerReady", { moviePlaying: loaded && !paused });
+      flashFeedback("Resynced with room");
+    } catch (err) {
+      pushNote("error", formatUserError(err, "Could not resync with room."));
+    } finally {
+      window.setTimeout(() => setBusy(false), 450);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => void handleResync()}
+      aria-label="Resync with room"
+      title={
+        health.needsResync
+          ? `Resync now (${health.statusLabel}) — snaps playback & connection back in sync`
+          : "Force instant resync with party timestamp"
+      }
+      className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 ${
+        health.needsResync
+          ? "bg-warn/20 text-warn ring-1 ring-warn/45 hover:bg-warn/30"
+          : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+      }`}
+    >
+      <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${busy ? "animate-spin" : ""}`} />
+      <span className="hidden sm:inline whitespace-nowrap">
+        {health.maxDriftSecs >= 2.0 ? `Resync · ${health.maxDriftSecs.toFixed(1)}s` : "Resync"}
+      </span>
+    </button>
+  );
+});
+
 interface TransportBarProps {
   activeTab: CapsuleTab | null;
   onToggleTab: (tab: CapsuleTab) => void;
@@ -139,6 +210,8 @@ interface TransportBarProps {
   onLeaveRoom: () => void;
   onHideControls?: () => void;
   onToggleFullscreen: () => void;
+  onPrevEpisode?: () => void;
+  onNextEpisode?: () => void;
   expandedDrawer?: ReactNode;
 }
 
@@ -149,6 +222,8 @@ export const TransportBar = memo(function TransportBar({
   onLeaveRoom,
   onHideControls,
   onToggleFullscreen,
+  onPrevEpisode,
+  onNextEpisode,
   expandedDrawer,
 }: TransportBarProps) {
   const paused = usePlayerStore((s) => s.paused);
@@ -180,6 +255,16 @@ export const TransportBar = memo(function TransportBar({
   const openSettings = useAppStore((s) => s.openSettings);
   const openShortcuts = useAppStore((s) => s.openShortcuts);
   const pushNote = useNotificationStore((s) => s.push);
+
+  const playlistItems = usePlaylistStore((s) => s.items);
+  const playlistIndex = usePlaylistStore((s) => s.currentIndex);
+  const activePlaylistItem =
+    playlistIndex >= 0 && playlistIndex < playlistItems.length
+      ? playlistItems[playlistIndex]
+      : null;
+  const hasPrevEpisode = playlistItems.length > 1 && playlistIndex > 0;
+  const hasNextEpisode =
+    playlistItems.length > 1 && playlistIndex >= 0 && playlistIndex < playlistItems.length - 1;
 
   const syncConnected = syncStatus.state === "connected";
   const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
@@ -277,12 +362,12 @@ export const TransportBar = memo(function TransportBar({
     }
   };
 
-  const visiblePeers = participants.slice(0, 4);
+  const visiblePeers = participants.slice(0, 3);
   const extraPeerCount = Math.max(0, participants.length - visiblePeers.length);
 
   return (
     <div className="shrink-0 w-full px-4 pb-3 pt-1 flex justify-center select-none bg-canvas">
-      <div className="ep-glass-capsule anim-fade-slide-up w-full max-w-[940px] rounded-[26px] px-4 py-2.5 space-y-2">
+      <div className="ep-glass-capsule anim-fade-slide-up w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2">
         {expandedDrawer && <div className="anim-fade-slide-up pb-1.5">{expandedDrawer}</div>}
 
         {/* Top capsule line: movie title/leave status + elastic scrubber */}
@@ -336,9 +421,9 @@ export const TransportBar = memo(function TransportBar({
         </div>
 
         {/* Bottom capsule line: Ready & Hideable Friend Avatars (or Start Party in Solo) | Hero Play Orb | Contextual Popovers */}
-        <div className="flex items-center justify-between gap-2 pt-0.5">
-          {/* Left: Ready pill + Friend Avatars + Hide Avatars toggle + Volume */}
-          <div className="flex items-center gap-1.5 min-w-0">
+        <div className="flex items-center justify-between gap-3 pt-0.5">
+          {/* Left: Ready pill + Resync + Friend Avatars + Volume */}
+          <div className="flex items-center gap-1.5 shrink-0">
             {roomCode ? (
               <>
                 <button
@@ -346,24 +431,26 @@ export const TransportBar = memo(function TransportBar({
                   disabled={!canToggleReady(loaded)}
                   onClick={handleToggleReady}
                   title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
-                  className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
+                  className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
                     localReady && loaded
                       ? "ep-glass-pill-active text-white"
                       : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
                   }`}
                 >
                   {localReady && loaded ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-ok" />
+                    <CheckCircle2 className="h-3.5 w-3.5 text-ok shrink-0" />
                   ) : (
-                    <Circle className="h-3.5 w-3.5 text-muted" />
+                    <Circle className="h-3.5 w-3.5 text-muted shrink-0" />
                   )}
-                  <span className="hidden sm:inline">
+                  <span className="hidden sm:inline whitespace-nowrap">
                     {localReady && loaded ? "Ready" : "Not Ready"}
                   </span>
                 </button>
 
+                <ResyncButton loaded={loaded} paused={paused} />
+
                 {/* Comforting Friend Profile Avatars integrated cleanly onto capsule */}
-                <div className="inline-flex items-center rounded-full bg-white/6 p-0.5 gap-0.5">
+                <div className="inline-flex items-center rounded-full bg-white/6 p-0.5 gap-0.5 shrink-0">
                   {!hideParticipants ? (
                     <button
                       type="button"
@@ -465,7 +552,7 @@ export const TransportBar = memo(function TransportBar({
             )}
 
             {/* Compact Volume */}
-            <div className="hidden md:flex items-center gap-1 pl-1">
+            <div className="hidden lg:flex items-center gap-1 pl-0.5 shrink-0">
               <button
                 type="button"
                 onClick={() => {
@@ -475,7 +562,7 @@ export const TransportBar = memo(function TransportBar({
                 }}
                 aria-label={muted ? "Unmute" : "Mute"}
                 title="Mute (M)"
-                className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
+                className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
               >
                 {muted || volume === 0 ? (
                   <VolumeX className="h-3.5 w-3.5 text-muted" />
@@ -483,7 +570,7 @@ export const TransportBar = memo(function TransportBar({
                   <Volume2 className="h-3.5 w-3.5" />
                 )}
               </button>
-              <div className="w-16">
+              <div className="w-14 shrink-0">
                 <Scrubber
                   ariaLabel="Volume"
                   value={muted ? 0 : volume}
@@ -513,6 +600,19 @@ export const TransportBar = memo(function TransportBar({
 
           {/* Center: Hero Transport Cluster */}
           <div className="flex items-center gap-1.5 shrink-0">
+            {playlistItems.length > 1 && onPrevEpisode && (
+              <button
+                type="button"
+                disabled={!hasPrevEpisode || ctrlLock.lockedForLocalUser}
+                onClick={onPrevEpisode}
+                aria-label="Previous episode"
+                title="Previous episode"
+                className="ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+              >
+                <SkipBack className="h-3.5 w-3.5" />
+              </button>
+            )}
+
             <button
               type="button"
               disabled={!loaded || ctrlLock.lockedForLocalUser}
@@ -555,19 +655,50 @@ export const TransportBar = memo(function TransportBar({
             >
               <RotateCw className="h-3.5 w-3.5" />
             </button>
+
+            {playlistItems.length > 1 && onNextEpisode && (
+              <button
+                type="button"
+                disabled={!hasNextEpisode || ctrlLock.lockedForLocalUser}
+                onClick={onNextEpisode}
+                aria-label="Next episode"
+                title="Next episode"
+                className="ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+              >
+                <SkipForward className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
 
-          {/* Right: Open File + Subtitles & Audio Popovers + Pure Video + Settings/FS */}
+          {/* Right: Open File + Episodes + Subtitles & Audio Popovers + Pure Video + Settings/FS */}
           <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
               onClick={onChooseFile}
               aria-label="Open video file"
-              title="Open video file"
-              className="ep-press h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
+              title="Open video file(s)"
+              className="ep-press h-7.5 w-7.5 2xl:w-auto 2xl:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs text-secondary hover:text-white hover:bg-white/10 whitespace-nowrap cursor-pointer"
             >
-              <FolderOpen className="h-3.5 w-3.5" />
-              <span className="hidden xl:inline">Open</span>
+              <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden 2xl:inline">Open</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onToggleTab("episodes")}
+              aria-label="Episodes drawer"
+              title="Season folder & episodes queue"
+              className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap cursor-pointer ${
+                activeTab === "episodes"
+                  ? "ep-glass-pill-active text-white"
+                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+              }`}
+            >
+              <ListVideo className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden sm:inline">
+                {activePlaylistItem?.episodeBadge ||
+                  (playlistItems.length > 1 ? `Episodes (${playlistItems.length})` : "Episodes")}
+              </span>
             </button>
 
             <button

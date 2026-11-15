@@ -7,6 +7,7 @@ interface ViewportPlaceholderProps {
   isDragActive: boolean;
   playerError: string | null;
   onChooseFile: () => void;
+  onChooseFolder?: () => void;
   onRetryPlayer?: () => void;
 }
 
@@ -15,6 +16,7 @@ export function ViewportPlaceholder({
   isDragActive,
   playerError,
   onChooseFile,
+  onChooseFolder,
   onRetryPlayer,
 }: ViewportPlaceholderProps) {
   if (loaded && !playerError) return null;
@@ -62,16 +64,24 @@ export function ViewportPlaceholder({
           </div>
           <div className="space-y-1.5">
             <p className="text-base font-medium tracking-tight text-white">
-              {isDragActive ? "Drop your video or subtitle file" : "Drop a movie file here"}
+              {isDragActive ? "Drop video, subtitle, or season folder" : "Drop a movie or season folder"}
             </p>
             <p className="text-xs text-secondary leading-relaxed max-w-xs mx-auto">
-              Plays directly from your device — drag an .srt, .ass, or .vtt file anytime.
+              Plays directly from your device — drag an entire season folder or an .srt, .ass, or .vtt file anytime.
             </p>
           </div>
-          <Button variant="primary" size="md" onClick={onChooseFile}>
-            <FolderOpen className="h-4 w-4" />
-            Choose Video File
-          </Button>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Button variant="primary" size="md" onClick={onChooseFile}>
+              <FolderOpen className="h-4 w-4" />
+              Choose Video File
+            </Button>
+            {onChooseFolder && (
+              <Button variant="secondary" size="md" onClick={onChooseFolder}>
+                <FolderOpen className="h-4 w-4" />
+                Season Folder
+              </Button>
+            )}
+          </div>
         </div>
       )}
     </div>

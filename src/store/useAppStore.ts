@@ -11,6 +11,7 @@ import {
   sanitizeUsername,
 } from "../lib/webviewHardening";
 import { usePlayerStore } from "./usePlayerStore";
+import { usePlaylistStore } from "./usePlaylistStore";
 import { useSubtitleStore } from "./useSubtitleStore";
 import { useSyncStore } from "./useSyncStore";
 
@@ -226,6 +227,7 @@ export const useAppStore = create<AppState>((set) => ({
     usePlayerStore.getState().reset();
     useSyncStore.getState().reset();
     useSubtitleStore.getState().clearLoadedTrack();
+    usePlaylistStore.getState().clearPlaylist();
     set({
       screen: "home",
       roomCode: "",

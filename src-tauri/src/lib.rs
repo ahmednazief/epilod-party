@@ -609,6 +609,23 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn sync_force_resync(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+        check_rate(&state, "sync_resync", 6, Duration::from_secs(5))?;
+        state.sync.force_resync(app, Arc::clone(&state.mpv)).await
+    }
+
+    #[tauri::command]
+    async fn scan_media_paths(
+        state: State<'_, AppState>,
+        paths: Vec<String>,
+    ) -> Result<epilod_core::playlist::MediaScanResultDto, String> {
+        let opts = state.network_policy.options();
+        tokio::task::spawn_blocking(move || epilod_core::playlist::scan_media_paths(&paths, opts))
+            .await
+            .map_err(|e| format!("Failed scanning media paths: {e}"))?
+    }
+
+    #[tauri::command]
     async fn sync_disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
         state.sync.disconnect().await;
         let _ = app.emit(
@@ -1056,6 +1073,7 @@ mod windows_app {
                 set_allow_network_shares,
                 sync_connect,
                 sync_reconnect,
+                sync_force_resync,
                 sync_disconnect,
                 sync_switch_backup,
                 sync_set_file,
@@ -1064,6 +1082,7 @@ mod windows_app {
                 sync_user_pause,
                 sync_user_seek,
                 sync_set_scrubbing,
+                scan_media_paths,
                 log_frontend_event,
                 get_logs_snapshot,
                 update_get_status,

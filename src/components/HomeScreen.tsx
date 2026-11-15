@@ -1,3 +1,4 @@
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
@@ -12,10 +13,11 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
-import { getFileDisplayName } from "../lib/fileDrop";
+import { scanMediaPaths } from "../lib/playlist";
 import { playSoundCue } from "../lib/soundEffects";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
+import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
 import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
@@ -71,6 +73,7 @@ export function HomeScreen() {
   const [editingName, setEditingName] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openingMedia, setOpeningMedia] = useState(false);
+  const [isDragActive, setIsDragActive] = useState(false);
   const verifyTimerRef = useRef<number | null>(null);
   const profileRef = useRef<HTMLDivElement | null>(null);
 
@@ -111,6 +114,55 @@ export function HomeScreen() {
     })();
   }, [initUpdater, checkForUpdates, autoCheckUpdates]);
 
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    const bindDrop = async () => {
+      try {
+        const win = getCurrentWebviewWindow();
+        const fn = await win.onDragDropEvent(async (event) => {
+          if (disposed) return;
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            setIsDragActive(true);
+            return;
+          }
+          if (payload.type === "leave") {
+            setIsDragActive(false);
+            return;
+          }
+          if (payload.type === "drop") {
+            setIsDragActive(false);
+            const dropped = payload.paths || [];
+            if (dropped.length === 0) return;
+            const scan = await scanMediaPaths(dropped);
+            if (scan.items.length > 0) {
+              const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+              usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
+              const target = scan.items[idx];
+              setSelectedFile(target.path, target.fileName);
+              enterRoom("", false);
+            } else {
+              setError("No playable video or season folder found in dropped items.");
+            }
+          }
+        });
+        if (disposed) fn();
+        else unlisten = fn;
+      } catch {
+        // Ignore outside Tauri webview window
+      }
+    };
+
+    void bindDrop();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [enterRoom, setSelectedFile]);
+
   const ensureValidName = (): boolean => {
     const clean = sanitizeUsername(username);
     if (!clean) {
@@ -132,8 +184,8 @@ export function HomeScreen() {
     setOpeningMedia(true);
     try {
       const chosen = await open({
-        multiple: false,
-        title: "Open Media File",
+        multiple: true,
+        title: "Open Media File(s)",
         filters: [
           {
             name: "Video Files",
@@ -153,8 +205,19 @@ export function HomeScreen() {
           },
         ],
       });
-      if (typeof chosen === "string" && chosen) {
-        setSelectedFile(chosen, getFileDisplayName(chosen));
+      const picked = Array.isArray(chosen)
+        ? chosen
+        : typeof chosen === "string" && chosen
+          ? [chosen]
+          : [];
+      if (picked.length > 0) {
+        const scan = await scanMediaPaths(picked);
+        if (scan.items.length > 0) {
+          const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+          usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
+          const target = scan.items[idx];
+          setSelectedFile(target.path, target.fileName);
+        }
         enterRoom("", false);
       }
     } catch {
@@ -579,6 +642,18 @@ export function HomeScreen() {
       </main>
 
       <div className="h-4 relative z-10" aria-hidden="true" />
+
+      {isDragActive && (
+        <div
+          role="status"
+          className="ep-glass-sheet anim-pop-in pointer-events-none fixed bottom-7 left-1/2 -translate-x-1/2 z-40 rounded-full px-5 py-2.5 flex items-center gap-2.5 border border-accent/55"
+        >
+          <OpenMediaIcon size={20} className="shrink-0" />
+          <span className="text-xs font-medium text-white">
+            Drop a video or full season folder to open
+          </span>
+        </div>
+      )}
     </div>
   );
 }

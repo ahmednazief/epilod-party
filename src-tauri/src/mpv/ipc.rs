@@ -1,6 +1,9 @@
 #![cfg(windows)]
 
-use epilod_core::mpv_ipc::{encode_observe, parse_line, MpvEvent, MpvMessage, TimePosThrottle};
+use epilod_core::mpv_ipc::{
+    encode_observe, parse_line, seek_absolute_cmd, set_pause_cmd, MpvEvent, MpvMessage,
+    TimePosThrottle,
+};
 use epilod_core::syncplay::PlayerSnapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,13 +13,17 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_and_run_ipc(
     pipe_name: String,
     app: AppHandle,
+    cmd_tx: mpsc::Sender<String>,
     mut cmd_rx: mpsc::Receiver<String>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
     loading_media: Arc<AtomicBool>,
     pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
+    deferred_seek: Arc<Mutex<Option<f64>>>,
+    deferred_pause: Arc<Mutex<Option<bool>>>,
 ) {
     let full_pipe = format!(r"\\.\pipe\{pipe_name}");
     let mut client = None;
@@ -78,7 +85,7 @@ pub async fn connect_and_run_ipc(
                     let skip_stale_seek = {
                         let mut ps = pending_seek.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some((target, at)) = *ps {
-                            if at.elapsed() < Duration::from_millis(2500)
+                            if at.elapsed() < Duration::from_millis(900)
                                 && (position - target).abs() > 1.0
                             {
                                 true
@@ -127,8 +134,17 @@ pub async fn connect_and_run_ipc(
                 }
                 MpvEvent::FileLoaded => {
                     loading_media.store(false, Ordering::SeqCst);
+                    *pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     ui_time_throttle.reset();
                     let _ = app.emit("mpv://file-loaded", ());
+                    if let Some(paused) = deferred_pause.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        let _ = cmd_tx.try_send(set_pause_cmd(900_001, paused));
+                    }
+                    if let Some(target) = deferred_seek.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        *pending_seek.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some((target, Instant::now()));
+                        let _ = cmd_tx.try_send(seek_absolute_cmd(900_002, target));
+                    }
                 }
                 MpvEvent::EndFile { reason, file_error } => {
                     if reason.as_deref() != Some("replace") && reason.as_deref() != Some("redirect")

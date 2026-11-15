@@ -51,6 +51,7 @@ pub enum SyncCommand {
     UserPause(f64),
     UserSeek(f64),
     ResetForNewFile,
+    ForceResync,
     SetScrubbing(bool),
     ManualRetry,
 }
@@ -200,6 +201,26 @@ impl SyncController {
             config: cfg,
         });
         Ok(())
+    }
+
+    pub async fn force_resync(&self, app: AppHandle, mpv: Arc<MpvController>) -> Result<(), String> {
+        let existing_tx = {
+            let guard = self
+                .runtime
+                .lock()
+                .map_err(|_| "Sync state lock poisoned".to_string())?;
+            guard
+                .as_ref()
+                .map(|rt| (rt.tx.clone(), rt.task.is_finished()))
+        };
+
+        if let Some((tx, finished)) = existing_tx {
+            if !finished && tx.send(SyncCommand::ForceResync).await.is_ok() {
+                return Ok(());
+            }
+        }
+
+        self.reconnect(app, mpv).await
     }
 
     pub async fn disconnect(&self) {
@@ -438,7 +459,7 @@ async fn run_sync_loop(
                     _ = &mut sleep => break,
                     cmd = rx.recv() => match cmd {
                         None => return,
-                        Some(SyncCommand::ManualRetry) => {
+                        Some(SyncCommand::ManualRetry | SyncCommand::ForceResync) => {
                             policy.manual_retry();
                             break;
                         }
@@ -460,11 +481,47 @@ async fn run_sync_loop(
             loop {
                 match rx.recv().await {
                     None => return,
-                    Some(SyncCommand::ManualRetry) => {
+                    Some(SyncCommand::ManualRetry | SyncCommand::ForceResync) => {
                         policy.manual_retry();
                         break;
                     }
                     Some(_) => {}
+                }
+            }
+        }
+    }
+}
+
+fn apply_sync_actions(
+    app: &AppHandle,
+    mpv: &MpvController,
+    actions: Vec<SyncAction>,
+    is_scrubbing: bool,
+) {
+    for act in actions {
+        match act {
+            SyncAction::ServerOverride { set_by } => {
+                let _ = app.emit(
+                    "sync://server-override",
+                    serde_json::json!({ "setBy": set_by }),
+                );
+            }
+            SyncAction::SetPaused(p) => {
+                mpv.note_paused(p);
+                let req = mpv.next_request_id();
+                let _ = mpv.send_command(set_pause_cmd(req, p));
+            }
+            SyncAction::Seek(pos) => {
+                if !is_scrubbing {
+                    mpv.note_seek_target(pos);
+                    let req = mpv.next_request_id();
+                    let _ = mpv.send_command(seek_absolute_cmd(req, pos));
+                }
+            }
+            SyncAction::SetSpeed(spd) => {
+                if !is_scrubbing {
+                    let req = mpv.next_request_id();
+                    let _ = mpv.send_command(set_speed_cmd(req, spd));
                 }
             }
         }
@@ -645,34 +702,7 @@ where
                             sm.update_local_player(snap.position, snap.paused);
                         }
                         let actions = sm.handle_server_state(&st, now_secs);
-                        for act in actions {
-                            match act {
-                                SyncAction::ServerOverride { set_by } => {
-                                    let _ = app.emit(
-                                        "sync://server-override",
-                                        serde_json::json!({ "setBy": set_by }),
-                                    );
-                                }
-                                SyncAction::SetPaused(p) => {
-                                    mpv.note_paused(p);
-                                    let req = mpv.next_request_id();
-                                    let _ = mpv.send_command(set_pause_cmd(req, p));
-                                }
-                                SyncAction::Seek(pos) => {
-                                    if !is_scrubbing {
-                                        mpv.note_seek_target(pos);
-                                        let req = mpv.next_request_id();
-                                        let _ = mpv.send_command(seek_absolute_cmd(req, pos));
-                                    }
-                                }
-                                SyncAction::SetSpeed(spd) => {
-                                    if !is_scrubbing {
-                                        let req = mpv.next_request_id();
-                                        let _ = mpv.send_command(set_speed_cmd(req, spd));
-                                    }
-                                }
-                            }
-                        }
+                        apply_sync_actions(app, mpv, actions, is_scrubbing);
                     }
                     Ok(ServerMessage::Error(msg)) => {
                         let _ = app.emit("sync://error", serde_json::json!({ "message": msg }));
@@ -701,48 +731,108 @@ where
                 };
                 match cmd {
                     SyncCommand::SetFile(Some(meta)) => {
-                        let wire = encode_set_file(
-                            &meta.name,
-                            meta.size_bytes,
-                            meta.duration_secs,
-                            meta.hash_identity,
-                        );
-                        if writer.write_all(wire.as_bytes()).await.is_err() {
-                            return Err("Failed sending file info to Syncplay.".to_string());
+                        if connected_emitted {
+                            let wire = encode_set_file(
+                                &meta.name,
+                                meta.size_bytes,
+                                meta.duration_secs,
+                                meta.hash_identity,
+                            );
+                            if writer.write_all(wire.as_bytes()).await.is_err() {
+                                return Err("Failed sending file info to Syncplay.".to_string());
+                            }
+                            emit_participants(app, &participants, local_file);
+                            if participants.len() > 1 && sm.last_server_playstate.is_some() {
+                                let actions = sm.force_resync(start_instant.elapsed().as_secs_f64());
+                                apply_sync_actions(app, mpv, actions, is_scrubbing);
+                            }
                         }
-                        emit_participants(app, &participants, local_file);
                     }
                     SyncCommand::SetFile(None) => {}
                     SyncCommand::SetReady { is_ready, manual } => {
-                        let wire = encode_set_ready(is_ready, manual);
-                        if writer.write_all(wire.as_bytes()).await.is_err() {
-                            return Err("Failed sending ready status.".to_string());
+                        if connected_emitted {
+                            let wire = encode_set_ready(is_ready, manual);
+                            if writer.write_all(wire.as_bytes()).await.is_err() {
+                                return Err("Failed sending ready status.".to_string());
+                            }
                         }
                     }
                     SyncCommand::UserPlay(pos) => {
                         sm.on_user_play(pos);
-                        let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
-                        let _ = writer.write_all(hb.as_bytes()).await;
+                        if connected_emitted {
+                            let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
+                            let _ = writer.write_all(hb.as_bytes()).await;
+                        }
                     }
                     SyncCommand::UserPause(pos) => {
                         sm.on_user_pause(pos);
-                        let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
-                        let _ = writer.write_all(hb.as_bytes()).await;
+                        if connected_emitted {
+                            let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
+                            let _ = writer.write_all(hb.as_bytes()).await;
+                        }
                     }
                     SyncCommand::UserSeek(pos) => {
                         sm.on_user_seek(pos);
-                        let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
-                        let _ = writer.write_all(hb.as_bytes()).await;
+                        if connected_emitted {
+                            let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
+                            let _ = writer.write_all(hb.as_bytes()).await;
+                        }
                     }
                     SyncCommand::ResetForNewFile => {
                         sm.reset_for_new_file();
                         let spd_req = mpv.next_request_id();
                         let _ = mpv.send_command(set_speed_cmd(spd_req, 1.0));
-                        let ready_wire = encode_set_ready(false, false);
-                        if writer.write_all(ready_wire.as_bytes()).await.is_err() {
-                            return Err("Failed resetting ready status for new file.".to_string());
+                        if connected_emitted {
+                            let ready_wire = encode_set_ready(false, false);
+                            if writer.write_all(ready_wire.as_bytes()).await.is_err() {
+                                return Err("Failed resetting ready status for new file.".to_string());
+                            }
+                            emit_participants(app, &participants, local_file);
                         }
-                        emit_participants(app, &participants, local_file);
+                    }
+                    SyncCommand::ForceResync => {
+                        is_scrubbing = false;
+                        if connected_emitted {
+                            let is_ready = local_ready.lock().map(|g| *g).unwrap_or(false);
+                            let ready_wire = encode_set_ready(is_ready, false);
+                            if writer.write_all(ready_wire.as_bytes()).await.is_err() {
+                                return Err("Failed refreshing ready status during resync.".to_string());
+                            }
+                            let current_file = local_file.lock().ok().and_then(|g| g.clone());
+                            if let Some(f) = current_file {
+                                let file_wire = encode_set_file(
+                                    &f.name,
+                                    f.size_bytes,
+                                    f.duration_secs,
+                                    f.hash_identity,
+                                );
+                                if writer.write_all(file_wire.as_bytes()).await.is_err() {
+                                    return Err("Failed refreshing file info during resync.".to_string());
+                                }
+                            }
+                            let _ = writer.write_all(b"{\"List\":null}\r\n").await;
+                            if sm.last_server_playstate.is_none() {
+                                if let Some(peer) = participants
+                                    .values()
+                                    .find(|p| p.username != active_username && p.is_controller)
+                                    .or_else(|| participants.values().find(|p| p.username != active_username))
+                                {
+                                    sm.last_server_playstate = Some(epilod_core::syncplay::Playstate {
+                                        position: peer.position,
+                                        paused: peer.paused,
+                                        do_seek: true,
+                                        set_by: Some(peer.username.clone()),
+                                    });
+                                    sm.last_server_state_at = Some(start_instant.elapsed().as_secs_f64());
+                                }
+                            }
+                            let actions = sm.force_resync(start_instant.elapsed().as_secs_f64());
+                            apply_sync_actions(app, mpv, actions, is_scrubbing);
+                            let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
+                            if writer.write_all(hb.as_bytes()).await.is_err() {
+                                return Err("Syncplay heartbeat write failed during resync.".to_string());
+                            }
+                        }
                     }
                     SyncCommand::SetScrubbing(scrubbing) => {
                         is_scrubbing = scrubbing;
