@@ -167,7 +167,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
                 style={{ transform: `scaleX(${isVerifying ? 1 : progressFraction})` }}
               />
             </span>
-            <span className="ep-update-pct-badge num font-mono text-[11px] font-semibold text-accent-soft px-2 py-0.5 rounded-full shrink-0">
+            <span className="ep-update-pct-badge num text-[11px] font-semibold text-accent-soft px-2 py-0.5 rounded-full shrink-0">
               {isVerifying ? 100 : rawPercent}%
             </span>
           </button>
@@ -184,7 +184,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             >
               <span className="h-1.5 w-1.5 rounded-full bg-ok animate-pulse shrink-0" />
               <span className="whitespace-nowrap">Update Ready · v{availableRelease.version}</span>
-              <span className="ep-update-pct-badge num font-mono text-[10.5px] font-semibold text-ok px-1.5 py-0.5 rounded-full shrink-0">
+              <span className="ep-update-pct-badge num text-[10.5px] font-semibold text-ok px-1.5 py-0.5 rounded-full shrink-0">
                 100%
               </span>
             </button>
@@ -219,7 +219,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
                     : `Update Available · v${availableRelease.version}`}
               </span>
               {isUpdatePaused && rawPercent > 0 && (
-                <span className="ep-update-pct-badge num font-mono text-[10.5px] font-semibold text-accent-soft px-1.5 py-0.5 rounded-full shrink-0">
+                <span className="ep-update-pct-badge num text-[10.5px] font-semibold text-accent-soft px-1.5 py-0.5 rounded-full shrink-0">
                   {rawPercent}%
                 </span>
               )}

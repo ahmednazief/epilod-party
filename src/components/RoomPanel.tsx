@@ -287,7 +287,7 @@ export const RoomPanel = memo(function RoomPanel() {
                 placeholder="Exact Syncplay room name…"
                 aria-label="Room Name"
                 onChange={(e) => setJoinCode(sanitizeRoomCodeInput(e.target.value, true))}
-                className="ep-glass-input flex-1 h-9 px-3 rounded-xl text-xs font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
+                className="ep-glass-input flex-1 h-9 px-3 rounded-xl text-xs num tracking-wide text-primary placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
               />
               <Button type="submit" variant="secondary" size="sm">
                 Join
@@ -397,7 +397,7 @@ export const RoomPanel = memo(function RoomPanel() {
             </div>
             <div
               title={serverOverrideNotice || undefined}
-              className="text-base font-mono font-semibold tracking-[0.14em] text-white num truncate"
+              className="text-[17px] leading-tight font-semibold tracking-[0.16em] text-white num truncate"
             >
               {literalRoom ? roomCode : formatRoomCodeDisplay(roomCode)}
             </div>
@@ -453,7 +453,7 @@ export const RoomPanel = memo(function RoomPanel() {
           <div className="flex items-center gap-1.5 min-w-0">
             <Users className="h-3.5 w-3.5 text-accent-soft shrink-0" />
             <span className="text-xs font-medium text-white truncate">Watching Together</span>
-            <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10.5px] font-medium text-white/90 num">
+            <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10.5px] font-semibold text-white/90">
               {participants.length}
             </span>
           </div>

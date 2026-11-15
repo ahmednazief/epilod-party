@@ -397,7 +397,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                         <span className="text-xs font-medium text-white">
                           Epilod Party v{availableRelease.version}
                         </span>
-                        <span className="text-[11px] font-mono text-muted">
+                        <span className="text-[11px] num text-muted">
                           {formatBytesCompact(availableRelease.sizeBytes)}
                         </span>
                       </div>
@@ -406,7 +406,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           {availableRelease.notes}
                         </p>
                       )}
-                      <div className="flex items-center gap-1.5 pt-1 text-[10.5px] font-mono text-muted">
+                      <div className="flex items-center gap-1.5 pt-1 text-[10.5px] num text-muted">
                         <ShieldCheck className="h-3 w-3 text-ok shrink-0" />
                         <span className="truncate">
                           {updateStatus?.signatureVerified
@@ -424,11 +424,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           <span className="text-secondary truncate">{updateProgress.message}</span>
                           <div className="flex items-center gap-2 shrink-0">
                             {updateProgress.speedBps > 0 && (
-                              <span className="font-mono text-muted">
+                              <span className="num text-muted">
                                 {formatTransferSpeed(updateProgress.speedBps)}
                               </span>
                             )}
-                            <span className="ep-update-pct-badge num font-mono text-xs font-semibold text-accent-soft px-2.5 py-0.5 rounded-full">
+                            <span className="ep-update-pct-badge num text-xs font-semibold text-accent-soft px-2.5 py-0.5 rounded-full">
                               {Math.round(updateProgress.percent)}%
                             </span>
                           </div>
@@ -440,7 +440,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           />
                         </div>
                         {updateProgress.totalBytes > 0 && (
-                          <div className="flex justify-between text-[10.5px] font-mono text-muted">
+                          <div className="flex justify-between text-[10.5px] num text-muted">
                             <span>{formatBytesCompact(updateProgress.downloadedBytes)}</span>
                             <span>{formatBytesCompact(updateProgress.totalBytes)}</span>
                           </div>
@@ -592,7 +592,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </Button>
                 </div>
 
-                <div className="ep-glass-input h-64 overflow-y-auto rounded-2xl p-3 font-mono text-[11px] space-y-1">
+                <div className="ep-glass-input h-64 overflow-y-auto rounded-2xl p-3 ep-mono-log text-[11px] space-y-1">
                   {logs.length === 0 ? (
                     <p className="text-muted p-2">No diagnostic events recorded yet.</p>
                   ) : (

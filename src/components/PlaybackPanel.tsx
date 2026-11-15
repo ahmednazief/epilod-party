@@ -105,7 +105,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                   <span className="truncate">{primaryLabel}</span>
                 </span>
                 {metaTags.length > 0 && (
-                  <span className="text-[10px] font-mono text-muted shrink-0">
+                  <span className="text-[10px] num font-medium text-muted shrink-0">
                     {metaTags.join(" · ")}
                   </span>
                 )}

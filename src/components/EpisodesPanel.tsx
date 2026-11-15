@@ -51,7 +51,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
   }, [currentIndex]);
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-2.5">
+    <div className="flex flex-col flex-1 min-h-0 gap-2.5">
       {/* Minimal Header */}
       <div className="flex items-start justify-between gap-2 shrink-0 px-0.5">
         <div className="min-w-0">
@@ -161,7 +161,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             >
               {/* Episode number or subtle active equalizer */}
               <div
-                className={`w-6 shrink-0 flex items-center justify-center font-mono text-[11px] font-semibold num ${
+                className={`w-6 shrink-0 flex items-center justify-center text-[11px] font-semibold num ${
                   active ? "text-accent-soft" : "text-muted group-hover:text-secondary"
                 }`}
               >
@@ -229,7 +229,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
               </div>
 
               {item.episodeBadge && (
-                <span className="shrink-0 font-mono text-[10.5px] text-muted/75 num">
+                <span className="shrink-0 text-[10.5px] font-medium text-white/55 num">
                   {item.episodeBadge}
                 </span>
               )}

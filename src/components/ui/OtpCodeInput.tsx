@@ -207,7 +207,7 @@ export function OtpCodeInput({
             onKeyDown={(e) => handleKeyDown(index, e)}
             onPaste={(e) => handlePaste(index, e)}
             className={[
-              "ep-otp-box text-center font-mono font-semibold text-white placeholder:text-white/20 focus:outline-none tabular-nums",
+              "ep-otp-box num text-center font-semibold text-white placeholder:text-white/20 focus:outline-none",
               compact
                 ? "h-10 rounded-xl text-sm"
                 : "h-12 sm:h-13 rounded-2xl text-lg",

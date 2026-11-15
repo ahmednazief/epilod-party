@@ -429,7 +429,7 @@ export function HomeScreen() {
         e.stopPropagation();
         setContextMenu({ x: e.clientX, y: e.clientY });
       }}
-      className="ep-amethyst-canvas relative min-h-full w-full flex flex-col justify-between text-primary select-none"
+      className="ep-amethyst-canvas relative h-full w-full overflow-y-auto overflow-x-hidden flex flex-col justify-between text-primary select-none"
     >
       {/* Subtle luminous contours behind glass surfaces so liquid lens distortion melts shapes cleanly */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden z-0" aria-hidden="true">
@@ -557,9 +557,9 @@ export function HomeScreen() {
                   setError(null);
                   setLobbyView("party");
                 }}
-                className="ep-glass-btn-party ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
+                className="group ep-glass-btn-party ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
               >
-                <WatchPartyIcon size={24} className="shrink-0" />
+                <WatchPartyIcon size={24} className="shrink-0 transition-transform duration-200 group-hover:scale-105" />
                 <span>Watch Party</span>
               </button>
 
@@ -567,9 +567,9 @@ export function HomeScreen() {
                 type="button"
                 disabled={openingMedia}
                 onClick={() => void handleOpenMediaSolo()}
-                className="ep-glass-btn-media ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
+                className="group ep-glass-btn-media ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
               >
-                <OpenMediaIcon size={24} className="shrink-0" />
+                <OpenMediaIcon size={24} className="shrink-0 transition-transform duration-200 group-hover:scale-105" />
                 <span>{openingMedia ? "Opening..." : "Open Media"}</span>
               </button>
             </div>
@@ -611,7 +611,7 @@ export function HomeScreen() {
                     </div>
                   </div>
                   <div className="inline-flex items-center gap-1 rounded-full bg-white/[0.06] pl-3 pr-1 py-1 shrink-0">
-                    <span className="font-mono text-xs font-semibold text-accent-soft tracking-[0.14em] tabular-nums">
+                    <span className="num text-xs font-semibold text-accent-soft tracking-[0.16em]">
                       {formatRoomCodeDisplay(draftRoomCode)}
                     </span>
                     <button
@@ -685,7 +685,7 @@ export function HomeScreen() {
                         setJoinInput(sanitizeRoomCodeInput(e.target.value, true));
                         if (error) setError(null);
                       }}
-                      className="ep-glass-input flex-1 h-10 px-3.5 rounded-xl text-sm font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
+                      className="ep-glass-input flex-1 h-10 px-3.5 rounded-xl text-sm num tracking-wide text-primary placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
                     />
                     <button
                       type="submit"
@@ -730,7 +730,7 @@ export function HomeScreen() {
               </button>
 
               {showOptions && (
-                <div className="anim-fade-slide-up ep-glass-sheet w-full rounded-[22px] p-3.5 space-y-2.5">
+                <div className="anim-pop-in ep-glass-sheet w-full rounded-[22px] p-3.5 space-y-2.5">
                   <input
                     type="password"
                     value={serverPassword}

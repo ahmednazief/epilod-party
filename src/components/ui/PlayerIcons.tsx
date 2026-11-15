@@ -56,7 +56,7 @@ export function PlayerPauseIcon({ size = 19, className = "" }: PlayerIconProps) 
  */
 export function PlayerSeekIcon({
   direction,
-  size = 18,
+  size = 19,
   className = "",
 }: PlayerIconProps & { direction: "back" | "forward" }) {
   const uid = useId().replace(/:/g, "");
@@ -105,8 +105,8 @@ export function PlayerSeekIcon({
           />
         </>
       )}
-      <path d="M10.4 12.2L11.7 11.4V17.4" stroke="#FFFFFF" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" />
-      <rect x="13.8" y="11.4" width="3.8" height="6" rx="1.9" stroke="#DDD6FE" strokeWidth="1.65" />
+      <path d="M9.8 12.6L11.5 11.4V17.8" stroke="#FFFFFF" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="13.8" y="11.4" width="4.4" height="6.4" rx="2.2" stroke="#DDD6FE" strokeWidth="1.8" />
     </svg>
   );
 }

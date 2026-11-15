@@ -25,7 +25,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { usePlayerShortcuts } from "../hooks/usePlayerShortcuts";
 import { isDesktop } from "../lib/bridge";
@@ -131,6 +131,46 @@ import { StatusDot } from "./ui/StatusDot";
 
 type SideTab = CapsuleTab;
 
+interface CapsulePopoverLayout {
+  left: number;
+  bottom: number;
+  width: number;
+}
+
+/**
+ * Anchors compact capsule menus (Episodes, CC, Audio) centered directly above their
+ * trigger button and clamped inside the play bar's resting horizontal footprint.
+ */
+function computeCapsulePopoverLayout(tab: SideTab): CapsulePopoverLayout {
+  const winW = window.innerWidth;
+  const maxWidth = tab === "episodes" ? 344 : 304;
+  const width = Math.min(maxWidth, Math.max(240, winW - 32));
+  const barEl = document.querySelector<HTMLElement>('[data-capsule-bar="true"]');
+  const anchorEl = document.querySelector<HTMLElement>(`[data-capsule-anchor="${tab}"]`);
+
+  const barRect = barEl?.getBoundingClientRect();
+  const barHeight = barEl ? Math.max(barEl.offsetHeight, barRect?.height ?? 0) : 100;
+  // Resting capsule sits 16px above bottom (pb-4); leave an 8px gap above its top edge.
+  const bottom = Math.max(124, Math.round(barHeight + 24));
+
+  const minLeft = barRect && barRect.width > 0 ? Math.max(16, Math.round(barRect.left)) : 16;
+  const maxRight =
+    barRect && barRect.width > 0 ? Math.min(winW - 16, Math.round(barRect.right)) : winW - 16;
+  const maxLeft = Math.max(minLeft, maxRight - width);
+
+  const btnRect = anchorEl?.getBoundingClientRect();
+  const desiredLeft =
+    btnRect && btnRect.width > 0
+      ? btnRect.left + btnRect.width / 2 - width / 2
+      : (minLeft + maxRight) / 2 - width / 2;
+
+  return {
+    left: Math.round(Math.max(minLeft, Math.min(desiredLeft, maxLeft))),
+    bottom,
+    width,
+  };
+}
+
 export function WatchRoom() {
   const {
     username,
@@ -205,6 +245,7 @@ export function WatchRoom() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [popoverPos, setPopoverPos] = useState<CapsulePopoverLayout | null>(null);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
@@ -1145,6 +1186,26 @@ export function WatchRoom() {
     }
   }, [hasFolderEpisodes, panelOpen, sideTab]);
 
+  useLayoutEffect(() => {
+    if (!panelOpen || sideTab === "room" || (sideTab === "episodes" && !hasFolderEpisodes)) {
+      setPopoverPos(null);
+      return;
+    }
+    const updatePosition = () => setPopoverPos(computeCapsulePopoverLayout(sideTab));
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    return () => window.removeEventListener("resize", updatePosition);
+  }, [
+    panelOpen,
+    sideTab,
+    hasFolderEpisodes,
+    playlistItems.length,
+    loaded,
+    roomCode,
+    syncStatus.state,
+    isFullscreen,
+  ]);
+
   const handleToggleCapsuleTab = (tab: SideTab) => {
     wakeChrome();
     if (panelOpen && sideTab === tab) {
@@ -1387,7 +1448,7 @@ export function WatchRoom() {
         visible={Boolean(showFloatingCapsule || showWindowBar || panelOpen || contextMenu)}
         playing={!paused}
         viewportRef={viewportRef}
-        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${panelOpen}:${sideTab}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${viewportTick}`}
+        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${panelOpen}:${sideTab}:${popoverPos?.left ?? 0}:${popoverPos?.bottom ?? 0}:${popoverPos?.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${viewportTick}`}
       />
       <NotificationStrip />
 
@@ -1420,7 +1481,7 @@ export function WatchRoom() {
               {activePlaylistItem?.episodeBadge && (
                 <span
                   data-tauri-drag-region
-                  className="shrink-0 font-mono text-[11px] text-white/55"
+                  className="shrink-0 num text-[11px] font-medium text-white/60"
                 >
                   {activePlaylistItem.episodeBadge}
                 </span>
@@ -1534,27 +1595,12 @@ export function WatchRoom() {
         )}
       </div>
 
-      {panelOpen && sideTab === "episodes" && hasFolderEpisodes && (
-        <aside
-          aria-label="Season episodes"
-          data-glass-region="true"
-          className="ep-glass-capsule anim-drawer-in absolute right-4 top-[54px] bottom-[114px] z-30 w-[336px] max-w-[calc(100vw-2rem)] rounded-[24px] p-3.5 flex flex-col overflow-hidden"
-        >
-          <EpisodesPanel
-            onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
-            onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
-            onAddEpisodes={() => void handleChooseFile(true)}
-            onClose={() => setPanelOpen(false)}
-          />
-        </aside>
-      )}
-
       {panelOpen && sideTab === "room" && (
-        <div className="absolute inset-x-4 bottom-[112px] z-30 flex justify-center pointer-events-none">
+        <div className="absolute inset-x-4 bottom-[124px] z-30 flex justify-center pointer-events-none">
           <aside
             aria-label="Watch Party"
             data-glass-region="true"
-            className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[1060px] max-h-[calc(100vh-176px)] rounded-[26px] p-3.5 flex flex-col gap-2.5 overflow-hidden"
+            className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[1060px] max-h-[calc(100vh-184px)] rounded-[26px] p-3.5 flex flex-col gap-2.5 overflow-hidden"
           >
             <div className="flex items-center justify-between gap-2 shrink-0">
               <SegmentedTabs
@@ -1585,20 +1631,45 @@ export function WatchRoom() {
         </div>
       )}
 
-      {panelOpen && (sideTab === "playback" || sideTab === "subtitles") && (
-        <div className="absolute inset-x-4 bottom-[108px] z-30 flex justify-center pointer-events-none">
-          <div className="w-full max-w-[1060px] flex justify-end">
-            <aside
-              aria-label={sideTab === "playback" ? "Audio and playback menu" : "Subtitles menu"}
-              data-glass-region="true"
-              className="ep-glass-sheet anim-pop-in pointer-events-auto w-[304px] max-w-full max-h-[calc(100vh-166px)] overflow-y-auto overflow-x-hidden rounded-[18px] p-1.5 border border-white/[0.12] select-none"
-            >
-              {sideTab === "playback" && <PlaybackPanel />}
-              {sideTab === "subtitles" && <SubtitlePanel />}
-            </aside>
-          </div>
-        </div>
-      )}
+      {panelOpen &&
+        popoverPos &&
+        (sideTab === "playback" ||
+          sideTab === "subtitles" ||
+          (sideTab === "episodes" && hasFolderEpisodes)) && (
+          <aside
+            key={sideTab}
+            aria-label={
+              sideTab === "episodes"
+                ? "Season episodes"
+                : sideTab === "playback"
+                  ? "Audio and playback menu"
+                  : "Subtitles menu"
+            }
+            data-glass-region="true"
+            style={{
+              left: popoverPos.left,
+              bottom: popoverPos.bottom,
+              width: popoverPos.width,
+              maxHeight: `calc(100vh - ${popoverPos.bottom + 58}px)`,
+            }}
+            className={`ep-popover-bloom fixed z-30 select-none ${
+              sideTab === "episodes"
+                ? "ep-glass-capsule flex flex-col overflow-hidden rounded-[22px] p-3.5"
+                : "ep-glass-sheet overflow-y-auto overflow-x-hidden rounded-[18px] p-1.5"
+            }`}
+          >
+            {sideTab === "episodes" && (
+              <EpisodesPanel
+                onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
+                onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
+                onAddEpisodes={() => void handleChooseFile(true)}
+                onClose={() => setPanelOpen(false)}
+              />
+            )}
+            {sideTab === "playback" && <PlaybackPanel />}
+            {sideTab === "subtitles" && <SubtitlePanel />}
+          </aside>
+        )}
 
       <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">
         <TransportBar
