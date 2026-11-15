@@ -484,3 +484,94 @@ test("Responsiveness invariants: lazy mpvStart, throttled playback/subtitle tick
 
 
 
+test("Installer packaging bundles everything the app needs and embeds both frontends", () => {
+  const read = (rel: string) => fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+
+  // Both Tauri binaries must expose + be built with custom-protocol, otherwise release builds load
+  // http://localhost:1420 / :1421 instead of the embedded UI.
+  assert.match(read("src-tauri/Cargo.toml"), /custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/);
+  assert.match(read("src-installer/Cargo.toml"), /custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/);
+
+  const build = read("scripts/build-installer.ps1");
+  assert.match(build, /cargo build --release -p epilod-party --features custom-protocol/);
+  assert.match(build, /cargo build --release -p epilod-setup --features custom-protocol/);
+  for (const required of [
+    "resources\\mpv\\mpv.exe",
+    "resources\\mpv\\ffmpeg.exe",
+    "Inter-Regular.ttf",
+    "NotoSansArabic-Regular.ttf",
+    "GPL-3.0.txt",
+    "SOURCE_OFFER.txt",
+  ]) {
+    assert.ok(build.includes(required), `build-installer.ps1 must hard-require ${required}`);
+  }
+
+  // ffmpeg must be pinned with a real SHA-256 alongside mpv and fetched by the fetch script.
+  const lock = JSON.parse(read("scripts/mpv.lock"));
+  for (const key of ["mpv", "ffmpeg"]) {
+    assert.match(lock[key].url, /^https:\/\/github\.com\/.+\.7z$/);
+    assert.match(lock[key].sha256, /^[0-9a-f]{64}$/);
+  }
+  const fetchScript = read("scripts/fetch-mpv.ps1");
+  assert.match(fetchScript, /lock\.ffmpeg\.url/);
+  assert.match(fetchScript, /ffmpeg\.exe/);
+
+  // Every file the Tauri bundle config lists must be staged into the custom installer payload too.
+  const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
+  for (const res of conf.bundle.resources as string[]) {
+    const dir = res.replace(/\/\*$/, "").replace(/\//g, "\\");
+    assert.ok(
+      build.includes(`resources\\${dir.replace(/^resources\\/, "")}`),
+      `installer staging must include ${res}`,
+    );
+  }
+});
+
+test("Transparent backdrop invariant: engineSurfaceVisible and mpv lifecycle guards", async () => {
+  const playerStoreMod = await loadModules<typeof import("../src/store/usePlayerStore")>(
+    "src/store/usePlayerStore.ts",
+  );
+  const store = playerStoreMod.usePlayerStore;
+  store.getState().reset();
+  assert.equal(store.getState().engineSurfaceVisible, false);
+
+  store.getState().setLoaded(true);
+  store.getState().setEngineSurfaceVisible(true);
+  assert.equal(store.getState().engineSurfaceVisible, true);
+
+  store.getState().resetForNewFile();
+  assert.equal(store.getState().loaded, false);
+  assert.equal(store.getState().engineSurfaceVisible, false);
+
+  store.getState().setEngineSurfaceVisible(true);
+  store.getState().reset();
+  assert.equal(store.getState().engineSurfaceVisible, false);
+
+  const mpvMod = await loadModules<typeof import("../src/lib/mpv")>("src/lib/mpv.ts");
+  assert.equal(mpvMod.isMpvNotRunningError("Video player is not running."), true);
+  assert.equal(mpvMod.isMpvNotRunningError(new Error("Video player is not running.")), true);
+  assert.equal(mpvMod.isMpvNotRunningError("Something else"), false);
+
+  const lostEvents: string[] = [];
+  const unsub = mpvMod.subscribeMpvRuntimeLost((msg) => {
+    lostEvents.push(msg);
+  });
+  await mpvMod.safeMpvCall(Promise.reject(new Error("Video player is not running.")), "testSeek");
+  await mpvMod.safeMpvCall(Promise.reject(new Error("Unrelated transient warning")), "testWarn");
+  unsub();
+  assert.deepEqual(lostEvents, ["Video player is not running."]);
+
+  const watchRoomSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  assert.match(
+    watchRoomSrc,
+    /const showVideoBackdrop =\s*loaded &&\s*!playerError &&\s*!settingsOpen &&\s*!shortcutsOpen &&\s*\(!desktopRuntime \|\| engineSurfaceVisible\);/,
+  );
+  assert.match(watchRoomSrc, /onMpvSurfaceState\(/);
+  assert.match(watchRoomSrc, /mpvGetSurfaceState\(/);
+  assert.match(watchRoomSrc, /subscribeMpvRuntimeLost\(/);
+  assert.match(watchRoomSrc, /enqueueMpvLifecycle\(async \(\) => \{\s*await mpvStop\(\)/);
+  assert.doesNotMatch(
+    watchRoomSrc,
+    /enqueueSyncLifecycle\(async \(\) => \{[^}]*mpvStop\(\)/,
+  );
+});

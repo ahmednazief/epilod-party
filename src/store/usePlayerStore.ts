@@ -16,6 +16,7 @@ interface PlayerState {
   looping: boolean;
   aspectMode: AspectMode;
   loaded: boolean;
+  engineSurfaceVisible: boolean;
   endedAtEof: boolean;
   isFullscreen: boolean;
   playerError: string | null;
@@ -30,6 +31,7 @@ interface PlayerState {
   setLooping: (looping: boolean) => void;
   setAspectMode: (aspect: AspectMode) => void;
   setLoaded: (loaded: boolean) => void;
+  setEngineSurfaceVisible: (visible: boolean) => void;
   setEndedAtEof: (ended: boolean) => void;
   setIsFullscreen: (fs: boolean) => void;
   setPlayerError: (err: string | null) => void;
@@ -53,6 +55,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   looping: false,
   aspectMode: "auto",
   loaded: false,
+  engineSurfaceVisible: false,
   endedAtEof: false,
   isFullscreen: false,
   playerError: null,
@@ -72,6 +75,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   setLooping: (looping) => set({ looping }),
   setAspectMode: (aspectMode) => set({ aspectMode }),
   setLoaded: (loaded) => set({ loaded }),
+  setEngineSurfaceVisible: (engineSurfaceVisible) => set({ engineSurfaceVisible }),
   setEndedAtEof: (endedAtEof) => set({ endedAtEof }),
   setIsFullscreen: (isFullscreen) => set({ isFullscreen }),
   setPlayerError: (playerError) => set({ playerError }),
@@ -106,6 +110,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       looping: false,
       aspectMode: "auto",
       loaded: false,
+      engineSurfaceVisible: false,
       endedAtEof: false,
       playerError: null,
       tracks: [],
@@ -120,6 +125,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       looping: false,
       aspectMode: "auto",
       loaded: false,
+      engineSurfaceVisible: false,
       endedAtEof: false,
       isFullscreen: false,
       playerError: null,

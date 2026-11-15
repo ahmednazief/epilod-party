@@ -5,6 +5,7 @@ import {
   mpvSetSubDelay,
   mpvSetSubStyle,
   mpvSetSubTrack,
+  safeMpvCall,
 } from "./mpv";
 import { playSoundCue } from "./soundEffects";
 import { getControllerLockState, resolveEffectiveUsername } from "./syncController";
@@ -22,7 +23,7 @@ export function toggleMutePlayback(): void {
   const nextMuted = !player.muted;
   player.setMuted(nextMuted);
   player.flashFeedback(nextMuted ? "Muted" : "Unmuted");
-  void mpvSetMute(nextMuted);
+  safeMpvCall(mpvSetMute(nextMuted));
 }
 
 export function seekPlaybackRelative(deltaSecs: number): void {
@@ -45,7 +46,7 @@ export function seekPlaybackRelative(deltaSecs: number): void {
   player.setEndedAtEof(false);
   player.setPositionSecs(next);
   player.flashFeedback(`${deltaSecs > 0 ? "+" : ""}${deltaSecs}s`);
-  void mpvSeek(next);
+  safeMpvCall(mpvSeek(next));
   if (connected) {
     void syncUserSeek(next);
   }
@@ -58,15 +59,17 @@ export function toggleSubtitlesVisibility(): void {
   const nextVis = !sub.visible;
   sub.setVisible(nextVis);
   player.flashFeedback(nextVis ? "Subtitles On" : "Subtitles Off");
-  void mpvSetSubStyle({
-    font: sub.font,
-    fontSize: sub.fontSize,
-    color: sub.color,
-    borderSize: sub.borderSize,
-    pos: sub.pos,
-    visible: nextVis,
-    overrideAss: sub.overrideAssStyle,
-  });
+  safeMpvCall(
+    mpvSetSubStyle({
+      font: sub.font,
+      fontSize: sub.fontSize,
+      color: sub.color,
+      borderSize: sub.borderSize,
+      pos: sub.pos,
+      visible: nextVis,
+      overrideAss: sub.overrideAssStyle,
+    }),
+  );
 }
 
 export function cycleSubtitleTrack(): void {
@@ -86,13 +89,15 @@ export function cycleSubtitleTrack(): void {
         ? subTracks[currentIdx + 1]
         : null;
 
-  void selectSubTrack(nextTrack ? nextTrack.id : null, player.tracks, {
-    mpvSetSubTrack,
-    mpvSetSubDelay,
-    setDelaySecs: sub.setDelaySecs,
-    setSubtitleVisible: sub.setVisible,
-    clearExternalTrackState: sub.clearLoadedTrack,
-  });
+  safeMpvCall(
+    selectSubTrack(nextTrack ? nextTrack.id : null, player.tracks, {
+      mpvSetSubTrack,
+      mpvSetSubDelay,
+      setDelaySecs: sub.setDelaySecs,
+      setSubtitleVisible: sub.setVisible,
+      clearExternalTrackState: sub.clearLoadedTrack,
+    }),
+  );
   player.flashFeedback(formatTrackAnnouncement(nextTrack, "sub"));
 }
 
@@ -106,7 +111,7 @@ export function cycleAudioTrack(): void {
   }
   const currentIdx = audioTracks.findIndex((t) => t.selected);
   const nextTrack = audioTracks[(currentIdx + 1) % audioTracks.length];
-  void mpvSetAudioTrack(nextTrack.id);
+  safeMpvCall(mpvSetAudioTrack(nextTrack.id));
   player.flashFeedback(formatTrackAnnouncement(nextTrack, "audio"));
 }
 

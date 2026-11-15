@@ -5,6 +5,7 @@ import {
   mpvSetAudioTrack,
   mpvSetLoop,
   mpvSetSpeed,
+  safeMpvCall,
   type AspectMode,
 } from "../lib/mpv";
 import { canChangePlaybackSpeed } from "../lib/syncSpeedGuard";
@@ -47,7 +48,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
       return;
     }
     setSpeed(nextSpeed);
-    void mpvSetSpeed(nextSpeed);
+    safeMpvCall(mpvSetSpeed(nextSpeed), "mpvSetSpeed");
   };
 
   return (
@@ -86,7 +87,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                 data-active={active}
                 onClick={() => {
                   const aid = opt.value === "none" ? null : Number(opt.value);
-                  void selectAudioTrack(aid, { mpvSetAudioTrack });
+                  safeMpvCall(selectAudioTrack(aid, { mpvSetAudioTrack }), "selectAudioTrack");
                 }}
                 className={`ep-menu-row ep-press w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 text-left text-xs cursor-pointer ${
                   active ? "text-white font-medium" : "text-primary/90 hover:text-white"
@@ -164,7 +165,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                 disabled={!loaded}
                 onClick={() => {
                   setAspectMode(item.value);
-                  void mpvSetAspectMode(item.value);
+                  safeMpvCall(mpvSetAspectMode(item.value), "mpvSetAspectMode");
                 }}
                 className={`ep-press h-7 rounded-[10px] text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
                   active
@@ -189,7 +190,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         onClick={() => {
           const next = !looping;
           setLooping(next);
-          void mpvSetLoop(next);
+          safeMpvCall(mpvSetLoop(next), "mpvSetLoop");
         }}
         className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
       >

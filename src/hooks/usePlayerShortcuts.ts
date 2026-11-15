@@ -8,6 +8,7 @@ import {
   mpvSetSubStyle,
   mpvSetSubTrack,
   mpvSetVolume,
+  safeMpvCall,
 } from "../lib/mpv";
 import { shouldReplayFromStart } from "../lib/playbackEnd";
 import { SeekAccumulator } from "../lib/seekCoalesce";
@@ -42,7 +43,7 @@ export function usePlayerShortcuts({
   useEffect(() => {
     const throttledSeek = createLeadingTrailingThrottle(
       (target: number, synced: boolean) => {
-        void mpvSeek(target);
+        safeMpvCall(mpvSeek(target), "shortcut:mpvSeek");
         if (synced) {
           void syncUserSeek(target);
         }
@@ -154,11 +155,15 @@ export function usePlayerShortcuts({
           player.setPaused(false);
           player.flashFeedback("Replay");
           void (async () => {
-            await mpvSeek(0);
-            await mpvSetPause(false);
-            if (syncConnected) {
-              await syncUserSeek(0);
-              await syncUserPlay(0);
+            try {
+              await safeMpvCall(mpvSeek(0), "shortcut:replaySeek");
+              await safeMpvCall(mpvSetPause(false), "shortcut:replayPlay");
+              if (syncConnected) {
+                await syncUserSeek(0);
+                await syncUserPlay(0);
+              }
+            } catch {
+              // Sync errors handled cleanly or ignored on disconnect.
             }
           })();
           return;
@@ -167,7 +172,7 @@ export function usePlayerShortcuts({
         const nextPaused = !player.paused;
         player.setPaused(nextPaused);
         player.flashFeedback(nextPaused ? "Paused" : "Playing");
-        void mpvSetPause(nextPaused);
+        safeMpvCall(mpvSetPause(nextPaused), "shortcut:mpvSetPause");
         if (syncConnected) {
           if (nextPaused) {
             void syncUserPause(player.positionSecs);
@@ -210,7 +215,7 @@ export function usePlayerShortcuts({
         const nextVol = Math.max(0, Math.min(130, player.volume + delta));
         player.setVolume(nextVol);
         player.flashFeedback(`Vol ${nextVol}%`);
-        void mpvSetVolume(nextVol);
+        safeMpvCall(mpvSetVolume(nextVol), "shortcut:mpvSetVolume");
         return;
       }
 
@@ -220,7 +225,7 @@ export function usePlayerShortcuts({
         const nextMuted = !player.muted;
         player.setMuted(nextMuted);
         player.flashFeedback(nextMuted ? "Muted" : "Unmuted");
-        void mpvSetMute(nextMuted);
+        safeMpvCall(mpvSetMute(nextMuted), "shortcut:mpvSetMute");
         return;
       }
 
@@ -236,7 +241,7 @@ export function usePlayerShortcuts({
         }
         player.setSpeed(nextSpeed);
         player.flashFeedback(`${nextSpeed.toFixed(1)}×`);
-        void mpvSetSpeed(nextSpeed);
+        safeMpvCall(mpvSetSpeed(nextSpeed), "shortcut:mpvSetSpeed");
         return;
       }
 
@@ -246,15 +251,18 @@ export function usePlayerShortcuts({
         const nextVis = !sub.visible;
         sub.setVisible(nextVis);
         player.flashFeedback(nextVis ? "Subtitles On" : "Subtitles Off");
-        void mpvSetSubStyle({
-          font: sub.font,
-          fontSize: sub.fontSize,
-          color: sub.color,
-          borderSize: sub.borderSize,
-          pos: sub.pos,
-          visible: nextVis,
-          overrideAss: sub.overrideAssStyle,
-        });
+        safeMpvCall(
+          mpvSetSubStyle({
+            font: sub.font,
+            fontSize: sub.fontSize,
+            color: sub.color,
+            borderSize: sub.borderSize,
+            pos: sub.pos,
+            visible: nextVis,
+            overrideAss: sub.overrideAssStyle,
+          }),
+          "shortcut:mpvSetSubStyle",
+        );
         return;
       }
 
@@ -274,13 +282,16 @@ export function usePlayerShortcuts({
               ? subTracks[currentIdx + 1]
               : null;
 
-        void selectSubTrack(nextTrack ? nextTrack.id : null, player.tracks, {
-          mpvSetSubTrack,
-          mpvSetSubDelay,
-          setDelaySecs: sub.setDelaySecs,
-          setSubtitleVisible: sub.setVisible,
-          clearExternalTrackState: sub.clearLoadedTrack,
-        });
+        safeMpvCall(
+          selectSubTrack(nextTrack ? nextTrack.id : null, player.tracks, {
+            mpvSetSubTrack,
+            mpvSetSubDelay,
+            setDelaySecs: sub.setDelaySecs,
+            setSubtitleVisible: sub.setVisible,
+            clearExternalTrackState: sub.clearLoadedTrack,
+          }),
+          "shortcut:selectSubTrack",
+        );
         player.flashFeedback(formatTrackAnnouncement(nextTrack, "sub"));
         return;
       }
@@ -291,7 +302,7 @@ export function usePlayerShortcuts({
         const delta = e.code === "KeyX" ? 0.1 : -0.1;
         const nextDelay = sub.nudgeDelay(delta);
         player.flashFeedback(`Sub ${formatDelaySigned(nextDelay)}`);
-        void mpvSetSubDelay(nextDelay);
+        safeMpvCall(mpvSetSubDelay(nextDelay), "shortcut:mpvSetSubDelay");
       }
     };
 

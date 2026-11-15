@@ -1,5 +1,45 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { createSerialQueue } from "./asyncGuard";
 import { isDesktop, safeInvoke } from "./bridge";
+
+export const enqueueMpvLifecycle = createSerialQueue();
+
+export interface MpvSurfaceState {
+  running: boolean;
+  hasMedia: boolean;
+  uiVisible: boolean;
+  surfaceVisible: boolean;
+}
+
+type RuntimeLostListener = (message: string) => void;
+const runtimeLostListeners = new Set<RuntimeLostListener>();
+
+export function subscribeMpvRuntimeLost(listener: RuntimeLostListener): () => void {
+  runtimeLostListeners.add(listener);
+  return () => {
+    runtimeLostListeners.delete(listener);
+  };
+}
+
+export function isMpvNotRunningError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+  return msg.includes("video player is not running") || msg.includes("command queue is unavailable");
+}
+
+export function safeMpvCall(promise: Promise<unknown>, _context?: string): Promise<void> {
+  return promise.then(
+    () => undefined,
+    (err) => {
+      if (isMpvNotRunningError(err)) {
+        const msg =
+          err instanceof Error ? err.message : String(err ?? "Video player is not running.");
+        for (const listener of runtimeLostListeners) {
+          listener(msg);
+        }
+      }
+    },
+  );
+}
 
 export interface PhysicalRect {
   x: number;
@@ -45,6 +85,18 @@ export async function mpvResize(rect: PhysicalRect, force = false): Promise<void
 
 export async function mpvSetVisible(visible: boolean): Promise<void> {
   await safeInvoke("mpv_set_visible", { visible });
+}
+
+export async function mpvGetSurfaceState(): Promise<MpvSurfaceState> {
+  if (!isDesktop()) {
+    return {
+      running: true,
+      hasMedia: true,
+      uiVisible: true,
+      surfaceVisible: true,
+    };
+  }
+  return safeInvoke<MpvSurfaceState>("mpv_get_surface_state");
 }
 
 export interface MpvBackdropFrame {
@@ -264,6 +316,11 @@ export async function onMpvTracks(cb: (tracks: MpvTrack[]) => void): Promise<Unl
 export async function onMpvError(cb: (message: string) => void): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<{ message: string }>("mpv://error", (e) => cb(e.payload.message));
+}
+
+export async function onMpvSurfaceState(cb: (state: MpvSurfaceState) => void): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<MpvSurfaceState>("mpv://surface-state", (e) => cb(e.payload));
 }
 
 export async function onMpvCommandWarning(cb: (message: string) => void): Promise<UnlistenFn> {

@@ -236,6 +236,13 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn mpv_get_surface_state(
+        state: State<'_, AppState>,
+    ) -> Result<crate::mpv::MpvSurfaceState, String> {
+        Ok(state.mpv.surface_state())
+    }
+
+    #[tauri::command]
     async fn mpv_backdrop_frame(
         state: State<'_, AppState>,
         max_width: Option<i32>,
@@ -1066,6 +1073,7 @@ mod windows_app {
                 mpv_start,
                 mpv_resize,
                 mpv_set_visible,
+                mpv_get_surface_state,
                 mpv_backdrop_frame,
                 mpv_load,
                 mpv_set_pause,

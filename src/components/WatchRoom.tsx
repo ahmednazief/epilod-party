@@ -34,7 +34,10 @@ import { getFileDisplayName, splitDroppedFiles } from "../lib/fileDrop";
 import { resolveFullscreenChromeState } from "../lib/fullscreenUi";
 import { logFrontendEvent } from "../lib/logger";
 import {
+  enqueueMpvLifecycle,
+  isMpvNotRunningError,
   mpvAddSubtitle,
+  mpvGetSurfaceState,
   mpvLoad,
   mpvResize,
   mpvSeek,
@@ -53,11 +56,14 @@ import {
   onMpvPaused,
   onMpvSurfaceClick,
   onMpvSurfaceDblClick,
+  onMpvSurfaceState,
   onMpvTime,
   onMpvTracks,
   onWindowFullscreen,
   onWindowRestored,
+  safeMpvCall,
   setAllowNetworkShares,
+  subscribeMpvRuntimeLost,
   subtitleCancelAutoSync,
   windowIsFullscreen,
   windowSetFullscreen,
@@ -149,9 +155,13 @@ function computeCapsulePopoverLayout(tab: SideTab): CapsulePopoverLayout {
   const anchorEl = document.querySelector<HTMLElement>(`[data-capsule-anchor="${tab}"]`);
 
   const barRect = barEl?.getBoundingClientRect();
-  const barHeight = barEl ? Math.max(barEl.offsetHeight, barRect?.height ?? 0) : 100;
-  // Resting capsule sits 16px above bottom (pb-4); leave an 8px gap above its top edge.
-  const bottom = Math.max(124, Math.round(barHeight + 24));
+  const barHeight = barEl ? Math.max(barEl.offsetHeight, barRect?.height ?? 0) : 104;
+  // Measure from both resting bottom padding (16px) and live rect top so menus always float ~18px above the bar.
+  const barTopDist = Math.max(
+    barHeight + 16,
+    barRect && barRect.height > 0 ? window.innerHeight - barRect.top : 0,
+  );
+  const bottom = Math.max(136, Math.round(barTopDist + 18));
 
   const minLeft = barRect && barRect.width > 0 ? Math.max(16, Math.round(barRect.left)) : 16;
   const maxRight =
@@ -208,6 +218,7 @@ export function WatchRoom() {
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
 
   const loaded = usePlayerStore((s) => s.loaded);
+  const engineSurfaceVisible = usePlayerStore((s) => s.engineSurfaceVisible);
   const paused = usePlayerStore((s) => s.paused);
   const muted = usePlayerStore((s) => s.muted);
   const durationSecs = usePlayerStore((s) => s.durationSecs);
@@ -244,14 +255,19 @@ export function WatchRoom() {
   const [chromeIdle, setChromeIdle] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
+  const [recoveryTick, setRecoveryTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [popoverPos, setPopoverPos] = useState<CapsulePopoverLayout | null>(null);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
   const soundTrackerRef = useRef(new RoomSoundTracker());
+  const mountedRef = useRef(true);
+  const mpvLifecycleActiveRef = useRef(false);
   const mpvStartedRef = useRef(false);
   const mpvStartPromiseRef = useRef<Promise<void> | null>(null);
+  const listenersReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const loadInFlightRef = useRef(false);
   const roomSessionStartedRef = useRef(false);
   const panelOpenRef = useRef(false);
   const contextMenuOpenRef = useRef(false);
@@ -333,8 +349,8 @@ export function WatchRoom() {
       p.setPositionSecs(0);
       p.setEndedAtEof(false);
       p.setPaused(false);
-      void mpvSeek(0);
-      void mpvSetPause(false);
+      safeMpvCall(mpvSeek(0), "mpvSeek:replay");
+      safeMpvCall(mpvSetPause(false), "mpvSetPause:replay");
       if (connected) {
         void syncUserSeek(0);
         void syncUserPlay(0);
@@ -343,7 +359,7 @@ export function WatchRoom() {
     }
     const nextPaused = !p.paused;
     p.setPaused(nextPaused);
-    void mpvSetPause(nextPaused);
+    safeMpvCall(mpvSetPause(nextPaused), "mpvSetPause");
     if (connected) {
       if (nextPaused) void syncUserPause(p.positionSecs);
       else void syncUserPlay(p.positionSecs);
@@ -356,31 +372,48 @@ export function WatchRoom() {
   });
 
   const ensureMpvStarted = useCallback(async () => {
-    if (!isDesktop() || mpvStartedRef.current) return;
+    if (!isDesktop() || !mountedRef.current || mpvStartedRef.current) return;
     if (mpvStartPromiseRef.current) {
       await mpvStartPromiseRef.current;
       return;
     }
 
-    const rawRect = measurePhysicalRect(viewportRef.current);
-    const initialRect = {
-      x: rawRect.x,
-      y: rawRect.y,
-      width: Math.max(1, rawRect.width),
-      height: Math.max(1, rawRect.height),
-    };
+    const startPromise = enqueueMpvLifecycle(async () => {
+      await listenersReadyPromiseRef.current;
+      if (!mountedRef.current || mpvStartedRef.current) return;
 
-    const startPromise = mpvStart(initialRect)
-      .then(() => {
-        mpvStartedRef.current = true;
-        viewportTrackerRef.current.markInvalidated();
-        const appState = useAppStore.getState();
-        const playerErr = usePlayerStore.getState().playerError;
-        void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !playerErr);
-      })
-      .finally(() => {
-        mpvStartPromiseRef.current = null;
-      });
+      const rawRect = measurePhysicalRect(viewportRef.current);
+      const initialRect = {
+        x: rawRect.x,
+        y: rawRect.y,
+        width: Math.max(1, rawRect.width),
+        height: Math.max(1, rawRect.height),
+      };
+
+      mpvLifecycleActiveRef.current = true;
+      try {
+        await mpvStart(initialRect);
+      } catch (err) {
+        mpvLifecycleActiveRef.current = false;
+        throw err;
+      }
+
+      if (!mountedRef.current) {
+        return;
+      }
+
+      mpvStartedRef.current = true;
+      viewportTrackerRef.current.markInvalidated();
+      setViewportTick((t) => t + 1);
+      const appState = useAppStore.getState();
+      const playerErr = usePlayerStore.getState().playerError;
+      safeMpvCall(
+        mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !playerErr),
+        "mpvSetVisible:start",
+      );
+    }).finally(() => {
+      mpvStartPromiseRef.current = null;
+    });
 
     mpvStartPromiseRef.current = startPromise;
     await startPromise;
@@ -420,6 +453,7 @@ export function WatchRoom() {
   const loadVideoPath = useCallback(
     async (path: string, pairedSubPath?: string | null) => {
       const gen = ++loadGenRef.current;
+      loadInFlightRef.current = true;
       const displayName = getFileDisplayName(path);
       autoLoadedPathRef.current = path;
       void subtitleCancelAutoSync().catch(() => undefined);
@@ -433,14 +467,15 @@ export function WatchRoom() {
       announcedFileKeyRef.current = null;
       try {
         await ensureMpvStarted();
-        if (loadGenRef.current !== gen) return;
+        if (loadGenRef.current !== gen || !mountedRef.current) return;
         await mpvLoad(path);
         if (loadGenRef.current !== gen) return;
         usePlayerStore.getState().setLoaded(true);
+        if (!mountedRef.current) return;
         usePlayerStore.getState().setPlayerError(null);
         const subState = useSubtitleStore.getState();
         await resetMpvPlaybackDefaults(useSyncStore.getState().status.state === "connected");
-        if (loadGenRef.current !== gen) return;
+        if (loadGenRef.current !== gen || !mountedRef.current) return;
         await mpvSetSubStyle({
           font: subState.font,
           fontSize: subState.fontSize,
@@ -450,12 +485,12 @@ export function WatchRoom() {
           visible: subState.visible,
           overrideAss: subState.overrideAssStyle,
         });
-        if (loadGenRef.current !== gen) return;
+        if (loadGenRef.current !== gen || !mountedRef.current) return;
         const appNow = useAppStore.getState();
         if (!useAppStore.getState().roomCode) {
           usePlayerStore.getState().setPaused(false);
           await mpvSetPause(false);
-          if (loadGenRef.current !== gen) return;
+          if (loadGenRef.current !== gen || !mountedRef.current) return;
         } else {
           const syncNow = useSyncStore.getState();
           const syncConnNow = syncNow.status.state === "connected";
@@ -469,7 +504,7 @@ export function WatchRoom() {
           if (!lockNow.lockedForLocalUser && otherPeersWithFile.length === 0) {
             usePlayerStore.getState().setPaused(false);
             await mpvSetPause(false);
-            if (loadGenRef.current !== gen) return;
+            if (loadGenRef.current !== gen || !mountedRef.current) return;
             if (syncConnNow) {
               useSyncStore.getState().setLocalReady(true);
               void syncSetReady(true, true);
@@ -486,12 +521,22 @@ export function WatchRoom() {
         }
         usePlayerStore.getState().flashFeedback(`Loaded ${displayName}`);
       } catch (err) {
-        if (loadGenRef.current !== gen) return;
+        if (loadGenRef.current !== gen || !mountedRef.current) return;
         pendingPairedSubRef.current = null;
+        if (isMpvNotRunningError(err)) {
+          mpvStartedRef.current = false;
+          mpvStartPromiseRef.current = null;
+          mpvLifecycleActiveRef.current = false;
+        }
+        usePlayerStore.getState().setEngineSurfaceVisible(false);
         const msg = formatUserError(err, "Failed opening video file.");
         usePlayerStore.getState().setPlayerError(msg);
         pushNote("error", msg);
         void logFrontendEvent("error", "player.load", msg, "ERR_LOAD");
+      } finally {
+        if (loadGenRef.current === gen) {
+          loadInFlightRef.current = false;
+        }
       }
     },
     [ensureMpvStarted, loadSubtitlePath, pushNote, setSelectedFile],
@@ -640,7 +685,11 @@ export function WatchRoom() {
       dialogOpenRef.current = true;
       try {
         if (mpvStartedRef.current) {
+          try {
           await mpvSetVisible(false);
+        } catch {
+          // Engine may not be alive if runtime exited.
+        }
         }
         const chosen = await open({
           multiple: true,
@@ -665,7 +714,10 @@ export function WatchRoom() {
         if (mpvStartedRef.current) {
           const appState = useAppStore.getState();
           const pState = usePlayerStore.getState();
-          void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+          safeMpvCall(
+          mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError),
+          "mpvSetVisible",
+        );
         }
       }
     },
@@ -683,7 +735,11 @@ export function WatchRoom() {
     dialogOpenRef.current = true;
     try {
       if (mpvStartedRef.current) {
-        await mpvSetVisible(false);
+        try {
+          await mpvSetVisible(false);
+        } catch {
+          // Engine may not be alive if runtime exited.
+        }
       }
       const chosen = await open({
         directory: true,
@@ -698,7 +754,10 @@ export function WatchRoom() {
       if (mpvStartedRef.current) {
         const appState = useAppStore.getState();
         const pState = usePlayerStore.getState();
-        void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+        safeMpvCall(
+          mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError),
+          "mpvSetVisible",
+        );
       }
     }
   }, [loadMediaInputs, pushNote]);
@@ -769,7 +828,7 @@ export function WatchRoom() {
       }
     }, 60);
     return () => window.clearTimeout(timer);
-  }, [loadVideoPath, selectedFilePath]);
+  }, [loadVideoPath, selectedFilePath, recoveryTick]);
 
   useEffect(() => {
     const timer = roomCode
@@ -795,19 +854,74 @@ export function WatchRoom() {
   }, [roomCode]);
 
   // Stop embedded mpv child HWND only when leaving WatchRoom completely
+  // Tear down any remaining Syncplay/mpv session when leaving WatchRoom entirely (HMR / ErrorBoundary / route switch)
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      void enqueueSyncLifecycle(async () => {
-        if (roomSessionStartedRef.current) {
-          roomSessionStartedRef.current = false;
+      mountedRef.current = false;
+      const hadMpv = mpvLifecycleActiveRef.current || mpvStartedRef.current;
+      mpvLifecycleActiveRef.current = false;
+      mpvStartedRef.current = false;
+      mpvStartPromiseRef.current = null;
+      usePlayerStore.getState().setEngineSurfaceVisible(false);
+      if (roomSessionStartedRef.current) {
+        roomSessionStartedRef.current = false;
+        void enqueueSyncLifecycle(async () => {
           await syncDisconnect();
-        }
-        if (mpvStartedRef.current) {
+        });
+      }
+      if (hadMpv && isDesktop()) {
+        void enqueueMpvLifecycle(async () => {
+          await mpvStop().catch(() => undefined);
+        });
+      }
+    };
+  }, []);
+
+  // Reconcile frontend loaded state with actual backend mpv surface state after mount / HMR / ErrorBoundary recovery
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let cancelled = false;
+    const reconcile = async () => {
+      await listenersReadyPromiseRef.current;
+      if (cancelled || !mountedRef.current) return;
+      try {
+        const st = await mpvGetSurfaceState();
+        if (cancelled || !mountedRef.current) return;
+        const p = usePlayerStore.getState();
+        p.setEngineSurfaceVisible(st.surfaceVisible);
+        if (st.running) {
+          mpvStartedRef.current = true;
+          mpvLifecycleActiveRef.current = true;
+          viewportTrackerRef.current.markInvalidated();
+          setViewportTick((t) => t + 1);
+          const appState = useAppStore.getState();
+          safeMpvCall(
+            mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !p.playerError),
+            "mpvSetVisible:reconcile",
+          );
+          if (!st.hasMedia && p.loaded && !loadInFlightRef.current) {
+            p.resetForNewFile();
+            autoLoadedPathRef.current = null;
+            setRecoveryTick((n) => n + 1);
+          }
+        } else {
           mpvStartedRef.current = false;
           mpvStartPromiseRef.current = null;
-          await mpvStop();
+          mpvLifecycleActiveRef.current = false;
+          if (p.loaded && !loadInFlightRef.current) {
+            p.resetForNewFile();
+            autoLoadedPathRef.current = null;
+            setRecoveryTick((n) => n + 1);
+          }
         }
-      });
+      } catch {
+        // Ignore outside Tauri runtime or transient unmount.
+      }
+    };
+    void reconcile();
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -815,55 +929,145 @@ export function WatchRoom() {
   useEffect(() => {
     let active = true;
     const unlisteners: Array<() => void> = [];
+    let settled = false;
+    let resolveReady!: () => void;
+    listenersReadyPromiseRef.current = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+    const markListenersReady = () => {
+      if (!settled) {
+        settled = true;
+        resolveReady();
+      }
+    };
+
+    const unsubRuntimeLost = subscribeMpvRuntimeLost((reason) => {
+      if (!active || leavingRef.current || loadInFlightRef.current) return;
+      const p = usePlayerStore.getState();
+      if (!p.loaded && !mpvStartedRef.current) return;
+      mpvStartedRef.current = false;
+      mpvStartPromiseRef.current = null;
+      mpvLifecycleActiveRef.current = false;
+      p.setEngineSurfaceVisible(false);
+      if (p.loaded && !p.playerError) {
+        const msg = "Playback engine stopped unexpectedly.";
+        p.setPlayerError(msg);
+        pushNote("error", msg);
+        void logFrontendEvent("error", "player.runtime_lost", reason, "ERR_MPV_RUNTIME_LOST");
+        const s = useSyncStore.getState();
+        void handlePlayerCrashSync({
+          syncConnected: s.status.state === "connected",
+          wasPaused: p.paused,
+          positionSecs: p.positionSecs,
+          setLocalReady: s.setLocalReady,
+          syncSetReady,
+          syncUserPause,
+          clearAnnouncementCache: () => {
+            announcedFileKeyRef.current = null;
+            autoReadyMarkedRef.current = false;
+          },
+        });
+      }
+    });
+    unlisteners.push(unsubRuntimeLost);
 
     const setup = async () => {
-      const fns = await Promise.all([
-        onMpvTime((position) => {
-          if (active) usePlayerStore.getState().setPositionSecs(position);
-        }),
-        onMpvDuration((duration) => {
-          if (active) usePlayerStore.getState().setDurationSecs(duration);
-        }),
-        onMpvPaused((paused) => {
-          if (active) usePlayerStore.getState().setPaused(paused);
-        }),
-        onMpvFileLoaded(() => {
-          if (!active) return;
-          usePlayerStore.getState().setLoaded(true);
-          usePlayerStore.getState().setPlayerError(null);
-          const pendingSub = pendingPairedSubRef.current;
-          const activePath = useAppStore.getState().selectedFilePath;
-          if (
-            pendingSub &&
-            activePath &&
-            activePath.toLowerCase() === pendingSub.videoPath.toLowerCase()
-          ) {
-            pendingPairedSubRef.current = null;
-            void loadSubtitlePathRef.current?.(pendingSub.subPath);
-          }
-        }),
-        onMpvEnded((payload) => {
-          if (!active) return;
-          const decision = classifyMpvEnd(payload);
-          if (decision.kind === "eof") {
-            usePlayerStore.getState().setEndedAtEof(true);
-            usePlayerStore.getState().setPaused(true);
-            const playlist = usePlaylistStore.getState();
+      try {
+        const fns = await Promise.all([
+          onMpvTime((position) => {
+            if (active) usePlayerStore.getState().setPositionSecs(position);
+          }),
+          onMpvDuration((duration) => {
+            if (active) usePlayerStore.getState().setDurationSecs(duration);
+          }),
+          onMpvPaused((paused) => {
+            if (active) usePlayerStore.getState().setPaused(paused);
+          }),
+          onMpvFileLoaded(() => {
+            if (!active) return;
+            usePlayerStore.getState().setLoaded(true);
+            usePlayerStore.getState().setPlayerError(null);
+            const pendingSub = pendingPairedSubRef.current;
+            const activePath = useAppStore.getState().selectedFilePath;
             if (
-              playlist.autoPlayNext &&
-              playlist.currentIndex >= 0 &&
-              playlist.currentIndex < playlist.items.length - 1
+              pendingSub &&
+              activePath &&
+              activePath.toLowerCase() === pendingSub.videoPath.toLowerCase()
             ) {
-              const nextIdx = playlist.currentIndex + 1;
-              const nextEp = playlist.items[nextIdx];
-              pushNote("info", `Up next: ${nextEp.episodeBadge ?? nextEp.cleanTitle}`);
-              void selectEpisodeAtIndexRef.current?.(nextIdx);
+              pendingPairedSubRef.current = null;
+              void loadSubtitlePathRef.current?.(pendingSub.subPath);
             }
-          } else if (decision.kind === "error") {
+          }),
+          onMpvSurfaceState((st) => {
+            if (!active) return;
+            const p = usePlayerStore.getState();
+            p.setEngineSurfaceVisible(st.surfaceVisible);
+            if (!st.running) {
+              mpvStartedRef.current = false;
+              mpvStartPromiseRef.current = null;
+              mpvLifecycleActiveRef.current = false;
+            } else {
+              mpvStartedRef.current = true;
+            }
+          }),
+          onMpvEnded((payload) => {
+            if (!active) return;
+            const decision = classifyMpvEnd(payload);
+            if (decision.kind === "eof") {
+              usePlayerStore.getState().setEndedAtEof(true);
+              usePlayerStore.getState().setPaused(true);
+              const playlist = usePlaylistStore.getState();
+              if (
+                playlist.autoPlayNext &&
+                playlist.currentIndex >= 0 &&
+                playlist.currentIndex < playlist.items.length - 1
+              ) {
+                const nextIdx = playlist.currentIndex + 1;
+                const nextEp = playlist.items[nextIdx];
+                pushNote("info", `Up next: ${nextEp.episodeBadge ?? nextEp.cleanTitle}`);
+                void selectEpisodeAtIndexRef.current?.(nextIdx);
+              }
+            } else if (decision.kind === "error") {
+              mpvStartedRef.current = false;
+              mpvStartPromiseRef.current = null;
+              mpvLifecycleActiveRef.current = false;
+              const p = usePlayerStore.getState();
+              const s = useSyncStore.getState();
+              p.setEngineSurfaceVisible(false);
+              p.setPlayerError(decision.message);
+              pushNote("error", decision.message);
+              void logFrontendEvent("error", "player.ended", decision.message, "ERR_MPV_ENDED");
+              void handlePlayerCrashSync({
+                syncConnected: s.status.state === "connected",
+                wasPaused: p.paused,
+                positionSecs: p.positionSecs,
+                setLocalReady: s.setLocalReady,
+                syncSetReady,
+                syncUserPause,
+                clearAnnouncementCache: () => {
+                  announcedFileKeyRef.current = null;
+                  autoReadyMarkedRef.current = false;
+                },
+              });
+            }
+          }),
+          onMpvTracks((tracks) => {
+            if (active) usePlayerStore.getState().setTracks(tracks);
+          }),
+          onMpvCommandWarning((msg) => {
+            if (active) pushNote("warn", msg);
+          }),
+          onMpvError((msg) => {
+            if (!active) return;
+            mpvStartedRef.current = false;
+            mpvStartPromiseRef.current = null;
+            mpvLifecycleActiveRef.current = false;
             const p = usePlayerStore.getState();
             const s = useSyncStore.getState();
-            p.setPlayerError(decision.message);
-            pushNote("error", decision.message);
+            p.setEngineSurfaceVisible(false);
+            p.setPlayerError(msg);
+            pushNote("error", msg);
+            void logFrontendEvent("error", "player.error", msg, "ERR_MPV");
             void handlePlayerCrashSync({
               syncConnected: s.status.state === "connected",
               wasPaused: p.paused,
@@ -876,74 +1080,51 @@ export function WatchRoom() {
                 autoReadyMarkedRef.current = false;
               },
             });
-          }
-        }),
-        onMpvTracks((tracks) => {
-          if (active) usePlayerStore.getState().setTracks(tracks);
-        }),
-        onMpvCommandWarning((msg) => {
-          if (active) pushNote("warn", msg);
-        }),
-        onMpvError((msg) => {
-          if (!active) return;
-          const p = usePlayerStore.getState();
-          const s = useSyncStore.getState();
-          p.setPlayerError(msg);
-          pushNote("error", msg);
-          void handlePlayerCrashSync({
-            syncConnected: s.status.state === "connected",
-            wasPaused: p.paused,
-            positionSecs: p.positionSecs,
-            setLocalReady: s.setLocalReady,
-            syncSetReady,
-            syncUserPause,
-            clearAnnouncementCache: () => {
-              announcedFileKeyRef.current = null;
-              autoReadyMarkedRef.current = false;
-            },
-          });
-        }),
-        onMpvSurfaceClick(() => {
-          if (active) toggleViewportPlayback();
-        }),
-        onMpvSurfaceDblClick(() => {
-          if (active) toggleFullscreen();
-        }),
-        onWindowFullscreen((fs) => {
-          if (active) {
-            usePlayerStore.getState().setIsFullscreen(fs);
-            setViewportTick((t) => t + 1);
-          }
-        }),
-        onWindowRestored(() => {
-          if (active) {
-            viewportTrackerRef.current.markInvalidated();
-            setViewportTick((t) => t + 1);
-          }
-        }),
-        onSyncStatus((status) => {
-          if (active) useSyncStore.getState().setStatus(status);
-        }),
-        onSyncParticipants((list) => {
-          if (active) useSyncStore.getState().setParticipants(list);
-        }),
-        onSyncError((msg) => {
-          if (!active) return;
-          useSyncStore.getState().setLastError(msg);
-          pushNote("error", msg);
-        }),
-        onSyncServerOverride((setBy) => {
-          if (!active) return;
-          const notice = formatControllerOverrideNotice(setBy);
-          useSyncStore.getState().setServerOverrideNotice(notice);
-          pushNote("info", notice);
-        }),
-      ]);
+          }),
+          onMpvSurfaceClick(() => {
+            if (active) toggleViewportPlayback();
+          }),
+          onMpvSurfaceDblClick(() => {
+            if (active) toggleFullscreen();
+          }),
+          onWindowFullscreen((fs) => {
+            if (active) {
+              usePlayerStore.getState().setIsFullscreen(fs);
+              setViewportTick((t) => t + 1);
+            }
+          }),
+          onWindowRestored(() => {
+            if (active) {
+              viewportTrackerRef.current.markInvalidated();
+              setViewportTick((t) => t + 1);
+            }
+          }),
+          onSyncStatus((status) => {
+            if (active) useSyncStore.getState().setStatus(status);
+          }),
+          onSyncParticipants((list) => {
+            if (active) useSyncStore.getState().setParticipants(list);
+          }),
+          onSyncError((msg) => {
+            if (!active) return;
+            useSyncStore.getState().setLastError(msg);
+            pushNote("error", msg);
+          }),
+          onSyncServerOverride((setBy) => {
+            if (!active) return;
+            const notice = formatControllerOverrideNotice(setBy);
+            useSyncStore.getState().setServerOverrideNotice(notice);
+            pushNote("info", notice);
+          }),
+        ]);
 
-      if (!active) {
-        fns.forEach((fn) => fn());
-      } else {
-        unlisteners.push(...fns);
+        if (!active) {
+          fns.forEach((fn) => fn());
+        } else {
+          unlisteners.push(...fns);
+        }
+      } finally {
+        markListenersReady();
       }
 
       // Sync initial fullscreen state if OS entered fullscreen externally
@@ -955,6 +1136,7 @@ export function WatchRoom() {
 
     return () => {
       active = false;
+      markListenersReady();
       if (surfaceClickTimerRef.current !== null) {
         window.clearTimeout(surfaceClickTimerRef.current);
         surfaceClickTimerRef.current = null;
@@ -1012,14 +1194,14 @@ export function WatchRoom() {
     if (!isDesktop() || !mpvStartedRef.current) return;
     const plan = viewportTrackerRef.current.planResize(rect);
     if (plan.send) {
-      void mpvResize(rect, plan.forceFlag);
+      safeMpvCall(mpvResize(rect, plan.forceFlag), "mpvResize");
     }
   }, [rect]);
 
   // Hide child HWND whenever fullscreen modals overlay live video or player fails (Fix 16)
   useEffect(() => {
     if (!isDesktop() || !mpvStartedRef.current) return;
-    void mpvSetVisible(!settingsOpen && !shortcutsOpen && !playerError);
+    safeMpvCall(mpvSetVisible(!settingsOpen && !shortcutsOpen && !playerError), "mpvSetVisible");
   }, [settingsOpen, shortcutsOpen, playerError, loaded]);
 
   // Wake/auto-hide floating cinema chrome & allow Escape to close floating popover
@@ -1087,7 +1269,7 @@ export function WatchRoom() {
 
     if (shouldResetSpeedForSync(syncConnected, speed)) {
       usePlayerStore.getState().setSpeed(1.0);
-      void mpvSetSpeed(1.0);
+      safeMpvCall(mpvSetSpeed(1.0), "mpvSetSpeed");
     }
   }, [
     durationSecs,
@@ -1170,7 +1352,13 @@ export function WatchRoom() {
 
   const showFloatingCapsule = chrome.showTransportBar && !chromeIdle;
   const showWindowBar = !isFullscreen && !chromeIdle;
-  const showVideoBackdrop = loaded && !playerError && !settingsOpen && !shortcutsOpen;
+  const desktopRuntime = isDesktop();
+  const showVideoBackdrop =
+    loaded &&
+    !playerError &&
+    !settingsOpen &&
+    !shortcutsOpen &&
+    (!desktopRuntime || engineSurfaceVisible);
 
   useEffect(() => {
     const rootEl = document.documentElement;
@@ -1187,7 +1375,7 @@ export function WatchRoom() {
   }, [hasFolderEpisodes, panelOpen, sideTab]);
 
   useLayoutEffect(() => {
-    if (!panelOpen || sideTab === "room" || (sideTab === "episodes" && !hasFolderEpisodes)) {
+    if (!panelOpen || (sideTab === "episodes" && !hasFolderEpisodes)) {
       setPopoverPos(null);
       return;
     }
@@ -1547,10 +1735,14 @@ export function WatchRoom() {
           onRetryPlayer={() => {
             void (async () => {
               usePlayerStore.getState().setPlayerError(null);
-              await mpvStop().catch(() => undefined);
+              usePlayerStore.getState().setEngineSurfaceVisible(false);
+              await enqueueMpvLifecycle(async () => {
+                await mpvStop().catch(() => undefined);
+              });
               viewportTrackerRef.current.markInvalidated();
               mpvStartedRef.current = false;
               mpvStartPromiseRef.current = null;
+              mpvLifecycleActiveRef.current = false;
               const currentFile = useAppStore.getState().selectedFilePath;
               if (currentFile) {
                 const matchItem = usePlaylistStore
@@ -1596,11 +1788,17 @@ export function WatchRoom() {
       </div>
 
       {panelOpen && sideTab === "room" && (
-        <div className="absolute inset-x-4 bottom-[124px] z-30 flex justify-center pointer-events-none">
+        <div
+          style={{ bottom: popoverPos?.bottom ?? 136 }}
+          className="fixed inset-x-4 z-40 flex justify-center pointer-events-none"
+        >
           <aside
             aria-label="Watch Party"
             data-glass-region="true"
-            className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[1060px] max-h-[calc(100vh-184px)] rounded-[26px] p-3.5 flex flex-col gap-2.5 overflow-hidden"
+            style={{
+              maxHeight: `calc(100vh - ${(popoverPos?.bottom ?? 136) + 58}px)`,
+            }}
+            className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[1060px] rounded-[26px] p-3.5 flex flex-col gap-2.5 overflow-hidden"
           >
             <div className="flex items-center justify-between gap-2 shrink-0">
               <SegmentedTabs
@@ -1652,7 +1850,7 @@ export function WatchRoom() {
               width: popoverPos.width,
               maxHeight: `calc(100vh - ${popoverPos.bottom + 58}px)`,
             }}
-            className={`ep-popover-bloom fixed z-30 select-none ${
+            className={`ep-popover-bloom fixed z-40 select-none ${
               sideTab === "episodes"
                 ? "ep-glass-capsule flex flex-col overflow-hidden rounded-[22px] p-3.5"
                 : "ep-glass-sheet overflow-y-auto overflow-x-hidden rounded-[18px] p-1.5"

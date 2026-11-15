@@ -14,7 +14,7 @@ use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::mpsc;
 
 #[allow(clippy::too_many_arguments)]
-pub async fn connect_and_run_ipc(
+pub async fn connect_and_run_ipc<F>(
     pipe_name: String,
     app: AppHandle,
     cmd_tx: mpsc::Sender<String>,
@@ -24,7 +24,11 @@ pub async fn connect_and_run_ipc(
     pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
     deferred_seek: Arc<Mutex<Option<f64>>>,
     deferred_pause: Arc<Mutex<Option<bool>>>,
-) {
+    check_child_exited: F,
+) -> String
+where
+    F: Fn() -> Option<String> + Send,
+{
     let full_pipe = format!(r"\\.\pipe\{pipe_name}");
     let mut client = None;
     for _ in 0..200 {
@@ -33,16 +37,17 @@ pub async fn connect_and_run_ipc(
                 client = Some(c);
                 break;
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            Err(_) => {
+                if let Some(status_msg) = check_child_exited() {
+                    return format!("Playback engine exited during startup ({status_msg}).");
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
         }
     }
 
     let Some(stream) = client else {
-        let _ = app.emit(
-            "mpv://error",
-            serde_json::json!({ "message": "Timed out connecting to mpv IPC pipe." }),
-        );
-        return;
+        return "Timed out connecting to mpv IPC pipe.".to_string();
     };
 
     let (reader_half, mut writer_half) = tokio::io::split(stream);
@@ -57,11 +62,7 @@ pub async fn connect_and_run_ipc(
     ];
     for c in init_cmds {
         if writer_half.write_all(c.as_bytes()).await.is_err() {
-            let _ = app.emit(
-                "mpv://error",
-                serde_json::json!({ "message": "mpv IPC write error during initialization." }),
-            );
-            return;
+            return "mpv IPC write error during initialization.".to_string();
         }
     }
 
@@ -188,4 +189,5 @@ pub async fn connect_and_run_ipc(
     }
 
     writer_task.abort();
+    "Playback engine stopped unexpectedly.".to_string()
 }

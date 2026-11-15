@@ -4,8 +4,10 @@ import { ShortcutsModal } from "./components/ShortcutsModal";
 import { HomeScreen } from "./components/HomeScreen";
 import { WatchRoom } from "./components/WatchRoom";
 import { isDesktop } from "./lib/bridge";
+import { enqueueMpvLifecycle, mpvStop } from "./lib/mpv";
 import { isTextEntryElement } from "./lib/shortcuts";
 import { useAppStore } from "./store/useAppStore";
+import { usePlayerStore } from "./store/usePlayerStore";
 import { useUpdaterStore } from "./store/useUpdaterStore";
 
 const PERIODIC_UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
@@ -30,6 +32,14 @@ export function App() {
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const startUpdateDownload = useUpdaterStore((s) => s.startDownload);
   const markAutoDownloadAttempted = useUpdaterStore((s) => s.markAutoDownloadAttempted);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    if (useAppStore.getState().screen === "home") {
+      usePlayerStore.getState().setEngineSurfaceVisible(false);
+      void enqueueMpvLifecycle(() => mpvStop().catch(() => undefined));
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;

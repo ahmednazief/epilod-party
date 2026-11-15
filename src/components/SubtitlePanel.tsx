@@ -21,6 +21,7 @@ import {
   mpvSetSubStyle,
   mpvSetSubTrack,
   mpvSetVisible,
+  safeMpvCall,
   subtitleAutoSync,
   subtitleCancelAutoSync,
   subtitleTwoAnchorSync,
@@ -55,15 +56,18 @@ const QUICK_SIZES = [
 
 function applyStyleNow(): void {
   const s = useSubtitleStore.getState();
-  void mpvSetSubStyle({
-    font: s.font,
-    fontSize: s.fontSize,
-    color: s.color,
-    borderSize: s.borderSize,
-    pos: s.pos,
-    visible: s.visible,
-    overrideAss: s.overrideAssStyle,
-  });
+  safeMpvCall(
+    mpvSetSubStyle({
+      font: s.font,
+      fontSize: s.fontSize,
+      color: s.color,
+      borderSize: s.borderSize,
+      pos: s.pos,
+      visible: s.visible,
+      overrideAss: s.overrideAssStyle,
+    }),
+    "mpvSetSubStyle",
+  );
 }
 
 export const SubtitlePanel = memo(function SubtitlePanel() {
@@ -149,7 +153,11 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       return;
     }
     let chosen: string | null = null;
-    await mpvSetVisible(false);
+    try {
+      await mpvSetVisible(false);
+    } catch {
+      // Engine may not be running before a file is loaded.
+    }
     try {
       const picked = await open({
         multiple: false,
@@ -164,7 +172,10 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
     } finally {
       const appState = useAppStore.getState();
       const pState = usePlayerStore.getState();
-      void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError);
+      safeMpvCall(
+        mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError),
+        "mpvSetVisible",
+      );
     }
     if (!chosen) return;
     try {
@@ -310,7 +321,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
 
   const handleNudge = (delta: number) => {
     const next = nudgeDelay(delta);
-    void mpvSetSubDelay(next);
+    safeMpvCall(mpvSetSubDelay(next), "mpvSetSubDelay");
   };
 
   const nearestSizeLabel = QUICK_SIZES.reduce((best, cur) =>
@@ -331,34 +342,43 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         onClick={() => {
           if (subsActive) {
             setVisible(false);
-            void mpvSetSubStyle({
-              font,
-              fontSize,
-              color,
-              borderSize,
-              pos,
-              visible: false,
-              overrideAss: overrideAssStyle,
-            });
+            safeMpvCall(
+              mpvSetSubStyle({
+                font,
+                fontSize,
+                color,
+                borderSize,
+                pos,
+                visible: false,
+                overrideAss: overrideAssStyle,
+              }),
+              "mpvSetSubStyle",
+            );
           } else if (selectedSub !== null) {
             setVisible(true);
-            void mpvSetSubStyle({
-              font,
-              fontSize,
-              color,
-              borderSize,
-              pos,
-              visible: true,
-              overrideAss: overrideAssStyle,
-            });
+            safeMpvCall(
+              mpvSetSubStyle({
+                font,
+                fontSize,
+                color,
+                borderSize,
+                pos,
+                visible: true,
+                overrideAss: overrideAssStyle,
+              }),
+              "mpvSetSubStyle",
+            );
           } else if (subTracks.length > 0) {
-            void selectSubTrack(subTracks[0].id, tracks, {
-              mpvSetSubTrack,
-              mpvSetSubDelay,
-              setDelaySecs,
-              setSubtitleVisible: setVisible,
-              clearExternalTrackState: clearLoadedTrack,
-            }).then(() => applyStyleNow());
+            safeMpvCall(
+              selectSubTrack(subTracks[0].id, tracks, {
+                mpvSetSubTrack,
+                mpvSetSubDelay,
+                setDelaySecs,
+                setSubtitleVisible: setVisible,
+                clearExternalTrackState: clearLoadedTrack,
+              }).then(() => applyStyleNow()),
+              "selectSubTrack",
+            );
           } else {
             pushNote("info", "No subtitle tracks in this video yet — choose a subtitle file.");
             void handleLoadExternalSubtitle();
@@ -555,7 +575,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             disabled={!loaded || delaySecs === 0}
             onClick={() => {
               setDelaySecs(0);
-              void mpvSetSubDelay(0);
+              safeMpvCall(mpvSetSubDelay(0), "mpvSetSubDelay");
             }}
             className="ep-press h-7 rounded-[10px] text-muted hover:text-white hover:bg-white/[0.08] disabled:opacity-30 cursor-pointer"
           >
@@ -688,15 +708,18 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             onClick={() => {
               const next = !overrideAssStyle;
               setOverrideAssStyle(next);
-              void mpvSetSubStyle({
-                font,
-                fontSize,
-                color,
-                borderSize,
-                pos,
-                visible,
-                overrideAss: next,
-              });
+              safeMpvCall(
+                mpvSetSubStyle({
+                  font,
+                  fontSize,
+                  color,
+                  borderSize,
+                  pos,
+                  visible,
+                  overrideAss: next,
+                }),
+                "mpvSetSubStyle",
+              );
             }}
             className="ep-menu-row ep-press w-full px-1.5 py-1.5 flex items-center justify-between gap-2 text-xs text-secondary hover:text-white cursor-pointer"
           >

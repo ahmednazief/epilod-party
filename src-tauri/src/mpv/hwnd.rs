@@ -267,7 +267,7 @@ pub fn set_child_visible(app: &AppHandle, hwnd: isize, visible: bool) {
                 0,
                 0,
                 0,
-                SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS,
+                SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
             );
         } else {
             SetWindowPos(
@@ -277,15 +277,14 @@ pub fn set_child_visible(app: &AppHandle, hwnd: isize, visible: bool) {
                 0,
                 0,
                 0,
-                SWP_HIDEWINDOW
-                    | SWP_NOACTIVATE
-                    | SWP_NOMOVE
-                    | SWP_NOSIZE
-                    | SWP_NOZORDER
-                    | SWP_ASYNCWINDOWPOS,
+                SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
             );
         }
     });
+}
+
+pub fn is_child_window_alive(hwnd: isize) -> bool {
+    hwnd != 0 && unsafe { IsWindow(hwnd as HWND) != 0 }
 }
 
 pub fn mark_child_closing_and_hide(app: &AppHandle, hwnd: isize) {

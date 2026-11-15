@@ -6,10 +6,11 @@ pub mod process;
 
 use epilod_core::syncplay::PlayerSnapshot;
 use hwnd::{
-    capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd,
+    capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd, is_child_window_alive,
     mark_child_closing_and_hide, resize_child_hwnd, set_child_visible, PendingResize, PhysicalRect,
 };
 use process::{resolve_fonts_dir, resolve_mpv_exe, spawn_mpv};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,8 +20,19 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 static MPV_PIPE_SEQ: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvSurfaceState {
+    pub running: bool,
+    pub has_media: bool,
+    pub ui_visible: bool,
+    pub surface_visible: bool,
+}
+
 pub struct MpvRuntime {
+    pub session_id: u64,
     pub app: AppHandle,
+    pub parent_hwnd: isize,
     pub hwnd: isize,
     pub child: Child,
     pub tx: mpsc::Sender<String>,
@@ -37,9 +49,11 @@ pub struct MpvController {
     pending_resize: Arc<PendingResize>,
     lifecycle_lock: AsyncMutex<()>,
     next_req_id: AtomicU64,
+    next_session_id: AtomicU64,
     shutting_down: Arc<AtomicBool>,
     has_media: Arc<AtomicBool>,
-    ui_visible: AtomicBool,
+    ui_visible: Arc<AtomicBool>,
+    last_app: Arc<Mutex<Option<AppHandle>>>,
     capture_busy: Arc<AtomicBool>,
 }
 
@@ -61,10 +75,50 @@ impl MpvController {
             pending_resize: Arc::new(PendingResize::default()),
             lifecycle_lock: AsyncMutex::new(()),
             next_req_id: AtomicU64::new(100),
+            next_session_id: AtomicU64::new(1),
             shutting_down: Arc::new(AtomicBool::new(false)),
             has_media: Arc::new(AtomicBool::new(false)),
-            ui_visible: AtomicBool::new(true),
+            ui_visible: Arc::new(AtomicBool::new(true)),
+            last_app: Arc::new(Mutex::new(None)),
             capture_busy: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn surface_state(&self) -> MpvSurfaceState {
+        let mut guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let running = match guard.as_mut() {
+            Some(rt) => {
+                let exited = matches!(rt.child.try_wait(), Ok(Some(_)));
+                !exited
+                    && !self.shutting_down.load(Ordering::SeqCst)
+                    && is_child_window_alive(rt.hwnd)
+            }
+            None => false,
+        };
+        drop(guard);
+        let has_media = running && self.has_media.load(Ordering::SeqCst);
+        let ui_visible = self.ui_visible.load(Ordering::SeqCst);
+        MpvSurfaceState {
+            running,
+            has_media,
+            ui_visible,
+            surface_visible: running && has_media && ui_visible,
+        }
+    }
+
+    fn emit_surface_state_with(&self, app: &AppHandle) {
+        let state = self.surface_state();
+        let _ = app.emit("mpv://surface-state", state);
+    }
+
+    fn emit_surface_state_best_effort(&self) {
+        let app = self
+            .last_app
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(app_handle) = app {
+            self.emit_surface_state_with(&app_handle);
         }
     }
 
@@ -125,8 +179,43 @@ impl MpvController {
     ) -> Result<(), String> {
         let _lifecycle = self.lifecycle_lock.lock().await;
         {
+            let mut last = self.last_app.lock().unwrap_or_else(|e| e.into_inner());
+            *last = Some(app.clone());
+        }
+
+        let stale_runtime = {
+            let mut guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            let should_recycle = match guard.as_mut() {
+                Some(rt) => {
+                    let exited = matches!(rt.child.try_wait(), Ok(Some(_)));
+                    let alive = is_child_window_alive(rt.hwnd);
+                    exited || !alive || rt.parent_hwnd != parent_hwnd
+                }
+                None => false,
+            };
+            if should_recycle {
+                guard.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(mut stale) = stale_runtime {
+            mark_child_closing_and_hide(&stale.app, stale.hwnd);
+            drop(stale.tx);
+            let _ = stale.child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_millis(250), stale.child.wait()).await;
+            destroy_child_hwnd(&stale.app, stale.hwnd);
+            self.has_media.store(false, Ordering::SeqCst);
+            self.loading_media.store(false, Ordering::SeqCst);
+        }
+
+        {
             let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_some() {
+                drop(guard);
+                let _ = self.resize(rect, true);
+                self.emit_surface_state_with(app);
                 return Ok(());
             }
         }
@@ -151,14 +240,15 @@ impl MpvController {
         let child_hwnd = create_child_hwnd(parent_hwnd, rect, app.clone())?;
         let seq = MPV_PIPE_SEQ.fetch_add(1, Ordering::Relaxed);
         let pipe_name = format!("epilod-mpv-{}-{seq}", std::process::id());
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
 
-        let child = match spawn_mpv(
+        let (child, stderr_tail) = match spawn_mpv(
             &mpv_exe,
             child_hwnd as u64,
             &pipe_name,
             fonts_dir.as_deref(),
         ) {
-            Ok(c) => c,
+            Ok(res) => res,
             Err(e) => {
                 destroy_child_hwnd(app, child_hwnd);
                 return Err(e);
@@ -178,7 +268,9 @@ impl MpvController {
         {
             let mut guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(MpvRuntime {
+                session_id,
                 app: app.clone(),
+                parent_hwnd,
                 hwnd: child_hwnd,
                 child,
                 tx,
@@ -188,9 +280,11 @@ impl MpvController {
         if self.has_media.load(Ordering::SeqCst) && self.ui_visible.load(Ordering::SeqCst) {
             set_child_visible(app, child_hwnd, true);
         }
+        self.emit_surface_state_with(app);
 
         let app_clone = app.clone();
         let runtime_clone = Arc::clone(&self.runtime);
+        let runtime_for_probe = Arc::clone(&self.runtime);
         let snap_clone = Arc::clone(&self.snapshot);
         let loading_clone = Arc::clone(&self.loading_media);
         let pending_seek_clone = Arc::clone(&self.pending_seek);
@@ -199,8 +293,9 @@ impl MpvController {
         let pending_resize_clone = Arc::clone(&self.pending_resize);
         let shutdown_flag = Arc::clone(&self.shutting_down);
         let has_media_clone = Arc::clone(&self.has_media);
+        let ui_visible_clone = Arc::clone(&self.ui_visible);
         tokio::spawn(async move {
-            ipc::connect_and_run_ipc(
+            let reason = ipc::connect_and_run_ipc(
                 pipe_name,
                 app_clone.clone(),
                 cmd_tx_ipc,
@@ -210,29 +305,73 @@ impl MpvController {
                 Arc::clone(&pending_seek_clone),
                 Arc::clone(&deferred_seek_clone),
                 Arc::clone(&deferred_pause_clone),
+                move || {
+                    if let Ok(mut guard) = runtime_for_probe.try_lock() {
+                        if let Some(rt) = guard.as_mut() {
+                            if rt.session_id == session_id {
+                                if let Ok(Some(status)) = rt.child.try_wait() {
+                                    return Some(format!("exit status {status}"));
+                                }
+                            }
+                        }
+                    }
+                    None
+                },
             )
             .await;
+
             if !shutdown_flag.load(Ordering::SeqCst) {
-                pending_resize_clone.cancel();
-                let taken = runtime_clone
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
+                let taken = {
+                    let mut guard = runtime_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let is_same = guard
+                        .as_ref()
+                        .map(|rt| rt.session_id == session_id)
+                        .unwrap_or(false);
+                    if is_same {
+                        guard.take()
+                    } else {
+                        None
+                    }
+                };
                 if let Some(mut rt) = taken {
+                    pending_resize_clone.cancel();
                     mark_child_closing_and_hide(&rt.app, rt.hwnd);
                     drop(rt.tx);
+                    let exit_note = match rt.child.try_wait() {
+                        Ok(Some(status)) => Some(format!("exit {status}")),
+                        _ => None,
+                    };
                     let _ = rt.child.start_kill();
                     let _ = tokio::time::timeout(Duration::from_millis(250), rt.child.wait()).await;
                     destroy_child_hwnd(&rt.app, rt.hwnd);
+                    has_media_clone.store(false, Ordering::SeqCst);
+                    loading_clone.store(false, Ordering::SeqCst);
+                    *pending_seek_clone.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *snap_clone.lock().unwrap_or_else(|e| e.into_inner()) =
+                        PlayerSnapshot::default();
+                    let _ = app_clone.emit(
+                        "mpv://surface-state",
+                        MpvSurfaceState {
+                            running: false,
+                            has_media: false,
+                            ui_visible: ui_visible_clone.load(Ordering::SeqCst),
+                            surface_visible: false,
+                        },
+                    );
+                    let mut full_msg = reason;
+                    if let Some(ex) = exit_note {
+                        if !full_msg.contains("exit") {
+                            full_msg = format!("{full_msg} ({ex})");
+                        }
+                    }
+                    if let Some(stderr_info) = stderr_tail.summary() {
+                        full_msg = format!("{full_msg} — {stderr_info}");
+                    }
+                    let _ = app_clone.emit(
+                        "mpv://error",
+                        serde_json::json!({ "message": full_msg }),
+                    );
                 }
-                has_media_clone.store(false, Ordering::SeqCst);
-                loading_clone.store(false, Ordering::SeqCst);
-                *pending_seek_clone.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                *snap_clone.lock().unwrap_or_else(|e| e.into_inner()) = PlayerSnapshot::default();
-                let _ = app_clone.emit(
-                    "mpv://error",
-                    serde_json::json!({ "message": "Playback engine stopped unexpectedly." }),
-                );
             }
         });
 
@@ -273,9 +412,19 @@ impl MpvController {
     pub fn set_visible(&self, visible: bool) -> Result<(), String> {
         self.ui_visible.store(visible, Ordering::SeqCst);
         let effective = visible && self.has_media.load(Ordering::SeqCst);
-        let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref rt) = *guard {
-            set_child_visible(&rt.app, rt.hwnd, effective);
+        let app_to_emit = {
+            let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref rt) = *guard {
+                set_child_visible(&rt.app, rt.hwnd, effective);
+                Some(rt.app.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(app_handle) = app_to_emit {
+            self.emit_surface_state_with(&app_handle);
+        } else {
+            self.emit_surface_state_best_effort();
         }
         Ok(())
     }
@@ -283,20 +432,49 @@ impl MpvController {
     pub fn set_media_loaded(&self, loaded: bool) {
         self.has_media.store(loaded, Ordering::SeqCst);
         let effective = loaded && self.ui_visible.load(Ordering::SeqCst);
-        let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref rt) = *guard {
-            set_child_visible(&rt.app, rt.hwnd, effective);
+        let app_to_emit = {
+            let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref rt) = *guard {
+                set_child_visible(&rt.app, rt.hwnd, effective);
+                Some(rt.app.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(app_handle) = app_to_emit {
+            self.emit_surface_state_with(&app_handle);
+        } else {
+            self.emit_surface_state_best_effort();
         }
     }
 
     pub fn send_command(&self, cmd_line: String) -> Result<(), String> {
-        let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let exited_or_dead = match guard.as_mut() {
+            Some(rt) => {
+                matches!(rt.child.try_wait(), Ok(Some(_))) || !is_child_window_alive(rt.hwnd)
+            }
+            None => true,
+        };
+        if exited_or_dead {
+            drop(guard);
+            self.has_media.store(false, Ordering::SeqCst);
+            self.emit_surface_state_best_effort();
+            return Err("Video player is not running.".to_string());
+        }
         let Some(ref rt) = *guard else {
+            drop(guard);
+            self.has_media.store(false, Ordering::SeqCst);
+            self.emit_surface_state_best_effort();
             return Err("Video player is not running.".to_string());
         };
-        rt.tx
-            .try_send(cmd_line)
-            .map_err(|_| "Video player command queue is unavailable.".to_string())
+        if rt.tx.try_send(cmd_line).is_err() {
+            drop(guard);
+            self.has_media.store(false, Ordering::SeqCst);
+            self.emit_surface_state_best_effort();
+            return Err("Video player command queue is unavailable.".to_string());
+        }
+        Ok(())
     }
 
     /// Fix 18: Cleanly stop and await child exit up to 500ms before destroying HWND.
@@ -316,6 +494,7 @@ impl MpvController {
             .take();
         *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = PlayerSnapshot::default();
         if let Some(mut rt) = taken {
+            let app_clone = rt.app.clone();
             mark_child_closing_and_hide(&rt.app, rt.hwnd);
             let _ = rt.tx.try_send("{\"command\":[\"quit\"]}\n".to_string());
             drop(rt.tx);
@@ -323,6 +502,9 @@ impl MpvController {
             let _ = rt.child.start_kill();
             let _ = tokio::time::timeout(Duration::from_millis(250), rt.child.wait()).await;
             destroy_child_hwnd(&rt.app, rt.hwnd);
+            self.emit_surface_state_with(&app_clone);
+        } else {
+            self.emit_surface_state_best_effort();
         }
     }
 
@@ -368,5 +550,34 @@ impl MpvController {
         })
         .await
         .map_err(|e| format!("Backdrop capture task failed: {e}"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_state_is_never_visible_without_running_runtime() {
+        let ctrl = MpvController::new();
+        let initial = ctrl.surface_state();
+        assert!(!initial.running);
+        assert!(!initial.has_media);
+        assert!(!initial.surface_visible);
+
+        // Even if load/visibility flags flip while stopped, surface_visible must remain false
+        // so the frontend never reveals a transparent desktop cutout.
+        ctrl.set_media_loaded(true);
+        let _ = ctrl.set_visible(true);
+        let state = ctrl.surface_state();
+        assert!(!state.running);
+        assert!(!state.has_media);
+        assert!(!state.surface_visible);
+
+        let err = ctrl
+            .send_command("{\"command\":[\"get_property\",\"pause\"]}\n".to_string())
+            .expect_err("send_command must fail when mpv runtime is absent");
+        assert!(err.contains("not running"));
+        assert!(!ctrl.surface_state().surface_visible);
     }
 }
