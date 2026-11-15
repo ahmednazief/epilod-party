@@ -165,7 +165,7 @@ export function WatchRoom() {
   const dialogOpenRef = useRef(false);
   const leavingRef = useRef(false);
   const loadGenRef = useRef(0);
-  const initialAutoLoadedRef = useRef(false);
+  const autoLoadedPathRef = useRef<string | null>(null);
   const pendingPairedSubRef = useRef<{ videoPath: string; subPath: string } | null>(null);
   const loadSubtitlePathRef = useRef<((path: string) => Promise<void>) | null>(null);
   const selectEpisodeAtIndexRef = useRef<((index: number) => Promise<void>) | null>(null);
@@ -282,6 +282,7 @@ export function WatchRoom() {
     async (path: string, pairedSubPath?: string | null) => {
       const gen = ++loadGenRef.current;
       const displayName = getFileDisplayName(path);
+      autoLoadedPathRef.current = path;
       void subtitleCancelAutoSync().catch(() => undefined);
       setSelectedFile(path, displayName);
       usePlaylistStore.getState().selectByPath(path);
@@ -296,6 +297,8 @@ export function WatchRoom() {
         if (loadGenRef.current !== gen) return;
         await mpvLoad(path);
         if (loadGenRef.current !== gen) return;
+        usePlayerStore.getState().setLoaded(true);
+        usePlayerStore.getState().setPlayerError(null);
         const subState = useSubtitleStore.getState();
         await resetMpvPlaybackDefaults(useSyncStore.getState().status.state === "connected");
         if (loadGenRef.current !== gen) return;
@@ -309,15 +312,18 @@ export function WatchRoom() {
           overrideAss: subState.overrideAssStyle,
         });
         if (loadGenRef.current !== gen) return;
+        if (!useAppStore.getState().roomCode) {
+          usePlayerStore.getState().setPaused(false);
+          await mpvSetPause(false);
+          if (loadGenRef.current !== gen) return;
+        }
         if (!isDesktop()) {
-          usePlayerStore.getState().setLoaded(true);
           const pendingSub = pendingPairedSubRef.current;
           if (pendingSub && pendingSub.videoPath.toLowerCase() === path.toLowerCase()) {
             pendingPairedSubRef.current = null;
             await loadSubtitlePath(pendingSub.subPath);
           }
         }
-        usePlayerStore.getState().setPlayerError(null);
         usePlayerStore.getState().flashFeedback(`Loaded ${displayName}`);
       } catch (err) {
         if (loadGenRef.current !== gen) return;
@@ -372,7 +378,13 @@ export function WatchRoom() {
     async (paths: string[], options?: { append?: boolean }) => {
       const clean = paths.map((p) => p.trim()).filter(Boolean);
       if (clean.length === 0) return;
-      const scan = await scanMediaPaths(clean);
+      let scan: Awaited<ReturnType<typeof scanMediaPaths>>;
+      try {
+        scan = await scanMediaPaths(clean);
+      } catch {
+        await loadVideoPath(clean[0]);
+        return;
+      }
 
       if (scan.items.length > 0) {
         const pStore = usePlaylistStore.getState();
@@ -568,15 +580,15 @@ export function WatchRoom() {
   // Auto-play preselected file or season folder when entering WatchRoom
   useEffect(() => {
     if (
-      initialAutoLoadedRef.current ||
       !selectedFilePath ||
       !isDesktop() ||
-      usePlayerStore.getState().loaded
+      usePlayerStore.getState().loaded ||
+      autoLoadedPathRef.current === selectedFilePath
     ) {
       return;
     }
-    initialAutoLoadedRef.current = true;
     const timer = window.setTimeout(() => {
+      autoLoadedPathRef.current = selectedFilePath;
       const pState = usePlaylistStore.getState();
       const activeItem =
         pState.items.find((it) => it.path.toLowerCase() === selectedFilePath.toLowerCase()) ??
@@ -584,16 +596,20 @@ export function WatchRoom() {
       if (activeItem) {
         void loadVideoPath(selectedFilePath, activeItem.subtitlePath);
       } else {
-        void scanMediaPaths([selectedFilePath]).then((scan) => {
-          if (scan.items.length > 0) {
-            const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
-            usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
-            const matched = scan.items[idx];
-            void loadVideoPath(matched.path, matched.subtitlePath);
-          } else {
+        void scanMediaPaths([selectedFilePath])
+          .then((scan) => {
+            if (scan.items.length > 0) {
+              const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+              usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
+              const matched = scan.items[idx];
+              void loadVideoPath(matched.path, matched.subtitlePath);
+            } else {
+              void loadVideoPath(selectedFilePath);
+            }
+          })
+          .catch(() => {
             void loadVideoPath(selectedFilePath);
-          }
-        });
+          });
       }
     }, 60);
     return () => window.clearTimeout(timer);
@@ -1033,6 +1049,7 @@ export function WatchRoom() {
   const handleLeaveRoom = () => {
     if (leavingRef.current) return;
     leavingRef.current = true;
+    autoLoadedPathRef.current = null;
     soundTrackerRef.current.reset();
     pendingPairedSubRef.current = null;
     lastPeerFileRef.current = null;

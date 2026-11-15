@@ -138,7 +138,9 @@ pub async fn connect_and_run_ipc(
                     ui_time_throttle.reset();
                     let _ = app.emit("mpv://file-loaded", ());
                     if let Some(paused) = deferred_pause.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        snapshot.lock().unwrap_or_else(|e| e.into_inner()).paused = paused;
                         let _ = cmd_tx.try_send(set_pause_cmd(900_001, paused));
+                        let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
                     }
                     if let Some(target) = deferred_seek.lock().unwrap_or_else(|e| e.into_inner()).take() {
                         *pending_seek.lock().unwrap_or_else(|e| e.into_inner()) =

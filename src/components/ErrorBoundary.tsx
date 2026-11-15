@@ -25,7 +25,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   render(): ReactNode {
     if (this.state.errorMessage) {
       return (
-        <div className="ep-amethyst-canvas h-full w-full flex items-center justify-center text-primary p-6">
+        <div className="ep-amethyst-canvas relative h-full w-full flex items-center justify-center text-primary p-6">
           <div className="ep-glass-sheet max-w-md w-full rounded-[24px] p-6 space-y-3.5">
             <h2 className="text-sm font-semibold text-white">Something went wrong in the UI</h2>
             <p className="text-xs text-secondary leading-relaxed break-words">{this.state.errorMessage}</p>

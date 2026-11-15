@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp",
+    "mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "mov", "m4v",
+    "mpg", "mpeg", "vob",
 ];
 
 pub const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub", "idx"];

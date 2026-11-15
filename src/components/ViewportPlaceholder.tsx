@@ -22,7 +22,7 @@ export function ViewportPlaceholder({
   if (loaded && !playerError) return null;
 
   return (
-    <div className="ep-amethyst-canvas absolute inset-0 flex flex-col items-center justify-center p-6 select-none">
+    <div className="ep-amethyst-canvas absolute inset-0 h-full w-full flex flex-col items-center justify-center p-6 select-none">
       <div className="pointer-events-none absolute inset-0 overflow-hidden z-0" aria-hidden="true">
         <div className="ep-ambient-orb-purple absolute left-[28%] top-[26%] h-64 w-64 rounded-full" />
         <div className="ep-ambient-orb-silver absolute right-[26%] top-[34%] h-64 w-64 rounded-full" />

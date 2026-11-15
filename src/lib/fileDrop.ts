@@ -9,6 +9,11 @@ export const VIDEO_EXTENSIONS = new Set([
   "wmv",
   "ogv",
   "3gp",
+  "mov",
+  "m4v",
+  "mpg",
+  "mpeg",
+  "vob",
 ]);
 
 export const SUBTITLE_EXTENSIONS = new Set(["srt", "ass", "ssa", "vtt", "sub", "idx"]);

@@ -13,10 +13,13 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
+import { formatUserError } from "../lib/errors";
+import { getFileDisplayName } from "../lib/fileDrop";
 import { scanMediaPaths } from "../lib/playlist";
 import { playSoundCue } from "../lib/soundEffects";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
+import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
@@ -178,6 +181,12 @@ export function HomeScreen() {
     if (openingMedia) return;
     setError(null);
     if (!isDesktop()) {
+      setSelectedFile(
+        "C:\\Movies\\Cinema.Showcase.2026.2160p.HDR.mkv",
+        "Cinema.Showcase.2026.2160p.HDR.mkv",
+      );
+      usePlayerStore.getState().setLoaded(true);
+      usePlayerStore.getState().setPaused(false);
       enterRoom("", false);
       return;
     }
@@ -200,6 +209,11 @@ export function HomeScreen() {
               "wmv",
               "ogv",
               "3gp",
+              "mov",
+              "m4v",
+              "mpg",
+              "mpeg",
+              "vob",
               "*",
             ],
           },
@@ -210,18 +224,25 @@ export function HomeScreen() {
         : typeof chosen === "string" && chosen
           ? [chosen]
           : [];
-      if (picked.length > 0) {
+      if (picked.length === 0) {
+        return;
+      }
+      try {
         const scan = await scanMediaPaths(picked);
         if (scan.items.length > 0) {
           const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
           usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
           const target = scan.items[idx];
           setSelectedFile(target.path, target.fileName);
+        } else {
+          setSelectedFile(picked[0], getFileDisplayName(picked[0]));
         }
-        enterRoom("", false);
+      } catch {
+        setSelectedFile(picked[0], getFileDisplayName(picked[0]));
       }
-    } catch {
       enterRoom("", false);
+    } catch (err) {
+      setError(formatUserError(err, "Could not open media file."));
     } finally {
       setOpeningMedia(false);
     }
@@ -308,7 +329,7 @@ export function HomeScreen() {
   const hasJoinCode = joinInput.trim().length > 0;
 
   return (
-    <div className="ep-amethyst-canvas min-h-full w-full flex flex-col justify-between text-primary select-none">
+    <div className="ep-amethyst-canvas relative min-h-full w-full flex flex-col justify-between text-primary select-none">
       {/* Subtle luminous contours behind glass surfaces so liquid lens distortion melts shapes cleanly */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden z-0" aria-hidden="true">
         <div className="ep-ambient-orb-purple absolute left-[24%] top-[28%] h-72 w-72 rounded-full" />

@@ -225,3 +225,40 @@ test("usePlaylistStore manages active episode, preferences, and clearing", async
   assert.equal(usePlaylistStore.getState().currentIndex, -1);
   assert.equal(usePlaylistStore.getState().folderName, null);
 });
+
+test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPlaceholder layout, and extra video extensions", async () => {
+  const { VIDEO_EXTENSIONS, classifyDroppedFile } = await loadModules<
+    typeof import("../src/lib/fileDrop")
+  >("src/lib/fileDrop.ts");
+
+  for (const ext of ["mov", "m4v", "mpg", "mpeg", "vob"]) {
+    assert.equal(VIDEO_EXTENSIONS.has(ext), true, `Missing video extension .${ext}`);
+    assert.equal(classifyDroppedFile(`C:\\Movies\\sample.${ext}`), "video");
+  }
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const canvasRule = globalsCss.match(/\.ep-amethyst-canvas\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.ok(canvasRule.length > 0);
+  assert.equal(
+    /position\s*:\s*relative/.test(canvasRule),
+    false,
+    ".ep-amethyst-canvas must not set position: relative so absolute overlays fill inset-0",
+  );
+
+  const watchRoomSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  assert.match(
+    watchRoomSrc,
+    /window\.setTimeout\(\(\) => \{\s*autoLoadedPathRef\.current = selectedFilePath;/,
+  );
+  assert.match(
+    watchRoomSrc,
+    /await mpvLoad\(path\);\s*if \(loadGenRef\.current !== gen\) return;\s*usePlayerStore\.getState\(\)\.setLoaded\(true\);/,
+  );
+  assert.match(
+    watchRoomSrc,
+    /if \(!useAppStore\.getState\(\)\.roomCode\) \{\s*usePlayerStore\.getState\(\)\.setPaused\(false\);\s*await mpvSetPause\(false\);/,
+  );
+});
