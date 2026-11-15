@@ -322,21 +322,21 @@ export function HomeScreen() {
       {/* Main Centered Lobby */}
       <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-5 py-6">
         {lobbyView === "entry" ? (
-          <div className="anim-fade-slide-up w-full max-w-[460px] flex flex-col items-center gap-7">
+          <div className="anim-fade-slide-up flex flex-col items-center gap-6">
             <div className="flex flex-col items-center text-center gap-2.5">
-              <LogoMark size={44} />
+              <LogoMark size={46} />
               <div className="space-y-1">
-                <h1 className="text-[22px] font-semibold tracking-tight text-white">
+                <h1 className="text-xl font-semibold tracking-tight text-white">
                   Epilod Party
                 </h1>
                 <p className="text-xs text-secondary">
-                  Private cinema on your desktop — watch solo or in effortless sync
+                  Watch a movie solo or in sync with friends
                 </p>
               </div>
             </div>
 
-            {/* Strictly 2 differentiated Liquid Glass buttons */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
+            {/* Strictly 2 sleek differentiated Liquid Glass pill buttons */}
+            <div className="flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={() => {
@@ -344,48 +344,20 @@ export function HomeScreen() {
                   setError(null);
                   setLobbyView("party");
                 }}
-                className="ep-glass-btn-party ep-press rounded-[26px] p-5 text-left flex flex-col justify-between min-h-[146px] cursor-pointer group"
+                className="ep-glass-btn-party ep-press h-11 px-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="h-10 w-10 rounded-2xl bg-accent/28 text-accent-soft flex items-center justify-center">
-                    <Users className="h-5 w-5" />
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded-full bg-accent/25 text-accent-soft text-[10px] font-semibold tracking-wider uppercase">
-                    Sync
-                  </span>
-                </div>
-                <div className="space-y-1 pt-5">
-                  <div className="text-[15px] font-semibold text-white">
-                    Watch Party
-                  </div>
-                  <p className="text-xs text-secondary leading-relaxed">
-                    Create a room or enter a friend&apos;s code
-                  </p>
-                </div>
+                <Users className="h-4 w-4 text-accent-soft shrink-0" />
+                <span>Watch Party</span>
               </button>
 
               <button
                 type="button"
                 disabled={openingMedia}
                 onClick={() => void handleOpenMediaSolo()}
-                className="ep-glass-btn-media ep-press rounded-[26px] p-5 text-left flex flex-col justify-between min-h-[146px] cursor-pointer disabled:opacity-60 group"
+                className="ep-glass-btn-media ep-press h-11 px-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="h-10 w-10 rounded-2xl bg-white/10 text-white flex items-center justify-center">
-                    <Film className="h-5 w-5" />
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded-full bg-white/10 text-secondary text-[10px] font-semibold tracking-wider uppercase">
-                    Player
-                  </span>
-                </div>
-                <div className="space-y-1 pt-5">
-                  <div className="text-[15px] font-semibold text-white">
-                    {openingMedia ? "Opening..." : "Open Media"}
-                  </div>
-                  <p className="text-xs text-secondary leading-relaxed">
-                    Pick a movie or video file and play locally
-                  </p>
-                </div>
+                <Film className="h-4 w-4 text-secondary shrink-0" />
+                <span>{openingMedia ? "Opening..." : "Open Media"}</span>
               </button>
             </div>
           </div>
