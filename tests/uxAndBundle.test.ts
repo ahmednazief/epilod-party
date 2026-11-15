@@ -179,4 +179,23 @@ test("Custom frameless TitleBar and consumer Smoked-Amethyst UX invariants hold 
   assert.equal(settingsSrc.includes('{ value: "logs", label: "Diagnostics" }'), true);
 });
 
+test("Transparent WebView2 punch-through reveals underlying mpv child HWND during playback", () => {
+  const tauriConf = JSON.parse(
+    fs.readFileSync(path.join(REPO_ROOT, "src-tauri/tauri.conf.json"), "utf8"),
+  ) as { app: { windows: Array<{ transparent?: boolean }> } };
+  assert.equal(tauriConf.app.windows[0]?.transparent, true);
+
+  const indexHtml = fs.readFileSync(path.join(REPO_ROOT, "index.html"), "utf8");
+  assert.equal(/<body[^>]*bg-canvas/.test(indexHtml), false);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const layerIdx = globalsCss.indexOf("@layer base");
+  const videoActiveIdx = globalsCss.indexOf("html.ep-video-active");
+  assert.ok(layerIdx !== -1 && videoActiveIdx > layerIdx);
+  // html.ep-video-active must live outside @layer base so @layer utilities never override it
+  const baseBlockClose = globalsCss.indexOf("}\n}", layerIdx);
+  assert.ok(baseBlockClose !== -1 && videoActiveIdx > baseBlockClose);
+});
+
+
 

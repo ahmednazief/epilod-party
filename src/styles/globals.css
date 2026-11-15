@@ -42,12 +42,12 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
+}
 
-  html.ep-video-active,
-  html.ep-video-active body,
-  html.ep-video-active #root {
-    background-color: transparent;
-  }
+html.ep-video-active,
+html.ep-video-active body,
+html.ep-video-active #root {
+  background-color: transparent;
 }
 
 .num {
