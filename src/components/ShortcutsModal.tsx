@@ -42,7 +42,7 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
                 <h3 className="px-2 text-[11px] font-medium uppercase tracking-wider text-muted">
                   {category}
                 </h3>
-                <div className="ep-glass-well rounded-2xl p-1.5 space-y-0.5">
+                <div className="space-y-0.5">
                   {rows.map((row) => (
                     <div
                       key={row.label}

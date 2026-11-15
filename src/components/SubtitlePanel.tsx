@@ -309,9 +309,9 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   ).label;
 
   return (
-    <div className="anim-tab-in px-3.5 pb-3.5 pt-2 space-y-2.5">
-      {/* Track selector & Visibility well */}
-      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
+    <div className="anim-tab-in px-4 pb-4 pt-2.5 space-y-3.5">
+      {/* Track selector & Visibility */}
+      <div className="space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <button
             type="button"
@@ -384,8 +384,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         </div>
       )}
 
-      {/* Timing & Magic Sync well */}
-      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
+      {/* Timing & Magic Sync */}
+      <div className="space-y-2.5">
         {autoSyncBusy ? (
           <button
             type="button"
@@ -469,8 +469,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         </div>
       </div>
 
-      {/* Size & Color appearance well */}
-      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
+      {/* Size & Color appearance */}
+      <div className="space-y-2.5">
         <div className="ep-glass-input p-1 rounded-full grid grid-cols-3 gap-1">
           {QUICK_SIZES.map((preset) => {
             const active = nearestSizeLabel === preset.label;
@@ -518,8 +518,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         </div>
       </div>
 
-      {/* Collapsed "More subtitle tools" well */}
-      <div className="ep-glass-well rounded-2xl p-2">
+      {/* Collapsed "More subtitle tools" */}
+      <div className="pt-0.5">
         <button
           type="button"
           onClick={() => setShowTools((s) => !s)}

@@ -185,8 +185,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       }}
     >
       <div className="ep-glass-sheet anim-modal-in w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[26px] overflow-hidden grid grid-cols-12">
-        {/* Left Navigation Rail (borderless tonal separation) */}
-        <aside className="col-span-4 bg-black/35 p-3.5 flex flex-col justify-between min-h-0">
+        {/* Left Navigation Rail (subtle airy tint separation) */}
+        <aside className="col-span-4 bg-white/[0.03] p-3.5 flex flex-col justify-between min-h-0">
           <div className="space-y-4">
             <div className="px-2.5 pt-1 flex items-center justify-between">
               <h2 className="text-sm font-semibold tracking-tight text-white">Preferences</h2>
@@ -284,18 +284,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
           <div className="flex-1 overflow-y-auto px-6 py-3">
             {tab === "prefs" && (
-              <div className="anim-tab-in space-y-3.5">
-                <div className="ep-glass-well rounded-2xl p-3">
-                  <TextField
-                    label="Display Name"
-                    value={username}
-                    maxLength={32}
-                    placeholder="Viewer"
-                    onChange={(e) => setUsername(e.target.value)}
-                  />
-                </div>
+              <div className="anim-tab-in space-y-4">
+                <TextField
+                  label="Display Name"
+                  value={username}
+                  maxLength={32}
+                  placeholder="Viewer"
+                  onChange={(e) => setUsername(e.target.value)}
+                />
 
-                <div className="ep-glass-well rounded-2xl p-1.5 space-y-0.5">
+                <div className="space-y-0.5">
                   <ComfortSwitchRow
                     title="Streamer Mode (Hide Profile Icons)"
                     description="Hide friend names and profile avatars while streaming or sharing your screen."
@@ -470,7 +468,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </div>
                 </div>
 
-                <div className="ep-glass-well rounded-2xl p-1.5">
+                <div className="pt-1">
                   <ComfortSwitchRow
                     title="Check for updates automatically"
                     description="Quietly check GitHub Releases on launch with verified installation."
@@ -521,7 +519,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </Button>
                 </div>
 
-                <div className="ep-glass-well rounded-2xl p-1.5">
+                <div className="pt-1">
                   <ComfortSwitchRow
                     title="Allow Shared LAN Folders (UNC / SMB)"
                     description="Permit opening movies from mapped network paths on your home Wi-Fi."

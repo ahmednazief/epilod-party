@@ -330,9 +330,9 @@ export const RoomPanel = memo(function RoomPanel() {
         <p className="text-[11px] text-secondary px-1">{serverOverrideNotice}</p>
       )}
 
-      {/* Friends list well */}
-      <div className="ep-glass-well rounded-2xl p-2.5 space-y-1.5">
-        <div className="px-1.5 pt-0.5 flex items-center justify-between text-[11px] font-medium text-muted">
+      {/* Friends list */}
+      <div className="pt-1 space-y-1.5">
+        <div className="px-1 flex items-center justify-between text-[11px] font-medium text-muted">
           <span>Watching Together ({participants.length})</span>
         </div>
 

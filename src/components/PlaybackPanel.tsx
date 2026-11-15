@@ -51,9 +51,9 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
   };
 
   return (
-    <div className="anim-tab-in px-3.5 pb-3.5 pt-2 space-y-2.5">
-      {/* Speed well */}
-      <div className="ep-glass-well rounded-2xl p-3 space-y-2">
+    <div className="anim-tab-in px-4 pb-4 pt-2.5 space-y-4">
+      {/* Speed */}
+      <div className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-secondary">Playback Speed</span>
           {syncConnected && (
@@ -86,8 +86,8 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </div>
       </div>
 
-      {/* Picture Frame pills well */}
-      <div className="ep-glass-well rounded-2xl p-3 space-y-2">
+      {/* Picture Frame pills */}
+      <div className="space-y-2">
         <span className="text-xs font-medium text-secondary block">Picture Frame</span>
         <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1">
           {FRAME_PILLS.map((item) => {
@@ -114,8 +114,8 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </div>
       </div>
 
-      {/* Audio track + Loop video well */}
-      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
+      {/* Audio track + Loop video */}
+      <div className="space-y-2.5">
         <div className="space-y-1.5">
           <span className="text-xs font-medium text-secondary block">Audio Track</span>
           <SelectMenu
