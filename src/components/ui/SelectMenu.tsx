@@ -1,5 +1,6 @@
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export interface SelectMenuOption<T extends string = string> {
   value: T;
@@ -29,13 +30,66 @@ export function SelectMenu<T extends string = string>({
 }: SelectMenuProps<T>) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [menuStyle, setMenuStyle] = useState<{
+    left: number;
+    width: number;
+    maxHeight: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
 
   const selectedOption = options.find((opt) => opt.value === value);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
+      const vh = typeof window !== "undefined" ? window.innerHeight : 720;
+      const width = Math.min(Math.max(r.width, 160), vw - 24);
+      const left = Math.max(12, Math.min(r.left, vw - width - 12));
+      if (placement === "top") {
+        setMenuStyle({
+          left,
+          width,
+          maxHeight: Math.min(224, Math.max(110, r.top - 18)),
+          bottom: Math.max(12, vh - r.top + 6),
+        });
+      } else {
+        setMenuStyle({
+          left,
+          width,
+          maxHeight: Math.min(224, Math.max(110, vh - r.bottom - 18)),
+          top: Math.min(vh - 12, r.bottom + 6),
+        });
+      }
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open, placement]);
 
   useEffect(() => {
     if (!open) return;
     const onMouseDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        rootRef.current &&
+        !rootRef.current.contains(target) &&
+        (!listRef.current || !listRef.current.contains(target))
+      ) {
         setOpen(false);
       }
     };
@@ -51,6 +105,47 @@ export function SelectMenu<T extends string = string>({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [open]);
+
+  const listbox =
+    open && menuStyle ? (
+      <div
+        ref={listRef}
+        role="listbox"
+        aria-label={ariaLabel}
+        data-glass-region="true"
+        style={{
+          left: `${menuStyle.left}px`,
+          width: `${menuStyle.width}px`,
+          maxHeight: `${menuStyle.maxHeight}px`,
+          ...(menuStyle.top !== undefined ? { top: `${menuStyle.top}px` } : {}),
+          ...(menuStyle.bottom !== undefined ? { bottom: `${menuStyle.bottom}px` } : {}),
+        }}
+        className="anim-pop-in ep-glass-sheet fixed z-50 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5"
+      >
+        {options.map((opt) => {
+          const active = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              role="option"
+              aria-selected={active}
+              data-active={active}
+              onClick={() => {
+                onChange(opt.value);
+                setOpen(false);
+              }}
+              className={`ep-menu-row w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs cursor-pointer ${
+                active ? "text-white font-medium" : "text-secondary hover:text-primary"
+              }`}
+            >
+              <span className="truncate">{opt.label}</span>
+              {active && <Check className="h-3.5 w-3.5 text-accent-soft shrink-0" />}
+            </button>
+          );
+        })}
+      </div>
+    ) : null;
 
   return (
     <div ref={rootRef} className={`relative w-full ${className}`}>
@@ -72,38 +167,7 @@ export function SelectMenu<T extends string = string>({
         />
       </button>
 
-      {open && (
-        <div
-          role="listbox"
-          aria-label={ariaLabel}
-          className={`anim-pop-in ep-glass-sheet absolute z-50 w-full max-h-56 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5 ${
-            placement === "top" ? "bottom-full mb-1.5" : "mt-1.5"
-          }`}
-        >
-          {options.map((opt) => {
-            const active = opt.value === value;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                role="option"
-                aria-selected={active}
-                data-active={active}
-                onClick={() => {
-                  onChange(opt.value);
-                  setOpen(false);
-                }}
-                className={`ep-menu-row w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs cursor-pointer ${
-                  active ? "text-white font-medium" : "text-secondary hover:text-primary"
-                }`}
-              >
-                <span className="truncate">{opt.label}</span>
-                {active && <Check className="h-3.5 w-3.5 text-accent-soft shrink-0" />}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {listbox && (typeof document !== "undefined" ? createPortal(listbox, document.body) : listbox)}
     </div>
   );
 }

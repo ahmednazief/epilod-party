@@ -172,7 +172,10 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             </span>
           </button>
         ) : availability === "downloadedReady" && availableRelease ? (
-          <div className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-1 rounded-full inline-flex items-center gap-2">
+          <div
+            data-glass-region={glassControls ? "true" : undefined}
+            className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-1 rounded-full inline-flex items-center gap-2"
+          >
             <button
               type="button"
               onClick={handleOpenUpdates}
@@ -197,7 +200,10 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             </button>
           </div>
         ) : availability === "updateAvailable" && availableRelease ? (
-          <div className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-1 rounded-full inline-flex items-center gap-2">
+          <div
+            data-glass-region={glassControls ? "true" : undefined}
+            className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-1 rounded-full inline-flex items-center gap-2"
+          >
             <button
               type="button"
               onClick={handleOpenUpdates}
@@ -239,18 +245,13 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
           </div>
         )}
 
-        <div
-          data-glass-region={glassControls ? "true" : undefined}
-          className={`flex items-center gap-1 ${
-            glassControls ? "ep-glass-pill h-8 px-1 rounded-full" : "pl-1"
-          }`}
-        >
+        <div className="flex items-center gap-1 pl-1">
           <button
             type="button"
             aria-label="Minimize window"
             title="Minimize"
             onClick={() => void handleMinimize()}
-            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
             <Minus className="h-3.5 w-3.5" />
           </button>
@@ -260,7 +261,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             aria-label={isMaximized ? "Restore window" : "Maximize window"}
             title={isMaximized ? "Restore" : "Maximize"}
             onClick={() => void handleToggleMaximize()}
-            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
             {isMaximized ? (
               <svg
@@ -309,7 +310,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             aria-label="Close window"
             title="Close"
             onClick={() => void handleClose()}
-            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-[#FCA5A5] hover:bg-[#FCA5A5]/15 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-bad/80 active:scale-92 transition-[background-color,color,transform] duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
             <X className="h-3.5 w-3.5" />
           </button>

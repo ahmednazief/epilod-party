@@ -6,6 +6,7 @@ interface ViewportPlaceholderProps {
   loaded: boolean;
   isDragActive: boolean;
   playerError: string | null;
+  clearanceBottom?: "none" | "bar" | "extended";
   onChooseFile: () => void;
   onChooseFolder?: () => void;
   onRetryPlayer?: () => void;
@@ -15,11 +16,19 @@ export function ViewportPlaceholder({
   loaded,
   isDragActive,
   playerError,
+  clearanceBottom = "bar",
   onChooseFile,
   onChooseFolder,
   onRetryPlayer,
 }: ViewportPlaceholderProps) {
   if (loaded && !playerError) return null;
+
+  const offsetClass =
+    clearanceBottom === "extended"
+      ? "-translate-y-24"
+      : clearanceBottom === "bar"
+        ? "-translate-y-6"
+        : "translate-y-0";
 
   return (
     <div className="ep-amethyst-canvas absolute inset-0 h-full w-full flex flex-col items-center justify-center p-6 select-none">
@@ -28,7 +37,9 @@ export function ViewportPlaceholder({
         <div className="ep-ambient-orb-silver absolute right-[26%] top-[34%] h-64 w-64 rounded-full" />
       </div>
       {playerError ? (
-        <div className="ep-glass-sheet anim-fade-slide-up relative z-10 max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5">
+        <div
+          className={`ep-glass-sheet anim-fade-slide-up relative z-10 max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5 transition-transform duration-200 ${offsetClass}`}
+        >
           <div className="h-11 w-11 rounded-full bg-bad/15 text-bad flex items-center justify-center">
             <AlertTriangle className="h-5 w-5" />
           </div>
@@ -49,7 +60,7 @@ export function ViewportPlaceholder({
         </div>
       ) : (
         <div
-          className={`relative z-10 max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-all duration-300 ${
+          className={`relative z-10 max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-[transform,background-color] duration-200 ${offsetClass} ${
             isDragActive ? "ep-glass-sheet scale-[1.02]" : ""
           }`}
         >

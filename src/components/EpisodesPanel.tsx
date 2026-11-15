@@ -1,6 +1,10 @@
-import { Captions, Check, FolderOpen, ListVideo, Plus, Sparkles, X } from "lucide-react";
+import { Captions, Check, FolderOpen, Plus, Sparkles, X } from "lucide-react";
 import { memo, useEffect, useRef } from "react";
-import { matchPeerEpisodeInPlaylist } from "../lib/playlist";
+import {
+  formatDisplayMediaTitle,
+  formatSeasonFolderTitle,
+  matchPeerEpisodeInPlaylist,
+} from "../lib/playlist";
 import { resolveEffectiveUsername } from "../lib/syncController";
 import { useAppStore } from "../store/useAppStore";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -40,6 +44,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
   const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
 
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const cleanFolderTitle = formatSeasonFolderTitle(folderName);
 
   useEffect(() => {
     activeItemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -47,21 +52,16 @@ export const EpisodesPanel = memo(function EpisodesPanel({
 
   return (
     <div className="flex flex-col h-full min-h-0 gap-2.5">
-      {/* Drawer Header */}
-      <div className="flex items-start justify-between gap-2 shrink-0">
-        <div className="min-w-0 flex items-center gap-2">
-          <div className="h-8 w-8 rounded-xl bg-accent/20 border border-accent-soft/30 flex items-center justify-center shrink-0">
-            <ListVideo className="h-4 w-4 text-accent-soft" />
+      {/* Minimal Header */}
+      <div className="flex items-start justify-between gap-2 shrink-0 px-0.5">
+        <div className="min-w-0">
+          <div className="text-[13px] font-semibold text-white truncate">
+            {cleanFolderTitle}
           </div>
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-white truncate">
-              {folderName || "Season Queue"}
-            </div>
-            <div className="text-[10.5px] text-secondary num">
-              {currentIndex >= 0 && items.length > 0
-                ? `Episode ${currentIndex + 1} of ${items.length}`
-                : `${items.length} ${items.length === 1 ? "Episode" : "Episodes"}`}
-            </div>
+          <div className="text-[11px] text-secondary num">
+            {currentIndex >= 0 && items.length > 0
+              ? `Episode ${currentIndex + 1} of ${items.length}`
+              : `${items.length} ${items.length === 1 ? "Episode" : "Episodes"}`}
           </div>
         </div>
 
@@ -71,23 +71,23 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             onClick={onClose}
             aria-label="Close episodes list"
             title="Close episodes (Esc)"
-            className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
+            className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         )}
       </div>
 
-      {/* Quick Actions & Toggles */}
-      <div className="flex flex-wrap items-center gap-1.5 shrink-0 pb-1 border-b border-white/[0.08]">
+      {/* Compact Controls */}
+      <div className="flex items-center gap-1.5 shrink-0 pb-1.5 border-b border-white/[0.07]">
         <button
           type="button"
           onClick={() => setAutoPlayNext(!autoPlayNext)}
           title="Automatically advance to the next episode when the current one finishes"
-          className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer transition-colors ${
+          className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer transition-colors ${
             autoPlayNext
               ? "ep-glass-pill-active text-white"
-              : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.12]"
+              : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.11]"
           }`}
         >
           {autoPlayNext && <Check className="h-3 w-3 text-ok" />}
@@ -99,10 +99,10 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             type="button"
             onClick={() => setFollowPartyEpisode(!followPartyEpisode)}
             title="Automatically follow when the Watch Party switches episodes"
-            className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer transition-colors ${
+            className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer transition-colors ${
               followPartyEpisode
                 ? "ep-glass-pill-active text-white"
-                : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.12]"
+                : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.11]"
             }`}
           >
             <Sparkles className="h-3 w-3 text-accent-soft" />
@@ -116,26 +116,29 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             onClick={onOpenSeasonFolder}
             title="Change season folder"
             aria-label="Change season folder"
-            className="ep-press h-6.5 w-6.5 rounded-full bg-white/[0.06] hover:bg-white/[0.14] text-secondary hover:text-white flex items-center justify-center cursor-pointer"
+            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full text-secondary hover:text-white flex items-center justify-center cursor-pointer"
           >
-            <FolderOpen className="h-3 w-3" />
+            <FolderOpen className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
             onClick={onAddEpisodes}
             title="Add episode files"
             aria-label="Add episode files"
-            className="ep-press h-6.5 w-6.5 rounded-full bg-white/[0.06] hover:bg-white/[0.14] text-secondary hover:text-white flex items-center justify-center cursor-pointer"
+            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full text-secondary hover:text-white flex items-center justify-center cursor-pointer"
           >
-            <Plus className="h-3 w-3" />
+            <Plus className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
 
-      {/* Vertical Episode List */}
-      <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-1.5">
+      {/* Clean Minimal Vertical Episode List */}
+      <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-1">
         {items.map((item, idx) => {
           const active = idx === currentIndex;
+          const display = formatDisplayMediaTitle(item.fileName);
+          const epTitle = display.title || item.cleanTitle;
+          const epNum = String(item.episode ?? idx + 1).padStart(2, "0");
           const peersHere = roomCode
             ? participants.filter(
                 (p) => matchPeerEpisodeInPlaylist(p.fileName, [item]) === 0,
@@ -150,67 +153,56 @@ export const EpisodesPanel = memo(function EpisodesPanel({
               onClick={() => onSelectEpisode(idx)}
               aria-current={active ? "true" : undefined}
               title={`${item.cleanTitle}${item.subtitlePath ? " (Paired subtitle ready)" : ""}`}
-              className={`ep-press group relative w-full rounded-2xl px-3 py-2.5 text-left flex items-center gap-2.5 cursor-pointer transition-all ${
+              className={`group relative w-full rounded-xl px-2.5 py-2 text-left flex items-center gap-2.5 cursor-pointer transition-colors ${
                 active
-                  ? "ep-episode-active border border-accent-soft/65 text-white"
-                  : "bg-white/[0.04] hover:bg-white/[0.10] border border-white/[0.06] hover:border-white/[0.14] text-secondary hover:text-white"
+                  ? "ep-episode-active text-white"
+                  : "hover:bg-white/[0.06] border border-transparent text-secondary hover:text-white"
               }`}
             >
-              {/* Luminous vertical spine on active episode */}
-              {active && (
-                <span
-                  aria-hidden="true"
-                  className="w-1 self-stretch rounded-full bg-accent-soft shadow-[0_0_12px_rgba(167,139,250,0.9)] shrink-0"
-                />
-              )}
-
-              {/* Episode number / Now-playing badge */}
+              {/* Episode number or subtle active equalizer */}
               <div
-                className={`h-9 min-w-[44px] px-2 rounded-xl flex items-center justify-center gap-1 shrink-0 font-mono text-[11px] font-semibold ${
-                  active
-                    ? "bg-accent text-white shadow-[0_0_14px_rgba(124,58,237,0.65)]"
-                    : "bg-white/[0.07] text-accent-soft group-hover:bg-white/[0.12]"
+                className={`w-6 shrink-0 flex items-center justify-center font-mono text-[11px] font-semibold num ${
+                  active ? "text-accent-soft" : "text-muted group-hover:text-secondary"
                 }`}
               >
                 {active && loaded && !paused ? (
-                  <span className="flex items-end gap-0.5 h-3 mr-0.5" aria-hidden="true">
-                    <span className="ep-eq-bar w-0.5 h-3 rounded-full bg-white" />
+                  <span className="flex items-end gap-0.5 h-3" aria-hidden="true">
+                    <span className="ep-eq-bar w-0.5 h-3 rounded-full bg-accent-soft" />
                     <span
-                      className="ep-eq-bar w-0.5 h-2 rounded-full bg-white"
+                      className="ep-eq-bar w-0.5 h-2 rounded-full bg-accent-soft"
                       style={{ animationDelay: "180ms" }}
                     />
                     <span
-                      className="ep-eq-bar w-0.5 h-2.5 rounded-full bg-white"
+                      className="ep-eq-bar w-0.5 h-2.5 rounded-full bg-accent-soft"
                       style={{ animationDelay: "340ms" }}
                     />
                   </span>
-                ) : null}
-                <span>{item.episodeBadge || `#${idx + 1}`}</span>
+                ) : (
+                  <span>{epNum}</span>
+                )}
               </div>
 
-              {/* Clean title + status tags */}
-              <div className="min-w-0 flex-1 space-y-0.5">
+              {/* Clean episode title + understated meta */}
+              <div className="min-w-0 flex-1">
                 <div
-                  className={`text-xs font-medium leading-snug line-clamp-2 ${
-                    active ? "text-white font-semibold" : "text-primary/90 group-hover:text-white"
+                  className={`text-xs leading-snug truncate ${
+                    active ? "text-white font-semibold" : "font-medium text-primary/90 group-hover:text-white"
                   }`}
                 >
-                  {item.cleanTitle}
+                  {epTitle}
                 </div>
 
                 {(active || item.subtitlePath || peersHere.length > 0) && (
-                  <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                  <div className="flex items-center gap-2 mt-0.5">
                     {active && (
-                      <span className="px-1.5 py-0.2 rounded-full bg-white/18 text-[9.5px] font-semibold tracking-wide uppercase text-white">
+                      <span className="text-[10px] font-medium text-accent-soft">
                         Now Playing
                       </span>
                     )}
                     {item.subtitlePath && (
                       <span
                         title="Paired external subtitle detected"
-                        className={`inline-flex items-center gap-0.5 text-[10px] ${
-                          active ? "text-accent-soft" : "text-muted"
-                        }`}
+                        className="inline-flex items-center gap-0.5 text-[10px] text-muted"
                       >
                         <Captions className="h-3 w-3" />
                         <span>Sub</span>
@@ -226,7 +218,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                               effectiveUsername,
                               avatarId,
                             )}
-                            size={16}
+                            size={15}
                             className="ring-1 ring-canvas/90"
                           />
                         ))}
@@ -235,6 +227,12 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                   </div>
                 )}
               </div>
+
+              {item.episodeBadge && (
+                <span className="shrink-0 font-mono text-[10.5px] text-muted/75 num">
+                  {item.episodeBadge}
+                </span>
+              )}
             </button>
           );
         })}

@@ -187,10 +187,10 @@ const ResyncButton = memo(function ResyncButton({
           ? `Resync now (${health.statusLabel}) — snaps playback & connection back in sync`
           : "Force instant resync with party timestamp"
       }
-      className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium min-w-0 max-w-full cursor-pointer disabled:opacity-60 ${
+      className={`h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium min-w-0 max-w-full cursor-pointer disabled:opacity-60 ${
         health.needsResync
           ? "ep-press bg-warn/20 border border-warn/45 text-warn hover:bg-warn/30"
-          : "ep-bar-pill text-secondary hover:text-white"
+          : "ep-bar-icon-btn text-secondary hover:text-white"
       }`}
     >
       <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${busy ? "animate-spin" : ""}`} />
@@ -386,7 +386,7 @@ export const TransportBar = memo(function TransportBar({
 
       <div
         data-glass-region="true"
-        className={`ep-glass-capsule anim-fade-slide-up w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2 ${
+        className={`ep-glass-capsule w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2 ${
           visible ? "pointer-events-auto" : "pointer-events-none"
         }`}
       >
@@ -444,7 +444,7 @@ export const TransportBar = memo(function TransportBar({
 
                 <ResyncButton loaded={loaded} paused={paused} />
 
-                <div className="inline-flex items-center rounded-full bg-white/[0.06] border border-white/[0.08] p-0.5 gap-0.5 shrink-0">
+                <div className="ep-bar-dock inline-flex items-center rounded-full p-0.5 gap-0.5 shrink-0">
                   {!hideParticipants ? (
                     <button
                       type="button"
@@ -453,7 +453,7 @@ export const TransportBar = memo(function TransportBar({
                       title="Friends watching together"
                       className={`ep-press h-6.5 pl-1 pr-2 rounded-full inline-flex items-center gap-1.5 text-xs cursor-pointer ${
                         activeTab === "room"
-                          ? "bg-accent/35 text-white"
+                          ? "bg-accent/20 text-white shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.28)] ring-1 ring-accent-soft/25"
                           : "text-secondary hover:text-white hover:bg-white/[0.08]"
                       }`}
                     >
@@ -503,7 +503,7 @@ export const TransportBar = memo(function TransportBar({
                       title="Party lounge (profile icons hidden)"
                       className={`ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[11px] cursor-pointer ${
                         activeTab === "room"
-                          ? "bg-accent/35 text-white"
+                          ? "bg-accent/20 text-white shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.28)] ring-1 ring-accent-soft/25"
                           : "text-muted hover:text-white hover:bg-white/[0.08]"
                       }`}
                     >
@@ -536,14 +536,14 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleTab("room")}
                 aria-label="Open party lounge"
                 title="Start or join a Watch Party"
-                className={`h-7.5 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+                className={`h-7.5 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer shrink-0 ${
                   activeTab === "room"
                     ? "ep-press ep-glass-pill-active text-white"
                     : "ep-bar-pill text-secondary hover:text-white"
                 }`}
               >
-                <Users className="h-3.5 w-3.5 text-accent-soft" />
-                <span className="hidden sm:inline">Start Party</span>
+                <Users className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+                <span className="hidden sm:inline whitespace-nowrap">Watch Party</span>
               </button>
             )}
 
@@ -685,10 +685,10 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleTab("episodes")}
                 aria-label="Episodes drawer"
                 title="Season folder & episodes queue"
-                className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium min-w-0 max-w-full cursor-pointer ${
+                className={`h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium min-w-0 max-w-full cursor-pointer ${
                   activeTab === "episodes"
                     ? "ep-press ep-glass-pill-active text-white"
-                    : "ep-bar-pill text-secondary hover:text-white"
+                    : "ep-bar-icon-btn text-secondary hover:text-white"
                 }`}
               >
                 <ListVideo className="h-3.5 w-3.5 shrink-0" />
@@ -704,10 +704,10 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => onToggleTab("subtitles")}
               aria-label="Subtitles popover"
               title="Subtitles & Magic Sync"
-              className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer ${
+              className={`h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer ${
                 activeTab === "subtitles"
                   ? "ep-press ep-glass-pill-active text-white"
-                  : "ep-bar-pill text-secondary hover:text-white"
+                  : "ep-bar-icon-btn text-secondary hover:text-white"
               }`}
             >
               <Captions className="h-3.5 w-3.5" />
@@ -719,10 +719,10 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => onToggleTab("playback")}
               aria-label="Audio & playback popover"
               title="Audio & Playback"
-              className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer ${
+              className={`h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer ${
                 activeTab === "playback"
                   ? "ep-press ep-glass-pill-active text-white"
-                  : "ep-bar-pill text-secondary hover:text-white"
+                  : "ep-bar-icon-btn text-secondary hover:text-white"
               }`}
             >
               <AudioLines className="h-3.5 w-3.5" />

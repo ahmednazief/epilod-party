@@ -340,3 +340,74 @@ export function matchPeerEpisodeInPlaylist(
 
   return -1;
 }
+
+const RELEASE_TAIL_RE =
+  /\b(?:2160p|1080p|720p|480p|4k|uhd|bluray|blu-ray|bdrip|brrip|web-?dl|webdl|webrip|hdtv|dvdrip|x264|x265|h\.?\s?264|h\.?\s?265|hevc|av1|10bit|8bit|hdr10\+?|hdr|aac|eac3|ac3|ddp?5(?:[\s.]?1)?|dts|atmos|flac|proper|repack|remux|pahe|rarbg|yts|psa|amzn|atvp|dsnp|hmax)\b/i;
+
+const EPISODE_SPLIT_RE =
+  /(?:^|\s)(s\d{1,2}[\s._-]*e\d{1,3}|\d{1,2}x\d{1,3}|(?:episode|ep)\s*\d{1,3})(?=\s|$|-)/i;
+
+function stripKnownMediaExt(name: string): string {
+  return name.replace(
+    /\.(?:mkv|mp4|ts|m2ts|avi|webm|flv|wmv|ogv|3gp|mov|m4v|mpg|mpeg|vob|srt|ass|ssa|vtt)$/i,
+    "",
+  );
+}
+
+function normalizeReleaseText(raw: string): string {
+  const stem = stripKnownMediaExt(raw.trim());
+  const noTags = stem.replace(/\[[^\]]*\]/g, " ").replace(/\([^)]*\)/g, " ");
+  const spaced = noTags.replaceAll(/[._]+/g, " ");
+  const cutIdx = spaced.search(RELEASE_TAIL_RE);
+  const head = cutIdx >= 0 ? spaced.slice(0, cutIdx) : spaced;
+  return head.replace(/\s+/g, " ").replace(/[\s-]+$/, "").trim();
+}
+
+export function formatDisplayMediaTitle(rawName: string): {
+  title: string;
+  subtitle: string | null;
+} {
+  const trimmed = rawName.trim();
+  if (!trimmed) return { title: "", subtitle: null };
+
+  const cleaned = normalizeReleaseText(trimmed);
+  const fallbackStem = stripKnownMediaExt(trimmed).replaceAll(/[._]+/g, " ").trim();
+  const base = cleaned || fallbackStem;
+
+  const match = EPISODE_SPLIT_RE.exec(base);
+  if (match && match.index !== undefined) {
+    const tokenStart = match.index + (match[0].startsWith(" ") ? 1 : 0);
+    const tokenEnd = match.index + match[0].length;
+    const before = base
+      .slice(0, tokenStart)
+      .replace(/[\s-]+$/, "")
+      .trim();
+    const after = base
+      .slice(tokenEnd)
+      .replace(/^[\s-]+/, "")
+      .trim();
+    if (after) {
+      return { title: after, subtitle: before || null };
+    }
+    return { title: before || base, subtitle: null };
+  }
+
+  return { title: base, subtitle: null };
+}
+
+export function formatSeasonFolderTitle(folderName: string | null | undefined): string {
+  const trimmed = folderName?.trim();
+  if (!trimmed) return "Season Queue";
+
+  const cleaned = normalizeReleaseText(trimmed);
+  const base = cleaned || trimmed;
+
+  const seasonMatch = base.match(/^(.*?)(?:^|\s)(?:s|season)\s*0*(\d{1,2})$/i);
+  if (seasonMatch) {
+    const show = seasonMatch[1].replace(/[\s-]+$/, "").trim();
+    const seasonNum = Number(seasonMatch[2]);
+    return show ? `${show} · Season ${seasonNum}` : `Season ${seasonNum}`;
+  }
+
+  return base;
+}

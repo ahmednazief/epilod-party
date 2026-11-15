@@ -31,7 +31,9 @@ interface ContextMenuProps {
 
 export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
+  const [coords, setCoords] = useState<{ left: number; top: number; maxHeight: number } | null>(
+    null,
+  );
 
   useLayoutEffect(() => {
     if (!position) {
@@ -45,9 +47,28 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
     const width = rect?.width ?? 268;
     const height = rect?.height ?? 320;
 
+    // Always keep the bottom of the right-click menu cleanly above the play bar
+    let maxBottom = vh - pad;
+    const capsules = document.querySelectorAll<HTMLElement>(".ep-glass-capsule");
+    capsules.forEach((el) => {
+      const style = window.getComputedStyle(el);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        Number.parseFloat(style.opacity) <= 0.05
+      ) {
+        return;
+      }
+      const cr = el.getBoundingClientRect();
+      if (cr.height > 20 && cr.top > vh * 0.35) {
+        maxBottom = Math.min(maxBottom, cr.top - 14);
+      }
+    });
+
     const left = Math.max(pad, Math.min(position.x, vw - width - pad));
-    const top = Math.max(pad, Math.min(position.y, vh - height - pad));
-    setCoords({ left, top });
+    const top = Math.max(pad, Math.min(position.y, maxBottom - height));
+    const maxHeight = Math.max(160, Math.floor(maxBottom - top));
+    setCoords({ left, top, maxHeight });
   }, [position, entries.length]);
 
   useEffect(() => {
@@ -89,8 +110,9 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
       style={{
         left: `${coords?.left ?? position.x}px`,
         top: `${coords?.top ?? position.y}px`,
+        maxHeight: coords ? `${coords.maxHeight}px` : undefined,
       }}
-      className="ep-glass-sheet anim-pop-in fixed z-50 w-[272px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-y-auto rounded-[18px] p-1.5 select-none border border-white/[0.12]"
+      className="ep-glass-sheet anim-pop-in fixed z-50 w-[272px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-[18px] p-1.5 select-none border border-white/[0.12]"
     >
       {entries.map((entry) => {
         if (entry.type === "divider") {

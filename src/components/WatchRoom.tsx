@@ -74,6 +74,7 @@ import {
 import { checkDropDuringDialog, handlePlayerCrashSync } from "../lib/playerLifecycle";
 import { resetMpvPlaybackDefaults } from "../lib/playbackReset";
 import {
+  formatDisplayMediaTitle,
   matchPeerEpisodeInPlaylist,
   naturalCompare,
   scanMediaPaths,
@@ -189,6 +190,14 @@ export function WatchRoom() {
     playlistIndex >= 0 && playlistIndex < playlistItems.length
       ? playlistItems[playlistIndex]
       : null;
+  const displayMedia = formatDisplayMediaTitle(selectedFileName || "");
+  const cleanHeaderTitle = selectedFileName
+    ? displayMedia.subtitle
+      ? `${displayMedia.subtitle} — ${displayMedia.title}`
+      : displayMedia.title || selectedFileName
+    : roomCode
+      ? "Watch Theater"
+      : "Media Player";
 
   const [sideTab, setSideTab] = useState<SideTab>("room");
   const [panelOpen, setPanelOpen] = useState(false);
@@ -1392,10 +1401,7 @@ export function WatchRoom() {
       >
         <TitleBar
           leftSlot={
-            <div
-              data-tauri-drag-region
-              className="inline-flex items-center gap-2.5 min-w-0 max-w-[60vw] pl-1"
-            >
+            <div className="inline-flex items-center gap-2.5 min-w-0 max-w-[60vw] pl-1">
               <button
                 type="button"
                 onClick={handleLeaveRoom}
@@ -1407,17 +1413,26 @@ export function WatchRoom() {
               </button>
               <span
                 data-tauri-drag-region
-                className="text-[13px] font-medium text-white/90 truncate max-w-[340px]"
+                className="text-[13px] font-medium text-white/90 truncate max-w-[360px]"
               >
-                {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
+                {cleanHeaderTitle}
               </span>
               {activePlaylistItem?.episodeBadge && (
-                <span className="shrink-0 font-mono text-[11px] text-white/55">
+                <span
+                  data-tauri-drag-region
+                  className="shrink-0 font-mono text-[11px] text-white/55"
+                >
                   {activePlaylistItem.episodeBadge}
                 </span>
               )}
               {roomCode && (
-                <span className="shrink-0 inline-flex items-center gap-1.5 text-[11px] text-white/55 num">
+                <button
+                  type="button"
+                  onClick={() => handleToggleCapsuleTab("room")}
+                  aria-label="Open Watch Party panel"
+                  title="Watch Party room · Click to view invite & viewers"
+                  className="ep-press shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] text-white/80 hover:text-white hover:bg-white/[0.12] num transition-colors cursor-pointer"
+                >
                   <StatusDot
                     tone={
                       syncStatus.state === "connected"
@@ -1431,7 +1446,7 @@ export function WatchRoom() {
                     }
                   />
                   <span>{formatRoomCodeDisplay(roomCode)}</span>
-                </span>
+                </button>
               )}
             </div>
           }
@@ -1461,7 +1476,7 @@ export function WatchRoom() {
           playerError={playerError}
           clearanceBottom={
             showFloatingCapsule
-              ? panelOpen && sideTab !== "episodes"
+              ? panelOpen && sideTab === "room"
                 ? "extended"
                 : "bar"
               : "none"
@@ -1534,40 +1549,55 @@ export function WatchRoom() {
         </aside>
       )}
 
-      {panelOpen && sideTab !== "episodes" && (
-        <aside
-          aria-label="Party and playback settings"
-          data-glass-region="true"
-          className="ep-glass-capsule anim-drawer-in absolute right-4 bottom-[112px] z-30 w-[372px] max-w-[calc(100vw-2rem)] max-h-[calc(100%-176px)] rounded-[24px] p-3.5 flex flex-col gap-3 overflow-hidden"
-        >
-          <div className="flex items-center gap-2">
-            <SegmentedTabs
-              ariaLabel="Panel section"
-              value={sideTab}
-              onChange={setSideTab}
-              className="flex-1 min-w-0"
-              items={[
-                { value: "room", label: "Party" },
-                { value: "playback", label: "Playback" },
-                { value: "subtitles", label: "Subtitles" },
-              ]}
-            />
-            <button
-              type="button"
-              onClick={() => setPanelOpen(false)}
-              aria-label="Close panel"
-              title="Close (Esc)"
-              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
+      {panelOpen && sideTab === "room" && (
+        <div className="absolute inset-x-4 bottom-[112px] z-30 flex justify-center pointer-events-none">
+          <aside
+            aria-label="Watch Party"
+            data-glass-region="true"
+            className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[1060px] max-h-[calc(100vh-176px)] rounded-[26px] p-3.5 flex flex-col gap-2.5 overflow-hidden"
+          >
+            <div className="flex items-center justify-between gap-2 shrink-0">
+              <SegmentedTabs
+                ariaLabel="Panel section"
+                value={sideTab}
+                onChange={setSideTab}
+                className="w-full max-w-[280px]"
+                items={[
+                  { value: "room", label: "Party" },
+                  { value: "playback", label: "Playback" },
+                  { value: "subtitles", label: "Subtitles" },
+                ]}
+              />
+              <button
+                type="button"
+                onClick={() => setPanelOpen(false)}
+                aria-label="Close Watch Party menu"
+                title="Close (Esc)"
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-0.5">
+              <RoomPanel />
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {panelOpen && (sideTab === "playback" || sideTab === "subtitles") && (
+        <div className="absolute inset-x-4 bottom-[108px] z-30 flex justify-center pointer-events-none">
+          <div className="w-full max-w-[1060px] flex justify-end">
+            <aside
+              aria-label={sideTab === "playback" ? "Audio and playback menu" : "Subtitles menu"}
+              data-glass-region="true"
+              className="ep-glass-sheet anim-pop-in pointer-events-auto w-[304px] max-w-full max-h-[calc(100vh-166px)] overflow-y-auto overflow-x-hidden rounded-[18px] p-1.5 border border-white/[0.12] select-none"
             >
-              <X className="h-3.5 w-3.5" />
-            </button>
+              {sideTab === "playback" && <PlaybackPanel />}
+              {sideTab === "subtitles" && <SubtitlePanel />}
+            </aside>
           </div>
-          <div className="min-h-0 overflow-y-auto pr-0.5">
-            {sideTab === "room" && <RoomPanel />}
-            {sideTab === "playback" && <PlaybackPanel />}
-            {sideTab === "subtitles" && <SubtitlePanel />}
-          </div>
-        </aside>
+        </div>
       )}
 
       <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">

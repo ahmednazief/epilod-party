@@ -1,4 +1,4 @@
-import { Lock, Repeat } from "lucide-react";
+import { AudioLines, Check, Lock, Repeat, VolumeX } from "lucide-react";
 import { memo } from "react";
 import {
   mpvSetAspectMode,
@@ -12,7 +12,6 @@ import { buildAudioTrackOptions, selectAudioTrack } from "../lib/tracks";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
-import { SelectMenu } from "./ui/SelectMenu";
 
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 2.0] as const;
 
@@ -38,6 +37,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
   const pushNote = useNotificationStore((s) => s.push);
 
   const audioOptions = buildAudioTrackOptions(tracks);
+  const audioCount = audioOptions.filter((o) => o.track !== null).length;
   const selectedAudio = tracks.find((t) => t.type === "audio" && t.selected);
   const currentAudioVal = selectedAudio ? String(selectedAudio.id) : "none";
 
@@ -51,19 +51,83 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
   };
 
   return (
-    <div className="anim-tab-in grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-0.5">
-      {/* Card 1: Speed */}
-      <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-medium text-secondary">Playback Speed</span>
-          {syncConnected && (
-            <span className="inline-flex items-center gap-1 text-[10.5px] font-medium text-accent-soft">
-              <Lock className="h-3 w-3" />
-              Synced 1.0×
-            </span>
-          )}
+    <div role="menu" aria-label="Audio and playback options" className="flex flex-col">
+      <div className="px-2.5 pt-1 pb-1 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        <span>Audio Track</span>
+        {loaded && <span className="num text-secondary">{audioCount}</span>}
+      </div>
+
+      {!loaded ? (
+        <div className="px-2.5 py-2 text-xs text-muted">
+          Open a video to switch audio tracks
         </div>
-        <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1">
+      ) : (
+        <div className="max-h-40 overflow-y-auto space-y-0.5">
+          {audioOptions.map((opt) => {
+            const active = opt.value === currentAudioVal;
+            const t = opt.track;
+            const primaryLabel = t
+              ? t.title?.trim() ||
+                (t.lang ? `${t.lang.trim().toUpperCase()} Audio` : `Audio Track ${t.id}`)
+              : "Mute / Off";
+            const metaTags: string[] = [];
+            if (t?.title?.trim() && t.lang?.trim()) {
+              metaTags.push(t.lang.trim().toUpperCase());
+            }
+            if (t?.codec?.trim()) {
+              metaTags.push(t.codec.trim().toUpperCase());
+            }
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={active}
+                data-active={active}
+                onClick={() => {
+                  const aid = opt.value === "none" ? null : Number(opt.value);
+                  void selectAudioTrack(aid, { mpvSetAudioTrack });
+                }}
+                className={`ep-menu-row ep-press w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 text-left text-xs cursor-pointer ${
+                  active ? "text-white font-medium" : "text-primary/90 hover:text-white"
+                }`}
+              >
+                <span className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
+                    {active ? (
+                      <Check className="h-3.5 w-3.5 text-ok" />
+                    ) : t ? (
+                      <AudioLines className="h-3.5 w-3.5 opacity-70" />
+                    ) : (
+                      <VolumeX className="h-3.5 w-3.5 opacity-70" />
+                    )}
+                  </span>
+                  <span className="truncate">{primaryLabel}</span>
+                </span>
+                {metaTags.length > 0 && (
+                  <span className="text-[10px] font-mono text-muted shrink-0">
+                    {metaTags.join(" · ")}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="ep-hairline-divider my-1.5 mx-1.5" role="separator" />
+
+      <div className="px-2.5 pt-0.5 pb-1 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        <span>Playback Speed</span>
+        {syncConnected && (
+          <span className="inline-flex items-center gap-1 text-accent-soft normal-case font-medium">
+            <Lock className="h-2.5 w-2.5" />
+            Synced 1×
+          </span>
+        )}
+      </div>
+      <div className="px-1.5 pb-1">
+        <div className="ep-glass-input p-0.5 rounded-xl grid grid-cols-5 gap-0.5">
           {SPEED_PRESETS.map((preset) => {
             const active = Math.abs(speed - preset) < 0.01;
             const disabled = !loaded || (syncConnected && preset !== 1.0);
@@ -73,10 +137,10 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                 type="button"
                 disabled={disabled}
                 onClick={() => handleSpeedClick(preset)}
-                className={`ep-press h-7.5 rounded-full text-xs font-medium num transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium num transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
                   active
                     ? "ep-droplet-indicator text-white"
-                    : "text-muted hover:text-primary"
+                    : "text-secondary hover:text-white"
                 }`}
               >
                 {preset === 1 ? "1×" : `${preset}×`}
@@ -86,10 +150,11 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </div>
       </div>
 
-      {/* Card 2: Picture Frame pills */}
-      <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2.5">
-        <span className="text-xs font-medium text-secondary block">Picture Frame</span>
-        <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1">
+      <div className="px-2.5 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        Picture Frame
+      </div>
+      <div className="px-1.5 pb-1">
+        <div className="ep-glass-input p-0.5 rounded-xl grid grid-cols-5 gap-0.5">
           {FRAME_PILLS.map((item) => {
             const active = aspectMode === item.value;
             return (
@@ -101,10 +166,10 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                   setAspectMode(item.value);
                   void mpvSetAspectMode(item.value);
                 }}
-                className={`ep-press h-7.5 rounded-full text-xs font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
                   active
                     ? "ep-droplet-indicator text-white"
-                    : "text-muted hover:text-primary"
+                    : "text-secondary hover:text-white"
                 }`}
               >
                 {item.label}
@@ -114,41 +179,34 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </div>
       </div>
 
-      {/* Card 3: Audio Track & Loop */}
-      <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-medium text-secondary">Audio Track</span>
-          <button
-            type="button"
-            disabled={!loaded}
-            aria-pressed={looping}
-            onClick={() => {
-              const next = !looping;
-              setLooping(next);
-              void mpvSetLoop(next);
-            }}
-            className={`ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium cursor-pointer disabled:opacity-45 disabled:pointer-events-none transition-colors ${
-              looping
-                ? "ep-glass-pill-active text-white"
-                : "bg-white/[0.07] text-secondary hover:text-white hover:bg-white/[0.12]"
-            }`}
-          >
-            <Repeat className="h-3 w-3" />
-            <span>Loop Video</span>
-          </button>
-        </div>
-        <SelectMenu
-          ariaLabel="Audio Track"
-          placement="top"
-          disabled={!loaded}
-          value={currentAudioVal}
-          options={audioOptions.map((o) => ({ value: o.value, label: o.label }))}
-          onChange={(val) => {
-            const aid = val === "none" ? null : Number(val);
-            void selectAudioTrack(aid, { mpvSetAudioTrack });
-          }}
-        />
-      </div>
+      <div className="ep-hairline-divider my-1.5 mx-1.5" role="separator" />
+
+      <button
+        type="button"
+        role="menuitemcheckbox"
+        aria-checked={looping}
+        disabled={!loaded}
+        onClick={() => {
+          const next = !looping;
+          setLooping(next);
+          void mpvSetLoop(next);
+        }}
+        className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+      >
+        <span className="flex items-center gap-2.5 min-w-0">
+          <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
+            {looping ? <Check className="h-3.5 w-3.5 text-ok" /> : <Repeat className="h-3.5 w-3.5" />}
+          </span>
+          <span className="truncate">Loop Current Video</span>
+        </span>
+        <span
+          className={`ep-switch-track w-7.5 h-4 rounded-full p-0.5 flex items-center transition-colors shrink-0 ${
+            looping ? "bg-accent justify-end" : "bg-white/20 justify-start"
+          }`}
+        >
+          <span className="ep-switch-thumb h-3 w-3 rounded-full bg-white shadow" />
+        </span>
+      </button>
     </div>
   );
 });

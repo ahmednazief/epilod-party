@@ -188,6 +188,20 @@ test("playlist parsing, natural season sorting, subtitle pairing, and cross-enco
     2,
   );
   assert.equal(mod.matchPeerEpisodeInPlaylist("Show.S02E01.mkv", scan.items), -1);
+
+  assert.deepEqual(
+    mod.formatDisplayMediaTitle(
+      "The.X-Files.S01E05.The.Jersey.Devil.720p.BluRay.x265.10Bit-Pahe.ink.mkv",
+    ),
+    {
+      title: "The Jersey Devil",
+      subtitle: "The X-Files",
+    },
+  );
+  assert.equal(
+    mod.formatSeasonFolderTitle("X-Files S01 BluRay 720p x265 10Bit [Pahe.in]"),
+    "X-Files · Season 1",
+  );
 });
 
 test("usePlaylistStore manages active episode, preferences, and clearing", async () => {
