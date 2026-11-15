@@ -80,42 +80,6 @@ export function App() {
     userPausedVersion,
   ]);
 
-  const liquidLensSvg = (
-    <svg
-      width="0"
-      height="0"
-      className="fixed pointer-events-none"
-      aria-hidden="true"
-    >
-      <defs>
-        <filter
-          id="epilod-liquid-lens"
-          x="-15%"
-          y="-15%"
-          width="130%"
-          height="130%"
-          colorInterpolationFilters="sRGB"
-        >
-          <feTurbulence
-            type="fractalNoise"
-            baseFrequency="0.011 0.017"
-            numOctaves="2"
-            seed="11"
-            result="noise"
-          />
-          <feGaussianBlur in="noise" stdDeviation="5" result="softNoise" />
-          <feDisplacementMap
-            in="SourceGraphic"
-            in2="softNoise"
-            scale="22"
-            xChannelSelector="R"
-            yChannelSelector="G"
-          />
-        </filter>
-      </defs>
-    </svg>
-  );
-
   if (screen === "room") {
     return (
       <div
@@ -124,7 +88,6 @@ export function App() {
           if (!isTextEntryElement(e.target)) e.preventDefault();
         }}
       >
-        {liquidLensSvg}
         <WatchRoom />
       </div>
     );
@@ -137,7 +100,6 @@ export function App() {
         if (!isTextEntryElement(e.target)) e.preventDefault();
       }}
     >
-      {liquidLensSvg}
       <HomeScreen />
       <SettingsModal open={settingsOpen} onClose={closeSettings} />
       <ShortcutsModal open={shortcutsOpen} onClose={closeShortcuts} />

@@ -47,6 +47,45 @@ export async function mpvSetVisible(visible: boolean): Promise<void> {
   await safeInvoke("mpv_set_visible", { visible });
 }
 
+export interface MpvBackdropFrame {
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
+}
+
+export async function mpvBackdropFrame(
+  maxWidth = 240,
+  maxHeight = 135,
+): Promise<MpvBackdropFrame | null> {
+  const raw = await safeInvoke<ArrayBuffer | Uint8Array | number[]>("mpv_backdrop_frame", {
+    maxWidth,
+    maxHeight,
+  });
+  const bytes =
+    raw instanceof ArrayBuffer
+      ? new Uint8Array(raw)
+      : raw instanceof Uint8Array
+        ? raw
+        : Array.isArray(raw)
+          ? Uint8Array.from(raw)
+          : null;
+  if (!bytes || bytes.byteLength < 8) {
+    return null;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint16(0, true);
+  const height = view.getUint16(2, true);
+  const expected = 4 + width * height * 4;
+  if (width <= 0 || height <= 0 || bytes.byteLength < expected) {
+    return null;
+  }
+  return {
+    width,
+    height,
+    rgba: new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 4, width * height * 4),
+  };
+}
+
 export async function mpvLoad(path: string): Promise<void> {
   await safeInvoke("mpv_load", { path });
 }

@@ -236,6 +236,18 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn mpv_backdrop_frame(
+        state: State<'_, AppState>,
+        max_width: Option<i32>,
+        max_height: Option<i32>,
+    ) -> Result<tauri::ipc::Response, String> {
+        let w = max_width.unwrap_or(240);
+        let h = max_height.unwrap_or(135);
+        let bytes = state.mpv.capture_backdrop_frame(w, h).await?;
+        Ok(tauri::ipc::Response::new(bytes))
+    }
+
+    #[tauri::command]
     async fn mpv_load(state: State<'_, AppState>, path: String) -> Result<(), String> {
         let opts = state.network_policy.options();
         let valid_path = tokio::task::spawn_blocking(move || {
@@ -942,6 +954,9 @@ mod windows_app {
             .manage(app_state)
             .on_window_event(move |window, event| match event {
                 tauri::WindowEvent::Resized(size) => {
+                    if let Some(state) = window.try_state::<AppState>() {
+                        state.mpv.resize_for_window_size(size.width, size.height);
+                    }
                     if let Ok(fs) = window.is_fullscreen() {
                         if let Some(changed) = transitions_for_event.on_fullscreen_sample(fs) {
                             let _ = window.emit(
@@ -1051,6 +1066,7 @@ mod windows_app {
                 mpv_start,
                 mpv_resize,
                 mpv_set_visible,
+                mpv_backdrop_frame,
                 mpv_load,
                 mpv_set_pause,
                 mpv_seek,

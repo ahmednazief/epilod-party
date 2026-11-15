@@ -197,5 +197,44 @@ test("Transparent WebView2 punch-through reveals underlying mpv child HWND durin
   assert.ok(baseBlockClose !== -1 && videoActiveIdx > baseBlockClose);
 });
 
+test("Real-time liquid-glass backdrop sampling and convex bezel lens invariants hold", () => {
+  const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  assert.equal(watchSrc.includes("<VideoGlassBackdrop"), true);
+  assert.equal(watchSrc.includes('data-glass-region="true"'), true);
+
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.equal(transportSrc.includes('data-glass-region="true"'), true);
+
+  const titleBarSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TitleBar.tsx"), "utf8");
+  assert.equal(titleBarSrc.includes("data-glass-region="), true);
+
+  const contextMenuSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/ContextMenu.tsx"),
+    "utf8",
+  );
+  assert.equal(contextMenuSrc.includes('data-glass-region="true"'), true);
+
+  const backdropSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"),
+    "utf8",
+  );
+  assert.equal(backdropSrc.includes("sampleBilinear"), true);
+  assert.equal(backdropSrc.includes("bezelThickness"), true);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.equal(globalsCss.includes("epilod-liquid-lens"), false);
+  assert.equal(/saturate\(2\d\d%/.test(globalsCss), false);
+
+  const mpvTs = fs.readFileSync(path.join(REPO_ROOT, "src/lib/mpv.ts"), "utf8");
+  assert.equal(mpvTs.includes('"mpv_backdrop_frame"'), true);
+
+  const rustLib = fs.readFileSync(path.join(REPO_ROOT, "src-tauri/src/lib.rs"), "utf8");
+  assert.equal(rustLib.includes("async fn mpv_backdrop_frame"), true);
+});
+
+
 
 

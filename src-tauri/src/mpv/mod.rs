@@ -6,8 +6,8 @@ pub mod process;
 
 use epilod_core::syncplay::PlayerSnapshot;
 use hwnd::{
-    create_child_hwnd, destroy_child_hwnd, mark_child_closing_and_hide, resize_child_hwnd,
-    set_child_visible, PendingResize, PhysicalRect,
+    capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd,
+    mark_child_closing_and_hide, resize_child_hwnd, set_child_visible, PendingResize, PhysicalRect,
 };
 use process::{resolve_fonts_dir, resolve_mpv_exe, spawn_mpv};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -40,6 +40,7 @@ pub struct MpvController {
     shutting_down: Arc<AtomicBool>,
     has_media: Arc<AtomicBool>,
     ui_visible: AtomicBool,
+    capture_busy: Arc<AtomicBool>,
 }
 
 impl Default for MpvController {
@@ -63,6 +64,7 @@ impl MpvController {
             shutting_down: Arc::new(AtomicBool::new(false)),
             has_media: Arc::new(AtomicBool::new(false)),
             ui_visible: AtomicBool::new(true),
+            capture_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -237,6 +239,19 @@ impl MpvController {
         Ok(())
     }
 
+    pub fn resize_for_window_size(&self, width: u32, height: u32) {
+        if width == 0 || height == 0 || !self.has_media.load(Ordering::Acquire) {
+            return;
+        }
+        let rect = PhysicalRect {
+            x: 0,
+            y: 0,
+            width: width as i32,
+            height: height as i32,
+        };
+        let _ = self.resize(rect, false);
+    }
+
     pub fn resize(&self, rect: PhysicalRect, force: bool) -> Result<(), String> {
         let mut guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ref mut rt) = *guard else {
@@ -309,5 +324,49 @@ impl MpvController {
             let _ = tokio::time::timeout(Duration::from_millis(250), rt.child.wait()).await;
             destroy_child_hwnd(&rt.app, rt.hwnd);
         }
+    }
+
+    /// Captures a downsampled RGBA snapshot of the active hardware mpv surface so
+    /// translucent UI chrome can blur and refract live video underneath.
+    pub async fn capture_backdrop_frame(
+        &self,
+        max_width: i32,
+        max_height: i32,
+    ) -> Result<Vec<u8>, String> {
+        if self.shutting_down.load(Ordering::SeqCst)
+            || !self.has_media.load(Ordering::SeqCst)
+            || !self.ui_visible.load(Ordering::SeqCst)
+        {
+            return Ok(Vec::new());
+        }
+        let hwnd = {
+            let guard = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().map(|rt| rt.hwnd).unwrap_or(0)
+        };
+        if hwnd == 0 {
+            return Ok(Vec::new());
+        }
+        if self
+            .capture_busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Ok(Vec::new());
+        }
+
+        struct BusyReset(Arc<AtomicBool>);
+        impl Drop for BusyReset {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let busy_guard = BusyReset(Arc::clone(&self.capture_busy));
+
+        tokio::task::spawn_blocking(move || {
+            let _guard = busy_guard;
+            capture_child_backdrop_rgba(hwnd, max_width, max_height)
+        })
+        .await
+        .map_err(|e| format!("Backdrop capture task failed: {e}"))?
     }
 }

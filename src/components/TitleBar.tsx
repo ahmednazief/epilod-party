@@ -240,6 +240,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
         )}
 
         <div
+          data-glass-region={glassControls ? "true" : undefined}
           className={`flex items-center gap-1 ${
             glassControls ? "ep-glass-pill h-8 px-1 rounded-full" : "pl-1"
           }`}

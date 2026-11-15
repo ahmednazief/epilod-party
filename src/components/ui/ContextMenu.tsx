@@ -84,6 +84,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
       ref={menuRef}
       role="menu"
       aria-label="Player context menu"
+      data-glass-region="true"
       onContextMenu={(e) => e.preventDefault()}
       style={{
         left: `${coords?.left ?? position.x}px`,

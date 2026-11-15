@@ -89,163 +89,186 @@ html.ep-video-active #root {
 .ep-glass-capsule {
   background: linear-gradient(
     180deg,
-    rgba(44, 30, 78, 0.56) 0%,
-    rgba(20, 14, 38, 0.72) 100%
+    rgba(255, 255, 255, 0.08) 0%,
+    rgba(22, 22, 28, 0.34) 44%,
+    rgba(12, 12, 16, 0.44) 100%
   );
-  backdrop-filter: url(#epilod-liquid-lens) blur(14px) saturate(195%) contrast(1.08) brightness(1.08);
-  -webkit-backdrop-filter: url(#epilod-liquid-lens) blur(14px) saturate(195%) contrast(1.08) brightness(1.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(16px) saturate(118%) brightness(1.04);
+  -webkit-backdrop-filter: blur(16px) saturate(118%) brightness(1.04);
   box-shadow:
-    inset 0 1.5px 1px 0 rgba(237, 233, 254, 0.36),
-    inset 1px 0 1px 0 rgba(196, 181, 253, 0.16),
-    inset 0 -1.5px 2px 0 rgba(139, 92, 246, 0.16),
-    inset 0 14px 28px -12px rgba(167, 139, 250, 0.14),
-    0 24px 56px -12px rgba(4, 2, 10, 0.88);
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.36),
+    inset 0 -1px 1.5px 0 rgba(255, 255, 255, 0.12),
+    inset 0 14px 28px -16px rgba(255, 255, 255, 0.10),
+    0 22px 54px -14px rgba(4, 2, 12, 0.84);
 }
 
 .ep-glass-sheet {
   background: linear-gradient(
     165deg,
-    rgba(34, 26, 56, 0.54) 0%,
-    rgba(16, 13, 28, 0.70) 100%
+    rgba(26, 26, 34, 0.56) 0%,
+    rgba(12, 12, 16, 0.72) 100%
   );
-  backdrop-filter: url(#epilod-liquid-lens) blur(14px) saturate(195%) contrast(1.07) brightness(1.06);
-  -webkit-backdrop-filter: url(#epilod-liquid-lens) blur(14px) saturate(195%) contrast(1.07) brightness(1.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(20px) saturate(118%) brightness(1.03);
+  -webkit-backdrop-filter: blur(20px) saturate(118%) brightness(1.03);
   box-shadow:
-    inset 0 1.5px 1px 0 rgba(255, 255, 255, 0.28),
-    inset 1px 0 1px 0 rgba(196, 181, 253, 0.12),
-    inset 0 -1.5px 2px 0 rgba(139, 92, 246, 0.10),
-    inset 0 16px 32px -14px rgba(255, 255, 255, 0.06),
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 1.5px 0 rgba(255, 255, 255, 0.10),
+    inset 0 16px 32px -18px rgba(255, 255, 255, 0.06),
     0 30px 70px -16px rgba(2, 1, 7, 0.88);
 }
 
 .ep-glass-pill {
   background: linear-gradient(
-    170deg,
-    rgba(42, 32, 68, 0.50) 0%,
-    rgba(19, 15, 32, 0.64) 100%
+    175deg,
+    rgba(255, 255, 255, 0.09) 0%,
+    rgba(18, 18, 24, 0.38) 100%
   );
-  backdrop-filter: url(#epilod-liquid-lens) blur(10px) saturate(185%) brightness(1.06);
-  -webkit-backdrop-filter: url(#epilod-liquid-lens) blur(10px) saturate(185%) brightness(1.06);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(14px) saturate(118%) brightness(1.04);
+  -webkit-backdrop-filter: blur(14px) saturate(118%) brightness(1.04);
   box-shadow:
-    inset 0 1.5px 1px 0 rgba(237, 233, 254, 0.28),
-    inset 0 -1px 1px 0 rgba(167, 139, 250, 0.12),
-    0 8px 22px -6px rgba(4, 2, 10, 0.68);
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.30),
+    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.10),
+    0 8px 22px -8px rgba(4, 2, 10, 0.66);
+  transition:
+    transform 210ms var(--spring-fluid),
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 220ms ease,
+    color 160ms ease;
 }
 
 .ep-update-pill {
   box-shadow:
-    inset 0 1px 0 0 rgba(237, 233, 254, 0.32),
-    inset 0 -1px 0 0 rgba(139, 92, 246, 0.20),
+    inset 0 1px 0 0 rgba(237, 233, 254, 0.24),
+    inset 0 -1px 0 0 rgba(139, 92, 246, 0.16),
     0 8px 22px -6px rgba(4, 2, 10, 0.68);
 }
 
 .ep-update-pct-badge {
-  background: rgba(124, 58, 237, 0.26);
-  box-shadow: inset 0 1px 0 0 rgba(237, 233, 254, 0.22);
+  background: rgba(124, 58, 237, 0.24);
+  box-shadow: inset 0 1px 0 0 rgba(237, 233, 254, 0.16);
 }
 
 .ep-glass-btn-party {
   background: linear-gradient(
     165deg,
-    rgba(167, 139, 250, 0.24) 0%,
-    rgba(124, 58, 237, 0.34) 55%,
-    rgba(46, 22, 92, 0.52) 100%
+    rgba(139, 92, 246, 0.26) 0%,
+    rgba(91, 33, 182, 0.36) 100%
   );
-  backdrop-filter: url(#epilod-liquid-lens) blur(10px) saturate(200%) contrast(1.06) brightness(1.06);
-  -webkit-backdrop-filter: url(#epilod-liquid-lens) blur(10px) saturate(200%) contrast(1.06) brightness(1.06);
+  border: 1px solid rgba(196, 181, 253, 0.20);
+  backdrop-filter: blur(18px) saturate(175%) brightness(1.04);
+  -webkit-backdrop-filter: blur(18px) saturate(175%) brightness(1.04);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(245, 243, 255, 0.48),
-    inset 0 -1px 1px 0 rgba(167, 139, 250, 0.24),
-    inset 0 8px 14px -8px rgba(221, 214, 254, 0.16),
-    0 10px 26px -6px rgba(124, 58, 237, 0.40);
+    inset 0 1px 0 0 rgba(245, 243, 255, 0.24),
+    0 10px 26px -8px rgba(124, 58, 237, 0.36);
+  transition:
+    transform 220ms var(--spring-fluid),
+    background 200ms ease,
+    border-color 200ms ease,
+    box-shadow 220ms ease;
 }
 
 .ep-glass-btn-party:hover {
+  transform: translateY(-1.5px);
   background: linear-gradient(
     165deg,
-    rgba(167, 139, 250, 0.32) 0%,
-    rgba(139, 92, 246, 0.42) 55%,
-    rgba(60, 28, 120, 0.60) 100%
+    rgba(139, 92, 246, 0.36) 0%,
+    rgba(109, 40, 217, 0.46) 100%
   );
+  border-color: rgba(221, 214, 254, 0.32);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(245, 243, 255, 0.58),
-    inset 0 -1px 1px 0 rgba(196, 181, 253, 0.30),
-    inset 0 10px 16px -8px rgba(237, 233, 254, 0.20),
-    0 14px 30px -6px rgba(124, 58, 237, 0.52);
+    inset 0 1px 0 0 rgba(245, 243, 255, 0.30),
+    0 14px 32px -8px rgba(124, 58, 237, 0.48);
 }
 
 .ep-glass-btn-media {
   background: linear-gradient(
     165deg,
-    rgba(255, 255, 255, 0.13) 0%,
-    rgba(38, 38, 48, 0.48) 55%,
-    rgba(14, 14, 19, 0.64) 100%
+    rgba(255, 255, 255, 0.09) 0%,
+    rgba(24, 24, 34, 0.50) 100%
   );
-  backdrop-filter: url(#epilod-liquid-lens) blur(10px) saturate(185%) contrast(1.06) brightness(1.06);
-  -webkit-backdrop-filter: url(#epilod-liquid-lens) blur(10px) saturate(185%) contrast(1.06) brightness(1.06);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  backdrop-filter: blur(18px) saturate(165%) brightness(1.04);
+  -webkit-backdrop-filter: blur(18px) saturate(165%) brightness(1.04);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.36),
-    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.10),
-    inset 0 8px 14px -8px rgba(255, 255, 255, 0.08),
-    0 10px 26px -6px rgba(0, 0, 0, 0.75);
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.18),
+    0 10px 26px -8px rgba(0, 0, 0, 0.68);
+  transition:
+    transform 220ms var(--spring-fluid),
+    background 200ms ease,
+    border-color 200ms ease,
+    box-shadow 220ms ease;
 }
 
 .ep-glass-btn-media:hover {
+  transform: translateY(-1.5px);
   background: linear-gradient(
     165deg,
-    rgba(255, 255, 255, 0.18) 0%,
-    rgba(48, 48, 60, 0.54) 55%,
-    rgba(18, 18, 24, 0.70) 100%
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(34, 34, 46, 0.56) 100%
   );
+  border-color: rgba(255, 255, 255, 0.20);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.46),
-    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.14),
-    inset 0 10px 16px -8px rgba(255, 255, 255, 0.12),
-    0 14px 30px -6px rgba(0, 0, 0, 0.85);
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.24),
+    0 14px 30px -8px rgba(0, 0, 0, 0.78);
 }
 
 .ep-glass-well {
   background: rgba(255, 255, 255, 0.035);
-  box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.08),
-    inset 0 -1px 0 0 rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease;
 }
 
 .ep-glass-pill-active {
-  background-color: rgba(139, 92, 246, 0.32);
-  border: 1px solid rgba(196, 181, 253, 0.38);
+  background-color: rgba(139, 92, 246, 0.26);
+  border: 1px solid rgba(196, 181, 253, 0.26);
   box-shadow:
-    inset 0 1px 0 0 rgba(245, 243, 255, 0.36),
-    inset 0 -1px 0 0 rgba(124, 58, 237, 0.24),
-    0 6px 18px -6px rgba(124, 58, 237, 0.42);
+    inset 0 1px 0 0 rgba(245, 243, 255, 0.20),
+    0 6px 18px -8px rgba(124, 58, 237, 0.42);
+  transition:
+    transform 200ms var(--spring-fluid),
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 200ms ease;
 }
 
 .ep-glass-pill-active:hover:not(:disabled) {
-  background-color: rgba(139, 92, 246, 0.44);
-  border-color: rgba(221, 214, 254, 0.54);
+  transform: translateY(-0.5px);
+  background-color: rgba(139, 92, 246, 0.36);
+  border-color: rgba(221, 214, 254, 0.38);
   box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.44),
-    inset 0 -1px 0 0 rgba(139, 92, 246, 0.30),
-    0 8px 22px -6px rgba(139, 92, 246, 0.52);
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.26),
+    0 8px 22px -6px rgba(139, 92, 246, 0.50);
 }
 
 .ep-glass-primary-pill {
   background: linear-gradient(
-    165deg,
-    #8B5CF6 0%,
-    #7C3AED 100%
+    180deg,
+    rgba(139, 92, 246, 0.94) 0%,
+    rgba(109, 40, 217, 0.96) 100%
   );
+  border: 1px solid rgba(221, 214, 254, 0.22);
   box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.38),
-    0 10px 24px -8px rgba(124, 58, 237, 0.55);
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.20),
+    0 8px 22px -8px rgba(124, 58, 237, 0.52);
+  transition:
+    transform 200ms var(--spring-fluid),
+    filter 180ms ease,
+    box-shadow 200ms ease;
 }
 
-.ep-glass-primary-pill:hover {
-  background: linear-gradient(
-    165deg,
-    #9A70FA 0%,
-    #8B5CF6 100%
-  );
+.ep-glass-primary-pill:hover:not(:disabled) {
+  transform: translateY(-0.5px);
+  filter: brightness(1.08);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.26),
+    0 12px 26px -8px rgba(139, 92, 246, 0.62);
 }
 
 .ep-glass-input {
@@ -358,27 +381,25 @@ html.ep-video-active #root {
   overflow: hidden;
   isolation: isolate;
   color: #FFFFFF;
-  background-color: rgba(255, 255, 255, 0.14);
+  background-color: rgba(255, 255, 255, 0.12);
   background-image: linear-gradient(
-    165deg,
-    rgba(255, 255, 255, 0.28) 0%,
-    rgba(255, 255, 255, 0.08) 46%,
-    rgba(255, 255, 255, 0.04) 72%,
-    rgba(255, 255, 255, 0.14) 100%
+    180deg,
+    rgba(255, 255, 255, 0.20) 0%,
+    rgba(255, 255, 255, 0.06) 55%,
+    rgba(255, 255, 255, 0.10) 100%
   );
-  backdrop-filter: blur(22px) saturate(185%) brightness(1.14);
-  -webkit-backdrop-filter: blur(22px) saturate(185%) brightness(1.14);
-  border: 1px solid rgba(255, 255, 255, 0.36);
+  backdrop-filter: blur(24px) saturate(185%) brightness(1.10);
+  -webkit-backdrop-filter: blur(24px) saturate(185%) brightness(1.10);
+  border: 1px solid rgba(255, 255, 255, 0.20);
   box-shadow:
-    inset 0 1px 1px 0 rgba(255, 255, 255, 0.72),
-    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.22),
-    inset 0 0 12px 0 rgba(255, 255, 255, 0.06),
-    0 8px 20px -4px rgba(0, 0, 0, 0.52),
-    0 2px 6px -1px rgba(0, 0, 0, 0.32);
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.36),
+    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.10),
+    0 8px 20px -4px rgba(0, 0, 0, 0.48),
+    0 2px 6px -1px rgba(0, 0, 0, 0.28);
   transition:
-    transform 210ms var(--ease-glass),
-    background-color 210ms var(--ease-glass),
-    border-color 210ms var(--ease-glass),
+    transform 230ms var(--spring-fluid),
+    background-color 200ms var(--ease-glass),
+    border-color 200ms var(--ease-glass),
     box-shadow 220ms var(--ease-glass),
     opacity 200ms var(--ease-glass);
 }
@@ -386,33 +407,32 @@ html.ep-video-active #root {
 .ep-orb-play::before {
   content: "";
   position: absolute;
-  inset: 1px 4px auto 4px;
-  height: 42%;
+  inset: 1px 6px auto 6px;
+  height: 32%;
   border-radius: 9999px;
   pointer-events: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42) 0%, rgba(255, 255, 255, 0) 100%);
-  opacity: 0.72;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0) 100%);
+  opacity: 0.45;
   transition: opacity 210ms var(--ease-glass);
 }
 
 .ep-orb-play:hover:not(:disabled) {
-  transform: scale(1.06);
-  background-color: rgba(255, 255, 255, 0.22);
-  border-color: rgba(255, 255, 255, 0.58);
+  transform: scale(1.07);
+  background-color: rgba(255, 255, 255, 0.19);
+  border-color: rgba(255, 255, 255, 0.34);
   box-shadow:
-    inset 0 1px 1.5px 0 rgba(255, 255, 255, 0.88),
-    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.32),
-    inset 0 0 16px 0 rgba(255, 255, 255, 0.12),
-    0 12px 26px -4px rgba(0, 0, 0, 0.62),
-    0 0 18px -4px rgba(255, 255, 255, 0.22);
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.48),
+    inset 0 -1px 1px 0 rgba(255, 255, 255, 0.16),
+    0 12px 26px -4px rgba(0, 0, 0, 0.58),
+    0 0 20px -4px rgba(196, 181, 253, 0.24);
 }
 
 .ep-orb-play:hover:not(:disabled)::before {
-  opacity: 0.95;
+  opacity: 0.7;
 }
 
 .ep-orb-play:active:not(:disabled) {
-  transform: scale(0.94);
+  transform: scale(0.93);
   transition-duration: 75ms;
   transition-timing-function: ease-out;
 }
@@ -422,25 +442,22 @@ html.ep-video-active #root {
 }
 
 .ep-bar-pill {
-  background-color: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.14);
+  background-color: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   transition:
-    transform 190ms var(--ease-glass),
-    background-color 190ms var(--ease-glass),
-    border-color 190ms var(--ease-glass),
+    transform 200ms var(--spring-fluid),
+    background-color 180ms var(--ease-glass),
+    border-color 180ms var(--ease-glass),
     box-shadow 200ms var(--ease-glass),
-    color 170ms var(--ease-glass),
-    opacity 190ms var(--ease-glass);
+    color 160ms var(--ease-glass),
+    opacity 180ms var(--ease-glass);
 }
 
 .ep-bar-pill:hover:not(:disabled) {
   transform: translateY(-0.5px);
-  background-color: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.22);
-  box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.26),
-    0 6px 16px -6px rgba(4, 2, 10, 0.65);
+  background-color: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.13);
+  box-shadow: 0 6px 16px -8px rgba(4, 2, 10, 0.60);
 }
 
 .ep-bar-pill:active:not(:disabled) {
@@ -452,25 +469,23 @@ html.ep-video-active #root {
 .ep-bar-icon-btn {
   border: 1px solid transparent;
   transition:
-    transform 190ms var(--ease-glass),
-    background-color 190ms var(--ease-glass),
-    border-color 190ms var(--ease-glass),
+    transform 200ms var(--spring-fluid),
+    background-color 180ms var(--ease-glass),
+    border-color 180ms var(--ease-glass),
     box-shadow 200ms var(--ease-glass),
-    color 170ms var(--ease-glass),
-    opacity 190ms var(--ease-glass);
+    color 160ms var(--ease-glass),
+    opacity 180ms var(--ease-glass);
 }
 
 .ep-bar-icon-btn:hover:not(:disabled) {
-  transform: translateY(-0.5px) scale(1.04);
-  background-color: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.16);
-  box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.22),
-    0 6px 14px -6px rgba(4, 2, 10, 0.6);
+  transform: translateY(-0.5px) scale(1.06);
+  background-color: rgba(255, 255, 255, 0.11);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 6px 14px -8px rgba(4, 2, 10, 0.55);
 }
 
 .ep-bar-icon-btn:active:not(:disabled) {
-  transform: scale(0.92);
+  transform: scale(0.91);
   transition-duration: 75ms;
   transition-timing-function: ease-out;
 }
@@ -590,6 +605,28 @@ html.ep-video-active #root {
   }
 }
 
+@keyframes ep-drawer-bloom {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ep-chrome-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .anim-pop-in {
   animation: ep-pop-in 240ms var(--spring-fluid) both;
 }
@@ -617,6 +654,22 @@ html.ep-video-active #root {
 
 .anim-drawer-in {
   animation: ep-drawer-in 220ms var(--spring-soft) both;
+}
+
+.anim-drawer-bloom {
+  transform-origin: bottom center;
+  animation: ep-drawer-bloom 280ms var(--spring-fluid) both;
+}
+
+.anim-chrome-in {
+  animation: ep-chrome-in 240ms var(--spring-soft) both;
+}
+
+.ep-chrome-transition {
+  transition:
+    opacity 240ms var(--spring-soft),
+    transform 280ms var(--spring-fluid);
+  will-change: opacity, transform;
 }
 
 .anim-icon-pop {
@@ -673,6 +726,9 @@ html.ep-video-active #root {
   .anim-fade-slide-up,
   .anim-tab-in,
   .anim-drawer-in,
+  .anim-drawer-bloom,
+  .anim-chrome-in,
+  .ep-chrome-transition,
   .anim-icon-pop,
   .anim-drop-float,
   .ep-eq-bar {
