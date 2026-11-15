@@ -1,43 +1,41 @@
 import {
+  ArrowRight,
   Check,
-  CheckCircle2,
-  Circle,
   Copy,
-  Eye,
   EyeOff,
   Lock,
   RefreshCw,
   Server,
+  Users,
 } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useState, type FormEvent } from "react";
 import { formatUserError } from "../lib/errors";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
-import { canToggleReady, resolveReadyToggleTarget } from "../lib/syncReady";
 import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
 import {
   enqueueSyncLifecycle,
   syncReconnect,
-  syncSetReady,
   syncSwitchBackup,
   type FileMatchStatus,
 } from "../lib/syncplay";
+import { sanitizeRoomCodeInput } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
-import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { generateRoomCode } from "./HomeScreen";
 import { Button } from "./ui/Button";
 import { StatusDot } from "./ui/StatusDot";
 
 function matchLabel(match: FileMatchStatus): { text: string; className: string } {
   switch (match) {
     case "matched":
-      return { text: "Watching in sync", className: "text-ok" };
+      return { text: "In sync", className: "text-ok" };
     case "sameLengthDifferentEncode":
-      return { text: "Same length · different encode", className: "text-warn" };
+      return { text: "Same length", className: "text-warn" };
     case "durationMismatch":
-      return { text: "Different video length", className: "text-bad" };
+      return { text: "Length differs", className: "text-bad" };
     case "differentFile":
-      return { text: "Different file", className: "text-warn" };
+      return { text: "Different video", className: "text-warn" };
     default:
       return { text: "Picking a movie…", className: "text-muted" };
   }
@@ -57,18 +55,16 @@ export const RoomPanel = memo(function RoomPanel() {
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
+  const setRoomCode = useAppStore((s) => s.setRoomCode);
   const setHideParticipants = useAppStore((s) => s.setHideParticipants);
-
-  const loaded = usePlayerStore((s) => s.loaded);
 
   const status = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
-  const localReady = useSyncStore((s) => s.localReady);
   const serverOverrideNotice = useSyncStore((s) => s.serverOverrideNotice);
-  const setLocalReady = useSyncStore((s) => s.setLocalReady);
   const pushNote = useNotificationStore((s) => s.push);
 
   const [copied, setCopied] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
 
   const endpointSummary = describeSyncEndpoint(status, serverEndpoint);
   const syncConnected = status.state === "connected";
@@ -111,25 +107,82 @@ export const RoomPanel = memo(function RoomPanel() {
     });
   };
 
-  const handleToggleReady = () => {
-    if (!canToggleReady(loaded)) {
-      pushNote("info", "Load a local video file first.");
-      return;
+  const handleStartPartyMidMovie = () => {
+    const code = generateRoomCode();
+    try {
+      void navigator.clipboard?.writeText(code).catch(() => undefined);
+    } catch {
+      // ignore
     }
-    const target = resolveReadyToggleTarget(loaded, localReady);
-    if (target !== null) {
-      setLocalReady(target);
-      void syncSetReady(target, true);
-    }
+    setRoomCode(code);
+    pushNote("success", `Watch Party started — invite code ${code}`);
   };
 
+  const handleJoinPartyMidMovie = (e: FormEvent) => {
+    e.preventDefault();
+    const cleaned = sanitizeRoomCodeInput(joinCode, literalRoom);
+    if (cleaned.length < (literalRoom ? 1 : 4)) {
+      pushNote("info", "Enter a valid room code to join.");
+      return;
+    }
+    setRoomCode(cleaned);
+  };
+
+  if (!roomCode) {
+    return (
+      <div className="anim-tab-in px-3.5 pb-3.5 pt-2 space-y-2.5">
+        <div className="ep-glass-well rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2.5">
+            <span className="h-8 w-8 rounded-full bg-accent/25 text-accent-soft flex items-center justify-center shrink-0">
+              <Users className="h-4 w-4" />
+            </span>
+            <div>
+              <div className="text-xs font-medium text-white">Turn this into a Watch Party</div>
+              <div className="text-[11px] text-secondary">
+                Keep playing smoothly while friends sync in
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleStartPartyMidMovie}
+            className="ep-glass-primary-pill ep-press w-full h-9.5 rounded-xl text-xs font-medium text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <span>Create Room &amp; Copy Invite</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="ep-glass-well rounded-2xl p-3.5 space-y-2">
+          <span className="text-[11px] font-medium text-secondary block">
+            Or join a friend&apos;s room code
+          </span>
+          <form onSubmit={handleJoinPartyMidMovie} className="flex items-center gap-2">
+            <input
+              type="text"
+              value={joinCode}
+              placeholder="XXXX-XXXX-XXXX"
+              aria-label="Room Code"
+              onChange={(e) => setJoinCode(sanitizeRoomCodeInput(e.target.value, literalRoom))}
+              className="ep-glass-input flex-1 h-9 px-3 rounded-xl text-xs font-mono tracking-wider text-primary placeholder:font-sans placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
+            />
+            <Button type="submit" variant="secondary" size="sm">
+              Join
+            </Button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="anim-tab-in px-4 py-3.5 space-y-4">
-      {/* Room invite code row — borderless typography + tactile Copy pill */}
-      <div className="flex items-center justify-between gap-3">
+    <div className="anim-tab-in px-3.5 pb-3.5 pt-2 space-y-2.5">
+      {/* Room invite code well */}
+      <div className="ep-glass-well rounded-2xl px-3.5 py-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-muted">
-            {literalRoom ? "Party Room" : "Invite Code"}
+            {literalRoom ? "Party Room" : "Invite Pass"}
           </div>
           <p className="text-sm font-mono font-medium text-white truncate pt-0.5">
             {roomCode}
@@ -147,7 +200,7 @@ export const RoomPanel = memo(function RoomPanel() {
 
       {/* Only surface connection actions when actually reconnecting/erroring */}
       {(status.state === "reconnecting" || status.state === "error") && (
-        <div className="space-y-2 rounded-2xl bg-bad/10 px-3.5 py-3">
+        <div className="space-y-2 rounded-2xl bg-bad/12 px-3.5 py-3">
           <div className="flex items-center gap-2 text-xs text-bad font-medium">
             <StatusDot tone={status.state === "error" ? "bad" : "warn"} pulse />
             <span>
@@ -198,67 +251,17 @@ export const RoomPanel = memo(function RoomPanel() {
         <p className="text-[11px] text-secondary px-1">{serverOverrideNotice}</p>
       )}
 
-      <div className="ep-hairline-divider" />
-
-      {/* Quick Comfort Controls: Ready & Profile Icon Visibility */}
-      <div className="space-y-1">
-        <div className="ep-menu-row px-2.5 py-2 flex items-center justify-between gap-2">
-          <span className="text-xs font-medium text-primary">Your Status</span>
-          <button
-            type="button"
-            disabled={!canToggleReady(loaded)}
-            onClick={handleToggleReady}
-            className={`ep-press h-7 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer disabled:opacity-45 ${
-              localReady && loaded
-                ? "ep-glass-primary-pill text-white"
-                : "bg-white/10 text-secondary hover:text-white"
-            }`}
-          >
-            {localReady && loaded ? (
-              <CheckCircle2 className="h-3.5 w-3.5" />
-            ) : (
-              <Circle className="h-3.5 w-3.5" />
-            )}
-            <span>{localReady && loaded ? "Ready" : "Not Ready"}</span>
-          </button>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => setHideParticipants(!hideParticipants)}
-          className="ep-menu-row ep-press w-full px-2.5 py-2 flex items-center justify-between gap-2 text-left cursor-pointer"
-        >
-          <div className="flex items-center gap-2 text-xs text-primary">
-            {hideParticipants ? (
-              <EyeOff className="h-3.5 w-3.5 text-accent-soft" />
-            ) : (
-              <Eye className="h-3.5 w-3.5 text-secondary" />
-            )}
-            <span>Friend Profile Icons</span>
-          </div>
-          <span
-            className={`text-[11px] font-medium ${
-              hideParticipants ? "text-accent-soft" : "text-ok"
-            }`}
-          >
-            {hideParticipants ? "Hidden" : "Visible"}
-          </span>
-        </button>
-      </div>
-
-      <div className="ep-hairline-divider" />
-
-      {/* Borderless NSMenu-style Friends list */}
-      <div className="space-y-2">
-        <div className="px-1 flex items-center justify-between text-[11px] font-medium text-muted">
+      {/* Friends list well */}
+      <div className="ep-glass-well rounded-2xl p-2.5 space-y-1.5">
+        <div className="px-1.5 pt-0.5 flex items-center justify-between text-[11px] font-medium text-muted">
           <span>Watching Together ({participants.length})</span>
         </div>
 
         {hideParticipants ? (
-          <div className="px-2.5 py-3 flex items-center justify-between gap-2 text-xs text-muted">
+          <div className="px-2 py-2.5 flex items-center justify-between gap-2 text-xs text-muted">
             <span className="inline-flex items-center gap-2">
               <EyeOff className="h-3.5 w-3.5 shrink-0 text-accent-soft" />
-              Profile icons tucked away for focus
+              Profile icons hidden for focus
             </span>
             <button
               type="button"
@@ -271,7 +274,7 @@ export const RoomPanel = memo(function RoomPanel() {
         ) : participants.length === 0 ? (
           <p className="text-xs text-muted px-2 py-2">
             {syncConnected
-              ? "Waiting for friends — share the invite code above."
+              ? "Waiting for friends — share the invite pass above."
               : "Connecting to your watch room…"}
           </p>
         ) : (
@@ -283,7 +286,7 @@ export const RoomPanel = memo(function RoomPanel() {
               return (
                 <div
                   key={p.username}
-                  className="ep-menu-row px-2.5 py-2 flex items-center justify-between gap-2.5"
+                  className="ep-menu-row px-2 py-1.5 flex items-center justify-between gap-2.5"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <span

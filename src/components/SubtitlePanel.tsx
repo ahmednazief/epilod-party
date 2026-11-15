@@ -309,50 +309,49 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   ).label;
 
   return (
-    <div className="anim-tab-in px-4 py-3.5 space-y-4">
-      {/* Top toggle row + Load button */}
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          disabled={!loaded}
-          onClick={() => {
-            const next = !visible;
-            setVisible(next);
-            void mpvSetSubStyle({
-              font,
-              fontSize,
-              color,
-              borderSize,
-              pos,
-              visible: next,
-              overrideAss: overrideAssStyle,
-            });
-          }}
-          className="ep-menu-row ep-press px-2 py-1.5 inline-flex items-center gap-2.5 text-xs font-medium text-white cursor-pointer disabled:opacity-45"
-        >
-          <span
-            className={`ep-switch-track w-9 h-5 rounded-full p-0.5 flex items-center transition-colors ${
-              visible ? "bg-accent justify-end" : "bg-white/20 justify-start"
-            }`}
+    <div className="anim-tab-in px-3.5 pb-3.5 pt-2 space-y-2.5">
+      {/* Track selector & Visibility well */}
+      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            disabled={!loaded}
+            onClick={() => {
+              const next = !visible;
+              setVisible(next);
+              void mpvSetSubStyle({
+                font,
+                fontSize,
+                color,
+                borderSize,
+                pos,
+                visible: next,
+                overrideAss: overrideAssStyle,
+              });
+            }}
+            className="ep-menu-row ep-press px-2 py-1 inline-flex items-center gap-2 text-xs font-medium text-white cursor-pointer disabled:opacity-45"
           >
-            <span className="ep-switch-thumb h-4 w-4 rounded-full bg-white shadow" />
-          </span>
-          <span>{visible ? "Subtitles On" : "Subtitles Off"}</span>
-        </button>
+            <span
+              className={`ep-switch-track w-9 h-5 rounded-full p-0.5 flex items-center transition-colors ${
+                visible ? "bg-accent justify-end" : "bg-white/20 justify-start"
+              }`}
+            >
+              <span className="ep-switch-thumb h-4 w-4 rounded-full bg-white shadow" />
+            </span>
+            <span>{visible ? "Subtitles On" : "Subtitles Off"}</span>
+          </button>
 
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!loaded}
-          onClick={() => void handleLoadExternalSubtitle()}
-        >
-          <FolderOpen className="h-3.5 w-3.5" />
-          <span>Add File</span>
-        </Button>
-      </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={!loaded}
+            onClick={() => void handleLoadExternalSubtitle()}
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            <span>Add File</span>
+          </Button>
+        </div>
 
-      {/* Track selector */}
-      <div className="space-y-1.5">
         <SelectMenu
           ariaLabel="Subtitle Track"
           disabled={!loaded}
@@ -377,7 +376,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       </div>
 
       {subIsBitmap && (
-        <div className="rounded-2xl bg-warn/10 px-3 py-2.5 flex items-start gap-2 text-[11px] text-warn">
+        <div className="rounded-2xl bg-warn/10 px-3 py-2 flex items-start gap-2 text-[11px] text-warn">
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
             Image-based subtitles ({selectedSub?.codec}) keep their built-in look and timing.
@@ -385,13 +384,13 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         </div>
       )}
 
-      {/* One-tap Magic Sync to Voice */}
-      <div className="space-y-1.5">
+      {/* Timing & Magic Sync well */}
+      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
         {autoSyncBusy ? (
           <button
             type="button"
             onClick={() => void handleCancelAutoSync()}
-            className="ep-press w-full h-9.5 px-3.5 rounded-xl bg-bad/20 hover:bg-bad/30 text-bad text-xs font-medium flex items-center justify-between cursor-pointer"
+            className="ep-press w-full h-9 px-3 rounded-xl bg-bad/20 hover:bg-bad/30 text-bad text-xs font-medium flex items-center justify-between cursor-pointer"
           >
             <span className="inline-flex items-center gap-2">
               <Square className="h-3.5 w-3.5 fill-current" />
@@ -404,7 +403,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             type="button"
             disabled={!canAutoSync}
             onClick={() => void handleAutoSync()}
-            className="ep-glass-pill-active ep-press w-full h-9.5 px-3.5 rounded-xl text-xs font-medium text-white flex items-center justify-between cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+            className="ep-glass-pill-active ep-press w-full h-9 px-3 rounded-xl text-xs font-medium text-white flex items-center justify-between cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
           >
             <span className="inline-flex items-center gap-2">
               <Sparkles className="h-3.5 w-3.5 text-accent-soft" />
@@ -416,65 +415,62 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           </button>
         )}
         {autoSyncError && <p className="text-[11px] text-bad px-1">{autoSyncError}</p>}
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between px-1 text-[11px]">
+            <span className="text-secondary font-medium">Timing</span>
+            <span className="num text-muted">{formatDelayLabel(delaySecs)}</span>
+          </div>
+          <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1 text-xs">
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(-0.5)}
+              className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
+            >
+              -0.5s
+            </button>
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(-0.1)}
+              className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
+            >
+              Earlier
+            </button>
+            <button
+              type="button"
+              disabled={!loaded || delaySecs === 0}
+              onClick={() => {
+                setDelaySecs(0);
+                void mpvSetSubDelay(0);
+              }}
+              className="ep-press py-1 rounded-full num text-muted hover:text-white disabled:opacity-40 cursor-pointer"
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(0.1)}
+              className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
+            >
+              Later
+            </button>
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(0.5)}
+              className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
+            >
+              +0.5s
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Gentle Earlier / Later timing nudge */}
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between px-1 text-[11px]">
-          <span className="text-secondary font-medium">Timing</span>
-          <span className="num text-muted">{formatDelayLabel(delaySecs)}</span>
-        </div>
-        <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1 text-xs">
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(-0.5)}
-            className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-          >
-            -0.5s
-          </button>
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(-0.1)}
-            className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-          >
-            Earlier
-          </button>
-          <button
-            type="button"
-            disabled={!loaded || delaySecs === 0}
-            onClick={() => {
-              setDelaySecs(0);
-              void mpvSetSubDelay(0);
-            }}
-            className="ep-press py-1 rounded-full num text-muted hover:text-white disabled:opacity-40 cursor-pointer"
-          >
-            Reset
-          </button>
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(0.1)}
-            className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-          >
-            Later
-          </button>
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(0.5)}
-            className="ep-press py-1 rounded-full text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-          >
-            +0.5s
-          </button>
-        </div>
-      </div>
-
-      <div className="ep-hairline-divider" />
-
-      {/* Human size & color row */}
-      <div className="space-y-2.5">
+      {/* Size & Color appearance well */}
+      <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
         <div className="ep-glass-input p-1 rounded-full grid grid-cols-3 gap-1">
           {QUICK_SIZES.map((preset) => {
             const active = nearestSizeLabel === preset.label;
@@ -511,7 +507,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                     setColor(c.hex);
                     applyStyleNow();
                   }}
-                  className={`ep-press h-5.5 w-5.5 rounded-full cursor-pointer transition-transform ${
+                  className={`ep-press h-5 w-5 rounded-full cursor-pointer transition-transform ${
                     active ? "ring-2 ring-accent-soft scale-110" : "opacity-80 hover:opacity-100"
                   }`}
                   style={{ backgroundColor: c.hex }}
@@ -522,8 +518,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         </div>
       </div>
 
-      {/* Collapsed "More subtitle tools..." drawer */}
-      <div>
+      {/* Collapsed "More subtitle tools" well */}
+      <div className="ep-glass-well rounded-2xl p-2">
         <button
           type="button"
           onClick={() => setShowTools((s) => !s)}
@@ -538,7 +534,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         </button>
 
         {showTools && (
-          <div className="anim-fade-slide-up pt-3 space-y-3.5">
+          <div className="anim-fade-slide-up px-1.5 pt-2.5 pb-1 space-y-3">
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-secondary">Font Family</span>
@@ -650,9 +646,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               />
             </label>
 
-            <div className="ep-hairline-divider" />
-
-            <div className="space-y-2">
+            <div className="space-y-2 pt-1">
               <p className="text-[11px] text-muted">
                 Manual 2-point alignment (match two lines to dialogue timestamps):
               </p>

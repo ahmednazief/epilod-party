@@ -175,6 +175,7 @@ export const TransportBar = memo(function TransportBar({
   const setLocalReady = useSyncStore((s) => s.setLocalReady);
 
   const username = useAppStore((s) => s.username);
+  const roomCode = useAppStore((s) => s.roomCode);
   const selectedFileName = useAppStore((s) => s.selectedFileName);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const setHideParticipants = useAppStore((s) => s.setHideParticipants);
@@ -279,24 +280,26 @@ export const TransportBar = memo(function TransportBar({
             <button
               type="button"
               onClick={onLeaveRoom}
-              aria-label="Leave room"
-              title="Leave room"
+              aria-label={roomCode ? "Leave room" : "Back to lobby"}
+              title={roomCode ? "Leave room" : "Back to lobby"}
               className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <StatusDot
-              tone={
-                syncStatus.state === "connected"
-                  ? "ok"
-                  : syncStatus.state === "error"
-                    ? "bad"
-                    : "warn"
-              }
-              pulse={
-                syncStatus.state === "connecting" || syncStatus.state === "reconnecting"
-              }
-            />
+            {roomCode && (
+              <StatusDot
+                tone={
+                  syncStatus.state === "connected"
+                    ? "ok"
+                    : syncStatus.state === "error"
+                      ? "bad"
+                      : "warn"
+                }
+                pulse={
+                  syncStatus.state === "connecting" || syncStatus.state === "reconnecting"
+                }
+              />
+            )}
             <button
               type="button"
               onClick={onChooseFile}
@@ -321,108 +324,127 @@ export const TransportBar = memo(function TransportBar({
           )}
         </div>
 
-        {/* Bottom capsule line: Ready & Hideable Friend Avatars | Hero Play Orb | Contextual Popovers */}
+        {/* Bottom capsule line: Ready & Hideable Friend Avatars (or Start Party in Solo) | Hero Play Orb | Contextual Popovers */}
         <div className="flex items-center justify-between gap-2 pt-0.5">
           {/* Left: Ready pill + Friend Avatars + Hide Avatars toggle + Volume */}
           <div className="flex items-center gap-1.5 min-w-0">
-            <button
-              type="button"
-              disabled={!canToggleReady(loaded)}
-              onClick={handleToggleReady}
-              title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
-              className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
-                localReady && loaded
-                  ? "ep-glass-pill-active text-white"
-                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
-              }`}
-            >
-              {localReady && loaded ? (
-                <CheckCircle2 className="h-3.5 w-3.5 text-ok" />
-              ) : (
-                <Circle className="h-3.5 w-3.5 text-muted" />
-              )}
-              <span className="hidden sm:inline">
-                {localReady && loaded ? "Ready" : "Not Ready"}
-              </span>
-            </button>
-
-            {/* Comforting Friend Profile Avatars integrated cleanly onto capsule */}
-            <div className="inline-flex items-center rounded-full bg-white/6 p-0.5 gap-0.5">
-              {!hideParticipants ? (
+            {roomCode ? (
+              <>
                 <button
                   type="button"
-                  onClick={() => onToggleTab("room")}
-                  aria-label="Open party lounge"
-                  title="Friends watching together"
-                  className={`ep-press h-6.5 pl-1 pr-2 rounded-full inline-flex items-center gap-1.5 text-xs cursor-pointer transition-colors ${
-                    activeTab === "room"
-                      ? "bg-accent/30 text-white"
-                      : "text-secondary hover:text-white"
+                  disabled={!canToggleReady(loaded)}
+                  onClick={handleToggleReady}
+                  title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
+                  className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
+                    localReady && loaded
+                      ? "ep-glass-pill-active text-white"
+                      : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
                   }`}
                 >
-                  {visiblePeers.length > 0 ? (
-                    <>
-                      <span className="flex items-center -space-x-1.5">
-                        {visiblePeers.map((p, idx) => (
-                          <span
-                            key={p.username}
-                            title={`${p.username}${p.isReady ? " · Ready" : ""}`}
-                            className={`h-5 w-5 rounded-full text-[10px] font-semibold flex items-center justify-center ring-2 ${
-                              p.isReady ? "ring-ok/85" : "ring-canvas/90"
-                            } ${AVATAR_TONES[idx % AVATAR_TONES.length]}`}
-                          >
-                            {p.username.slice(0, 1).toUpperCase()}
-                          </span>
-                        ))}
-                        {extraPeerCount > 0 && (
-                          <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90">
-                            +{extraPeerCount}
-                          </span>
-                        )}
-                      </span>
-                      <span className="hidden lg:inline text-[11px] font-medium num">
-                        {participants.length}
-                      </span>
-                    </>
+                  {localReady && loaded ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-ok" />
                   ) : (
-                    <>
-                      <Users className="h-3.5 w-3.5 text-accent-soft ml-0.5" />
-                      <span className="hidden lg:inline text-[11px]">Party</span>
-                    </>
+                    <Circle className="h-3.5 w-3.5 text-muted" />
                   )}
+                  <span className="hidden sm:inline">
+                    {localReady && loaded ? "Ready" : "Not Ready"}
+                  </span>
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onToggleTab("room")}
-                  aria-label="Open party lounge"
-                  title="Party lounge (profile icons hidden)"
-                  className={`ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[11px] cursor-pointer ${
-                    activeTab === "room" ? "bg-accent/30 text-white" : "text-muted hover:text-white"
-                  }`}
-                >
-                  <Users className="h-3.5 w-3.5" />
-                </button>
-              )}
 
+                {/* Comforting Friend Profile Avatars integrated cleanly onto capsule */}
+                <div className="inline-flex items-center rounded-full bg-white/6 p-0.5 gap-0.5">
+                  {!hideParticipants ? (
+                    <button
+                      type="button"
+                      onClick={() => onToggleTab("room")}
+                      aria-label="Open party lounge"
+                      title="Friends watching together"
+                      className={`ep-press h-6.5 pl-1 pr-2 rounded-full inline-flex items-center gap-1.5 text-xs cursor-pointer transition-colors ${
+                        activeTab === "room"
+                          ? "bg-accent/30 text-white"
+                          : "text-secondary hover:text-white"
+                      }`}
+                    >
+                      {visiblePeers.length > 0 ? (
+                        <>
+                          <span className="flex items-center -space-x-1.5">
+                            {visiblePeers.map((p, idx) => (
+                              <span
+                                key={p.username}
+                                title={`${p.username}${p.isReady ? " · Ready" : ""}`}
+                                className={`h-5 w-5 rounded-full text-[10px] font-semibold flex items-center justify-center ring-2 ${
+                                  p.isReady ? "ring-ok/85" : "ring-canvas/90"
+                                } ${AVATAR_TONES[idx % AVATAR_TONES.length]}`}
+                              >
+                                {p.username.slice(0, 1).toUpperCase()}
+                              </span>
+                            ))}
+                            {extraPeerCount > 0 && (
+                              <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90">
+                                +{extraPeerCount}
+                              </span>
+                            )}
+                          </span>
+                          <span className="hidden lg:inline text-[11px] font-medium num">
+                            {participants.length}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <Users className="h-3.5 w-3.5 text-accent-soft ml-0.5" />
+                          <span className="hidden lg:inline text-[11px]">Party</span>
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onToggleTab("room")}
+                      aria-label="Open party lounge"
+                      title="Party lounge (profile icons hidden)"
+                      className={`ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[11px] cursor-pointer ${
+                        activeTab === "room" ? "bg-accent/30 text-white" : "text-muted hover:text-white"
+                      }`}
+                    >
+                      <Users className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setHideParticipants(!hideParticipants)}
+                    aria-label={hideParticipants ? "Show profile icons" : "Hide profile icons"}
+                    title={
+                      hideParticipants
+                        ? "Show friend profile icons"
+                        : "Hide all profile icons for pure focus"
+                    }
+                    className="ep-press h-6.5 w-6.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+                  >
+                    {hideParticipants ? (
+                      <EyeOff className="h-3 w-3 text-accent-soft" />
+                    ) : (
+                      <Eye className="h-3 w-3" />
+                    )}
+                  </button>
+                </div>
+              </>
+            ) : (
               <button
                 type="button"
-                onClick={() => setHideParticipants(!hideParticipants)}
-                aria-label={hideParticipants ? "Show profile icons" : "Hide profile icons"}
-                title={
-                  hideParticipants
-                    ? "Show friend profile icons"
-                    : "Hide all profile icons for pure focus"
-                }
-                className="ep-press h-6.5 w-6.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+                onClick={() => onToggleTab("room")}
+                aria-label="Open party lounge"
+                title="Start or join a Watch Party"
+                className={`ep-press h-7.5 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+                  activeTab === "room"
+                    ? "ep-glass-pill-active text-white"
+                    : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                }`}
               >
-                {hideParticipants ? (
-                  <EyeOff className="h-3 w-3 text-accent-soft" />
-                ) : (
-                  <Eye className="h-3 w-3" />
-                )}
+                <Users className="h-3.5 w-3.5 text-accent-soft" />
+                <span className="hidden sm:inline">Start Party</span>
               </button>
-            </div>
+            )}
 
             {/* Compact Volume */}
             <div className="hidden md:flex items-center gap-1 pl-1">

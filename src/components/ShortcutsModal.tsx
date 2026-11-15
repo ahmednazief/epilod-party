@@ -34,9 +34,7 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
           </button>
         </div>
 
-        <div className="ep-hairline-divider mx-6" />
-
-        <div className="px-6 py-4 max-h-[70vh] overflow-y-auto space-y-5">
+        <div className="px-6 py-4 max-h-[70vh] overflow-y-auto space-y-4">
           {SHORTCUT_CATEGORIES.map((category) => {
             const rows = PLAYER_SHORTCUTS.filter((s) => s.category === category);
             return (
@@ -44,7 +42,7 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
                 <h3 className="px-2 text-[11px] font-medium uppercase tracking-wider text-muted">
                   {category}
                 </h3>
-                <div className="space-y-0.5">
+                <div className="ep-glass-well rounded-2xl p-1.5 space-y-0.5">
                   {rows.map((row) => (
                     <div
                       key={row.label}

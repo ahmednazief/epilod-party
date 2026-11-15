@@ -186,7 +186,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     >
       <div className="ep-glass-sheet anim-modal-in w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[26px] overflow-hidden grid grid-cols-12">
         {/* Left Navigation Rail (borderless tonal separation) */}
-        <aside className="col-span-4 bg-black/25 p-3.5 flex flex-col justify-between min-h-0">
+        <aside className="col-span-4 bg-black/35 p-3.5 flex flex-col justify-between min-h-0">
           <div className="space-y-4">
             <div className="px-2.5 pt-1 flex items-center justify-between">
               <h2 className="text-sm font-semibold tracking-tight text-white">Preferences</h2>
@@ -263,9 +263,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
           </div>
         </aside>
 
-        {/* Right Content Pane — Zero boxed cards per row; pure clean dividers */}
+        {/* Right Content Pane — Zero boxed cards per row and zero partial lines */}
         <div className="col-span-8 flex flex-col min-h-0">
-          <div className="px-6 pt-4 pb-3 flex items-center justify-between">
+          <div className="px-6 pt-4 pb-2 flex items-center justify-between">
             <span className="text-xs font-medium text-muted">
               {tab === "prefs" && "Comfort & Privacy"}
               {tab === "updates" && "App Updates"}
@@ -282,12 +282,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             </button>
           </div>
 
-          <div className="ep-hairline-divider mx-6" />
-
-          <div className="flex-1 overflow-y-auto px-6 py-4">
+          <div className="flex-1 overflow-y-auto px-6 py-3">
             {tab === "prefs" && (
-              <div className="anim-tab-in space-y-3">
-                <div className="pb-2">
+              <div className="anim-tab-in space-y-3.5">
+                <div className="ep-glass-well rounded-2xl p-3">
                   <TextField
                     label="Display Name"
                     value={username}
@@ -297,41 +295,35 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   />
                 </div>
 
-                <div className="ep-hairline-divider" />
+                <div className="ep-glass-well rounded-2xl p-1.5 space-y-0.5">
+                  <ComfortSwitchRow
+                    title="Streamer Mode (Hide Profile Icons)"
+                    description="Hide friend names and profile avatars while streaming or sharing your screen."
+                    checked={hideParticipants}
+                    onChange={setHideParticipants}
+                  />
 
-                <ComfortSwitchRow
-                  title="Streamer Mode (Hide Profile Icons)"
-                  description="Hide friend names and profile avatars while streaming or sharing your screen."
-                  checked={hideParticipants}
-                  onChange={setHideParticipants}
-                />
+                  <ComfortSwitchRow
+                    title="Private File Titles"
+                    description="Keep your local movie filename private from party servers."
+                    checked={hashFilenames}
+                    onChange={setHashFilenames}
+                  />
 
-                <div className="ep-hairline-divider mx-3" />
+                  <ComfortSwitchRow
+                    title="Calm Motion"
+                    description="Replace bouncy spring transitions with gentle fades."
+                    checked={reducedMotion}
+                    onChange={setReducedMotion}
+                  />
 
-                <ComfortSwitchRow
-                  title="Private File Titles"
-                  description="Keep your local movie filename private from party servers."
-                  checked={hashFilenames}
-                  onChange={setHashFilenames}
-                />
-
-                <div className="ep-hairline-divider mx-3" />
-
-                <ComfortSwitchRow
-                  title="Calm Motion"
-                  description="Replace bouncy spring transitions with gentle fades."
-                  checked={reducedMotion}
-                  onChange={setReducedMotion}
-                />
-
-                <div className="ep-hairline-divider mx-3" />
-
-                <ComfortSwitchRow
-                  title="Quiet Background Sync"
-                  description="Keep subtitle alignment gentle on fans and battery during long movies."
-                  checked={lowPowerMode}
-                  onChange={setLowPowerMode}
-                />
+                  <ComfortSwitchRow
+                    title="Quiet Background Sync"
+                    description="Keep subtitle alignment gentle on fans and battery during long movies."
+                    checked={lowPowerMode}
+                    onChange={setLowPowerMode}
+                  />
+                </div>
               </div>
             )}
 
@@ -478,14 +470,14 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </div>
                 </div>
 
-                <div className="ep-hairline-divider" />
-
-                <ComfortSwitchRow
-                  title="Check for updates automatically"
-                  description="Quietly check GitHub Releases on launch with verified installation."
-                  checked={autoCheckUpdates}
-                  onChange={setAutoCheckUpdates}
-                />
+                <div className="ep-glass-well rounded-2xl p-1.5">
+                  <ComfortSwitchRow
+                    title="Check for updates automatically"
+                    description="Quietly check GitHub Releases on launch with verified installation."
+                    checked={autoCheckUpdates}
+                    onChange={setAutoCheckUpdates}
+                  />
+                </div>
               </div>
             )}
 
@@ -529,17 +521,17 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </Button>
                 </div>
 
-                <div className="ep-hairline-divider" />
-
-                <ComfortSwitchRow
-                  title="Allow Shared LAN Folders (UNC / SMB)"
-                  description="Permit opening movies from mapped network paths on your home Wi-Fi."
-                  checked={allowNetworkShares}
-                  onChange={(allow) => {
-                    setStoreAllowShares(allow);
-                    void setAllowNetworkShares(allow);
-                  }}
-                />
+                <div className="ep-glass-well rounded-2xl p-1.5">
+                  <ComfortSwitchRow
+                    title="Allow Shared LAN Folders (UNC / SMB)"
+                    description="Permit opening movies from mapped network paths on your home Wi-Fi."
+                    checked={allowNetworkShares}
+                    onChange={(allow) => {
+                      setStoreAllowShares(allow);
+                      void setAllowNetworkShares(allow);
+                    }}
+                  />
+                </div>
               </div>
             )}
 

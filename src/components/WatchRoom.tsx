@@ -146,6 +146,7 @@ export function WatchRoom() {
   const dialogOpenRef = useRef(false);
   const leavingRef = useRef(false);
   const loadGenRef = useRef(0);
+  const initialAutoLoadedRef = useRef(false);
 
   panelOpenRef.current = panelOpen;
 
@@ -345,6 +346,7 @@ export function WatchRoom() {
   // Connect / tear down Syncplay lifecycle serialized via FIFO queue (Fix 03 / Fix 17)
   const connectRoom = useCallback(
     (endpoint: string, password: string) => {
+      if (!isDesktop() || !roomCode) return;
       void enqueueSyncLifecycle(async () => {
         const syncState = useSyncStore.getState();
         syncState.setParticipants([]);
@@ -366,14 +368,34 @@ export function WatchRoom() {
     [literalRoom, pushNote, roomCode, username],
   );
 
+  // Auto-play preselected file when entering Solo Media Player from Lobby
   useEffect(() => {
-    if (!roomCode) return;
+    if (
+      initialAutoLoadedRef.current ||
+      !selectedFilePath ||
+      !isDesktop() ||
+      usePlayerStore.getState().loaded
+    ) {
+      return;
+    }
+    initialAutoLoadedRef.current = true;
     const timer = window.setTimeout(() => {
-      roomSessionStartedRef.current = true;
-      connectRoom(serverEndpoint, serverPassword);
-    }, 0);
+      void loadVideoPath(selectedFilePath);
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [loadVideoPath, selectedFilePath]);
+
+  useEffect(() => {
+    const timer = roomCode
+      ? window.setTimeout(() => {
+          roomSessionStartedRef.current = true;
+          connectRoom(serverEndpoint, serverPassword);
+        }, 0)
+      : null;
     return () => {
-      window.clearTimeout(timer);
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
       if (!roomSessionStartedRef.current && !mpvStartedRef.current) {
         return;
       }
@@ -759,11 +781,15 @@ export function WatchRoom() {
             >
               <LogoMark size={20} />
               <span className="text-xs font-medium text-primary truncate max-w-[300px]">
-                {selectedFileName || "Watch Theater"}
+                {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
               </span>
-              {roomCode && (
+              {roomCode ? (
                 <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full truncate max-w-[140px]">
                   {roomCode}
+                </span>
+              ) : (
+                <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full">
+                  Solo
                 </span>
               )}
             </div>
@@ -839,7 +865,6 @@ export function WatchRoom() {
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
-              <div className="ep-hairline-divider mx-3" />
               <div className="flex-1 overflow-y-auto min-h-0">
                 {sideTab === "room" && <RoomPanel />}
                 {sideTab === "playback" && <PlaybackPanel />}

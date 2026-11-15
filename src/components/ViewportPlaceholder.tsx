@@ -21,8 +21,12 @@ export function ViewportPlaceholder({
 
   return (
     <div className="ep-amethyst-canvas absolute inset-0 flex flex-col items-center justify-center p-6 select-none">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden z-0" aria-hidden="true">
+        <div className="ep-ambient-orb-purple absolute left-[28%] top-[26%] h-64 w-64 rounded-full" />
+        <div className="ep-ambient-orb-silver absolute right-[26%] top-[34%] h-64 w-64 rounded-full" />
+      </div>
       {playerError ? (
-        <div className="ep-glass-sheet anim-fade-slide-up max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5">
+        <div className="ep-glass-sheet anim-fade-slide-up relative z-10 max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5">
           <div className="h-11 w-11 rounded-full bg-bad/15 text-bad flex items-center justify-center">
             <AlertTriangle className="h-5 w-5" />
           </div>
@@ -43,7 +47,7 @@ export function ViewportPlaceholder({
         </div>
       ) : (
         <div
-          className={`max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-all duration-300 ${
+          className={`relative z-10 max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-all duration-300 ${
             isDragActive ? "ep-glass-sheet scale-[1.02]" : ""
           }`}
         >

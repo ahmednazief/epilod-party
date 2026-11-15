@@ -16,19 +16,26 @@ export function App() {
       aria-hidden="true"
     >
       <defs>
-        <filter id="epilod-liquid-lens" x="-10%" y="-10%" width="120%" height="120%">
+        <filter
+          id="epilod-liquid-lens"
+          x="-15%"
+          y="-15%"
+          width="130%"
+          height="130%"
+          colorInterpolationFilters="sRGB"
+        >
           <feTurbulence
             type="fractalNoise"
-            baseFrequency="0.014"
+            baseFrequency="0.011 0.017"
             numOctaves="2"
-            seed="7"
+            seed="11"
             result="noise"
           />
-          <feGaussianBlur in="noise" stdDeviation="8" result="softNoise" />
+          <feGaussianBlur in="noise" stdDeviation="5" result="softNoise" />
           <feDisplacementMap
             in="SourceGraphic"
             in2="softNoise"
-            scale="10"
+            scale="22"
             xChannelSelector="R"
             yChannelSelector="G"
           />
