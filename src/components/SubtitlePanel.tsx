@@ -309,119 +309,102 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   ).label;
 
   return (
-    <div className="anim-tab-in px-4 pb-4 pt-2.5 space-y-3.5">
-      {/* Track selector & Visibility */}
-      <div className="space-y-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <button
-            type="button"
+    <div className="anim-tab-in space-y-2.5 pt-0.5">
+      {/* Primary 3-column horizontal deck */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+        {/* Card 1: Track selector & Visibility */}
+        <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => {
+                const next = !visible;
+                setVisible(next);
+                void mpvSetSubStyle({
+                  font,
+                  fontSize,
+                  color,
+                  borderSize,
+                  pos,
+                  visible: next,
+                  overrideAss: overrideAssStyle,
+                });
+              }}
+              className="ep-press inline-flex items-center gap-2 text-xs font-medium text-white cursor-pointer disabled:opacity-45"
+            >
+              <span
+                className={`ep-switch-track w-8.5 h-5 rounded-full p-0.5 flex items-center transition-colors ${
+                  visible ? "bg-accent justify-end" : "bg-white/20 justify-start"
+                }`}
+              >
+                <span className="ep-switch-thumb h-4 w-4 rounded-full bg-white shadow" />
+              </span>
+              <span>{visible ? "Subtitles On" : "Subtitles Off"}</span>
+            </button>
+
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!loaded}
+              onClick={() => void handleLoadExternalSubtitle()}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              <span>Add File</span>
+            </Button>
+          </div>
+
+          <SelectMenu
+            ariaLabel="Subtitle Track"
+            placement="top"
             disabled={!loaded}
-            onClick={() => {
-              const next = !visible;
-              setVisible(next);
-              void mpvSetSubStyle({
-                font,
-                fontSize,
-                color,
-                borderSize,
-                pos,
-                visible: next,
-                overrideAss: overrideAssStyle,
+            value={currentSubVal}
+            options={subOptions.map((o) => ({ value: o.value, label: o.label }))}
+            onChange={(val) => {
+              const sid = val === "none" ? null : Number(val);
+              void selectSubTrack(sid, tracks, {
+                mpvSetSubTrack,
+                mpvSetSubDelay,
+                setDelaySecs,
+                setSubtitleVisible: setVisible,
+                clearExternalTrackState: clearLoadedTrack,
               });
             }}
-            className="ep-menu-row ep-press px-2 py-1 inline-flex items-center gap-2 text-xs font-medium text-white cursor-pointer disabled:opacity-45"
-          >
-            <span
-              className={`ep-switch-track w-9 h-5 rounded-full p-0.5 flex items-center transition-colors ${
-                visible ? "bg-accent justify-end" : "bg-white/20 justify-start"
-              }`}
-            >
-              <span className="ep-switch-thumb h-4 w-4 rounded-full bg-white shadow" />
-            </span>
-            <span>{visible ? "Subtitles On" : "Subtitles Off"}</span>
-          </button>
-
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={!loaded}
-            onClick={() => void handleLoadExternalSubtitle()}
-          >
-            <FolderOpen className="h-3.5 w-3.5" />
-            <span>Add File</span>
-          </Button>
+          />
         </div>
 
-        <SelectMenu
-          ariaLabel="Subtitle Track"
-          disabled={!loaded}
-          value={currentSubVal}
-          options={subOptions.map((o) => ({ value: o.value, label: o.label }))}
-          onChange={(val) => {
-            const sid = val === "none" ? null : Number(val);
-            void selectSubTrack(sid, tracks, {
-              mpvSetSubTrack,
-              mpvSetSubDelay,
-              setDelaySecs,
-              setSubtitleVisible: setVisible,
-              clearExternalTrackState: clearLoadedTrack,
-            });
-          }}
-        />
-        {loadedFilePath && (
-          <p className="text-[11px] text-muted truncate px-1">
-            {getFileDisplayName(loadedFilePath)}
-          </p>
-        )}
-      </div>
+        {/* Card 2: Timing & Magic Sync */}
+        <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="font-medium text-secondary">Timing</span>
+              <span className="num text-[11px] text-muted">{formatDelayLabel(delaySecs)}</span>
+            </div>
 
-      {subIsBitmap && (
-        <div className="rounded-2xl bg-warn/10 px-3 py-2 flex items-start gap-2 text-[11px] text-warn">
-          <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-          <span>
-            Image-based subtitles ({selectedSub?.codec}) keep their built-in look and timing.
-          </span>
-        </div>
-      )}
-
-      {/* Timing & Magic Sync */}
-      <div className="space-y-2.5">
-        {autoSyncBusy ? (
-          <button
-            type="button"
-            onClick={() => void handleCancelAutoSync()}
-            className="ep-press w-full h-9 px-3 rounded-xl bg-bad/20 hover:bg-bad/30 text-bad text-xs font-medium flex items-center justify-between cursor-pointer"
-          >
-            <span className="inline-flex items-center gap-2">
-              <Square className="h-3.5 w-3.5 fill-current" />
-              Listening to dialogue…
-            </span>
-            <span className="text-[11px]">Cancel</span>
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={!canAutoSync}
-            onClick={() => void handleAutoSync()}
-            className="ep-glass-pill-active ep-press w-full h-9 px-3 rounded-xl text-xs font-medium text-white flex items-center justify-between cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
-          >
-            <span className="inline-flex items-center gap-2">
-              <Sparkles className="h-3.5 w-3.5 text-accent-soft" />
-              <span>Magic Sync to Voice</span>
-            </span>
-            <span className="text-[11px] text-accent-soft">
-              {autoSyncOutcome ? "Matched to speech" : "Auto-align"}
-            </span>
-          </button>
-        )}
-        {autoSyncError && <p className="text-[11px] text-bad px-1">{autoSyncError}</p>}
-
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between px-1 text-[11px]">
-            <span className="text-secondary font-medium">Timing</span>
-            <span className="num text-muted">{formatDelayLabel(delaySecs)}</span>
+            {autoSyncBusy ? (
+              <button
+                type="button"
+                onClick={() => void handleCancelAutoSync()}
+                className="ep-press inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-bad/20 hover:bg-bad/30 text-bad text-[11px] font-medium cursor-pointer"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                <span>Cancel</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!canAutoSync}
+                onClick={() => void handleAutoSync()}
+                title="Automatically align subtitles to speech"
+                className="ep-glass-pill-active ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium text-white cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+              >
+                <Sparkles className="h-3 w-3 text-accent-soft" />
+                <span>{autoSyncOutcome ? "Matched" : "Magic Sync"}</span>
+              </button>
+            )}
           </div>
-          <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1 text-xs">
+
+          <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1 text-[11px]">
             <button
               type="button"
               disabled={!loaded}
@@ -467,100 +450,131 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             </button>
           </div>
         </div>
-      </div>
 
-      {/* Size & Color appearance */}
-      <div className="space-y-2.5">
-        <div className="ep-glass-input p-1 rounded-full grid grid-cols-3 gap-1">
-          {QUICK_SIZES.map((preset) => {
-            const active = nearestSizeLabel === preset.label;
-            return (
-              <button
-                key={preset.label}
-                type="button"
-                onClick={() => {
-                  setFontSize(preset.px);
-                  applyStyleNow();
-                }}
-                className={`ep-press py-1 rounded-full text-xs font-medium cursor-pointer ${
-                  active ? "ep-droplet-indicator text-white" : "text-muted hover:text-primary"
+        {/* Card 3: Size, Color & More Tools toggle */}
+        <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              {SUBTITLE_COLORS.map((c) => {
+                const active = color.toUpperCase() === c.hex.toUpperCase();
+                return (
+                  <button
+                    key={c.hex}
+                    type="button"
+                    aria-label={`Color ${c.label}`}
+                    title={c.label}
+                    onClick={() => {
+                      setColor(c.hex);
+                      applyStyleNow();
+                    }}
+                    className={`ep-press h-4.5 w-4.5 rounded-full cursor-pointer transition-transform ${
+                      active ? "ring-2 ring-accent-soft scale-110" : "opacity-80 hover:opacity-100"
+                    }`}
+                    style={{ backgroundColor: c.hex }}
+                  />
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowTools((s) => !s)}
+              aria-expanded={showTools}
+              className="ep-press inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/[0.06] hover:bg-white/[0.12] text-[11px] font-medium text-secondary hover:text-white cursor-pointer shrink-0"
+            >
+              <span>Fine-tune</span>
+              <ChevronDown
+                className={`h-3 w-3 transition-transform duration-200 ${
+                  showTools ? "rotate-180" : ""
                 }`}
-              >
-                {preset.label}
-              </button>
-            );
-          })}
-        </div>
+              />
+            </button>
+          </div>
 
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[11px] font-medium text-secondary">Color</span>
-          <div className="flex items-center gap-2">
-            {SUBTITLE_COLORS.map((c) => {
-              const active = color.toUpperCase() === c.hex.toUpperCase();
+          <div className="ep-glass-input p-1 rounded-full grid grid-cols-3 gap-1">
+            {QUICK_SIZES.map((preset) => {
+              const active = nearestSizeLabel === preset.label;
               return (
                 <button
-                  key={c.hex}
+                  key={preset.label}
                   type="button"
-                  aria-label={`Color ${c.label}`}
-                  title={c.label}
                   onClick={() => {
-                    setColor(c.hex);
+                    setFontSize(preset.px);
                     applyStyleNow();
                   }}
-                  className={`ep-press h-5 w-5 rounded-full cursor-pointer transition-transform ${
-                    active ? "ring-2 ring-accent-soft scale-110" : "opacity-80 hover:opacity-100"
+                  className={`ep-press py-1 rounded-full text-xs font-medium cursor-pointer ${
+                    active ? "ep-droplet-indicator text-white" : "text-muted hover:text-primary"
                   }`}
-                  style={{ backgroundColor: c.hex }}
-                />
+                >
+                  {preset.label}
+                </button>
               );
             })}
           </div>
         </div>
       </div>
 
-      {/* Collapsed "More subtitle tools" */}
-      <div className="pt-0.5">
-        <button
-          type="button"
-          onClick={() => setShowTools((s) => !s)}
-          className="ep-menu-row ep-press w-full px-2 py-1.5 flex items-center justify-between text-xs text-muted hover:text-primary cursor-pointer"
-        >
-          <span>More subtitle tools</span>
-          <ChevronDown
-            className={`h-3.5 w-3.5 transition-transform duration-200 ${
-              showTools ? "rotate-180" : ""
-            }`}
-          />
-        </button>
+      {/* Compact inline notices when relevant */}
+      {(loadedFilePath || subIsBitmap || autoSyncError) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[11px]">
+          {loadedFilePath && (
+            <span className="text-muted truncate max-w-[320px]">
+              File: {getFileDisplayName(loadedFilePath)}
+            </span>
+          )}
+          {subIsBitmap && (
+            <span className="inline-flex items-center gap-1.5 text-warn">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              Image subtitles ({selectedSub?.codec}) keep built-in style &amp; timing.
+            </span>
+          )}
+          {autoSyncError && <span className="text-bad">{autoSyncError}</span>}
+        </div>
+      )}
 
-        {showTools && (
-          <div className="anim-fade-slide-up px-1.5 pt-2.5 pb-1 space-y-3">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] text-secondary">Font Family</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    resetDefaults();
-                    applyStyleNow();
-                  }}
-                  className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary cursor-pointer"
-                >
-                  <RotateCcw className="h-3 w-3" />
-                  Reset look
-                </button>
-              </div>
-              <SelectMenu
-                ariaLabel="Subtitle Font"
-                value={font}
-                options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
-                onChange={(val) => {
-                  setFont(val);
+      {/* Optional compact 3-column advanced drawer */}
+      {showTools && (
+        <div className="anim-fade-slide-up grid grid-cols-1 md:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto">
+          <div className="ep-glass-well rounded-2xl p-3 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-medium text-secondary">Font Family</span>
+              <button
+                type="button"
+                onClick={() => {
+                  resetDefaults();
                   applyStyleNow();
                 }}
-              />
+                className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary cursor-pointer"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Reset look
+              </button>
             </div>
+            <SelectMenu
+              ariaLabel="Subtitle Font"
+              placement="top"
+              value={font}
+              options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
+              onChange={(val) => {
+                setFont(val);
+                applyStyleNow();
+              }}
+            />
+            <label className="ep-menu-row px-2 py-1.5 flex items-center justify-between gap-2 text-xs cursor-pointer">
+              <span className="text-secondary">Override styled fansubs</span>
+              <input
+                type="checkbox"
+                checked={overrideAssStyle}
+                onChange={(e) => {
+                  setOverrideAssStyle(e.target.checked);
+                  applyStyleNow();
+                }}
+                className="accent-[var(--color-accent)] h-4 w-4 shrink-0"
+              />
+            </label>
+          </div>
 
+          <div className="ep-glass-well rounded-2xl p-3 space-y-2">
             <div className="space-y-1">
               <div className="flex justify-between text-[11px] text-secondary">
                 <span>Exact Size</span>
@@ -617,73 +631,53 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 onCommit={() => throttledApplyStyle.flush()}
               />
             </div>
+          </div>
 
-            <div className="space-y-1.5">
-              <span className="text-[11px] text-secondary block">Text Encoding</span>
+          <div className="ep-glass-well rounded-2xl p-3 space-y-2">
+            <div className="space-y-1">
+              <span className="text-[11px] font-medium text-secondary block">Text Encoding</span>
               <SelectMenu
                 ariaLabel="Subtitle Encoding"
+                placement="top"
                 value={encodingHint}
                 options={SUBTITLE_ENCODING_OPTIONS}
                 onChange={(val) => void handleEncodingChange(val)}
               />
             </div>
 
-            <label className="ep-menu-row px-2 py-1.5 flex items-start justify-between gap-2 text-xs cursor-pointer">
-              <div>
-                <span className="text-secondary block">Override styled fansubs</span>
-                <span className="text-[11px] text-muted">
-                  Apply your font and color even on .ass/.ssa tracks.
-                </span>
-              </div>
-              <input
-                type="checkbox"
-                checked={overrideAssStyle}
-                onChange={(e) => {
-                  setOverrideAssStyle(e.target.checked);
-                  applyStyleNow();
-                }}
-                className="mt-0.5 accent-[var(--color-accent)] h-4 w-4 shrink-0"
+            <div className="grid grid-cols-2 gap-1.5">
+              <TextField
+                label="Early sub (s)"
+                value={srcASecs}
+                onChange={(e) => setSrcASecs(e.target.value)}
               />
-            </label>
-
-            <div className="space-y-2 pt-1">
-              <p className="text-[11px] text-muted">
-                Manual 2-point alignment (match two lines to dialogue timestamps):
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                <TextField
-                  label="Early sub (s)"
-                  value={srcASecs}
-                  onChange={(e) => setSrcASecs(e.target.value)}
-                />
-                <TextField
-                  label="Early voice (s)"
-                  value={dstASecs}
-                  onChange={(e) => setDstASecs(e.target.value)}
-                />
-                <TextField
-                  label="Late sub (s)"
-                  value={srcBSecs}
-                  onChange={(e) => setSrcBSecs(e.target.value)}
-                />
-                <TextField
-                  label="Late voice (s)"
-                  value={dstBSecs}
-                  onChange={(e) => setDstBSecs(e.target.value)}
-                />
-              </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                className="w-full"
-                onClick={() => void handleTwoAnchorApply()}
-              >
-                Apply 2-Point Alignment
-              </Button>
+              <TextField
+                label="Early voice (s)"
+                value={dstASecs}
+                onChange={(e) => setDstASecs(e.target.value)}
+              />
+              <TextField
+                label="Late sub (s)"
+                value={srcBSecs}
+                onChange={(e) => setSrcBSecs(e.target.value)}
+              />
+              <TextField
+                label="Late voice (s)"
+                value={dstBSecs}
+                onChange={(e) => setDstBSecs(e.target.value)}
+              />
             </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="w-full"
+              onClick={() => void handleTwoAnchorApply()}
+            >
+              Apply 2-Point Alignment
+            </Button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 });

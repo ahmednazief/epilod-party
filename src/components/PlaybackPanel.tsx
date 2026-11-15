@@ -51,13 +51,13 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
   };
 
   return (
-    <div className="anim-tab-in px-4 pb-4 pt-2.5 space-y-4">
-      {/* Speed */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
+    <div className="anim-tab-in grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-0.5">
+      {/* Card 1: Speed */}
+      <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2.5">
+        <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-medium text-secondary">Playback Speed</span>
           {syncConnected && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-accent-soft">
+            <span className="inline-flex items-center gap-1 text-[10.5px] font-medium text-accent-soft">
               <Lock className="h-3 w-3" />
               Synced 1.0×
             </span>
@@ -73,7 +73,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                 type="button"
                 disabled={disabled}
                 onClick={() => handleSpeedClick(preset)}
-                className={`ep-press h-7 rounded-full text-xs font-medium num transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                className={`ep-press h-7.5 rounded-full text-xs font-medium num transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
                   active
                     ? "ep-droplet-indicator text-white"
                     : "text-muted hover:text-primary"
@@ -86,8 +86,8 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </div>
       </div>
 
-      {/* Picture Frame pills */}
-      <div className="space-y-2">
+      {/* Card 2: Picture Frame pills */}
+      <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2.5">
         <span className="text-xs font-medium text-secondary block">Picture Frame</span>
         <div className="ep-glass-input p-1 rounded-full grid grid-cols-5 gap-1">
           {FRAME_PILLS.map((item) => {
@@ -101,7 +101,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                   setAspectMode(item.value);
                   void mpvSetAspectMode(item.value);
                 }}
-                className={`ep-press h-7 rounded-full text-xs font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                className={`ep-press h-7.5 rounded-full text-xs font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
                   active
                     ? "ep-droplet-indicator text-white"
                     : "text-muted hover:text-primary"
@@ -114,44 +114,40 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </div>
       </div>
 
-      {/* Audio track + Loop video */}
-      <div className="space-y-2.5">
-        <div className="space-y-1.5">
-          <span className="text-xs font-medium text-secondary block">Audio Track</span>
-          <SelectMenu
-            ariaLabel="Audio Track"
+      {/* Card 3: Audio Track & Loop */}
+      <div className="ep-glass-well rounded-2xl p-3 flex flex-col justify-between gap-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-secondary">Audio Track</span>
+          <button
+            type="button"
             disabled={!loaded}
-            value={currentAudioVal}
-            options={audioOptions.map((o) => ({ value: o.value, label: o.label }))}
-            onChange={(val) => {
-              const aid = val === "none" ? null : Number(val);
-              void selectAudioTrack(aid, { mpvSetAudioTrack });
+            aria-pressed={looping}
+            onClick={() => {
+              const next = !looping;
+              setLooping(next);
+              void mpvSetLoop(next);
             }}
-          />
-        </div>
-
-        <button
-          type="button"
-          disabled={!loaded}
-          onClick={() => {
-            const next = !looping;
-            setLooping(next);
-            void mpvSetLoop(next);
-          }}
-          className="ep-menu-row ep-press w-full px-2 py-2 flex items-center justify-between gap-3 cursor-pointer disabled:opacity-45 disabled:pointer-events-none"
-        >
-          <span className="inline-flex items-center gap-2 text-xs font-medium text-primary">
-            <Repeat className="h-3.5 w-3.5 text-secondary" />
-            Loop Video
-          </span>
-          <span
-            className={`ep-switch-track w-10 h-6 rounded-full p-0.5 flex items-center transition-colors ${
-              looping ? "bg-accent justify-end" : "bg-white/18 justify-start"
+            className={`ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium cursor-pointer disabled:opacity-45 disabled:pointer-events-none transition-colors ${
+              looping
+                ? "ep-glass-pill-active text-white"
+                : "bg-white/[0.07] text-secondary hover:text-white hover:bg-white/[0.12]"
             }`}
           >
-            <span className="ep-switch-thumb h-5 w-5 rounded-full bg-white shadow" />
-          </span>
-        </button>
+            <Repeat className="h-3 w-3" />
+            <span>Loop Video</span>
+          </button>
+        </div>
+        <SelectMenu
+          ariaLabel="Audio Track"
+          placement="top"
+          disabled={!loaded}
+          value={currentAudioVal}
+          options={audioOptions.map((o) => ({ value: o.value, label: o.label }))}
+          onChange={(val) => {
+            const aid = val === "none" ? null : Number(val);
+            void selectAudioTrack(aid, { mpvSetAudioTrack });
+          }}
+        />
       </div>
     </div>
   );

@@ -20,7 +20,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { mpvSeek, mpvSetMute, mpvSetPause, mpvSetVolume } from "../lib/mpv";
 import { shouldReplayFromStart } from "../lib/playbackEnd";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
@@ -138,6 +138,7 @@ interface TransportBarProps {
   onLeaveRoom: () => void;
   onHideControls?: () => void;
   onToggleFullscreen: () => void;
+  expandedDrawer?: ReactNode;
 }
 
 export const TransportBar = memo(function TransportBar({
@@ -147,6 +148,7 @@ export const TransportBar = memo(function TransportBar({
   onLeaveRoom,
   onHideControls,
   onToggleFullscreen,
+  expandedDrawer,
 }: TransportBarProps) {
   const paused = usePlayerStore((s) => s.paused);
   const loaded = usePlayerStore((s) => s.loaded);
@@ -268,7 +270,9 @@ export const TransportBar = memo(function TransportBar({
 
   return (
     <div className="shrink-0 w-full px-4 pb-3 pt-1 flex justify-center select-none bg-canvas">
-      <div className="ep-glass-capsule anim-fade-slide-up w-full max-w-[940px] rounded-[26px] px-4 py-2.5 space-y-1.5">
+      <div className="ep-glass-capsule anim-fade-slide-up w-full max-w-[940px] rounded-[26px] px-4 py-2.5 space-y-2">
+        {expandedDrawer && <div className="anim-fade-slide-up pb-1.5">{expandedDrawer}</div>}
+
         {/* Top capsule line: movie title/leave status + elastic scrubber */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 shrink-0 max-w-[230px]">

@@ -13,6 +13,7 @@ interface SelectMenuProps<T extends string = string> {
   ariaLabel: string;
   disabled?: boolean;
   placeholder?: string;
+  placement?: "bottom" | "top";
   className?: string;
 }
 
@@ -23,6 +24,7 @@ export function SelectMenu<T extends string = string>({
   ariaLabel,
   disabled = false,
   placeholder = "Select…",
+  placement = "bottom",
   className = "",
 }: SelectMenuProps<T>) {
   const [open, setOpen] = useState(false);
@@ -74,7 +76,9 @@ export function SelectMenu<T extends string = string>({
         <div
           role="listbox"
           aria-label={ariaLabel}
-          className="anim-pop-in ep-glass-sheet absolute z-50 mt-1.5 w-full max-h-56 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5"
+          className={`anim-pop-in ep-glass-sheet absolute z-50 w-full max-h-56 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5 ${
+            placement === "top" ? "bottom-full mb-1.5" : "mt-1.5"
+          }`}
         >
           {options.map((opt) => {
             const active = opt.value === value;

@@ -214,11 +214,7 @@ export function WatchRoom() {
         viewportTrackerRef.current.markInvalidated();
         const appState = useAppStore.getState();
         const playerErr = usePlayerStore.getState().playerError;
-        if (panelOpenRef.current) {
-          void mpvSetVisible(false);
-        } else {
-          void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !playerErr);
-        }
+        void mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !playerErr);
       })
       .finally(() => {
         mpvStartPromiseRef.current = null;
@@ -647,15 +643,11 @@ export function WatchRoom() {
     }
   }, [rect]);
 
-  // Hide child HWND whenever modals/popover overlay live video or player fails (Fix 16)
+  // Hide child HWND whenever fullscreen modals overlay live video or player fails (Fix 16)
   useEffect(() => {
     if (!isDesktop() || !mpvStartedRef.current) return;
-    if (panelOpen && loaded) {
-      void mpvSetVisible(false);
-      return;
-    }
     void mpvSetVisible(!settingsOpen && !shortcutsOpen && !playerError);
-  }, [settingsOpen, shortcutsOpen, playerError, panelOpen, loaded]);
+  }, [settingsOpen, shortcutsOpen, playerError, loaded]);
 
   // Wake/auto-hide floating cinema chrome & allow Escape to close floating popover
   useEffect(() => {
@@ -832,48 +824,14 @@ export function WatchRoom() {
             })();
           }}
         />
-      </div>
-
-      {/* Floating Smoked-Amethyst Popover (Party / Playback / Subtitles) */}
-      {panelOpen && (
-        <>
+        {panelOpen && (
           <div
-            className="fixed inset-0 z-20"
+            className="absolute inset-0 z-20"
             onClick={() => setPanelOpen(false)}
             aria-hidden="true"
           />
-          <div className="fixed inset-x-0 bottom-26 z-30 flex justify-center px-4 pointer-events-none">
-            <div className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[390px] max-h-[calc(100vh-145px)] rounded-[24px] flex flex-col overflow-hidden">
-              <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-2">
-                <SegmentedTabs
-                  ariaLabel="Inspector panel"
-                  value={sideTab}
-                  onChange={setSideTab}
-                  className="flex-1"
-                  items={[
-                    { value: "room", label: "Party" },
-                    { value: "playback", label: "Playback" },
-                    { value: "subtitles", label: "Subtitles" },
-                  ]}
-                />
-                <button
-                  type="button"
-                  onClick={() => setPanelOpen(false)}
-                  aria-label="Close popover"
-                  className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto min-h-0">
-                {sideTab === "room" && <RoomPanel />}
-                {sideTab === "playback" && <PlaybackPanel />}
-                {sideTab === "subtitles" && <SubtitlePanel />}
-              </div>
-            </div>
-          </div>
-        </>
-      )}
+        )}
+      </div>
 
       {showFloatingCapsule ? (
         <TransportBar
@@ -883,6 +841,39 @@ export function WatchRoom() {
           onLeaveRoom={handleLeaveRoom}
           onHideControls={() => setChromeIdle(true)}
           onToggleFullscreen={toggleFullscreen}
+          expandedDrawer={
+            panelOpen ? (
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between gap-3 px-1">
+                  <SegmentedTabs
+                    ariaLabel="Inspector panel"
+                    value={sideTab}
+                    onChange={setSideTab}
+                    className="w-full max-w-[300px]"
+                    items={[
+                      { value: "room", label: "Party" },
+                      { value: "playback", label: "Playback" },
+                      { value: "subtitles", label: "Subtitles" },
+                    ]}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPanelOpen(false)}
+                    aria-label="Close popover"
+                    title="Collapse play bar (Esc)"
+                    className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="max-h-[42vh] overflow-visible">
+                  {sideTab === "room" && <RoomPanel />}
+                  {sideTab === "playback" && <PlaybackPanel />}
+                  {sideTab === "subtitles" && <SubtitlePanel />}
+                </div>
+              </div>
+            ) : null
+          }
         />
       ) : (
         <div
