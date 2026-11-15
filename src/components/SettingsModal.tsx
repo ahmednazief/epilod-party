@@ -419,15 +419,19 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                   {(isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
                     updateProgress && (
-                      <div className="space-y-1.5 pt-1">
+                      <div className="ep-glass-well rounded-2xl p-3.5 space-y-2">
                         <div className="flex items-center justify-between gap-2 text-[11px]">
                           <span className="text-secondary truncate">{updateProgress.message}</span>
-                          <span className="font-mono text-muted shrink-0">
-                            {updateProgress.speedBps > 0
-                              ? `${formatTransferSpeed(updateProgress.speedBps)} · `
-                              : ""}
-                            {Math.round(updateProgress.percent)}%
-                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {updateProgress.speedBps > 0 && (
+                              <span className="font-mono text-muted">
+                                {formatTransferSpeed(updateProgress.speedBps)}
+                              </span>
+                            )}
+                            <span className="ep-update-pct-badge num font-mono text-xs font-semibold text-accent-soft px-2.5 py-0.5 rounded-full">
+                              {Math.round(updateProgress.percent)}%
+                            </span>
+                          </div>
                         </div>
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
                           <div
