@@ -1,4 +1,3 @@
-import { AudioLines, Check, Lock, Repeat, VolumeX } from "lucide-react";
 import { memo } from "react";
 import {
   mpvSetAspectMode,
@@ -13,6 +12,9 @@ import { buildAudioTrackOptions, selectAudioTrack } from "../lib/tracks";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { AppCheckIcon, AppLockIcon, AppRepeatIcon } from "./ui/AppIcons";
+import { GlassSwitchTrack } from "./ui/GlassSwitch";
+import { PlayerAudioIcon, PlayerVolumeIcon } from "./ui/PlayerIcons";
 
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 2.0] as const;
 
@@ -96,11 +98,11 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                 <span className="flex items-center gap-2.5 min-w-0">
                   <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
                     {active ? (
-                      <Check className="h-3.5 w-3.5 text-ok" />
+                      <AppCheckIcon size={14} className="text-ok" />
                     ) : t ? (
-                      <AudioLines className="h-3.5 w-3.5 opacity-70" />
+                      <PlayerAudioIcon size={14} className="opacity-80" />
                     ) : (
-                      <VolumeX className="h-3.5 w-3.5 opacity-70" />
+                      <PlayerVolumeIcon muted size={14} className="opacity-80" />
                     )}
                   </span>
                   <span className="truncate">{primaryLabel}</span>
@@ -122,7 +124,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         <span>Playback Speed</span>
         {syncConnected && (
           <span className="inline-flex items-center gap-1 text-accent-soft normal-case font-medium">
-            <Lock className="h-2.5 w-2.5" />
+            <AppLockIcon size={11} />
             Synced 1×
           </span>
         )}
@@ -138,7 +140,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                 type="button"
                 disabled={disabled}
                 onClick={() => handleSpeedClick(preset)}
-                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium num transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
+                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium num cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
                   active
                     ? "ep-droplet-indicator text-white"
                     : "text-secondary hover:text-white"
@@ -167,7 +169,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
                   setAspectMode(item.value);
                   safeMpvCall(mpvSetAspectMode(item.value), "mpvSetAspectMode");
                 }}
-                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
+                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium cursor-pointer disabled:opacity-35 disabled:pointer-events-none ${
                   active
                     ? "ep-droplet-indicator text-white"
                     : "text-secondary hover:text-white"
@@ -196,17 +198,11 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
       >
         <span className="flex items-center gap-2.5 min-w-0">
           <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
-            {looping ? <Check className="h-3.5 w-3.5 text-ok" /> : <Repeat className="h-3.5 w-3.5" />}
+            {looping ? <AppCheckIcon size={14} className="text-ok" /> : <AppRepeatIcon size={14} />}
           </span>
           <span className="truncate">Loop Current Video</span>
         </span>
-        <span
-          className={`ep-switch-track w-7.5 h-4 rounded-full p-0.5 flex items-center transition-colors shrink-0 ${
-            looping ? "bg-accent justify-end" : "bg-white/20 justify-start"
-          }`}
-        >
-          <span className="ep-switch-thumb h-3 w-3 rounded-full bg-white shadow" />
-        </span>
+        <GlassSwitchTrack checked={looping} size="sm" />
       </button>
     </div>
   );

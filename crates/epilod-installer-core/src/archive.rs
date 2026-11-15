@@ -1,18 +1,111 @@
 use crate::plan::{ComponentId, APP_VERSION};
+use lzma_rust2::filter::bcj2::{Bcj2Options, Bcj2Reader, Bcj2Writer};
+use lzma_rust2::{
+    Lzma2Options, Lzma2Reader, Lzma2Writer, LzmaOptions, LzmaReader, LzmaWriter, DICT_SIZE_MIN,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 const MAGIC: &[u8; 8] = b"EPKG0001";
+const MAGIC_V2: &[u8; 8] = b"EPKG0002";
 const SFX_TRAILER_MAGIC: &[u8; 12] = b"EPILOD_SFX01";
 const SFX_TRAILER_SIZE: u64 = 20; // [u64 payload_start_offset LE][12-byte SFX_TRAILER_MAGIC]
+const BCJ2_HEADER_SIZE: u64 = 36; // [u32 dict_size][u64 main_len][u64 call_len][u64 jump_len][u64 rc_len]
 const CHUNK_SIZE: usize = 64 * 1024;
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
+const MAIN_DICT_MIN: u32 = 1 << 16;
+const MAIN_DICT_MAX: u32 = 256 << 20;
+const CALL_JUMP_DICT_MAX: u32 = 8 << 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveFormat {
+    RawV1,
+    Bcj2Lzma2V2,
+}
+
+fn parse_magic(magic: &[u8; 8]) -> Option<ArchiveFormat> {
+    if magic == MAGIC {
+        Some(ArchiveFormat::RawV1)
+    } else if magic == MAGIC_V2 {
+        Some(ArchiveFormat::Bcj2Lzma2V2)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Bcj2StreamHeader {
+    dict_size: u32,
+    main_len: u64,
+    call_len: u64,
+    jump_len: u64,
+    rc_len: u64,
+}
+
+impl Bcj2StreamHeader {
+    fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), ArchiveError> {
+        writer.write_all(&self.dict_size.to_le_bytes())?;
+        writer.write_all(&self.main_len.to_le_bytes())?;
+        writer.write_all(&self.call_len.to_le_bytes())?;
+        writer.write_all(&self.jump_len.to_le_bytes())?;
+        writer.write_all(&self.rc_len.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn read_checked(
+        file: &mut File,
+        data_start: u64,
+        end_offset: u64,
+    ) -> Result<Self, ArchiveError> {
+        let streams_start = data_start
+            .checked_add(BCJ2_HEADER_SIZE)
+            .ok_or(ArchiveError::BadHeader)?;
+        if streams_start > end_offset {
+            return Err(ArchiveError::BadHeader);
+        }
+
+        file.seek(SeekFrom::Start(data_start))?;
+        let mut raw = [0u8; BCJ2_HEADER_SIZE as usize];
+        file.read_exact(&mut raw)?;
+
+        let dict_size = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+        if !(DICT_SIZE_MIN..=MAIN_DICT_MAX).contains(&dict_size) {
+            return Err(ArchiveError::BadHeader);
+        }
+
+        let main_len = u64::from_le_bytes(raw[4..12].try_into().unwrap());
+        let call_len = u64::from_le_bytes(raw[12..20].try_into().unwrap());
+        let jump_len = u64::from_le_bytes(raw[20..28].try_into().unwrap());
+        let rc_len = u64::from_le_bytes(raw[28..36].try_into().unwrap());
+
+        let total_end = streams_start
+            .checked_add(main_len)
+            .and_then(|v| v.checked_add(call_len))
+            .and_then(|v| v.checked_add(jump_len))
+            .and_then(|v| v.checked_add(rc_len))
+            .ok_or_else(|| ArchiveError::CorruptBounds("Compressed stream overflow".to_string()))?;
+
+        if total_end != end_offset {
+            return Err(ArchiveError::CorruptBounds(
+                "Compressed BCJ2 stream length mismatch".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            dict_size,
+            main_len,
+            call_len,
+            jump_len,
+            rc_len,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveSource {
@@ -39,7 +132,7 @@ pub struct PackageManifest {
 }
 
 impl PackageManifest {
-    pub fn validate_layout(&self, data_start: u64, end_offset: u64) -> Result<(), ArchiveError> {
+    fn validate_common(&self, raw_bounds: Option<(u64, u64)>) -> Result<(), ArchiveError> {
         if self.version.trim().is_empty() || self.entries.is_empty() {
             return Err(ArchiveError::CorruptBounds(
                 "Empty installer manifest".to_string(),
@@ -67,14 +160,21 @@ impl PackageManifest {
                 });
             }
 
-            let abs_start = data_start
-                .checked_add(entry.offset)
-                .ok_or_else(|| ArchiveError::CorruptBounds(entry.relative_path.clone()))?;
-            let abs_end = abs_start
-                .checked_add(entry.size)
-                .ok_or_else(|| ArchiveError::CorruptBounds(entry.relative_path.clone()))?;
-            if abs_end > end_offset {
-                return Err(ArchiveError::CorruptBounds(entry.relative_path.clone()));
+            if let Some((data_start, end_offset)) = raw_bounds {
+                let abs_start = data_start
+                    .checked_add(entry.offset)
+                    .ok_or_else(|| ArchiveError::CorruptBounds(entry.relative_path.clone()))?;
+                let abs_end = abs_start
+                    .checked_add(entry.size)
+                    .ok_or_else(|| ArchiveError::CorruptBounds(entry.relative_path.clone()))?;
+                if abs_end > end_offset {
+                    return Err(ArchiveError::CorruptBounds(entry.relative_path.clone()));
+                }
+            } else if entry.offset != computed_total {
+                return Err(ArchiveError::CorruptBounds(format!(
+                    "Non-contiguous compressed stream offset for {}",
+                    entry.relative_path
+                )));
             }
 
             computed_total = computed_total
@@ -90,6 +190,14 @@ impl PackageManifest {
         }
 
         Ok(())
+    }
+
+    pub fn validate_layout(&self, data_start: u64, end_offset: u64) -> Result<(), ArchiveError> {
+        self.validate_common(Some((data_start, end_offset)))
+    }
+
+    pub fn validate_compressed_layout(&self) -> Result<(), ArchiveError> {
+        self.validate_common(None)
     }
 }
 
@@ -222,18 +330,42 @@ pub fn classify_component(relative_path: &str) -> ComponentId {
     }
 }
 
-pub fn pack_directory(
-    source_dir: &Path,
-    out_archive: &Path,
-) -> Result<PackageManifest, ArchiveError> {
-    pack_directory_with_version(source_dir, out_archive, APP_VERSION)
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
-pub fn pack_directory_with_version(
+enum Bcj2Sink {
+    Main(Lzma2Writer<BufWriter<File>>),
+    Addr(LzmaWriter<Vec<u8>>),
+    Rc(Vec<u8>),
+}
+
+impl Write for Bcj2Sink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Bcj2Sink::Main(w) => w.write(buf),
+            Bcj2Sink::Addr(w) => w.write(buf),
+            Bcj2Sink::Rc(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Bcj2Sink::Main(w) => w.flush(),
+            Bcj2Sink::Addr(w) => w.flush(),
+            Bcj2Sink::Rc(w) => w.flush(),
+        }
+    }
+}
+
+fn build_manifest(
     source_dir: &Path,
-    out_archive: &Path,
     version: &str,
-) -> Result<PackageManifest, ArchiveError> {
+) -> Result<(BTreeMap<String, PathBuf>, PackageManifest), ArchiveError> {
     let mut files: BTreeMap<String, PathBuf> = BTreeMap::new();
     collect_files_sorted(source_dir, source_dir, &mut files)?;
 
@@ -243,7 +375,7 @@ pub fn pack_directory_with_version(
 
     for (rel, full_path) in &files {
         sanitize_relative_path(rel)?;
-        let lower_rel = rel.replace('\\', "/").to_ascii_lowercase();
+        let lower_rel = normalize_rel(rel).to_ascii_lowercase();
         if !seen_lower.insert(lower_rel) {
             return Err(ArchiveError::UnsafePath(format!(
                 "Case-insensitive collision in source tree: {rel}"
@@ -273,6 +405,143 @@ pub fn pack_directory_with_version(
         total_bytes: data_offset,
         entries,
     };
+    Ok((files, manifest))
+}
+
+fn copy_stream_chunks<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    buf: &mut [u8],
+) -> Result<(), ArchiveError> {
+    loop {
+        let n = reader.read(buf)?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n])?;
+    }
+    Ok(())
+}
+
+pub fn pack_directory(
+    source_dir: &Path,
+    out_archive: &Path,
+) -> Result<PackageManifest, ArchiveError> {
+    pack_directory_with_version(source_dir, out_archive, APP_VERSION)
+}
+
+pub fn pack_directory_with_version(
+    source_dir: &Path,
+    out_archive: &Path,
+    version: &str,
+) -> Result<PackageManifest, ArchiveError> {
+    let (files, manifest) = build_manifest(source_dir, version)?;
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    if manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(ArchiveError::BadHeader);
+    }
+
+    if let Some(parent) = out_archive.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_name = format!(
+        ".{}.{}.main.tmp",
+        out_archive
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("epilod-payload"),
+        std::process::id()
+    );
+    let main_tmp_path = out_archive.with_file_name(tmp_name);
+    let _tmp_guard = TempFileGuard(main_tmp_path.clone());
+
+    let dict_size = (manifest.total_bytes.min(u64::from(MAIN_DICT_MAX)) as u32)
+        .clamp(MAIN_DICT_MIN, MAIN_DICT_MAX);
+    let mut main_opts = Lzma2Options::with_preset(9);
+    main_opts.lzma_options.dict_size = dict_size;
+
+    let mut addr_opts = LzmaOptions::with_preset(6);
+    addr_opts.lc = 0;
+    addr_opts.lp = 2;
+    addr_opts.pb = 2;
+    addr_opts.dict_size = (manifest.total_bytes.min(u64::from(CALL_JUMP_DICT_MAX)) as u32)
+        .clamp(MAIN_DICT_MIN, CALL_JUMP_DICT_MAX);
+
+    let main_sink = Bcj2Sink::Main(Lzma2Writer::new(
+        BufWriter::new(File::create(&main_tmp_path)?),
+        main_opts,
+    ));
+    let call_sink = Bcj2Sink::Addr(LzmaWriter::new_use_header(Vec::new(), &addr_opts, None)?);
+    let jump_sink = Bcj2Sink::Addr(LzmaWriter::new_use_header(Vec::new(), &addr_opts, None)?);
+    let rc_sink = Bcj2Sink::Rc(Vec::new());
+
+    let bcj2_opts = Bcj2Options {
+        uncompressed_size: Some(manifest.total_bytes),
+        relative_limit: Bcj2Options::RELATIVE_LIMIT_DEFAULT,
+    };
+    let mut bcj2 = Bcj2Writer::new([main_sink, call_sink, jump_sink, rc_sink], &bcj2_opts)?;
+
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    for full_path in files.values() {
+        let mut reader = BufReader::new(File::open(full_path)?);
+        copy_stream_chunks(&mut reader, &mut bcj2, &mut buf)?;
+    }
+
+    let [main_done, call_done, jump_done, rc_done] = bcj2.finish()?;
+
+    let mut main_file_writer = match main_done {
+        Bcj2Sink::Main(w) => w.finish()?,
+        _ => unreachable!(),
+    };
+    main_file_writer.flush()?;
+    drop(main_file_writer);
+
+    let call_bytes = match call_done {
+        Bcj2Sink::Addr(w) => w.finish()?,
+        _ => unreachable!(),
+    };
+    let jump_bytes = match jump_done {
+        Bcj2Sink::Addr(w) => w.finish()?,
+        _ => unreachable!(),
+    };
+    let rc_bytes = match rc_done {
+        Bcj2Sink::Rc(v) => v,
+        _ => unreachable!(),
+    };
+
+    let main_len = fs::metadata(&main_tmp_path)?.len();
+    let header = Bcj2StreamHeader {
+        dict_size,
+        main_len,
+        call_len: call_bytes.len() as u64,
+        jump_len: jump_bytes.len() as u64,
+        rc_len: rc_bytes.len() as u64,
+    };
+
+    let out_file = File::create(out_archive)?;
+    let mut writer = BufWriter::new(out_file);
+    writer.write_all(MAGIC_V2)?;
+    writer.write_all(&(manifest_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(&manifest_bytes)?;
+    header.write_to(&mut writer)?;
+
+    let mut main_reader = BufReader::new(File::open(&main_tmp_path)?);
+    copy_stream_chunks(&mut main_reader, &mut writer, &mut buf)?;
+    writer.write_all(&call_bytes)?;
+    writer.write_all(&jump_bytes)?;
+    writer.write_all(&rc_bytes)?;
+    writer.flush()?;
+    Ok(manifest)
+}
+
+#[cfg(test)]
+pub(crate) fn pack_directory_v1(
+    source_dir: &Path,
+    out_archive: &Path,
+    version: &str,
+) -> Result<PackageManifest, ArchiveError> {
+    let (files, manifest) = build_manifest(source_dir, version)?;
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     if manifest_bytes.len() > MAX_MANIFEST_BYTES {
         return Err(ArchiveError::BadHeader);
@@ -291,13 +560,7 @@ pub fn pack_directory_with_version(
     let mut buf = vec![0u8; CHUNK_SIZE];
     for full_path in files.values() {
         let mut reader = BufReader::new(File::open(full_path)?);
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            writer.write_all(&buf[..n])?;
-        }
+        copy_stream_chunks(&mut reader, &mut writer, &mut buf)?;
     }
     writer.flush()?;
     Ok(manifest)
@@ -312,7 +575,7 @@ pub fn detect_archive_source(archive_path: &Path) -> Result<ArchiveSource, Archi
 
     let mut head_magic = [0u8; 8];
     file.read_exact(&mut head_magic)?;
-    if &head_magic == MAGIC {
+    if parse_magic(&head_magic).is_some() {
         return Ok(ArchiveSource {
             start_offset: 0,
             end_offset: file_len,
@@ -375,7 +638,7 @@ fn try_read_sfx_trailer_at_end(
     file.seek(SeekFrom::Start(start_offset))?;
     let mut payload_magic = [0u8; 8];
     file.read_exact(&mut payload_magic)?;
-    if &payload_magic == MAGIC {
+    if parse_magic(&payload_magic).is_some() {
         return Ok(Some(ArchiveSource {
             start_offset,
             end_offset,
@@ -433,16 +696,20 @@ pub fn attach_payload_sfx(
     Ok(total_written + SFX_TRAILER_SIZE)
 }
 
-pub fn read_manifest(archive_path: &Path) -> Result<(PackageManifest, u64), ArchiveError> {
+fn normalize_rel(rel: &str) -> String {
+    rel.replace('\\', "/")
+}
+
+fn read_manifest_internal(
+    archive_path: &Path,
+) -> Result<(ArchiveSource, ArchiveFormat, PackageManifest, u64), ArchiveError> {
     let source = detect_archive_source(archive_path)?;
     let mut file = File::open(archive_path)?;
     file.seek(SeekFrom::Start(source.start_offset))?;
 
     let mut magic = [0u8; 8];
     file.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(ArchiveError::BadHeader);
-    }
+    let format = parse_magic(&magic).ok_or(ArchiveError::BadHeader)?;
 
     let mut len_buf = [0u8; 8];
     file.read_exact(&mut len_buf)?;
@@ -463,7 +730,18 @@ pub fn read_manifest(archive_path: &Path) -> Result<(PackageManifest, u64), Arch
     let mut manifest_bytes = vec![0u8; manifest_len];
     file.read_exact(&mut manifest_bytes)?;
     let manifest: PackageManifest = serde_json::from_slice(&manifest_bytes)?;
-    manifest.validate_layout(data_start, source.end_offset)?;
+    match format {
+        ArchiveFormat::RawV1 => manifest.validate_layout(data_start, source.end_offset)?,
+        ArchiveFormat::Bcj2Lzma2V2 => {
+            manifest.validate_compressed_layout()?;
+            let _ = Bcj2StreamHeader::read_checked(&mut file, data_start, source.end_offset)?;
+        }
+    }
+    Ok((source, format, manifest, data_start))
+}
+
+pub fn read_manifest(archive_path: &Path) -> Result<(PackageManifest, u64), ArchiveError> {
+    let (_source, _format, manifest, data_start) = read_manifest_internal(archive_path)?;
     Ok((manifest, data_start))
 }
 
@@ -485,48 +763,184 @@ where
     )
 }
 
-pub fn extract_entries_verified_streaming<F>(
-    archive_path: &Path,
-    dest_dir: &Path,
-    reused_rel_paths: &BTreeSet<String>,
-    cancel_flag: &AtomicBool,
-    mut on_progress: F,
-) -> Result<PackageManifest, ArchiveError>
+struct ExtractContext<'a, F> {
+    dest_dir: &'a Path,
+    reused_rel_paths: &'a BTreeSet<String>,
+    total_bytes: u64,
+    files_total: usize,
+    total_done: u64,
+    buf: Vec<u8>,
+    cancel_flag: &'a AtomicBool,
+    on_progress: &'a mut F,
+}
+
+impl<'a, F> ExtractContext<'a, F>
 where
     F: FnMut(ExtractProgress),
 {
-    let source = detect_archive_source(archive_path)?;
-    let (manifest, data_start) = read_manifest(archive_path)?;
-    let mut reader = BufReader::new(File::open(archive_path)?);
-    let mut total_done: u64 = 0;
-    let files_total = manifest.entries.len();
-    let mut buf = vec![0u8; CHUNK_SIZE];
+    fn new(
+        manifest: &PackageManifest,
+        dest_dir: &'a Path,
+        reused_rel_paths: &'a BTreeSet<String>,
+        cancel_flag: &'a AtomicBool,
+        on_progress: &'a mut F,
+    ) -> Self {
+        Self {
+            dest_dir,
+            reused_rel_paths,
+            total_bytes: manifest.total_bytes,
+            files_total: manifest.entries.len(),
+            total_done: 0,
+            buf: vec![0u8; CHUNK_SIZE],
+            cancel_flag,
+            on_progress,
+        }
+    }
 
-    fs::create_dir_all(dest_dir)?;
+    fn emit_reused(&mut self, entry: &PackageEntry, idx: usize) {
+        self.total_done = self.total_done.saturating_add(entry.size);
+        (self.on_progress)(ExtractProgress {
+            action: ExtractAction::ReusedVerified,
+            component: entry.component,
+            relative_path: entry.relative_path.clone(),
+            file_bytes_done: entry.size,
+            file_bytes_total: entry.size,
+            total_bytes_done: self.total_done,
+            total_bytes: self.total_bytes,
+            files_done: idx + 1,
+            files_total: self.files_total,
+        });
+    }
+
+    fn stream_entry<R: Read>(
+        &mut self,
+        reader: &mut R,
+        entry: &PackageEntry,
+        idx: usize,
+    ) -> Result<(), ArchiveError> {
+        let clean_rel = sanitize_relative_path(&entry.relative_path)?;
+        let out_path = self.dest_dir.join(&clean_rel);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut writer = BufWriter::new(File::create(&out_path)?);
+        let mut hasher = Sha256::new();
+        let mut remaining = entry.size;
+        let mut file_done = 0u64;
+
+        (self.on_progress)(ExtractProgress {
+            action: ExtractAction::Unpacking,
+            component: entry.component,
+            relative_path: entry.relative_path.clone(),
+            file_bytes_done: 0,
+            file_bytes_total: entry.size,
+            total_bytes_done: self.total_done,
+            total_bytes: self.total_bytes,
+            files_done: idx,
+            files_total: self.files_total,
+        });
+
+        while remaining > 0 {
+            if self.cancel_flag.load(Ordering::SeqCst) {
+                return Err(ArchiveError::Cancelled);
+            }
+            let want = remaining.min(self.buf.len() as u64) as usize;
+            reader.read_exact(&mut self.buf[..want])?;
+            writer.write_all(&self.buf[..want])?;
+            hasher.update(&self.buf[..want]);
+            remaining -= want as u64;
+            file_done += want as u64;
+            self.total_done += want as u64;
+
+            (self.on_progress)(ExtractProgress {
+                action: ExtractAction::Unpacking,
+                component: entry.component,
+                relative_path: entry.relative_path.clone(),
+                file_bytes_done: file_done,
+                file_bytes_total: entry.size,
+                total_bytes_done: self.total_done,
+                total_bytes: self.total_bytes,
+                files_done: idx,
+                files_total: self.files_total,
+            });
+        }
+
+        writer.flush()?;
+
+        (self.on_progress)(ExtractProgress {
+            action: ExtractAction::VerifyingDigest,
+            component: entry.component,
+            relative_path: entry.relative_path.clone(),
+            file_bytes_done: entry.size,
+            file_bytes_total: entry.size,
+            total_bytes_done: self.total_done,
+            total_bytes: self.total_bytes,
+            files_done: idx + 1,
+            files_total: self.files_total,
+        });
+
+        let digest_hex = hex_lower(&hasher.finalize());
+        if digest_hex != entry.sha256.to_ascii_lowercase() {
+            return Err(ArchiveError::ChecksumMismatch {
+                path: entry.relative_path.clone(),
+                expected: entry.sha256.clone(),
+                actual: digest_hex,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn drain_exact<R: Read>(
+        &mut self,
+        reader: &mut R,
+        mut remaining: u64,
+    ) -> Result<(), ArchiveError> {
+        while remaining > 0 {
+            if self.cancel_flag.load(Ordering::SeqCst) {
+                return Err(ArchiveError::Cancelled);
+            }
+            let want = remaining.min(self.buf.len() as u64) as usize;
+            reader.read_exact(&mut self.buf[..want])?;
+            remaining -= want as u64;
+        }
+        Ok(())
+    }
+}
+
+fn open_slice(
+    path: &Path,
+    offset: u64,
+    len: u64,
+) -> Result<BufReader<io::Take<File>>, ArchiveError> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    Ok(BufReader::new(file.take(len)))
+}
+
+fn extract_v1_entries<F: FnMut(ExtractProgress)>(
+    archive_path: &Path,
+    source: ArchiveSource,
+    data_start: u64,
+    manifest: &PackageManifest,
+    ctx: &mut ExtractContext<'_, F>,
+) -> Result<(), ArchiveError> {
+    let mut reader = BufReader::new(File::open(archive_path)?);
 
     for (idx, entry) in manifest.entries.iter().enumerate() {
-        if cancel_flag.load(Ordering::SeqCst) {
+        if ctx.cancel_flag.load(Ordering::SeqCst) {
             return Err(ArchiveError::Cancelled);
         }
 
-        let norm_rel = entry.relative_path.replace('\\', "/");
-        if reused_rel_paths.contains(&norm_rel) {
-            total_done = total_done.saturating_add(entry.size);
-            on_progress(ExtractProgress {
-                action: ExtractAction::ReusedVerified,
-                component: entry.component,
-                relative_path: entry.relative_path.clone(),
-                file_bytes_done: entry.size,
-                file_bytes_total: entry.size,
-                total_bytes_done: total_done,
-                total_bytes: manifest.total_bytes,
-                files_done: idx + 1,
-                files_total,
-            });
+        if ctx
+            .reused_rel_paths
+            .contains(&normalize_rel(&entry.relative_path))
+        {
+            ctx.emit_reused(entry, idx);
             continue;
         }
 
-        let clean_rel = sanitize_relative_path(&entry.relative_path)?;
         let abs_start = data_start
             .checked_add(entry.offset)
             .ok_or_else(|| ArchiveError::CorruptBounds(entry.relative_path.clone()))?;
@@ -537,75 +951,117 @@ where
             return Err(ArchiveError::CorruptBounds(entry.relative_path.clone()));
         }
 
-        let out_path = dest_dir.join(&clean_rel);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         reader.seek(SeekFrom::Start(abs_start))?;
-        let mut writer = BufWriter::new(File::create(&out_path)?);
-        let mut hasher = Sha256::new();
-        let mut remaining = entry.size;
-        let mut file_done = 0u64;
+        ctx.stream_entry(&mut reader, entry, idx)?;
+    }
 
-        on_progress(ExtractProgress {
-            action: ExtractAction::Unpacking,
-            component: entry.component,
-            relative_path: entry.relative_path.clone(),
-            file_bytes_done: 0,
-            file_bytes_total: entry.size,
-            total_bytes_done: total_done,
-            total_bytes: manifest.total_bytes,
-            files_done: idx,
-            files_total,
-        });
+    Ok(())
+}
 
-        while remaining > 0 {
-            if cancel_flag.load(Ordering::SeqCst) {
-                return Err(ArchiveError::Cancelled);
-            }
-            let want = remaining.min(buf.len() as u64) as usize;
-            reader.read_exact(&mut buf[..want])?;
-            writer.write_all(&buf[..want])?;
-            hasher.update(&buf[..want]);
-            remaining -= want as u64;
-            file_done += want as u64;
-            total_done += want as u64;
+fn extract_v2_entries<F: FnMut(ExtractProgress)>(
+    archive_path: &Path,
+    source: ArchiveSource,
+    data_start: u64,
+    manifest: &PackageManifest,
+    ctx: &mut ExtractContext<'_, F>,
+) -> Result<(), ArchiveError> {
+    let mut meta_file = File::open(archive_path)?;
+    let hdr = Bcj2StreamHeader::read_checked(&mut meta_file, data_start, source.end_offset)?;
 
-            on_progress(ExtractProgress {
-                action: ExtractAction::Unpacking,
-                component: entry.component,
-                relative_path: entry.relative_path.clone(),
-                file_bytes_done: file_done,
-                file_bytes_total: entry.size,
-                total_bytes_done: total_done,
-                total_bytes: manifest.total_bytes,
-                files_done: idx,
-                files_total,
-            });
+    let main_start = data_start + BCJ2_HEADER_SIZE;
+    let call_start = main_start + hdr.main_len;
+    let jump_start = call_start + hdr.call_len;
+    let rc_start = jump_start + hdr.jump_len;
+
+    let main_reader: Box<dyn Read> = Box::new(Lzma2Reader::new(
+        open_slice(archive_path, main_start, hdr.main_len)?,
+        hdr.dict_size,
+        None,
+    ));
+    let call_reader: Box<dyn Read> = Box::new(LzmaReader::new_mem_limit(
+        open_slice(archive_path, call_start, hdr.call_len)?,
+        u32::MAX,
+        None,
+    )?);
+    let jump_reader: Box<dyn Read> = Box::new(LzmaReader::new_mem_limit(
+        open_slice(archive_path, jump_start, hdr.jump_len)?,
+        u32::MAX,
+        None,
+    )?);
+    let rc_reader: Box<dyn Read> = Box::new(open_slice(archive_path, rc_start, hdr.rc_len)?);
+
+    let mut bcj2 = Bcj2Reader::try_new(
+        vec![main_reader, call_reader, jump_reader, rc_reader],
+        manifest.total_bytes,
+    )?;
+
+    let mut early_exited = false;
+    for (idx, entry) in manifest.entries.iter().enumerate() {
+        if ctx.cancel_flag.load(Ordering::SeqCst) {
+            return Err(ArchiveError::Cancelled);
         }
 
-        writer.flush()?;
-
-        on_progress(ExtractProgress {
-            action: ExtractAction::VerifyingDigest,
-            component: entry.component,
-            relative_path: entry.relative_path.clone(),
-            file_bytes_done: entry.size,
-            file_bytes_total: entry.size,
-            total_bytes_done: total_done,
-            total_bytes: manifest.total_bytes,
-            files_done: idx + 1,
-            files_total,
-        });
-
-        let digest_hex = hex_lower(&hasher.finalize());
-        if digest_hex != entry.sha256.to_ascii_lowercase() {
-            return Err(ArchiveError::ChecksumMismatch {
-                path: entry.relative_path.clone(),
-                expected: entry.sha256.clone(),
-                actual: digest_hex,
+        if ctx
+            .reused_rel_paths
+            .contains(&normalize_rel(&entry.relative_path))
+        {
+            let remaining_all_reused = manifest.entries[idx..].iter().all(|item| {
+                ctx.reused_rel_paths
+                    .contains(&normalize_rel(&item.relative_path))
             });
+            if remaining_all_reused {
+                for (rem_offset, rem_entry) in manifest.entries[idx..].iter().enumerate() {
+                    if ctx.cancel_flag.load(Ordering::SeqCst) {
+                        return Err(ArchiveError::Cancelled);
+                    }
+                    ctx.emit_reused(rem_entry, idx + rem_offset);
+                }
+                early_exited = true;
+                break;
+            }
+
+            ctx.drain_exact(&mut bcj2, entry.size)?;
+            ctx.emit_reused(entry, idx);
+            continue;
+        }
+
+        ctx.stream_entry(&mut bcj2, entry, idx)?;
+    }
+
+    if !early_exited {
+        let _ = bcj2.finish()?;
+    }
+
+    Ok(())
+}
+
+pub fn extract_entries_verified_streaming<F>(
+    archive_path: &Path,
+    dest_dir: &Path,
+    reused_rel_paths: &BTreeSet<String>,
+    cancel_flag: &AtomicBool,
+    mut on_progress: F,
+) -> Result<PackageManifest, ArchiveError>
+where
+    F: FnMut(ExtractProgress),
+{
+    let (source, format, manifest, data_start) = read_manifest_internal(archive_path)?;
+    fs::create_dir_all(dest_dir)?;
+
+    let mut ctx = ExtractContext::new(
+        &manifest,
+        dest_dir,
+        reused_rel_paths,
+        cancel_flag,
+        &mut on_progress,
+    );
+
+    match format {
+        ArchiveFormat::RawV1 => {
+            extract_v1_entries(archive_path, source, data_start, &manifest, &mut ctx)?
+        }
+        ArchiveFormat::Bcj2Lzma2V2 => {
+            extract_v2_entries(archive_path, source, data_start, &manifest, &mut ctx)?
         }
     }
 
@@ -956,22 +1412,102 @@ mod tests {
     fn extract_detects_corrupted_payload_bytes() {
         let root = unique_tmp_dir("tamper");
         let src = root.join("src");
-        let pkg = root.join("epilod.epkg");
+        let pkg_v1 = root.join("epilod_v1.epkg");
+        let pkg_v2 = root.join("epilod_v2.epkg");
         let out = root.join("out");
 
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("Epilod Party.exe"), b"original-payload-bytes").unwrap();
-        pack_directory(&src, &pkg).unwrap();
 
-        // Flip the final byte of payload
-        let mut raw = fs::read(&pkg).unwrap();
-        let last = raw.len() - 1;
-        raw[last] ^= 0xFF;
-        fs::write(&pkg, raw).unwrap();
+        // Raw V1 archive: flipping final payload byte yields ChecksumMismatch
+        pack_directory_v1(&src, &pkg_v1, APP_VERSION).unwrap();
+        let mut raw_v1 = fs::read(&pkg_v1).unwrap();
+        let last_v1 = raw_v1.len() - 1;
+        raw_v1[last_v1] ^= 0xFF;
+        fs::write(&pkg_v1, raw_v1).unwrap();
 
         let cancel = AtomicBool::new(false);
-        let err = extract_verified_streaming(&pkg, &out, &cancel, |_| {}).unwrap_err();
-        assert!(matches!(err, ArchiveError::ChecksumMismatch { .. }));
+        let err_v1 = extract_verified_streaming(&pkg_v1, &out, &cancel, |_| {}).unwrap_err();
+        assert!(matches!(err_v1, ArchiveError::ChecksumMismatch { .. }));
+
+        // Compressed V2 archive: corrupting compressed stream triggers error cleanly
+        pack_directory(&src, &pkg_v2).unwrap();
+        let mut raw_v2 = fs::read(&pkg_v2).unwrap();
+        let last_v2 = raw_v2.len() - 1;
+        raw_v2[last_v2] ^= 0xFF;
+        fs::write(&pkg_v2, raw_v2).unwrap();
+
+        let err_v2 = extract_verified_streaming(&pkg_v2, &out, &cancel, |_| {}).unwrap_err();
+        assert!(matches!(
+            err_v2,
+            ArchiveError::Io(_) | ArchiveError::ChecksumMismatch { .. }
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compressed_v2_reused_skip_and_midstream_drain_work() {
+        let root = unique_tmp_dir("v2_reuse");
+        let src = root.join("src");
+        let pkg = root.join("epilod.epkg");
+
+        fs::create_dir_all(src.join("resources/fonts")).unwrap();
+        fs::create_dir_all(src.join("resources/mpv")).unwrap();
+        // Entries sort lexicographically:
+        // 0: Epilod Party.exe
+        // 1: resources/fonts/Inter-Regular.ttf
+        // 2: resources/mpv/mpv.exe
+        let app_bytes = [0xE8u8, 0x10, 0x00, 0x00, 0x00, 0x90, 0x90, 0xC3].repeat(1024);
+        let font_bytes = b"font-payload-data".repeat(256);
+        let mpv_bytes = [0x0Fu8, 0x84, 0x20, 0x00, 0x00, 0x00, 0x55, 0x89].repeat(2048);
+
+        fs::write(src.join("Epilod Party.exe"), &app_bytes).unwrap();
+        fs::write(src.join("resources/fonts/Inter-Regular.ttf"), &font_bytes).unwrap();
+        fs::write(src.join("resources/mpv/mpv.exe"), &mpv_bytes).unwrap();
+
+        let manifest = pack_directory(&src, &pkg).unwrap();
+        assert_eq!(manifest.entries.len(), 3);
+        let (read_back, _) = read_manifest(&pkg).unwrap();
+        assert_eq!(read_back, manifest);
+
+        // Case 1: trailing entry reused -> early exit skips decompressing mpv.exe
+        let out_tail = root.join("out_tail");
+        let mut reused_tail = BTreeSet::new();
+        reused_tail.insert("resources/mpv/mpv.exe".to_string());
+        let mut actions_tail = Vec::new();
+        let cancel = AtomicBool::new(false);
+        extract_entries_verified_streaming(&pkg, &out_tail, &reused_tail, &cancel, |ev| {
+            actions_tail.push((ev.relative_path, ev.action));
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read(out_tail.join("Epilod Party.exe")).unwrap(),
+            app_bytes
+        );
+        assert_eq!(
+            fs::read(out_tail.join("resources/fonts/Inter-Regular.ttf")).unwrap(),
+            font_bytes
+        );
+        assert!(!out_tail.join("resources/mpv/mpv.exe").exists());
+        assert!(actions_tail
+            .iter()
+            .any(|(p, a)| { p == "resources/mpv/mpv.exe" && *a == ExtractAction::ReusedVerified }));
+
+        // Case 2: middle entry reused while later entry is unpacked -> stream drains cleanly
+        let out_mid = root.join("out_mid");
+        let mut reused_mid = BTreeSet::new();
+        reused_mid.insert("resources/fonts/Inter-Regular.ttf".to_string());
+        extract_entries_verified_streaming(&pkg, &out_mid, &reused_mid, &cancel, |_| {}).unwrap();
+        assert_eq!(
+            fs::read(out_mid.join("Epilod Party.exe")).unwrap(),
+            app_bytes
+        );
+        assert!(!out_mid.join("resources/fonts/Inter-Regular.ttf").exists());
+        assert_eq!(
+            fs::read(out_mid.join("resources/mpv/mpv.exe")).unwrap(),
+            mpv_bytes
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1075,7 +1611,7 @@ mod tests {
 
         let sfx_unsigned = root.join("SetupUnsigned.exe");
         attach_payload_sfx(&stub_path, &pkg, &sfx_unsigned).unwrap();
-        assert!(fs::metadata(&sfx_unsigned).unwrap().len() > 16_000);
+        assert!(fs::metadata(&sfx_unsigned).unwrap().len() > unsigned_stub.len() as u64);
 
         let uninst_unsigned = root.join("out_unsigned/epilod-uninstall.exe");
         copy_uninstaller_executable(&sfx_unsigned, &uninst_unsigned).unwrap();

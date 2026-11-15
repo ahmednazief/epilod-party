@@ -15,10 +15,25 @@ try {
 
     if (-not $SkipMpvFetch) {
         $MpvExe = Join-Path $RepoRoot "src-tauri\resources\mpv\mpv.exe"
-        if (-not (Test-Path $MpvExe)) {
-            Write-Host "==> mpv.exe missing; running fetch-mpv.ps1..."
+        $FfmpegExe = Join-Path $RepoRoot "src-tauri\resources\mpv\ffmpeg.exe"
+        if (-not (Test-Path $MpvExe) -or -not (Test-Path $FfmpegExe)) {
+            Write-Host "==> mpv.exe and/or ffmpeg.exe missing; running fetch-mpv.ps1..."
             & (Join-Path $PSScriptRoot "fetch-mpv.ps1")
         }
+    }
+
+    # Hard gate: never produce an installer that is missing something the app needs at runtime.
+    $RequiredResources = @(
+        "src-tauri\resources\mpv\mpv.exe",
+        "src-tauri\resources\mpv\ffmpeg.exe",
+        "src-tauri\resources\fonts\Inter-Regular.ttf",
+        "src-tauri\resources\fonts\NotoSansArabic-Regular.ttf",
+        "src-tauri\resources\licenses\GPL-3.0.txt",
+        "src-tauri\resources\licenses\SOURCE_OFFER.txt"
+    )
+    $MissingResources = $RequiredResources | Where-Object { -not (Test-Path (Join-Path $RepoRoot $_)) }
+    if ($MissingResources) {
+        throw "Refusing to build installer; required bundled files are missing:`n  $($MissingResources -join "`n  ")"
     }
 
     if (-not $SkipFrontendBuild) {
@@ -29,8 +44,15 @@ try {
         npm run build
     }
 
-    Write-Host "==> Compiling release Epilod Party binary..."
-    cargo build --release -p epilod-party
+    foreach ($DistFile in @("dist\index.html", "installer\dist\index.html")) {
+        if (-not (Test-Path (Join-Path $RepoRoot $DistFile))) {
+            throw "Frontend build output missing: $DistFile (run npm run build)."
+        }
+    }
+
+    Write-Host "==> Compiling release Epilod Party binary (frontend embedded via custom-protocol)..."
+    cargo build --release -p epilod-party --features custom-protocol
+    if ($LASTEXITCODE -ne 0) { throw "cargo build epilod-party failed" }
 
     $ReleaseDir = Join-Path $RepoRoot "target\release"
     $AppExe = Join-Path $ReleaseDir "epilod-party.exe"
@@ -76,7 +98,8 @@ try {
     cargo run --release -p epilod-installer-core --bin epilod-pack -- $StagingDir $PayloadOut --version $AppVersion
 
     Write-Host "==> Compiling custom Windows setup GUI (epilod-setup.exe)..."
-    cargo build --release -p epilod-setup
+    cargo build --release -p epilod-setup --features custom-protocol
+    if ($LASTEXITCODE -ne 0) { throw "cargo build epilod-setup failed" }
 
     $SetupStub = Join-Path $ReleaseDir "epilod-setup.exe"
     if (-not (Test-Path $SetupStub)) {

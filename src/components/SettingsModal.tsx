@@ -1,16 +1,15 @@
 import {
-  ChevronDown,
-  Download,
-  Pause,
-  RefreshCw,
-  RotateCw,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-  Terminal,
-  Wrench,
-  X,
-} from "lucide-react";
+  AppChevronIcon,
+  AppCloseIcon,
+  AppDownloadIcon,
+  AppLogsIcon,
+  AppResetIcon,
+  AppShieldIcon,
+  AppSlidersIcon,
+  AppSparkleIcon,
+  AppWrenchIcon,
+} from "./ui/AppIcons";
+import { PlayerPauseIcon } from "./ui/PlayerIcons";
 import { useEffect, useState } from "react";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { setAllowNetworkShares } from "../lib/mpv";
@@ -19,9 +18,12 @@ import { playSoundCue } from "../lib/soundEffects";
 import { formatBytesCompact, formatTransferSpeed } from "../lib/updater";
 import { validateServerEndpointInput } from "../lib/webviewHardening";
 import { useAppStore, type SettingsTab } from "../store/useAppStore";
+import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
+import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { Button } from "./ui/Button";
+import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
 import { TextField } from "./ui/TextField";
 
@@ -64,13 +66,7 @@ function ComfortSwitchRow({
         <div className="text-[13px] font-medium text-white">{title}</div>
         <div className="text-xs text-secondary leading-relaxed mt-0.5">{description}</div>
       </div>
-      <span
-        className={`ep-switch-track w-10 h-6 rounded-full p-0.5 flex items-center transition-colors shrink-0 ${
-          checked ? "bg-accent justify-end" : "bg-white/18 justify-start"
-        }`}
-      >
-        <span className="ep-switch-thumb h-5 w-5 rounded-full bg-white shadow" />
-      </span>
+      <GlassSwitchTrack checked={checked} size="md" />
     </button>
   );
 }
@@ -126,6 +122,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsPath, setLogsPath] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const { mounted, exiting } = useAnimatedPresence(open, 200);
 
   useEffect(() => {
     if (open) {
@@ -156,7 +153,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     }
   }, [open, tab]);
 
-  if (!open) return null;
+  if (!mounted) return null;
 
   const handleSaveServer = () => {
     const check = validateServerEndpointInput(endpointDraft);
@@ -184,7 +181,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   return (
     <div
-      className="ep-modal-backdrop anim-backdrop-in fixed inset-0 z-50 flex items-center justify-center p-4"
+      className={`ep-modal-backdrop ${
+        exiting ? "anim-backdrop-out pointer-events-none" : "anim-backdrop-in"
+      } fixed inset-0 z-50 flex items-center justify-center p-4`}
       role="dialog"
       aria-modal="true"
       aria-label="Preferences"
@@ -192,7 +191,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="ep-glass-sheet anim-modal-in w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[26px] overflow-hidden grid grid-cols-12">
+      <div
+        className={`ep-glass-sheet ${
+          exiting ? "anim-modal-out" : "anim-modal-in"
+        } w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[26px] overflow-hidden grid grid-cols-12`}
+      >
         {/* Left Navigation Rail (subtle airy tint separation) */}
         <aside className="col-span-4 bg-white/[0.03] p-3.5 flex flex-col justify-between min-h-0">
           <div className="space-y-4">
@@ -214,9 +217,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     }`}
                   >
                     {item.value === "prefs" ? (
-                      <Sparkles className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+                      <AppSparkleIcon size={14} className="text-accent-soft shrink-0" />
                     ) : (
-                      <Download className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+                      <AppDownloadIcon size={14} className="text-accent-soft shrink-0" />
                     )}
                     <span className="truncate">{item.label}</span>
                   </button>
@@ -233,41 +236,41 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
               className="ep-press w-full px-2.5 py-1.5 flex items-center justify-between text-[11px] font-medium text-muted hover:text-secondary cursor-pointer"
             >
               <span className="inline-flex items-center gap-1.5">
-                <Wrench className="h-3 w-3" />
+                <AppWrenchIcon size={12} />
                 Advanced
               </span>
-              <ChevronDown
-                className={`h-3 w-3 transition-transform duration-200 ${
+              <AppChevronIcon
+                direction="down"
+                size={12}
+                className={`transition-transform duration-200 ${
                   advancedOpen ? "rotate-180" : ""
                 }`}
               />
             </button>
 
-            {advancedOpen && (
-              <div className="anim-fade-slide-up space-y-1">
-                {ADVANCED_NAV.map((item) => {
-                  const active = tab === item.value;
-                  return (
-                    <button
-                      key={item.value}
-                      type="button"
-                      data-active={active}
-                      onClick={() => setTab(item.value)}
-                      className={`ep-menu-row ep-press w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs cursor-pointer ${
-                        active ? "text-white font-medium" : "text-muted hover:text-white"
-                      }`}
-                    >
-                      {item.value === "server" ? (
-                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
-                      ) : (
-                        <Terminal className="h-3.5 w-3.5 shrink-0" />
-                      )}
-                      <span className="truncate">{item.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <AnimatedCollapse open={advancedOpen} innerClassName="space-y-1 pt-0.5">
+              {ADVANCED_NAV.map((item) => {
+                const active = tab === item.value;
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    data-active={active}
+                    onClick={() => setTab(item.value)}
+                    className={`ep-menu-row ep-press w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs cursor-pointer ${
+                      active ? "text-white font-medium" : "text-muted hover:text-white"
+                    }`}
+                  >
+                    {item.value === "server" ? (
+                      <AppSlidersIcon size={14} className="shrink-0" />
+                    ) : (
+                      <AppLogsIcon size={14} className="shrink-0" />
+                    )}
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </AnimatedCollapse>
           </div>
         </aside>
 
@@ -284,9 +287,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
               type="button"
               onClick={onClose}
               aria-label="Close settings"
-              className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+              className="ep-bar-icon-btn ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
             >
-              <X className="h-4 w-4" />
+              <AppCloseIcon size={16} />
             </button>
           </div>
 
@@ -407,7 +410,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                         </p>
                       )}
                       <div className="flex items-center gap-1.5 pt-1 text-[10.5px] num text-muted">
-                        <ShieldCheck className="h-3 w-3 text-ok shrink-0" />
+                        <AppShieldIcon size={12} className="text-ok shrink-0" />
                         <span className="truncate">
                           {updateStatus?.signatureVerified
                             ? `Ed25519 Signed · SHA-256: ${availableRelease.sha256.slice(0, 16)}...`
@@ -461,8 +464,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       disabled={isCheckingUpdates || isDownloadingUpdate || isApplyingUpdate}
                       onClick={() => void checkForUpdates(false)}
                     >
-                      <RefreshCw
-                        className={`h-3.5 w-3.5 ${isCheckingUpdates ? "animate-spin" : ""}`}
+                      <AppResetIcon
+                        clockwise
+                        size={14}
+                        className={isCheckingUpdates ? "animate-spin" : ""}
                       />
                       {isCheckingUpdates ? "Checking..." : "Check for Updates"}
                     </Button>
@@ -474,7 +479,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           size="sm"
                           onClick={() => void cancelUpdateDownload()}
                         >
-                          <Pause className="h-3.5 w-3.5" />
+                          <PlayerPauseIcon size={14} />
                           Pause
                         </Button>
                       )}
@@ -485,7 +490,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           size="sm"
                           onClick={() => void startUpdateDownload()}
                         >
-                          <Download className="h-3.5 w-3.5" />
+                          <AppDownloadIcon size={14} />
                           {isUpdatePaused ? "Resume Download" : "Download Update"}
                         </Button>
                       )}
@@ -497,8 +502,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           disabled={isApplyingUpdate}
                           onClick={() => void applyAndRestartUpdate()}
                         >
-                          <RotateCw
-                            className={`h-3.5 w-3.5 ${isApplyingUpdate ? "animate-spin" : ""}`}
+                          <AppResetIcon
+                            clockwise
+                            size={14}
+                            className={isApplyingUpdate ? "animate-spin" : ""}
                           />
                           {isApplyingUpdate
                             ? "Launching Updater..."
@@ -587,7 +594,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     {logsPath || "In-memory session log (latest 150 events)"}
                   </p>
                   <Button variant="secondary" size="sm" onClick={() => void loadLogs()}>
-                    <RefreshCw className={`h-3.5 w-3.5 ${logsLoading ? "animate-spin" : ""}`} />
+                    <AppResetIcon clockwise size={14} className={logsLoading ? "animate-spin" : ""} />
                     Refresh
                   </Button>
                 </div>

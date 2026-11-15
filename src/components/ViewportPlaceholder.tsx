@@ -1,4 +1,5 @@
-import { AlertTriangle, FolderOpen } from "lucide-react";
+import { AppAlertIcon, AppFolderIcon } from "./ui/AppIcons";
+import { OpenMediaIcon } from "./ui/LobbyIcons";
 import { Button } from "./ui/Button";
 import { LogoMark } from "./ui/LogoMark";
 
@@ -41,7 +42,7 @@ export function ViewportPlaceholder({
           className={`ep-glass-sheet anim-fade-slide-up relative z-10 max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5 transition-transform duration-200 ${offsetClass}`}
         >
           <div className="h-11 w-11 rounded-full bg-bad/15 text-bad flex items-center justify-center">
-            <AlertTriangle className="h-5 w-5" />
+            <AppAlertIcon variant="warn" size={20} />
           </div>
           <div className="space-y-1.5">
             <h3 className="text-sm font-medium text-white">Playback Engine Issue</h3>
@@ -83,12 +84,12 @@ export function ViewportPlaceholder({
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2">
             <Button variant="primary" size="md" onClick={onChooseFile}>
-              <FolderOpen className="h-4 w-4" />
+              <OpenMediaIcon bare size={16} />
               Choose Video File
             </Button>
             {onChooseFolder && (
               <Button variant="secondary" size="md" onClick={onChooseFolder}>
-                <FolderOpen className="h-4 w-4" />
+                <AppFolderIcon size={16} />
                 Season Folder
               </Button>
             )}

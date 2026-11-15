@@ -10,7 +10,7 @@ interface VideoGlassBackdropProps {
 }
 
 const CAPTURE_INTERVAL_MS = 75;
-const LAYOUT_TRACK_MS = 300;
+const LAYOUT_TRACK_MS = 420;
 
 interface ActiveBounds {
   minU: number;
@@ -162,7 +162,11 @@ export function VideoGlassBackdrop({
     regions.forEach((el) => {
       const style = window.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") return;
-      if (Number.parseFloat(style.opacity) <= 0.02) return;
+      const parsedOpacity = Number.parseFloat(style.opacity);
+      if (Number.isFinite(parsedOpacity) && parsedOpacity <= 0.01) return;
+      const regionAlpha = Number.isFinite(parsedOpacity)
+        ? Math.min(1, Math.max(0, parsedOpacity))
+        : 1;
       const r = el.getBoundingClientRect();
       if (r.width < 4 || r.height < 4) return;
 
@@ -251,7 +255,7 @@ export function VideoGlassBackdrop({
       ctx.beginPath();
       ctx.roundRect(r.left, r.top, r.width, r.height, radius);
       ctx.clip();
-      ctx.globalAlpha = 0.92;
+      ctx.globalAlpha = 0.92 * regionAlpha;
       ctx.filter = "blur(6px)";
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";

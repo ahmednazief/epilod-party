@@ -10,7 +10,7 @@ opt-level = 3
 
 [profile.release]
 lto = true
-opt-level = "s"
+opt-level = "z"
 codegen-units = 1
-panic = "unwind"
-strip = "symbols"
+panic = "abort"
+strip = true

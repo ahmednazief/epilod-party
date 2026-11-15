@@ -47,7 +47,7 @@ export function useViewportRect(ref: RefObject<HTMLElement | null>, refreshSigna
       trailingTimer = setTimeout(() => {
         trailingTimer = null;
         commit();
-      }, 60);
+      }, 16);
     };
 
     commit();

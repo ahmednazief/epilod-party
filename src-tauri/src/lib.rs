@@ -500,7 +500,17 @@ mod windows_app {
     #[tauri::command]
     async fn mpv_set_sub_track(state: State<'_, AppState>, sid: Option<u64>) -> Result<(), String> {
         let req = state.mpv.next_request_id();
-        state.mpv.send_command(set_sid_cmd(req, sid))
+        state.mpv.send_command(set_sid_cmd(req, sid))?;
+        // Selecting a track must also make subtitles visible in mpv; otherwise a
+        // previously hidden state (sub-visibility=no) keeps the chosen CC invisible.
+        let vis_req = state.mpv.next_request_id();
+        state.mpv.send_command(
+            epilod_core::mpv_ipc::set_property_cmd(
+                vis_req,
+                "sub-visibility",
+                serde_json::json!(sid.is_some()),
+            ),
+        )
     }
 
     #[tauri::command]

@@ -1,22 +1,20 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  ArrowLeft,
-  ArrowRight,
-  Check,
-  ClipboardPaste,
-  Copy,
-  Download,
-  FolderOpen,
-  Keyboard,
-  KeyRound,
-  ListVideo,
-  Pencil,
-  Play,
-  RefreshCw,
-  Settings,
-  Users,
-} from "lucide-react";
+  AppArrowIcon,
+  AppDownloadIcon,
+  AppEditIcon,
+  AppKeyboardIcon,
+  AppKeyIcon,
+  AppResetIcon,
+} from "./ui/AppIcons";
+import {
+  PartyCopyIcon,
+  PartyPasteIcon,
+  PlayerEpisodesIcon,
+  PlayerPlayIcon,
+  PlayerSettingsIcon,
+} from "./ui/PlayerIcons";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
@@ -24,13 +22,16 @@ import { getFileDisplayName } from "../lib/fileDrop";
 import { scanMediaPaths } from "../lib/playlist";
 import { isTextEntryElement } from "../lib/shortcuts";
 import { playSoundCue } from "../lib/soundEffects";
+import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
+import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
+import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
 import { LogoMark } from "./ui/LogoMark";
 import { OtpCodeInput } from "./ui/OtpCodeInput";
@@ -89,6 +90,8 @@ export function HomeScreen() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
   const profileRef = useRef<HTMLDivElement | null>(null);
+  const profilePopover = useAnimatedPresence(editingName, 170);
+  const dragBanner = useAnimatedPresence(isDragActive, 170);
 
   useEffect(() => {
     if (!editingName) return;
@@ -377,46 +380,46 @@ export function HomeScreen() {
     {
       id: "open-media",
       label: "Open Media File(s)…",
-      icon: <Play className="h-3.5 w-3.5 text-accent-soft" />,
+      icon: <PlayerPlayIcon size={14} className="text-accent-soft" />,
       accent: true,
       onSelect: () => void handleOpenMediaSolo(),
     },
     {
       id: "open-folder",
       label: "Choose Season Folder…",
-      icon: <ListVideo className="h-3.5 w-3.5" />,
+      icon: <PlayerEpisodesIcon size={14} />,
       onSelect: () => void handleOpenFolderSolo(),
     },
     {
       id: "party-view",
       label: lobbyView === "party" ? "Back to Main Lobby" : "Start or Join Watch Party",
-      icon: <Users className="h-3.5 w-3.5" />,
+      icon: <WatchPartyIcon bare size={14} />,
       onSelect: () => setLobbyView(lobbyView === "party" ? "entry" : "party"),
     },
     { type: "divider", id: "lobby-div" },
     {
       id: "edit-profile",
       label: "Edit Profile & Avatar",
-      icon: <FolderOpen className="h-3.5 w-3.5" />,
+      icon: <AppEditIcon size={14} />,
       onSelect: () => setEditingName(true),
     },
     {
       id: "check-updates",
       label: "Check for Updates…",
-      icon: <Download className="h-3.5 w-3.5" />,
+      icon: <AppDownloadIcon size={14} />,
       onSelect: () => openSettings("updates"),
     },
     {
       id: "shortcuts",
       label: "Keyboard Shortcuts…",
       shortcut: "?",
-      icon: <Keyboard className="h-3.5 w-3.5" />,
+      icon: <AppKeyboardIcon size={14} />,
       onSelect: openShortcuts,
     },
     {
       id: "preferences",
       label: "Preferences…",
-      icon: <Settings className="h-3.5 w-3.5" />,
+      icon: <PlayerSettingsIcon size={14} />,
       onSelect: () => openSettings("prefs"),
     },
   ];
@@ -447,7 +450,7 @@ export function HomeScreen() {
               onClick={() => setEditingName((v) => !v)}
               title="Edit your display name and profile avatar"
               aria-expanded={editingName}
-              className={`ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3 py-1 rounded-full cursor-pointer transition-all ${
+              className={`ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3 py-1 rounded-full cursor-pointer ${
                 editingName ? "ring-1 ring-accent/65" : ""
               }`}
             >
@@ -455,7 +458,7 @@ export function HomeScreen() {
               <span className="text-xs font-medium text-primary max-w-[140px] truncate">
                 {username || "Viewer"}
               </span>
-              <Pencil className="h-3 w-3 text-accent-soft opacity-85" />
+              <AppEditIcon size={12} className="text-accent-soft opacity-85" />
             </button>
           }
           rightActions={
@@ -465,17 +468,19 @@ export function HomeScreen() {
               aria-label="Preferences"
               className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
             >
-              <Settings className="h-3.5 w-3.5" />
+              <PlayerSettingsIcon size={14} />
               <span>Preferences</span>
             </button>
           }
         />
 
-        {editingName && (
+        {profilePopover.mounted && (
           <div
             role="dialog"
             aria-label="Edit profile and avatar"
-            className="ep-glass-sheet anim-pop-in absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] rounded-[24px] p-4 space-y-3.5"
+            className={`ep-glass-sheet ${
+              profilePopover.exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
+            } absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] rounded-[24px] p-4 space-y-3.5`}
           >
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2.5 min-w-0">
@@ -496,7 +501,7 @@ export function HomeScreen() {
               <button
                 type="button"
                 onClick={() => setEditingName(false)}
-                className="ep-btn-ghost ep-press h-7 px-3 rounded-full text-[11px] font-semibold text-accent-soft hover:text-white cursor-pointer"
+                className="ep-press h-7 px-3 rounded-full text-[11px] font-semibold bg-accent/18 hover:bg-accent/28 text-accent-soft hover:text-white cursor-pointer"
               >
                 Done
               </button>
@@ -535,7 +540,7 @@ export function HomeScreen() {
       {/* Main Centered Lobby */}
       <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-5 py-6">
         {lobbyView === "entry" ? (
-          <div className="anim-fade-slide-up flex flex-col items-center gap-6">
+          <div key="entry" className="anim-fade-slide-up flex flex-col items-center gap-6">
             <div className="flex flex-col items-center text-center gap-2.5">
               <LogoMark size={46} />
               <div className="space-y-1">
@@ -575,7 +580,7 @@ export function HomeScreen() {
             </div>
           </div>
         ) : (
-          <div className="anim-fade-slide-up w-full max-w-[440px] flex flex-col gap-4">
+          <div key="party" className="anim-fade-slide-up w-full max-w-[440px] flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <button
                 type="button"
@@ -590,7 +595,7 @@ export function HomeScreen() {
                 }}
                 className="ep-glass-pill ep-press inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
               >
-                <ArrowLeft className="h-3.5 w-3.5" />
+                <AppArrowIcon direction="left" size={14} />
                 <span>Back</span>
               </button>
 
@@ -621,7 +626,7 @@ export function HomeScreen() {
                       title="Generate new 6-digit code"
                       className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
                     >
-                      <RefreshCw className="h-3 w-3" />
+                      <AppResetIcon clockwise size={12} />
                     </button>
                     <button
                       type="button"
@@ -630,11 +635,7 @@ export function HomeScreen() {
                       title="Copy 6-digit code"
                       className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
                     >
-                      {copiedDraft ? (
-                        <Check className="h-3 w-3 text-ok" />
-                      ) : (
-                        <Copy className="h-3 w-3" />
-                      )}
+                      <PartyCopyIcon copied={copiedDraft} size={13} />
                     </button>
                   </div>
                 </div>
@@ -645,7 +646,7 @@ export function HomeScreen() {
                   className="ep-glass-primary-pill ep-press w-full h-10 rounded-2xl text-xs font-medium text-white inline-flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <span>Create Room &amp; Copy Invite</span>
-                  <ArrowRight className="h-3.5 w-3.5" />
+                  <AppArrowIcon direction="right" size={14} />
                 </button>
               </div>
 
@@ -669,7 +670,7 @@ export function HomeScreen() {
                     onClick={() => void handlePasteJoin()}
                     className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.07] hover:bg-white/[0.12] text-[11px] font-medium text-secondary hover:text-white cursor-pointer shrink-0"
                   >
-                    <ClipboardPaste className="h-3 w-3" />
+                    <PartyPasteIcon size={13} />
                     <span>Paste Code</span>
                   </button>
                 </div>
@@ -696,7 +697,7 @@ export function HomeScreen() {
                       }`}
                     >
                       <span>Join</span>
-                      <ArrowRight className="h-3.5 w-3.5" />
+                      <AppArrowIcon direction="right" size={14} />
                     </button>
                   </form>
                 ) : (
@@ -722,15 +723,16 @@ export function HomeScreen() {
             <div className="w-full flex flex-col items-center gap-3">
               <button
                 type="button"
+                aria-expanded={showOptions}
                 onClick={() => setShowOptions((o) => !o)}
-                className="ep-press inline-flex items-center gap-1.5 text-xs text-muted hover:text-secondary cursor-pointer"
+                className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs text-muted hover:text-secondary hover:bg-white/[0.06] cursor-pointer"
               >
-                <KeyRound className="h-3 w-3" />
+                <AppKeyIcon size={12} />
                 <span>{showOptions ? "Hide room options" : "Room password & options"}</span>
               </button>
 
-              {showOptions && (
-                <div className="anim-pop-in ep-glass-sheet w-full rounded-[22px] p-3.5 space-y-2.5">
+              <AnimatedCollapse open={showOptions} className="w-full" innerClassName="pt-0.5">
+                <div className="ep-glass-sheet w-full rounded-[22px] p-3.5 space-y-2.5">
                   <input
                     type="password"
                     value={serverPassword}
@@ -740,24 +742,27 @@ export function HomeScreen() {
                     onChange={(e) => setServerPassword(e.target.value)}
                     className="ep-glass-input w-full h-9.5 px-3.5 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
                   />
-                  <label className="ep-menu-row flex items-center justify-between gap-3 px-2.5 py-1.5 text-xs text-secondary cursor-pointer">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={standardRoomName}
+                    onClick={() => {
+                      const checked = !standardRoomName;
+                      setStandardRoomName(checked);
+                      setVerifyingJoin(false);
+                      setJoinInput((prev) =>
+                        checked
+                          ? sanitizeRoomCodeInput(prev, true)
+                          : prev.replace(/\D/g, "").slice(0, 6),
+                      );
+                    }}
+                    className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-secondary hover:text-white cursor-pointer"
+                  >
                     <span>Use exact Syncplay room name</span>
-                    <input
-                      type="checkbox"
-                      checked={standardRoomName}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setStandardRoomName(checked);
-                        setVerifyingJoin(false);
-                        setJoinInput((prev) =>
-                          checked ? sanitizeRoomCodeInput(prev, true) : prev.replace(/\D/g, "").slice(0, 6),
-                        );
-                      }}
-                      className="accent-[var(--color-accent)] h-3.5 w-3.5"
-                    />
-                  </label>
+                    <GlassSwitchTrack checked={standardRoomName} size="sm" />
+                  </button>
                 </div>
-              )}
+              </AnimatedCollapse>
             </div>
           </div>
         )}
@@ -765,10 +770,12 @@ export function HomeScreen() {
 
       <div className="h-4 relative z-10" aria-hidden="true" />
 
-      {isDragActive && (
+      {dragBanner.mounted && (
         <div
           role="status"
-          className="ep-glass-sheet anim-pop-in pointer-events-none fixed bottom-7 left-1/2 -translate-x-1/2 z-40 rounded-full px-5 py-2.5 flex items-center gap-2.5 border border-accent/55"
+          className={`ep-glass-sheet ${
+            dragBanner.exiting ? "anim-pop-out" : "anim-pop-in"
+          } pointer-events-none fixed bottom-7 left-1/2 -translate-x-1/2 z-40 rounded-full px-5 py-2.5 flex items-center gap-2.5 border border-accent/55`}
         >
           <OpenMediaIcon size={20} className="shrink-0" />
           <span className="text-xs font-medium text-white">

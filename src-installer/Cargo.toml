@@ -9,6 +9,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 epilod-installer-core = { path = "../crates/epilod-installer-core" }
 
+[features]
+# Embeds ../installer/dist into the setup binary. Without it Tauri compiles in "dev" mode and the setup
+# window would load devUrl (http://localhost:1421). Pass it for every release build of epilod-setup.
+custom-protocol = ["tauri/custom-protocol"]
+
 [target.'cfg(windows)'.dependencies]
 tauri = "2"
 tauri-plugin-dialog = "2"

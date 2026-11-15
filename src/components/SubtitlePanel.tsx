@@ -1,15 +1,17 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  AlertCircle,
-  Captions,
-  Check,
-  ChevronRight,
-  FolderOpen,
-  RotateCcw,
-  SlidersHorizontal,
-  Sparkles,
-  Square,
-} from "lucide-react";
+  AppAlertIcon,
+  AppCheckIcon,
+  AppChevronIcon,
+  AppFolderIcon,
+  AppResetIcon,
+  AppSlidersIcon,
+  AppSparkleIcon,
+  AppStopIcon,
+} from "./ui/AppIcons";
+import { PlayerCaptionsIcon } from "./ui/PlayerIcons";
+import { AnimatedCollapse } from "./ui/AnimatedCollapse";
+import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { memo, useEffect, useMemo, useState } from "react";
 import { isDesktop } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
@@ -388,17 +390,11 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       >
         <span className="flex items-center gap-2.5 min-w-0">
           <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
-            <Captions className="h-3.5 w-3.5" />
+            <PlayerCaptionsIcon size={14} />
           </span>
           <span className="truncate">{subsActive ? "Show Subtitles" : "Subtitles Off"}</span>
         </span>
-        <span
-          className={`ep-switch-track w-7.5 h-4 rounded-full p-0.5 flex items-center transition-colors shrink-0 ${
-            subsActive ? "bg-accent justify-end" : "bg-white/20 justify-start"
-          }`}
-        >
-          <span className="ep-switch-thumb h-3 w-3 rounded-full bg-white shadow" />
-        </span>
+        <GlassSwitchTrack checked={subsActive} size="sm" />
       </button>
 
       <button
@@ -410,7 +406,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       >
         <span className="flex items-center gap-2.5 min-w-0">
           <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
-            <FolderOpen className="h-3.5 w-3.5" />
+            <AppFolderIcon size={14} />
           </span>
           <span className="truncate">Add Subtitle File…</span>
         </span>
@@ -475,9 +471,9 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 <span className="flex items-center gap-2.5 min-w-0">
                   <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
                     {active ? (
-                      <Check className="h-3.5 w-3.5 text-ok" />
+                      <AppCheckIcon size={14} className="text-ok" />
                     ) : t ? (
-                      <Captions className="h-3.5 w-3.5 opacity-70" />
+                      <PlayerCaptionsIcon size={14} className="opacity-70" />
                     ) : null}
                   </span>
                   <span className="truncate">{primaryLabel}</span>
@@ -497,7 +493,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         <div className="px-2.5 pt-1 text-[10.5px] space-y-0.5">
           {subIsBitmap && (
             <div className="inline-flex items-center gap-1.5 text-warn">
-              <AlertCircle className="h-3 w-3 shrink-0" />
+              <AppAlertIcon variant="info" size={12} className="shrink-0" />
               <span>Image subtitles ({selectedSub?.codec}) keep built-in style &amp; timing.</span>
             </div>
           )}
@@ -528,7 +524,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         >
           <span className="flex items-center gap-2.5 min-w-0">
             <span className="w-4 h-4 flex items-center justify-center shrink-0">
-              <Square className="h-3 w-3 fill-current" />
+              <AppStopIcon size={12} />
             </span>
             <span className="truncate">Cancel Magic Sync</span>
           </span>
@@ -544,7 +540,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         >
           <span className="flex items-center gap-2.5 min-w-0">
             <span className="w-4 h-4 flex items-center justify-center shrink-0">
-              <Sparkles className="h-3.5 w-3.5" />
+              <AppSparkleIcon size={14} />
             </span>
             <span className="truncate">{autoSyncOutcome ? "Magic Sync Matched" : "Magic Sync"}</span>
           </span>
@@ -618,7 +614,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                   setColor(c.hex);
                   applyStyleNow();
                 }}
-                className={`ep-press h-3.5 w-3.5 rounded-full border border-white/25 cursor-pointer transition-transform ${
+                className={`ep-press h-3.5 w-3.5 rounded-full border border-white/25 cursor-pointer ${
                   active ? "ring-2 ring-white scale-110" : "opacity-75 hover:opacity-100"
                 }`}
                 style={{ backgroundColor: c.hex }}
@@ -661,77 +657,74 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       >
         <span className="flex items-center gap-2.5 min-w-0">
           <span className="w-4 h-4 flex items-center justify-center shrink-0">
-            <SlidersHorizontal className="h-3.5 w-3.5" />
+            <AppSlidersIcon size={14} />
           </span>
           <span className="truncate">Fine-tune Style &amp; Encoding</span>
         </span>
-        <ChevronRight
-          className={`h-3.5 w-3.5 text-muted shrink-0 transition-transform duration-200 ${
+        <AppChevronIcon
+          direction="right"
+          size={14}
+          className={`text-muted shrink-0 transition-transform duration-200 ${
             showTools ? "rotate-90" : ""
           }`}
         />
       </button>
 
-      {showTools && (
-        <div className="anim-fade-slide-up px-2 pb-1.5 pt-1.5 space-y-2.5 border-t border-white/[0.07] mt-1">
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-secondary">Font Family</span>
-              <button
-                type="button"
-                onClick={() => {
-                  resetDefaults();
+      <AnimatedCollapse open={showTools}>
+        <div className="pt-1">
+          <div className="px-2 pb-1.5 pt-1.5 space-y-2.5 border-t border-white/[0.07]">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-secondary">Font Family</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetDefaults();
+                    applyStyleNow();
+                  }}
+                  className="ep-press inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                >
+                  <AppResetIcon size={12} />
+                  Reset
+                </button>
+              </div>
+              <SelectMenu
+                ariaLabel="Subtitle Font"
+                placement="top"
+                value={font}
+                options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
+                onChange={(val) => {
+                  setFont(val);
                   applyStyleNow();
                 }}
-                className="inline-flex items-center gap-1 text-muted hover:text-white cursor-pointer"
-              >
-                <RotateCcw className="h-3 w-3" />
-                Reset
-              </button>
+              />
             </div>
-            <SelectMenu
-              ariaLabel="Subtitle Font"
-              placement="top"
-              value={font}
-              options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
-              onChange={(val) => {
-                setFont(val);
-                applyStyleNow();
-              }}
-            />
-          </div>
 
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={overrideAssStyle}
-            onClick={() => {
-              const next = !overrideAssStyle;
-              setOverrideAssStyle(next);
-              safeMpvCall(
-                mpvSetSubStyle({
-                  font,
-                  fontSize,
-                  color,
-                  borderSize,
-                  pos,
-                  visible,
-                  overrideAss: next,
-                }),
-                "mpvSetSubStyle",
-              );
-            }}
-            className="ep-menu-row ep-press w-full px-1.5 py-1.5 flex items-center justify-between gap-2 text-xs text-secondary hover:text-white cursor-pointer"
-          >
-            <span>Override styled fansubs</span>
-            <span
-              className={`ep-switch-track w-7.5 h-4 rounded-full p-0.5 flex items-center transition-colors shrink-0 ${
-                overrideAssStyle ? "bg-accent justify-end" : "bg-white/20 justify-start"
-              }`}
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={overrideAssStyle}
+              onClick={() => {
+                const next = !overrideAssStyle;
+                setOverrideAssStyle(next);
+                safeMpvCall(
+                  mpvSetSubStyle({
+                    font,
+                    fontSize,
+                    color,
+                    borderSize,
+                    pos,
+                    visible,
+                    overrideAss: next,
+                  }),
+                  "mpvSetSubStyle",
+                );
+              }}
+              className="ep-menu-row ep-press w-full px-1.5 py-1.5 flex items-center justify-between gap-2 text-xs text-secondary hover:text-white cursor-pointer"
             >
-              <span className="ep-switch-thumb h-3 w-3 rounded-full bg-white shadow" />
-            </span>
-          </button>
+              <span>Override styled fansubs</span>
+              <GlassSwitchTrack checked={overrideAssStyle} size="sm" />
+            </button>
 
           <div className="space-y-1.5">
             <div>
@@ -838,7 +831,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             </Button>
           </div>
         </div>
-      )}
+        </div>
+      </AnimatedCollapse>
     </div>
   );
 });

@@ -1,6 +1,7 @@
-import { Check, ChevronDown } from "lucide-react";
+import { AppCheckIcon, AppChevronIcon } from "./AppIcons";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { usePresencePayload } from "../../lib/useAnimatedPresence";
 
 export interface SelectMenuOption<T extends string = string> {
   value: T;
@@ -106,21 +107,27 @@ export function SelectMenu<T extends string = string>({
     };
   }, [open]);
 
+  const listMenu = usePresencePayload(open && menuStyle ? menuStyle : null, 170);
+
   const listbox =
-    open && menuStyle ? (
+    listMenu.mounted && listMenu.value ? (
       <div
         ref={listRef}
         role="listbox"
         aria-label={ariaLabel}
         data-glass-region="true"
         style={{
-          left: `${menuStyle.left}px`,
-          width: `${menuStyle.width}px`,
-          maxHeight: `${menuStyle.maxHeight}px`,
-          ...(menuStyle.top !== undefined ? { top: `${menuStyle.top}px` } : {}),
-          ...(menuStyle.bottom !== undefined ? { bottom: `${menuStyle.bottom}px` } : {}),
+          left: `${listMenu.value.left}px`,
+          width: `${listMenu.value.width}px`,
+          maxHeight: `${listMenu.value.maxHeight}px`,
+          ...(listMenu.value.top !== undefined ? { top: `${listMenu.value.top}px` } : {}),
+          ...(listMenu.value.bottom !== undefined
+            ? { bottom: `${listMenu.value.bottom}px` }
+            : {}),
         }}
-        className="anim-pop-in ep-glass-sheet fixed z-50 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5"
+        className={`${
+          listMenu.exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
+        } ep-glass-sheet fixed z-50 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5`}
       >
         {options.map((opt) => {
           const active = opt.value === value;
@@ -135,12 +142,12 @@ export function SelectMenu<T extends string = string>({
                 onChange(opt.value);
                 setOpen(false);
               }}
-              className={`ep-menu-row w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs cursor-pointer ${
+              className={`ep-menu-row ep-press w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs cursor-pointer ${
                 active ? "text-white font-medium" : "text-secondary hover:text-primary"
               }`}
             >
               <span className="truncate">{opt.label}</span>
-              {active && <Check className="h-3.5 w-3.5 text-accent-soft shrink-0" />}
+              {active && <AppCheckIcon size={14} className="text-accent-soft shrink-0" />}
             </button>
           );
         })}
@@ -160,8 +167,10 @@ export function SelectMenu<T extends string = string>({
         className="ep-glass-input ep-press w-full h-9.5 px-3.5 flex items-center justify-between gap-2 text-left text-xs text-primary rounded-xl focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-45 disabled:pointer-events-none cursor-pointer"
       >
         <span className="truncate">{selectedOption ? selectedOption.label : placeholder}</span>
-        <ChevronDown
-          className={`h-3.5 w-3.5 text-muted shrink-0 transition-transform duration-200 ${
+        <AppChevronIcon
+          direction="down"
+          size={14}
+          className={`text-muted shrink-0 transition-transform duration-200 ${
             open ? "rotate-180" : ""
           }`}
         />

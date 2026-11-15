@@ -66,7 +66,7 @@ export function SegmentedTabs<T extends string>({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(item.value)}
-            className={`ep-press relative z-10 flex-1 px-3 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent rounded-full ${
+            className={`ep-press relative z-10 flex-1 px-3 py-1 text-xs font-medium whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-accent rounded-full ${
               active ? "text-white" : "text-white/75 hover:text-white"
             }`}
           >

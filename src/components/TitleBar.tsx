@@ -1,5 +1,10 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Download, Minus, RotateCw, X } from "lucide-react";
+import {
+  AppCloseIcon,
+  AppDownloadIcon,
+  AppMinimizeIcon,
+  AppResetIcon,
+} from "./ui/AppIcons";
 import { useEffect, useState, type ReactNode } from "react";
 import { isDesktop } from "../lib/bridge";
 import { useAppStore } from "../store/useAppStore";
@@ -195,7 +200,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
               title={`Restart now and install Epilod Party v${availableRelease.version}`}
               className="ep-glass-primary-pill ep-press h-5.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-semibold text-white cursor-pointer disabled:opacity-60 shrink-0"
             >
-              <RotateCw className={`h-3 w-3 ${isApplyingUpdate ? "animate-spin" : ""}`} />
+              <AppResetIcon clockwise size={12} className={isApplyingUpdate ? "animate-spin" : ""} />
               <span>{isApplyingUpdate ? "Restarting..." : "Restart"}</span>
             </button>
           </div>
@@ -210,7 +215,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
               title={`Update available: Epilod Party v${availableRelease.version}`}
               className="ep-press inline-flex items-center gap-1.5 text-[11.5px] font-medium text-white hover:text-accent-soft cursor-pointer"
             >
-              <Download className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+              <AppDownloadIcon size={14} className="text-accent-soft shrink-0" />
               <span className="whitespace-nowrap">
                 {isUpdatePaused
                   ? `Update Paused · v${availableRelease.version}`
@@ -253,7 +258,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             onClick={() => void handleMinimize()}
             className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
-            <Minus className="h-3.5 w-3.5" />
+            <AppMinimizeIcon size={14} />
           </button>
 
           <button
@@ -310,9 +315,9 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             aria-label="Close window"
             title="Close"
             onClick={() => void handleClose()}
-            className="h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-bad/80 active:scale-92 transition-[background-color,color,transform] duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-press h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-bad/80 hover:scale-105 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
-            <X className="h-3.5 w-3.5" />
+            <AppCloseIcon size={14} />
           </button>
         </div>
       </div>

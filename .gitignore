@@ -3,6 +3,7 @@ dist/
 installer/dist/
 target/
 src-tauri/gen/
+src-installer/gen/
 *.log
 *.exe
 *.dll

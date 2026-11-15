@@ -1,5 +1,6 @@
-import { Check } from "lucide-react";
+import { AppCheckIcon } from "./AppIcons";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { usePresencePayload } from "../../lib/useAnimatedPresence";
 
 export type ContextMenuEntry =
   | {
@@ -36,10 +37,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
   );
 
   useLayoutEffect(() => {
-    if (!position) {
-      setCoords(null);
-      return;
-    }
+    if (!position) return;
     const pad = 12;
     const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
     const vh = typeof window !== "undefined" ? window.innerHeight : 720;
@@ -49,7 +47,11 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
 
     // Always keep the bottom of the right-click menu cleanly above the play bar
     let maxBottom = vh - pad;
-    const capsules = document.querySelectorAll<HTMLElement>(".ep-glass-capsule");
+    const barCandidates = document.querySelectorAll<HTMLElement>('[data-capsule-bar="true"]');
+    const capsules =
+      barCandidates.length > 0
+        ? barCandidates
+        : document.querySelectorAll<HTMLElement>(".ep-glass-capsule");
     capsules.forEach((el) => {
       const style = window.getComputedStyle(el);
       if (
@@ -98,7 +100,12 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
     };
   }, [onClose, position]);
 
-  if (!position) return null;
+  const activeMenu = position ? { position, entries } : null;
+  const { mounted, exiting, value: renderedMenu } = usePresencePayload(activeMenu, 170);
+
+  if (!mounted || !renderedMenu) return null;
+
+  const activePosition = renderedMenu.position;
 
   return (
     <div
@@ -108,13 +115,15 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
       data-glass-region="true"
       onContextMenu={(e) => e.preventDefault()}
       style={{
-        left: `${coords?.left ?? position.x}px`,
-        top: `${coords?.top ?? position.y}px`,
+        left: `${coords?.left ?? activePosition.x}px`,
+        top: `${coords?.top ?? activePosition.y}px`,
         maxHeight: coords ? `${coords.maxHeight}px` : undefined,
       }}
-      className="ep-glass-sheet anim-pop-in fixed z-50 w-[272px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-[18px] p-1.5 select-none border border-white/[0.12]"
+      className={`ep-glass-sheet ${
+        exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
+      } fixed z-50 w-[272px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-[18px] p-1.5 select-none border border-white/[0.12]`}
     >
-      {entries.map((entry) => {
+      {renderedMenu.entries.map((entry) => {
         if (entry.type === "divider") {
           return <div key={entry.id} className="ep-hairline-divider my-1 mx-1.5" role="separator" />;
         }
@@ -146,7 +155,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
             <span className="flex items-center gap-2.5 min-w-0">
               <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
                 {entry.checked ? (
-                  <Check className="h-3.5 w-3.5 text-ok" />
+                  <AppCheckIcon size={14} className="text-ok" />
                 ) : (
                   entry.icon
                 )}

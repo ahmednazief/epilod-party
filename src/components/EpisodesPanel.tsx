@@ -1,4 +1,11 @@
-import { Captions, Check, FolderOpen, Plus, Sparkles, X } from "lucide-react";
+import {
+  AppCheckIcon,
+  AppCloseIcon,
+  AppFolderIcon,
+  AppPlusIcon,
+  AppSparkleIcon,
+} from "./ui/AppIcons";
+import { PlayerCaptionsIcon } from "./ui/PlayerIcons";
 import { memo, useEffect, useRef } from "react";
 import {
   formatDisplayMediaTitle,
@@ -73,7 +80,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             title="Close episodes (Esc)"
             className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
           >
-            <X className="h-3.5 w-3.5" />
+            <AppCloseIcon size={14} />
           </button>
         )}
       </div>
@@ -84,13 +91,13 @@ export const EpisodesPanel = memo(function EpisodesPanel({
           type="button"
           onClick={() => setAutoPlayNext(!autoPlayNext)}
           title="Automatically advance to the next episode when the current one finishes"
-          className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer transition-colors ${
+          className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer ${
             autoPlayNext
               ? "ep-glass-pill-active text-white"
               : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.11]"
           }`}
         >
-          {autoPlayNext && <Check className="h-3 w-3 text-ok" />}
+          {autoPlayNext && <AppCheckIcon size={12} className="text-ok" />}
           <span>Auto-Next</span>
         </button>
 
@@ -99,13 +106,13 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             type="button"
             onClick={() => setFollowPartyEpisode(!followPartyEpisode)}
             title="Automatically follow when the Watch Party switches episodes"
-            className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer transition-colors ${
+            className={`ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer ${
               followPartyEpisode
                 ? "ep-glass-pill-active text-white"
                 : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.11]"
             }`}
           >
-            <Sparkles className="h-3 w-3 text-accent-soft" />
+            <AppSparkleIcon size={12} className="text-accent-soft" />
             <span>Follow</span>
           </button>
         )}
@@ -118,7 +125,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             aria-label="Change season folder"
             className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full text-secondary hover:text-white flex items-center justify-center cursor-pointer"
           >
-            <FolderOpen className="h-3.5 w-3.5" />
+            <AppFolderIcon size={14} />
           </button>
           <button
             type="button"
@@ -127,7 +134,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             aria-label="Add episode files"
             className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full text-secondary hover:text-white flex items-center justify-center cursor-pointer"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <AppPlusIcon size={14} />
           </button>
         </div>
       </div>
@@ -153,7 +160,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
               onClick={() => onSelectEpisode(idx)}
               aria-current={active ? "true" : undefined}
               title={`${item.cleanTitle}${item.subtitlePath ? " (Paired subtitle ready)" : ""}`}
-              className={`group relative w-full rounded-xl px-2.5 py-2 text-left flex items-center gap-2.5 cursor-pointer transition-colors ${
+              className={`group relative w-full rounded-xl px-2.5 py-2 text-left flex items-center gap-2.5 cursor-pointer ep-menu-row ep-press ${
                 active
                   ? "ep-episode-active text-white"
                   : "hover:bg-white/[0.06] border border-transparent text-secondary hover:text-white"
@@ -204,7 +211,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                         title="Paired external subtitle detected"
                         className="inline-flex items-center gap-0.5 text-[10px] text-muted"
                       >
-                        <Captions className="h-3 w-3" />
+                        <PlayerCaptionsIcon size={12} />
                         <span>Sub</span>
                       </span>
                     )}

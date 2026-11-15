@@ -19,9 +19,11 @@ pwsh -ExecutionPolicy Bypass -File scripts/fetch-mpv.ps1
 ```
 
 Confirm:
-- `src-tauri/resources/mpv/mpv.exe` exists and matches SHA-256 pinned in `scripts/mpv.lock`.
-- `src-tauri/resources/mpv/ffmpeg.exe` exists if you require embedded MKV subtitle/audio extraction fallback.
-- `src-tauri/resources/licenses/GPL-3.0.txt` and `SOURCE_OFFER.txt` are bundled alongside the binaries.
+- `src-tauri/resources/mpv/mpv.exe` exists and its archive matched the SHA-256 pinned in `scripts/mpv.lock`.
+- `src-tauri/resources/mpv/ffmpeg.exe` exists (separate upstream archive, also SHA-256 pinned in `scripts/mpv.lock`). It is **required** for auto-sync against subtitle tracks embedded in MKV files and as the audio-extraction fallback.
+- `src-tauri/resources/fonts/` (Inter + Noto Sans Arabic) and `src-tauri/resources/licenses/GPL-3.0.txt` + `SOURCE_OFFER.txt` are bundled alongside the binaries.
+
+`scripts/build-installer.ps1` refuses to build if any of these are missing, and it compiles both `epilod-party` and `epilod-setup` with `--features custom-protocol` so the built frontends (`dist/`, `installer/dist/`) are embedded in the binaries. A plain `cargo build --release` without that feature produces a binary that tries to load `http://localhost:1420` / `:1421` instead of its bundled UI.
 
 ## 3. Run Full Windows Verification & Custom Installer Build
 
@@ -29,7 +31,7 @@ Confirm:
 pwsh -ExecutionPolicy Bypass -File scripts/windows-verify.ps1
 ```
 
-Or build the standalone custom installer directly after fetching `mpv.exe`:
+Or build the standalone custom installer directly (fetches and verifies `mpv.exe` + `ffmpeg.exe` if missing):
 
 ```powershell
 pwsh -ExecutionPolicy Bypass -File scripts/build-installer.ps1

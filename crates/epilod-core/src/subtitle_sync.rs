@@ -3,6 +3,8 @@ use thiserror::Error;
 
 pub const ENVELOPE_FPS: f64 = 100.0; // 10 ms per bin
 const MIN_SPOKEN_CUES: usize = 5;
+/// Extra correlation a non-1.0 frame-rate scale must earn over the unscaled alignment.
+const DRIFT_CANDIDATE_MARGIN: f64 = 0.03;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SubtitleSyncError {
@@ -50,7 +52,7 @@ pub struct AutoSyncConfig {
 impl Default for AutoSyncConfig {
     fn default() -> Self {
         Self {
-            max_offset_secs: 60.0,
+            max_offset_secs: 180.0,
             check_framerate_drift: true,
             min_z_score: 4.5,
             min_correlation: 0.18,
@@ -350,6 +352,109 @@ fn is_ass_vector_drawing(text: &str) -> bool {
     lower.contains("{\\p1") || lower.contains("\\p1}") || lower.contains("\\p2")
 }
 
+fn is_non_spoken_ass_style_or_actor(style: &str, actor: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "sign",
+        "signs",
+        "typeset",
+        "typesetting",
+        "title",
+        "titles",
+        "credit",
+        "credits",
+        "karaoke",
+        "op",
+        "ed",
+        "opening",
+        "ending",
+        "eyecatch",
+        "insert",
+        "fx",
+        "logo",
+    ];
+    for field in [style, actor] {
+        for raw_tok in field.split(|c: char| !c.is_alphanumeric()) {
+            let tok = raw_tok
+                .to_ascii_lowercase()
+                .trim_end_matches(|c: char| c.is_ascii_digit())
+                .to_string();
+            if !tok.is_empty() && MARKERS.contains(&tok.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn strip_delimiters(input: &str, open: char, close: char) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut depth = 0usize;
+    for ch in input.chars() {
+        if ch == open {
+            depth += 1;
+        } else if ch == close && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Returns true when a cue likely represents actual spoken dialogue rather than SDH descriptions
+/// (`[Music]`, `(sighs)`), song lyrics (`♪`), watermarks, or empty typesetting tags.
+pub fn is_spoken_dialogue_text(raw: &str) -> bool {
+    let no_ass = strip_delimiters(raw, '{', '}');
+    let no_html = strip_delimiters(&no_ass, '<', '>');
+    let no_tags = no_html.replace("\\N", " ").replace("\\n", " ");
+    let trimmed = no_tags.trim();
+    if trimmed.is_empty() || trimmed.contains('♪') || trimmed.contains('♫') {
+        return false;
+    }
+    if trimmed.starts_with('#') && trimmed.ends_with('#') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if [
+        "opensubtitles",
+        "subscene",
+        "subtitles by",
+        "synced by",
+        "www.",
+        "http://",
+        "https://",
+    ]
+    .iter()
+    .any(|wm| lower.contains(wm))
+    {
+        return false;
+    }
+
+    let s1 = strip_delimiters(trimmed, '[', ']');
+    let s2 = strip_delimiters(&s1, '(', ')');
+    let s3 = strip_delimiters(&s2, '（', '）');
+    let s4 = strip_delimiters(&s3, '【', '】');
+    s4.chars().any(|c| c.is_alphanumeric())
+}
+
+fn filter_spoken_cues(cues: &[SubtitleCue]) -> Vec<SubtitleCue> {
+    let mut sorted = cues.to_vec();
+    sorted.sort_unstable_by_key(|c| (c.start_ms, c.end_ms, c.index));
+    let filtered: Vec<SubtitleCue> = sorted
+        .iter()
+        .filter(|c| {
+            let dur = c.end_ms.saturating_sub(c.start_ms);
+            (100..=15_000).contains(&dur) && is_spoken_dialogue_text(&c.text)
+        })
+        .cloned()
+        .collect();
+    if filtered.len() >= MIN_SPOKEN_CUES {
+        filtered
+    } else {
+        sorted
+    }
+}
+
 pub fn parse_subtitles(input: &str) -> Result<Vec<SubtitleCue>, SubtitleSyncError> {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     let trimmed = normalized.trim_start_matches('\u{FEFF}');
@@ -357,39 +462,74 @@ pub fn parse_subtitles(input: &str) -> Result<Vec<SubtitleCue>, SubtitleSyncErro
         return parse_ass_dialogue(trimmed);
     }
 
+    // Group into blocks separated by whitespace-only lines so `.srt` / `.vtt` files with
+    // spaces or tabs on separator lines do not merge adjacent cues.
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in trimmed.lines() {
+        let line_clean = line.trim_end();
+        if line_clean.trim().is_empty() {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(line_clean);
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
     let mut cues = Vec::new();
-    let blocks = trimmed.split("\n\n");
     let mut seq = 1usize;
-    for block in blocks {
-        let lines: Vec<&str> = block.lines().map(|l| l.trim_end()).collect();
-        if lines.is_empty() {
-            continue;
-        }
+    for lines in blocks {
         let first = lines[0].trim();
-        if first.starts_with("WEBVTT") || first.starts_with("NOTE") || first.starts_with("STYLE") {
+        if first.starts_with("WEBVTT")
+            || first.starts_with("NOTE")
+            || first.starts_with("STYLE")
+            || first.starts_with("REGION")
+        {
             continue;
         }
-        let arrow_idx = lines.iter().position(|l| l.contains("-->"));
-        let Some(idx) = arrow_idx else {
-            continue;
-        };
-        let timing_line = lines[idx];
-        let Some((lhs, rhs)) = timing_line.split_once("-->") else {
-            continue;
-        };
-        let start_ms = parse_timestamp_ms(lhs)?;
-        let end_ms = parse_timestamp_ms(rhs)?;
-        let text = lines[idx + 1..].join("\n").trim().to_string();
-        if text.is_empty() {
+        let arrow_positions: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| if l.contains("-->") { Some(i) } else { None })
+            .collect();
+        if arrow_positions.is_empty() {
             continue;
         }
-        cues.push(SubtitleCue {
-            index: seq,
-            start_ms,
-            end_ms: end_ms.max(start_ms),
-            text,
-        });
-        seq += 1;
+        for (pos_i, &idx) in arrow_positions.iter().enumerate() {
+            let timing_line = lines[idx];
+            let Some((lhs, rhs)) = timing_line.split_once("-->") else {
+                continue;
+            };
+            let start_ms = parse_timestamp_ms(lhs)?;
+            let end_ms = parse_timestamp_ms(rhs)?;
+            let next_arrow = arrow_positions.get(pos_i + 1).copied();
+            let text_end = match next_arrow {
+                Some(na)
+                    if na > idx + 1
+                        && !lines[na - 1].trim().is_empty()
+                        && lines[na - 1].trim().chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    na - 1
+                }
+                Some(na) => na,
+                None => lines.len(),
+            };
+            let text = lines[idx + 1..text_end].join("\n").trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            cues.push(SubtitleCue {
+                index: seq,
+                start_ms,
+                end_ms: end_ms.max(start_ms),
+                text,
+            });
+            seq += 1;
+        }
     }
 
     if cues.is_empty() {
@@ -399,7 +539,8 @@ pub fn parse_subtitles(input: &str) -> Result<Vec<SubtitleCue>, SubtitleSyncErro
 }
 
 fn parse_ass_dialogue(input: &str) -> Result<Vec<SubtitleCue>, SubtitleSyncError> {
-    let mut cues = Vec::new();
+    let mut spoken_cues = Vec::new();
+    let mut all_cues = Vec::new();
     let mut seq = 1usize;
     for line in input.lines() {
         let trimmed = line.trim();
@@ -414,19 +555,28 @@ fn parse_ass_dialogue(input: &str) -> Result<Vec<SubtitleCue>, SubtitleSyncError
             if raw_text.is_empty() || is_ass_vector_drawing(raw_text) {
                 continue;
             }
-            cues.push(SubtitleCue {
+            let cue = SubtitleCue {
                 index: seq,
                 start_ms,
                 end_ms: end_ms.max(start_ms),
                 text: raw_text.to_string(),
-            });
+            };
             seq += 1;
+            if !is_non_spoken_ass_style_or_actor(fields[3], fields[4]) {
+                spoken_cues.push(cue.clone());
+            }
+            all_cues.push(cue);
         }
     }
-    if cues.is_empty() {
+    let result = if !spoken_cues.is_empty() {
+        spoken_cues
+    } else {
+        all_cues
+    };
+    if result.is_empty() {
         return Err(SubtitleSyncError::TooFewCues);
     }
-    Ok(cues)
+    Ok(result)
 }
 
 pub fn render_srt(cues: &[SubtitleCue]) -> String {
@@ -547,7 +697,7 @@ pub fn rescale_ass_text(
     for line in normalized.lines() {
         if let Some(rest) = line.strip_prefix("Dialogue:") {
             let fields: Vec<&str> = rest.splitn(10, ',').collect();
-            if fields.len() == 10 && !is_ass_vector_drawing(fields[9]) {
+            if fields.len() == 10 {
                 let start_ms = parse_timestamp_ms(fields[1])?;
                 let end_ms = parse_timestamp_ms(fields[2])?;
                 let ns = transform_ms(start_ms, scale, anchor_ms, offset_ms)?;
@@ -595,16 +745,19 @@ pub fn fit_two_anchor_transform(
 }
 
 /// Streaming PCM s16le mono 16kHz -> 100 Hz speech-band energy envelope builder.
-/// Includes a simple first-order DC/rumble high-pass filter (~200 Hz) so low-frequency
-/// music/rumble (e.g. 75 Hz) does not mask speech cadence.
+/// Applies a 250 Hz – 3200 Hz band-pass filter so low-frequency rumble/music and high-frequency
+/// SFX/hiss do not mask speech cadence, followed by adaptive baseline subtraction and robust
+/// active-speech normalization + log compression.
 pub struct AudioEnvelopeBuilder {
-    sample_rate: usize,
     samples_per_bin: usize,
+    alpha_hp: f32,
+    alpha_lp: f32,
     bin_energy_sum: f64,
     bin_count: usize,
     bins: Vec<f32>,
     prev_x: f32,
     prev_y: f32,
+    prev_lp: f32,
     pending_byte: Option<u8>,
 }
 
@@ -621,28 +774,30 @@ impl AudioEnvelopeBuilder {
 
     pub fn with_sample_rate(sample_rate: usize) -> Self {
         let sr = sample_rate.max(8_000);
+        let dt = 1.0 / sr as f32;
+        let rc_hp = 1.0 / (2.0 * std::f32::consts::PI * 250.0);
+        let alpha_hp = rc_hp / (rc_hp + dt);
+        let rc_lp = 1.0 / (2.0 * std::f32::consts::PI * 3200.0);
+        let alpha_lp = dt / (rc_lp + dt);
         Self {
-            sample_rate: sr,
             samples_per_bin: (sr as f64 / ENVELOPE_FPS).round().max(1.0) as usize,
+            alpha_hp,
+            alpha_lp,
             bin_energy_sum: 0.0,
             bin_count: 0,
             bins: Vec::new(),
             prev_x: 0.0,
             prev_y: 0.0,
+            prev_lp: 0.0,
             pending_byte: None,
         }
     }
 
     pub fn push_pcm_s16le_bytes(&mut self, bytes: &[u8]) {
-        // High-pass alpha for ~250 Hz cutoff at self.sample_rate
-        let dt = 1.0 / self.sample_rate as f32;
-        let rc = 1.0 / (2.0 * std::f32::consts::PI * 250.0);
-        let alpha = rc / (rc + dt);
-
         let mut iter = bytes.iter().copied();
         if let Some(prev) = self.pending_byte.take() {
             if let Some(hi) = iter.next() {
-                self.push_sample(i16::from_le_bytes([prev, hi]), alpha);
+                self.push_sample(i16::from_le_bytes([prev, hi]));
             } else {
                 self.pending_byte = Some(prev);
                 return;
@@ -650,7 +805,7 @@ impl AudioEnvelopeBuilder {
         }
         while let Some(lo) = iter.next() {
             if let Some(hi) = iter.next() {
-                self.push_sample(i16::from_le_bytes([lo, hi]), alpha);
+                self.push_sample(i16::from_le_bytes([lo, hi]));
             } else {
                 self.pending_byte = Some(lo);
                 break;
@@ -658,13 +813,15 @@ impl AudioEnvelopeBuilder {
         }
     }
 
-    fn push_sample(&mut self, sample: i16, alpha: f32) {
+    fn push_sample(&mut self, sample: i16) {
         let x = sample as f32 / 32768.0;
-        let y = alpha * (self.prev_y + x - self.prev_x);
+        let y_hp = self.alpha_hp * (self.prev_y + x - self.prev_x);
         self.prev_x = x;
-        self.prev_y = y;
+        self.prev_y = y_hp;
+        let y_lp = self.prev_lp + self.alpha_lp * (y_hp - self.prev_lp);
+        self.prev_lp = y_lp;
 
-        self.bin_energy_sum += (y as f64) * (y as f64);
+        self.bin_energy_sum += (y_lp as f64) * (y_lp as f64);
         self.bin_count += 1;
         if self.bin_count >= self.samples_per_bin {
             let rms = (self.bin_energy_sum / self.bin_count as f64).sqrt() as f32;
@@ -686,69 +843,143 @@ impl AudioEnvelopeBuilder {
         if peak < 1e-4 {
             return Err(SubtitleSyncError::InsufficientAudio);
         }
-        let inv_peak = 1.0 / peak;
-        for b in &mut self.bins {
-            *b = (*b * inv_peak).clamp(0.0, 1.0);
+
+        // Estimate the steady background music/noise floor across 20s windows so continuous
+        // low-level ambience does not wash out quiet speech cadence.
+        let mut sorted_all = self.bins.clone();
+        sorted_all.sort_unstable_by(|a, b| a.total_cmp(b));
+        let global_p25 = sorted_all[(sorted_all.len() * 25 / 100).min(sorted_all.len() - 1)];
+
+        const FLOOR_CHUNK_BINS: usize = 2_000;
+        let mut subtracted = Vec::with_capacity(self.bins.len());
+        let mut scratch = Vec::with_capacity(FLOOR_CHUNK_BINS);
+        for chunk in self.bins.chunks(FLOOR_CHUNK_BINS) {
+            scratch.clear();
+            scratch.extend_from_slice(chunk);
+            scratch.sort_unstable_by(|a, b| a.total_cmp(b));
+            let chunk_p15 = scratch[(scratch.len() * 15 / 100).min(scratch.len() - 1)];
+            let floor = chunk_p15.min(global_p25 * 1.5);
+            for &b in chunk {
+                subtracted.push((b - 0.85 * floor).max(0.0));
+            }
         }
-        Ok(self.bins)
+
+        let sub_peak = subtracted.iter().copied().fold(0.0f32, f32::max);
+        let work = if sub_peak >= peak * 0.02 && sub_peak >= 1e-6 {
+            subtracted
+        } else {
+            self.bins
+        };
+
+        // Normalize to the 90th percentile of active (above-median) bins rather than raw max peak
+        // so single loud explosions/gunshots cannot crush hours of quiet dialogue near zero.
+        let work_peak = work.iter().copied().fold(0.0f32, f32::max);
+        let mut work_sorted = work.clone();
+        work_sorted.sort_unstable_by(|a, b| a.total_cmp(b));
+        let median = work_sorted[work_sorted.len() / 2];
+        let active_thresh = median + work_peak * 1e-4;
+        let first_active = work_sorted.partition_point(|&v| v <= active_thresh);
+        let active = &work_sorted[first_active..];
+        let ref_raw = if active.len() >= 20 {
+            active[(active.len() * 90 / 100).min(active.len() - 1)]
+        } else {
+            work_peak
+        };
+        let ref_level = ref_raw.max(work_peak * 0.02).max(1e-6);
+
+        let log_denom = (1.0f32 + 4.0).ln();
+        let mut out = work;
+        for b in &mut out {
+            let u = (*b / ref_level).clamp(0.0, 1.5);
+            *b = ((1.0 + 4.0 * u).ln() / log_denom).clamp(0.0, 1.0);
+        }
+        Ok(out)
     }
 }
 
-fn build_cue_activity(
+fn build_merged_cue_intervals(
     cues: &[SubtitleCue],
-    total_bins: usize,
+    max_cue_bins: usize,
     scale: f64,
     anchor_ms: u64,
-) -> Vec<f32> {
-    let mut act = vec![0.0f32; total_bins];
+) -> Vec<(usize, usize)> {
+    let mut raw: Vec<(usize, usize)> = Vec::with_capacity(cues.len());
     for cue in cues {
         let s =
             ((anchor_ms as f64) + ((cue.start_ms as f64) - (anchor_ms as f64)) * scale).max(0.0);
         let e = ((anchor_ms as f64) + ((cue.end_ms as f64) - (anchor_ms as f64)) * scale).max(s);
-        let b0 = ((s / 10.0).floor() as isize).clamp(0, total_bins as isize) as usize;
-        let b1 = ((e / 10.0).ceil() as isize).clamp(0, total_bins as isize) as usize;
-        for slot in &mut act[b0..b1] {
-            *slot = 1.0;
+        let b0 = ((s / 10.0).floor() as isize).clamp(0, max_cue_bins as isize) as usize;
+        let b1 = ((e / 10.0).ceil() as isize).clamp(0, max_cue_bins as isize) as usize;
+        if b1 > b0 {
+            raw.push((b0, b1));
         }
     }
-    act
+    raw.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(raw.len());
+    for (b0, b1) in raw {
+        if let Some(last) = merged.last_mut() {
+            if b0 <= last.1 {
+                last.1 = last.1.max(b1);
+                continue;
+            }
+        }
+        merged.push((b0, b1));
+    }
+    merged
 }
 
-fn score_alignment(audio: &[f32], cue_act: &[f32], lag_bins: isize) -> f64 {
-    let n = audio.len().min(cue_act.len()) as isize;
-    if n <= 0 {
-        return 0.0;
+fn score_alignment_fast(
+    pref_y: &[f64],
+    sum_y_all: f64,
+    var_y_term: f64,
+    total_bins: usize,
+    merged: &[(usize, usize)],
+    total_cue_bins: usize,
+    lag_bins: isize,
+) -> Option<f64> {
+    if total_bins < 500 || total_cue_bins == 0 || var_y_term <= 1e-12 {
+        return None;
     }
-    let mut sum_xy = 0.0f64;
-    let mut sum_x = 0.0f64;
-    let mut sum_y = 0.0f64;
-    let mut sum_x2 = 0.0f64;
-    let mut sum_y2 = 0.0f64;
-    let mut count = 0usize;
+    let start_i = 0isize.max(-lag_bins);
+    let end_i = total_bins as isize - lag_bins;
+    if end_i <= start_i {
+        return None;
+    }
+    let lo = start_i as usize;
+    let hi = end_i as usize;
 
-    let start_i = 0.max(-lag_bins);
-    let end_i = n.min(n - lag_bins);
-    for i in start_i..end_i {
-        let x = cue_act[i as usize] as f64;
-        let y = audio[(i + lag_bins) as usize] as f64;
-        sum_xy += x * y;
-        sum_x += x;
-        sum_y += y;
-        sum_x2 += x * x;
-        sum_y2 += y * y;
-        count += 1;
+    let idx = merged.partition_point(|&(_, b1)| b1 <= lo);
+    let mut sum_x = 0.0f64;
+    let mut sum_xy = 0.0f64;
+    for &(b0, b1) in &merged[idx..] {
+        if b0 >= hi {
+            break;
+        }
+        let cb0 = b0.max(lo);
+        let cb1 = b1.min(hi);
+        if cb1 > cb0 {
+            sum_x += (cb1 - cb0) as f64;
+            let ca0 = (cb0 as isize + lag_bins) as usize;
+            let ca1 = (cb1 as isize + lag_bins) as usize;
+            sum_xy += pref_y[ca1] - pref_y[ca0];
+        }
     }
-    let min_overlap = (n as usize / 4).max(500).min(n as usize);
-    if count < min_overlap {
-        return 0.0;
+
+    if sum_x < (total_cue_bins as f64 * 0.50) {
+        return None;
     }
-    let cf = count as f64;
-    let num = cf * sum_xy - sum_x * sum_y;
-    let den = ((cf * sum_x2 - sum_x * sum_x) * (cf * sum_y2 - sum_y * sum_y)).sqrt();
+
+    let nf = total_bins as f64;
+    let var_x_term = nf * sum_x - sum_x * sum_x;
+    if var_x_term <= 1e-12 {
+        return Some(0.0);
+    }
+    let num = nf * sum_xy - sum_x * sum_y_all;
+    let den = (var_x_term * var_y_term).sqrt();
     if den <= 1e-12 {
-        0.0
+        Some(0.0)
     } else {
-        num / den
+        Some(num / den)
     }
 }
 
@@ -764,8 +995,29 @@ pub fn auto_align_subtitles(
         return Err(SubtitleSyncError::InsufficientAudio);
     }
 
+    let spoken_cues = filter_spoken_cues(cues);
     let max_lag = (config.max_offset_secs * ENVELOPE_FPS).round() as isize;
     let total_bins = audio_envelope.len();
+    let max_cue_bins = total_bins.saturating_add(max_lag.max(0) as usize);
+
+    let mut pref_y = Vec::with_capacity(total_bins + 1);
+    let mut pref_y2 = Vec::with_capacity(total_bins + 1);
+    pref_y.push(0.0f64);
+    pref_y2.push(0.0f64);
+    let (mut acc_y, mut acc_y2) = (0.0f64, 0.0f64);
+    for &v in audio_envelope {
+        let y = if v.is_finite() {
+            v.max(0.0) as f64
+        } else {
+            0.0
+        };
+        acc_y += y;
+        acc_y2 += y * y;
+        pref_y.push(acc_y);
+        pref_y2.push(acc_y2);
+    }
+    let sum_y_all = pref_y[total_bins];
+    let var_y_term = (total_bins as f64) * pref_y2[total_bins] - sum_y_all * sum_y_all;
 
     // Candidate scales: 1.0 plus common PAL/NTSC framerate ratios if enabled and timeline >= 90s
     let mut candidate_scales = vec![1.0f64];
@@ -773,55 +1025,119 @@ pub fn auto_align_subtitles(
         candidate_scales.extend([23.976 / 25.0, 25.0 / 23.976, 24.0 / 25.0, 25.0 / 24.0]);
     }
 
-    let anchor_ms = cues[0].start_ms;
+    let anchor_ms = spoken_cues[0].start_ms;
     let mut best_scale = 1.0f64;
     let mut best_lag: isize = 0;
     let mut best_corr = f64::NEG_INFINITY;
+    let mut best_adjusted = f64::NEG_INFINITY;
     let mut best_z = 0.0f64;
 
-    // Coarse search at 50 ms (step 5 bins), then fine search ±10 bins at 10 ms resolution
+    const COARSE_STEP: isize = 2;
+    // Coarse search at 20 ms step, then 10 ms fine search around the top 4 distinct coarse peaks
     for &scale in &candidate_scales {
-        let cue_act = build_cue_activity(cues, total_bins, scale, anchor_ms);
-        if cue_act.iter().all(|&v| v == 0.0) {
+        let merged = build_merged_cue_intervals(&spoken_cues, max_cue_bins, scale, anchor_ms);
+        if merged.is_empty() {
+            continue;
+        }
+        let total_cue_bins: usize = merged.iter().map(|&(a, b)| b - a).sum();
+
+        let mut coarse_points: Vec<(isize, f64)> = Vec::new();
+        let mut lag = -max_lag;
+        while lag <= max_lag {
+            if let Some(r) = score_alignment_fast(
+                &pref_y,
+                sum_y_all,
+                var_y_term,
+                total_bins,
+                &merged,
+                total_cue_bins,
+                lag,
+            ) {
+                coarse_points.push((lag, r));
+            }
+            lag += COARSE_STEP;
+        }
+        if coarse_points.is_empty() {
             continue;
         }
 
-        let mut coarse_scores = Vec::new();
-        let mut coarse_best_lag = 0isize;
-        let mut coarse_best_val = f64::NEG_INFINITY;
-        let mut lag = -max_lag;
-        while lag <= max_lag {
-            let r = score_alignment(audio_envelope, &cue_act, lag);
-            coarse_scores.push(r);
-            if r > coarse_best_val {
-                coarse_best_val = r;
-                coarse_best_lag = lag;
+        let mut ranked = coarse_points.clone();
+        ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        let mut peak_lags: Vec<isize> = Vec::with_capacity(4);
+        for &(cand_lag, _) in &ranked {
+            if peak_lags.iter().all(|&p| (p - cand_lag).abs() >= 20) {
+                peak_lags.push(cand_lag);
+                if peak_lags.len() == 4 {
+                    break;
+                }
             }
-            lag += 5;
         }
 
-        let mean = coarse_scores.iter().sum::<f64>() / coarse_scores.len().max(1) as f64;
-        let var = coarse_scores
+        let mut local_best_lag = ranked[0].0;
+        let mut local_best_corr = ranked[0].1;
+        for peak_lag in peak_lags {
+            let fine_lo = (peak_lag - 6).max(-max_lag);
+            let fine_hi = (peak_lag + 6).min(max_lag);
+            for f_lag in fine_lo..=fine_hi {
+                if let Some(r) = score_alignment_fast(
+                    &pref_y,
+                    sum_y_all,
+                    var_y_term,
+                    total_bins,
+                    &merged,
+                    total_cue_bins,
+                    f_lag,
+                ) {
+                    if r > local_best_corr {
+                        local_best_corr = r;
+                        local_best_lag = f_lag;
+                    }
+                }
+            }
+        }
+
+        // Measure background mean/std excluding the peak's own ±2.5s shoulder so a wide
+        // dialogue peak does not inflate the background variance against itself on short clips.
+        let bg_count = coarse_points
             .iter()
-            .map(|&s| (s - mean) * (s - mean))
-            .sum::<f64>()
-            / coarse_scores.len().max(1) as f64;
-        let std = var.sqrt().max(1e-6);
-
-        let fine_lo = (coarse_best_lag - 8).max(-max_lag);
-        let fine_hi = (coarse_best_lag + 8).min(max_lag);
-        let mut local_best_lag = coarse_best_lag;
-        let mut local_best_corr = coarse_best_val;
-        for f_lag in fine_lo..=fine_hi {
-            let r = score_alignment(audio_envelope, &cue_act, f_lag);
-            if r > local_best_corr {
-                local_best_corr = r;
-                local_best_lag = f_lag;
-            }
-        }
+            .filter(|&&(l, _)| (l - local_best_lag).abs() > 250)
+            .count();
+        let (mean, std) = if bg_count >= 40 {
+            let n = bg_count as f64;
+            let m = coarse_points
+                .iter()
+                .filter(|&&(l, _)| (l - local_best_lag).abs() > 250)
+                .map(|&(_, r)| r)
+                .sum::<f64>()
+                / n;
+            let v = coarse_points
+                .iter()
+                .filter(|&&(l, _)| (l - local_best_lag).abs() > 250)
+                .map(|&(_, r)| (r - m) * (r - m))
+                .sum::<f64>()
+                / n;
+            (m, v.sqrt().max(1e-6))
+        } else {
+            let n = coarse_points.len() as f64;
+            let m = coarse_points.iter().map(|&(_, r)| r).sum::<f64>() / n;
+            let v = coarse_points
+                .iter()
+                .map(|&(_, r)| (r - m) * (r - m))
+                .sum::<f64>()
+                / n;
+            (m, v.sqrt().max(1e-6))
+        };
 
         let z = (local_best_corr - mean) / std;
-        if local_best_corr > best_corr {
+        // A frame-rate-drift candidate must clearly beat the unscaled fit; otherwise random noise
+        // could make a wrong scale win by a hair and visibly stretch an already-correct subtitle.
+        let adjusted = if (scale - 1.0).abs() > 1e-9 {
+            local_best_corr - DRIFT_CANDIDATE_MARGIN
+        } else {
+            local_best_corr
+        };
+        if adjusted > best_adjusted {
+            best_adjusted = adjusted;
             best_corr = local_best_corr;
             best_lag = local_best_lag;
             best_scale = scale;
@@ -1052,5 +1368,241 @@ mod tests {
         let res = auto_align_subtitles(&cues, &env, &AutoSyncConfig::default()).unwrap();
         assert!(res.drift_applied);
         assert!((res.scale - true_scale).abs() < 0.002);
+    }
+
+    /// Deterministic pseudo-random in [0,1) so the noisy test is reproducible.
+    fn lcg(state: &mut u64) -> f32 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*state >> 40) as f32) / ((1u64 << 24) as f32)
+    }
+
+    #[test]
+    fn test_autosync_survives_noise_loud_spikes_and_does_not_invent_drift() {
+        let mut rng = 0x9E3779B97F4A7C15u64;
+        let secs = 600usize;
+        let mut windows = Vec::new();
+        let mut t = 4_000u64;
+        let mut step = 0u64;
+        while t < 580_000 {
+            let gap = 2_500 + ((step * 2_713) % 7_000);
+            let dur = 1_200 + ((step * 1_451) % 2_600);
+            windows.push((t, t + dur));
+            t += dur + gap;
+            step += 1;
+        }
+        // Noisy floor, speech at varying levels, and loud non-speech spikes (explosions/music hits)
+        let mut env = vec![0.0f32; secs * 100];
+        for slot in env.iter_mut() {
+            *slot = 0.03 + 0.20 * lcg(&mut rng);
+        }
+        for &(s, e) in &windows {
+            for slot in &mut env[(s / 10) as usize..((e / 10) as usize).min(secs * 100)] {
+                *slot = 0.35 + 0.5 * lcg(&mut rng);
+            }
+        }
+        for spike_start in (30..secs).step_by(40) {
+            for slot in &mut env[spike_start * 100..spike_start * 100 + 60] {
+                *slot = 1.0;
+            }
+        }
+
+        for true_offset_ms in [-2_400i64, 0, 7_300, 41_000] {
+            let cues: Vec<SubtitleCue> = windows
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| SubtitleCue {
+                    index: i + 1,
+                    start_ms: (s as i64 - true_offset_ms).max(0) as u64,
+                    end_ms: (e as i64 - true_offset_ms).max(0) as u64,
+                    text: format!("Line {i}"),
+                })
+                .collect();
+            let res = auto_align_subtitles(&cues, &env, &AutoSyncConfig::default())
+                .unwrap_or_else(|e| panic!("offset {true_offset_ms}: {e}"));
+            assert!(
+                (res.offset_ms - true_offset_ms).abs() <= 30,
+                "offset {true_offset_ms}: got {}",
+                res.offset_ms
+            );
+            assert!(
+                !res.drift_applied,
+                "offset {true_offset_ms}: invented drift scale {}",
+                res.scale
+            );
+        }
+    }
+
+    #[test]
+    fn test_autosync_extreme_explosions_and_quiet_dialogue_from_pcm() {
+        let sr = 16_000usize;
+        let secs = 360usize;
+        // 20 speech bursts placed in [85s..330s] so shifts from -25s to +80s keep every cue in bounds.
+        let mut windows = Vec::new();
+        let mut t_ms = 85_000u64;
+        for step in 0..20u64 {
+            let dur = 1_400 + ((step * 733) % 1_900);
+            let gap = 7_500 + ((step * 2_903) % 5_500);
+            windows.push((t_ms, t_ms + dur));
+            t_ms += dur + gap;
+        }
+        let explosion_windows = [
+            (30_000u64, 31_200u64),
+            (120_000, 121_300),
+            (195_000, 196_100),
+            (265_000, 266_200),
+            (345_000, 346_200),
+        ];
+
+        let mut pcm = Vec::with_capacity(sr * secs * 2);
+        let mut win_idx = 0usize;
+        let mut exp_idx = 0usize;
+        for n in 0..sr * secs {
+            let cur_ms = (n as u64 * 1000) / sr as u64;
+            while win_idx < windows.len() && cur_ms >= windows[win_idx].1 {
+                win_idx += 1;
+            }
+            while exp_idx < explosion_windows.len() && cur_ms >= explosion_windows[exp_idx].1 {
+                exp_idx += 1;
+            }
+            let in_speech = win_idx < windows.len() && cur_ms >= windows[win_idx].0;
+            let in_explosion =
+                exp_idx < explosion_windows.len() && cur_ms >= explosion_windows[exp_idx].0;
+
+            let t = n as f64 / sr as f64;
+            let rumble = 8000.0 * (2.0 * std::f64::consts::PI * 90.0 * t).sin();
+            let hiss = 5000.0 * (2.0 * std::f64::consts::PI * 5500.0 * t).sin();
+            let speech = if in_speech {
+                1400.0 * (2.0 * std::f64::consts::PI * 750.0 * t).sin()
+            } else {
+                0.0
+            };
+            let boom = if in_explosion {
+                20_000.0 * (2.0 * std::f64::consts::PI * 420.0 * t).sin()
+                    + 12_000.0 * (2.0 * std::f64::consts::PI * 1100.0 * t).sin()
+            } else {
+                0.0
+            };
+            let sample = (rumble + hiss + speech + boom).clamp(-32767.0, 32767.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        // Feed odd-sized chunks to exercise `pending_byte` across buffer boundaries.
+        let mut builder = AudioEnvelopeBuilder::with_sample_rate(sr);
+        for chunk in pcm.chunks(4097) {
+            builder.push_pcm_s16le_bytes(chunk);
+        }
+        let env = builder.finish().expect("envelope");
+
+        for true_offset_ms in [-18_400i64, 74_200] {
+            let cues: Vec<SubtitleCue> = windows
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, e))| SubtitleCue {
+                    index: i + 1,
+                    start_ms: (s as i64 - true_offset_ms) as u64,
+                    end_ms: (e as i64 - true_offset_ms) as u64,
+                    text: format!("Quiet dialogue line {i}"),
+                })
+                .collect();
+            let res = auto_align_subtitles(&cues, &env, &AutoSyncConfig::default())
+                .unwrap_or_else(|e| panic!("offset {true_offset_ms}: {e}"));
+            assert!(
+                (res.offset_ms - true_offset_ms).abs() <= 30,
+                "offset {true_offset_ms}: got {} (corr={}, z={})",
+                res.offset_ms,
+                res.correlation,
+                res.confidence_z
+            );
+            assert!(!res.drift_applied);
+        }
+    }
+
+    #[test]
+    fn test_autosync_polluted_sdh_music_ass_signs_and_whitespace_srt() {
+        // Irregular speech windows inside a 50s timeline, with last cue near the tail so a +3.5s
+        // delayed subtitle pushes cue end past audio_duration (50s).
+        let windows = vec![
+            (3_000, 4_800),
+            (7_500, 9_200),
+            (13_100, 15_400),
+            (19_000, 21_200),
+            (25_600, 27_900),
+            (32_200, 34_800),
+            (39_400, 41_900),
+            (46_800, 49_200),
+        ];
+        let env = make_synthetic_envelope(50, &windows);
+
+        // 1) Polluted SRT: spaces/tabs on blank separator lines, missing blank line between cues 1 & 2,
+        // SDH cues, song lyrics, watermarks, delayed by +3500 ms (expected offset = -3500 ms).
+        let delay_ms = 3_500u64;
+        let mut srt = String::new();
+        srt.push_str(&format!(
+            "1\n{} --> {}\nFirst spoken line\n2\n{} --> {}\nSecond line missing blank\n   \t\n",
+            format_srt_timestamp(windows[0].0 + delay_ms),
+            format_srt_timestamp(windows[0].1 + delay_ms),
+            format_srt_timestamp(windows[1].0 + delay_ms),
+            format_srt_timestamp(windows[1].1 + delay_ms),
+        ));
+        // Add misleading SDH / song / watermark cues at random wrong positions
+        srt.push_str("99\n00:00:00,200 --> 00:00:02,000\n[Music]\n \n");
+        srt.push_str("100\n00:00:05,500 --> 00:00:07,000\n(door slams loudly)\n\t\n");
+        srt.push_str("101\n00:00:11,000 --> 00:00:13,000\n[موسيقى]\n  \n");
+        srt.push_str("102\n00:00:16,500 --> 00:00:18,500\n♪ Opening Song ♪\n\n");
+        srt.push_str("103\n00:00:43,000 --> 00:00:45,500\nSynced by OpenSubtitles.org\n   \n");
+        for (idx, &(s, e)) in windows.iter().enumerate().skip(2) {
+            srt.push_str(&format!(
+                "{}\n{} --> {}\nLine {idx}\n  \n",
+                idx + 200,
+                format_srt_timestamp(s + delay_ms),
+                format_srt_timestamp(e + delay_ms),
+            ));
+        }
+
+        let srt_cues = parse_subtitles(&srt).unwrap();
+        let srt_res = auto_align_subtitles(&srt_cues, &env, &AutoSyncConfig::default()).unwrap();
+        assert!(
+            (srt_res.offset_ms - (-(delay_ms as i64))).abs() <= 30,
+            "got {} expected -{}",
+            srt_res.offset_ms,
+            delay_ms
+        );
+
+        // 2) Polluted out-of-order ASS: OP/ED/Sign/Karaoke actors + vector drawing + shifted early by 2.4s.
+        let early_ms = 2_400u64;
+        let mut ass = String::from(
+            "[Script Info]\nTitle: Test\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\nStyle: Sign,Arial\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+        );
+        // Drawing cue must also be rescaled by rescale_ass_text!
+        ass.push_str("Dialogue: 0,0:00:10.00,0:00:12.00,Sign,,0,0,0,,{\\p1}m 0 0 l 20 20{\\p0}\n");
+        ass.push_str("Dialogue: 0,0:00:00.50,0:00:02.00,OP-Romaji,,0,0,0,,Opening lyric\n");
+        ass.push_str("Dialogue: 0,0:00:36.00,0:00:38.50,Default,ED1,0,0,0,,Ending credit\n");
+        // Insert spoken cues intentionally out of chronological order
+        for &(s, e) in windows.iter().rev() {
+            ass.push_str(&format!(
+                "Dialogue: 0,{},{},Default,Actor,0,0,0,,{{\\an8}}Spoken line\n",
+                format_ass_timestamp(s - early_ms),
+                format_ass_timestamp(e - early_ms),
+            ));
+        }
+
+        let ass_cues = parse_subtitles(&ass).unwrap();
+        let ass_res = auto_align_subtitles(&ass_cues, &env, &AutoSyncConfig::default()).unwrap();
+        assert!(
+            (ass_res.offset_ms - (early_ms as i64)).abs() <= 30,
+            "got {} expected +{}",
+            ass_res.offset_ms,
+            early_ms
+        );
+
+        let rescaled =
+            rescale_ass_text(&ass, ass_res.scale, ass_res.anchor_ms, ass_res.offset_ms).unwrap();
+        // Vector drawing shifted from 10.00->12.00 by +2.4s => 12.40->14.40
+        assert!(
+            rescaled.contains("0:00:12.40,0:00:14.40,Sign,,0,0,0,,{\\p1}"),
+            "drawing not shifted:\n{rescaled}"
+        );
     }
 }

@@ -6,6 +6,7 @@ license = "GPL-3.0-only"
 
 [dependencies]
 epilod-core = { path = "../epilod-core" }
+lzma-rust2 = { version = "0.25.0", default-features = false, features = ["std", "encoder", "optimization"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

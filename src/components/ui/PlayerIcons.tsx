@@ -6,47 +6,120 @@ interface PlayerIconProps {
 }
 
 /**
- * Custom Liquid-Glass Play glyph for the hero center orb.
+ * Custom faceted Smoked-Amethyst Crystal Play prism for the hero center orb.
  */
-export function PlayerPlayIcon({ size = 19, className = "" }: PlayerIconProps) {
+export function PlayerPlayIcon({ size = 24, className = "" }: PlayerIconProps) {
   const uid = useId().replace(/:/g, "");
-  const fillId = `ep-play-fill-${uid}`;
+  const haloId = `ep-play-halo-${uid}`;
+  const coreId = `ep-play-core-${uid}`;
+  const facetId = `ep-play-facet-${uid}`;
+  const rimId = `ep-play-rim-${uid}`;
+  const clipId = `ep-play-clip-${uid}`;
+
+  const haloPath =
+    "M6.85 12C6.6 9.5 6.6 7.8 6.85 6.4C6.85 4.45 8.4 3.45 10 4.4C13.4 6.35 16.5 8.3 18.9 9.95C20.95 11.35 20.95 12.65 18.9 14.05C16.5 15.7 13.4 17.65 10 19.6C8.4 20.55 6.85 19.55 6.85 17.6C6.6 16.2 6.6 14.5 6.85 12Z";
+  const corePath =
+    "M8.05 12C7.85 9.8 7.85 8.3 8.05 7.1C8.05 5.55 9.25 4.72 10.6 5.5C13.35 7.1 16 8.85 18 10.22C19.75 11.4 19.75 12.6 18 13.78C16 15.15 13.35 16.9 10.6 18.5C9.25 19.28 8.05 18.45 8.05 16.9C7.85 15.7 7.85 14.2 8.05 12Z";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={fillId} x1="6" y1="3" x2="20" y2="21" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="65%" stopColor="#F5F3FF" />
-          <stop offset="100%" stopColor="#DDD6FE" />
+        <linearGradient id={haloId} x1="7" y1="4" x2="20" y2="20" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#EDE9FE" stopOpacity="0.46" />
+          <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.34" />
         </linearGradient>
+        <linearGradient id={coreId} x1="7" y1="5" x2="19" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" />
+          <stop offset="52%" stopColor="#F5F3FF" />
+          <stop offset="100%" stopColor="#E4D8FF" />
+        </linearGradient>
+        <linearGradient id={facetId} x1="8" y1="12" x2="19" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#C4B5FD" stopOpacity="0.46" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.34" />
+        </linearGradient>
+        <linearGradient id={rimId} x1="7" y1="4" x2="19" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.95" />
+          <stop offset="100%" stopColor="#DDD6FE" stopOpacity="0.48" />
+        </linearGradient>
+        <clipPath id={clipId}>
+          <path d={corePath} />
+        </clipPath>
       </defs>
-      <path
-        d="M8.1 5.05C7.24 4.55 6.18 5.17 6.18 6.16V17.84C6.18 18.83 7.24 19.45 8.1 18.95L18.22 13.11C19.08 12.61 19.08 11.39 18.22 10.89L8.1 5.05Z"
-        fill={`url(#${fillId})`}
-      />
+      <path d={haloPath} fill={`url(#${haloId})`} stroke="#EDE9FE" strokeOpacity="0.38" strokeWidth="0.85" />
+      <path d={corePath} fill={`url(#${coreId})`} />
+      <g clipPath={`url(#${clipId})`}>
+        <path
+          d="M6.5 13.1C10.8 11.7 15.2 11.35 20.5 12V20.5H6.5V13.1Z"
+          fill={`url(#${facetId})`}
+        />
+        <path
+          d="M8.65 12.2C8.55 9.4 8.6 7.2 9.35 6.45C10.05 5.75 11.45 6.45 14 8.05"
+          stroke="#FFFFFF"
+          strokeOpacity="0.9"
+          strokeWidth="1.05"
+          strokeLinecap="round"
+        />
+      </g>
+      <path d={corePath} stroke={`url(#${rimId})`} strokeWidth="0.75" />
     </svg>
   );
 }
 
 /**
- * Custom Liquid-Glass Pause pillars for the hero center orb.
+ * Custom faceted Smoked-Amethyst Crystal Pause pillars for the hero center orb.
  */
-export function PlayerPauseIcon({ size = 19, className = "" }: PlayerIconProps) {
+export function PlayerPauseIcon({ size = 24, className = "" }: PlayerIconProps) {
   const uid = useId().replace(/:/g, "");
-  const fillId = `ep-pause-fill-${uid}`;
+  const haloId = `ep-pause-halo-${uid}`;
+  const coreId = `ep-pause-core-${uid}`;
+  const facetId = `ep-pause-facet-${uid}`;
+  const shineId = `ep-pause-shine-${uid}`;
+  const rimId = `ep-pause-rim-${uid}`;
+  const clipId = `ep-pause-clip-${uid}`;
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={fillId} x1="6" y1="4" x2="18" y2="20" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="65%" stopColor="#F5F3FF" />
-          <stop offset="100%" stopColor="#DDD6FE" />
+        <linearGradient id={haloId} x1="5" y1="4" x2="19" y2="20" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#EDE9FE" stopOpacity="0.46" />
+          <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.34" />
         </linearGradient>
+        <linearGradient id={coreId} x1="6" y1="5" x2="18" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" />
+          <stop offset="52%" stopColor="#F5F3FF" />
+          <stop offset="100%" stopColor="#E4D8FF" />
+        </linearGradient>
+        <linearGradient id={facetId} x1="6" y1="12" x2="18" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#C4B5FD" stopOpacity="0.46" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.34" />
+        </linearGradient>
+        <linearGradient id={shineId} x1="12" y1="6" x2="12" y2="12.5" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.88" />
+          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id={rimId} x1="6" y1="5" x2="18" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.95" />
+          <stop offset="100%" stopColor="#DDD6FE" stopOpacity="0.48" />
+        </linearGradient>
+        <clipPath id={clipId}>
+          <rect x="6" y="5" width="4.2" height="14" rx="2.1" />
+          <rect x="13.8" y="5" width="4.2" height="14" rx="2.1" />
+        </clipPath>
       </defs>
-      <rect x="6.5" y="5" width="4.2" height="14" rx="2.1" fill={`url(#${fillId})`} />
-      <rect x="13.3" y="5" width="4.2" height="14" rx="2.1" fill={`url(#${fillId})`} />
+      <rect x="5" y="3.9" width="6.2" height="16.2" rx="3.1" fill={`url(#${haloId})`} stroke="#EDE9FE" strokeOpacity="0.38" strokeWidth="0.85" />
+      <rect x="12.8" y="3.9" width="6.2" height="16.2" rx="3.1" fill={`url(#${haloId})`} stroke="#EDE9FE" strokeOpacity="0.38" strokeWidth="0.85" />
+      <rect x="6" y="5" width="4.2" height="14" rx="2.1" fill={`url(#${coreId})`} />
+      <rect x="13.8" y="5" width="4.2" height="14" rx="2.1" fill={`url(#${coreId})`} />
+      <g clipPath={`url(#${clipId})`}>
+        <path
+          d="M4.5 13.7C9.5 12.05 14.5 11.75 19.5 12.55V20.5H4.5V13.7Z"
+          fill={`url(#${facetId})`}
+        />
+        <rect x="6.95" y="6.1" width="1.2" height="6" rx="0.6" fill={`url(#${shineId})`} />
+        <rect x="14.75" y="6.1" width="1.2" height="6" rx="0.6" fill={`url(#${shineId})`} />
+      </g>
+      <rect x="6" y="5" width="4.2" height="14" rx="2.1" stroke={`url(#${rimId})`} strokeWidth="0.75" />
+      <rect x="13.8" y="5" width="4.2" height="14" rx="2.1" stroke={`url(#${rimId})`} strokeWidth="0.75" />
     </svg>
   );
 }
@@ -202,11 +275,11 @@ export function PlayerVolumeIcon({
 }
 
 /**
- * Custom crystal captions plaque icon matching LobbyIcons squircle style.
+ * Custom crystal captions screen icon with stepped subtitle bars.
  */
 export function PlayerCaptionsIcon({
   active = false,
-  size = 18,
+  size = 17,
   className = "",
 }: PlayerIconProps & { active?: boolean }) {
   const uid = useId().replace(/:/g, "");
@@ -216,69 +289,76 @@ export function PlayerCaptionsIcon({
     <svg width={size} height={size} viewBox="0 0 28 28" fill="none" aria-hidden="true" className={className}>
       <defs>
         <linearGradient id={plateId} x1="3" y1="4" x2="25" y2="24" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor={active ? "#C4B5FD" : "#A78BFA"} stopOpacity={active ? "0.95" : "0.34"} />
-          <stop offset="100%" stopColor={active ? "#7C3AED" : "#5B21B6"} stopOpacity={active ? "0.95" : "0.24"} />
+          <stop offset="0%" stopColor="#A78BFA" stopOpacity="0.34" />
+          <stop offset="100%" stopColor="#6D28D9" stopOpacity="0.24" />
         </linearGradient>
       </defs>
       <rect
-        x="2"
-        y="4.5"
-        width="24"
-        height="19"
-        rx="6"
-        fill={`url(#${plateId})`}
-        stroke="#EDE9FE"
-        strokeOpacity={active ? "0.8" : "0.48"}
-        strokeWidth="1.25"
+        x="2.5"
+        y="5"
+        width="23"
+        height="18"
+        rx="4.6"
+        fill={active ? `url(#${plateId})` : "#FFFFFF"}
+        fillOpacity={active ? "1" : "0.06"}
+        stroke={active ? "#DDD6FE" : "#E2E8F0"}
+        strokeOpacity={active ? "0.95" : "0.72"}
+        strokeWidth="1.5"
       />
       {/* Stepped luminous subtitle bars inside screen frame */}
-      <rect x="6" y="10.2" width="11" height="2.4" rx="1.2" fill="#FFFFFF" />
-      <rect x="18.6" y="10.2" width="3.4" height="2.4" rx="1.2" fill="#DDD6FE" />
-      <rect x="6" y="15.2" width="5.2" height="2.4" rx="1.2" fill="#DDD6FE" />
-      <rect x="12.8" y="15.2" width="9.2" height="2.4" rx="1.2" fill="#FFFFFF" />
+      <rect x="6.3" y="10.4" width="10.2" height="2.2" rx="1.1" fill="#FFFFFF" />
+      <rect
+        x="18.1"
+        y="10.4"
+        width="3.6"
+        height="2.2"
+        rx="1.1"
+        fill={active ? "#DDD6FE" : "#C4B5FD"}
+        fillOpacity={active ? "1" : "0.8"}
+      />
+      <rect
+        x="6.3"
+        y="15.1"
+        width="4.8"
+        height="2.2"
+        rx="1.1"
+        fill={active ? "#DDD6FE" : "#C4B5FD"}
+        fillOpacity={active ? "1" : "0.8"}
+      />
+      <rect x="12.7" y="15.1" width="9" height="2.2" rx="1.1" fill="#FFFFFF" />
     </svg>
   );
 }
 
 /**
- * Custom Royal-Purple acoustic waveform pill icon for Audio & Playback.
+ * Custom sculpted acoustic waveform icon for Audio & Playback (pill-free).
  */
 export function PlayerAudioIcon({
   active = false,
-  size = 18,
+  size = 17,
   className = "",
 }: PlayerIconProps & { active?: boolean }) {
   const uid = useId().replace(/:/g, "");
-  const plateId = `ep-aud-plate-${uid}`;
-  const waveId = `ep-aud-wave-${uid}`;
+  const centerId = `ep-aud-center-${uid}`;
+  const midId = `ep-aud-mid-${uid}`;
 
   return (
-    <svg width={size} height={size} viewBox="0 0 28 28" fill="none" aria-hidden="true" className={className}>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={plateId} x1="2" y1="2" x2="26" y2="26" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor={active ? "#C4B5FD" : "#A78BFA"} stopOpacity={active ? "0.92" : "0.3"} />
-          <stop offset="100%" stopColor={active ? "#6D28D9" : "#4C1D95"} stopOpacity={active ? "0.92" : "0.22"} />
-        </linearGradient>
-        <linearGradient id={waveId} x1="7" y1="6" x2="21" y2="22" gradientUnits="userSpaceOnUse">
+        <linearGradient id={centerId} x1="12" y1="3.5" x2="12" y2="20.5" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="100%" stopColor="#DDD6FE" />
+          <stop offset="100%" stopColor={active ? "#A78BFA" : "#DDD6FE"} />
+        </linearGradient>
+        <linearGradient id={midId} x1="8" y1="6" x2="8" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#F8FAFC" />
+          <stop offset="100%" stopColor={active ? "#C4B5FD" : "#CBD5E1"} />
         </linearGradient>
       </defs>
-      <rect
-        x="2"
-        y="3"
-        width="24"
-        height="22"
-        rx="7.5"
-        fill={`url(#${plateId})`}
-        stroke="#EDE9FE"
-        strokeOpacity={active ? "0.78" : "0.44"}
-        strokeWidth="1.2"
-      />
-      <rect x="6.8" y="11.2" width="2.5" height="5.6" rx="1.25" fill="#DDD6FE" />
-      <rect x="10.9" y="7.5" width="2.5" height="13" rx="1.25" fill={`url(#${waveId})`} />
-      <rect x="15" y="9.4" width="2.5" height="9.2" rx="1.25" fill="#FFFFFF" />
-      <rect x="19.1" y="12" width="2.5" height="4" rx="1.25" fill="#C4B5FD" />
+      <rect x="3.6" y="9.6" width="2.2" height="4.8" rx="1.1" fill={active ? "#DDD6FE" : "#CBD5E1"} />
+      <rect x="7.25" y="6.2" width="2.2" height="11.6" rx="1.1" fill={`url(#${midId})`} />
+      <rect x="10.9" y="3.6" width="2.2" height="16.8" rx="1.1" fill={`url(#${centerId})`} />
+      <rect x="14.55" y="7" width="2.2" height="10" rx="1.1" fill={active ? "#DDD6FE" : "#E2E8F0"} />
+      <rect x="18.2" y="9.8" width="2.2" height="4.4" rx="1.1" fill={active ? "#A78BFA" : "#94A3B8"} />
     </svg>
   );
 }
@@ -288,7 +368,7 @@ export function PlayerAudioIcon({
  */
 export function PlayerEpisodesIcon({
   active = false,
-  size = 18,
+  size = 17,
   className = "",
 }: PlayerIconProps & { active?: boolean }) {
   const uid = useId().replace(/:/g, "");
@@ -297,14 +377,30 @@ export function PlayerEpisodesIcon({
   return (
     <svg width={size} height={size} viewBox="0 0 28 28" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={cardId} x1="6" y1="8" x2="24" y2="24" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor={active ? "#DDD6FE" : "#C4B5FD"} />
-          <stop offset="100%" stopColor={active ? "#7C3AED" : "#6D28D9"} />
+        <linearGradient id={cardId} x1="6" y1="10" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor={active ? "#C4B5FD" : "#475569"} stopOpacity={active ? "0.92" : "0.72"} />
+          <stop offset="100%" stopColor={active ? "#6D28D9" : "#1E293B"} stopOpacity={active ? "0.92" : "0.82"} />
         </linearGradient>
       </defs>
       {/* Back stack cards */}
-      <rect x="6.5" y="4.5" width="15" height="3.2" rx="1.6" fill="#DDD6FE" fillOpacity="0.45" />
-      <rect x="4.5" y="7.8" width="19" height="3.4" rx="1.7" fill="#C4B5FD" fillOpacity="0.68" />
+      <rect
+        x="6.5"
+        y="4.5"
+        width="15"
+        height="3"
+        rx="1.5"
+        fill={active ? "#DDD6FE" : "#CBD5E1"}
+        fillOpacity={active ? "0.58" : "0.38"}
+      />
+      <rect
+        x="4.5"
+        y="7.8"
+        width="19"
+        height="3.2"
+        rx="1.6"
+        fill="#C4B5FD"
+        fillOpacity={active ? "0.78" : "0.48"}
+      />
       {/* Front active episode frame */}
       <rect
         x="2.8"
@@ -313,13 +409,13 @@ export function PlayerEpisodesIcon({
         height="13.5"
         rx="4"
         fill={`url(#${cardId})`}
-        stroke="#F5F3FF"
-        strokeOpacity="0.6"
-        strokeWidth="1.1"
+        stroke={active ? "#F5F3FF" : "#E2E8F0"}
+        strokeOpacity={active ? "0.85" : "0.62"}
+        strokeWidth="1.2"
       />
       <path
         d="M12.3 14.5L17.1 17.25L12.3 20V14.5Z"
-        fill="#FFFFFF"
+        fill={active ? "#FFFFFF" : "#EDE9FE"}
       />
     </svg>
   );
@@ -357,8 +453,8 @@ export function PlayerReadyIcon({
         </>
       ) : (
         <>
-          <circle cx="12" cy="12" r="8.8" fill="#8B5CF6" fillOpacity="0.16" stroke="#C4B5FD" strokeOpacity="0.7" strokeWidth="1.6" />
-          <circle cx="12" cy="12" r="2.8" fill="#DDD6FE" fillOpacity="0.7" />
+          <circle cx="12" cy="12" r="8.8" fill="#FFFFFF" fillOpacity="0.06" stroke="#CBD5E1" strokeOpacity="0.68" strokeWidth="1.6" />
+          <circle cx="12" cy="12" r="2.6" fill="#C4B5FD" fillOpacity="0.78" />
         </>
       )}
     </svg>
@@ -494,6 +590,155 @@ export function PlayerFullscreenIcon({
           <path d="M19.5 15V18.5C19.5 19.05 19.05 19.5 18.5 19.5H15" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </>
       )}
+    </svg>
+  );
+}
+
+/**
+ * Custom crystal overlapping sheets Copy / Copied icon for Watch Party passcode.
+ */
+export function PartyCopyIcon({
+  copied = false,
+  size = 15,
+  className = "",
+}: PlayerIconProps & { copied?: boolean }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      {copied ? (
+        <>
+          <circle cx="12" cy="12" r="9" fill="#10B981" fillOpacity="0.18" stroke="#34D399" strokeWidth="1.6" />
+          <path d="M8.3 12.3L10.9 14.9L16 9.5" stroke="#6EE7B7" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+        </>
+      ) : (
+        <>
+          <path
+            d="M8.5 6.8V5.6C8.5 4.44 9.44 3.5 10.6 3.5H18.4C19.56 3.5 20.5 4.44 20.5 5.6V13.4C20.5 14.56 19.56 15.5 18.4 15.5H17.2"
+            stroke="#C4B5FD"
+            strokeOpacity="0.8"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+          />
+          <rect
+            x="3.5"
+            y="8.5"
+            width="12"
+            height="12"
+            rx="2.8"
+            fill="#FFFFFF"
+            fillOpacity="0.08"
+            stroke="#F8FAFC"
+            strokeWidth="1.7"
+          />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Custom Watch Party portal exit icon (inherits hover tone cleanly).
+ */
+export function PartyLeaveIcon({ size = 15, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M11 4.5H7.2C5.7 4.5 4.5 5.7 4.5 7.2V16.8C4.5 18.3 5.7 19.5 7.2 19.5H11"
+        stroke="currentColor"
+        strokeOpacity="0.72"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+      <path d="M10.5 12H19.5" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" />
+      <path d="M16.2 8.4L19.8 12L16.2 15.6" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/**
+ * Custom overlapping crystal silhouettes for Watch Party viewers section.
+ */
+export function PartyViewersIcon({ size = 15, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle cx="16.4" cy="8.6" r="2.6" stroke="#C4B5FD" strokeOpacity="0.82" strokeWidth="1.55" />
+      <path
+        d="M15.8 13.7C18.3 13.9 20.4 15.4 20.8 18.1"
+        stroke="#C4B5FD"
+        strokeOpacity="0.82"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      <circle cx="9.6" cy="8.2" r="3.1" fill="#FFFFFF" fillOpacity="0.1" stroke="#F8FAFC" strokeWidth="1.7" />
+      <path
+        d="M3.6 18.7C4.1 15.6 6.5 14 9.6 14C12.7 14 15.1 15.6 15.6 18.7"
+        stroke="#F8FAFC"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Custom miniature amethyst host crest icon.
+ */
+export function PartyHostIcon({ size = 12, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M4.2 17.5L5.6 7.8L10.1 11.6L12 5.6L13.9 11.6L18.4 7.8L19.8 17.5H4.2Z"
+        fill="#A78BFA"
+        fillOpacity="0.28"
+        stroke="#DDD6FE"
+        strokeWidth="1.65"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Custom crystal clipboard paste icon for joining a Watch Party code.
+ */
+export function PartyPasteIcon({ size = 14, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <rect x="8.5" y="3.2" width="7" height="3.2" rx="1.6" fill="#C4B5FD" fillOpacity="0.35" stroke="#DDD6FE" strokeWidth="1.45" />
+      <path
+        d="M8.5 5H7.2C5.7 5 4.5 6.2 4.5 7.7V18.3C4.5 19.8 5.7 21 7.2 21H16.8C18.3 21 19.5 19.8 19.5 18.3V7.7C19.5 6.2 18.3 5 16.8 5H15.5"
+        stroke="#F8FAFC"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+      <path d="M9 12.2H15" stroke="#C4B5FD" strokeWidth="1.65" strokeLinecap="round" />
+      <path d="M9 15.8H13.2" stroke="#F8FAFC" strokeOpacity="0.85" strokeWidth="1.65" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * Custom signal-play host emblem for starting a Watch Party.
+ */
+export function PartyCreateIcon({ size = 16, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle cx="12" cy="12" r="8.8" fill="#FFFFFF" fillOpacity="0.1" stroke="#F8FAFC" strokeOpacity="0.88" strokeWidth="1.6" />
+      <path d="M10.1 8.8L15.7 12L10.1 15.2V8.8Z" fill="#FFFFFF" />
+      <path d="M18.4 4.2L20.1 5.9M4.2 5.9L5.9 4.2" stroke="#DDD6FE" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * Custom dual-blade server switch icon for backup sync route fallback.
+ */
+export function PartyServerIcon({ size = 13, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <rect x="4" y="4.5" width="16" height="6" rx="2.2" fill="#FFFFFF" fillOpacity="0.08" stroke="#E2E8F0" strokeWidth="1.6" />
+      <rect x="4" y="13.5" width="16" height="6" rx="2.2" fill="#A78BFA" fillOpacity="0.14" stroke="#C4B5FD" strokeWidth="1.6" />
+      <circle cx="8" cy="7.5" r="1" fill="#F8FAFC" />
+      <circle cx="8" cy="16.5" r="1" fill="#DDD6FE" />
     </svg>
   );
 }

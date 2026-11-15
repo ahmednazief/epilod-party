@@ -11,7 +11,8 @@ import { playSoundCue } from "./soundEffects";
 import { getControllerLockState, resolveEffectiveUsername } from "./syncController";
 import { syncSetReady, syncUserSeek } from "./syncplay";
 import { canToggleReady, resolveReadyToggleTarget } from "./syncReady";
-import { formatTrackAnnouncement, selectSubTrack } from "./tracks";
+import type { MpvTrack } from "./mpv";
+import { formatTrackAnnouncement, isBitmapSubtitleTrack, selectSubTrack } from "./tracks";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -50,6 +51,69 @@ export function seekPlaybackRelative(deltaSecs: number): void {
   if (connected) {
     void syncUserSeek(next);
   }
+}
+
+function pushSubStyle(visible: boolean): void {
+  const sub = useSubtitleStore.getState();
+  safeMpvCall(
+    mpvSetSubStyle({
+      font: sub.font,
+      fontSize: sub.fontSize,
+      color: sub.color,
+      borderSize: sub.borderSize,
+      pos: sub.pos,
+      visible,
+      overrideAss: sub.overrideAssStyle,
+    }),
+  );
+}
+
+let lastAutoSubSignature = "";
+
+/**
+ * When a new file's track list arrives, make sure the subtitle bundled with the
+ * episode is actually on: pick the default (or first text) embedded track if mpv
+ * didn't select one, and push subtitle visibility/style to mpv. Runs once per
+ * distinct track set so a user choosing "Off" is never overridden.
+ */
+export function autoEnableEmbeddedSubtitle(tracks: readonly MpvTrack[]): void {
+  const subs = tracks.filter((t) => t.type === "sub");
+  if (subs.length === 0) {
+    lastAutoSubSignature = "";
+    return;
+  }
+  const signature = subs.map((t) => `${t.id}:${t.external ? "e" : "i"}`).join("|");
+  if (signature === lastAutoSubSignature) return;
+  lastAutoSubSignature = signature;
+
+  const sub = useSubtitleStore.getState();
+  sub.setVisible(true);
+  if (!subs.some((t) => t.selected)) {
+    const pick =
+      subs.find((t) => t.external) ??
+      subs.find((t) => !isBitmapSubtitleTrack(t)) ??
+      subs[0];
+    safeMpvCall(mpvSetSubTrack(pick.id));
+  }
+  pushSubStyle(true);
+}
+
+/** CC button: make sure subtitles are on (selecting the first track if needed). */
+export function ensureSubtitlesOn(): void {
+  const player = usePlayerStore.getState();
+  if (!player.loaded) return;
+  const subs = player.tracks.filter((t) => t.type === "sub");
+  if (subs.length === 0) return;
+  const sub = useSubtitleStore.getState();
+  const selected = subs.find((t) => t.selected);
+  if (selected && sub.visible) return;
+  sub.setVisible(true);
+  if (!selected) {
+    const pick = subs.find((t) => !isBitmapSubtitleTrack(t)) ?? subs[0];
+    safeMpvCall(mpvSetSubTrack(pick.id));
+  }
+  pushSubStyle(true);
+  player.flashFeedback("Subtitles On");
 }
 
 export function toggleSubtitlesVisibility(): void {

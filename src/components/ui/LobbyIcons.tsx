@@ -3,13 +3,14 @@ import { useId } from "react";
 interface LobbyIconProps {
   size?: number;
   className?: string;
+  bare?: boolean;
 }
 
 /**
  * Dedicated multi-layered icon for Watch Party:
  * synced widescreen cinema frame + wireless broadcast arc + friends silhouette trio.
  */
-export function WatchPartyIcon({ size = 24, className = "" }: LobbyIconProps) {
+export function WatchPartyIcon({ size = 24, className = "", bare = false }: LobbyIconProps) {
   const uid = useId().replace(/:/g, "");
   const badgeId = `ep-party-badge-${uid}`;
   const screenId = `ep-party-screen-${uid}`;
@@ -18,7 +19,7 @@ export function WatchPartyIcon({ size = 24, className = "" }: LobbyIconProps) {
     <svg
       width={size}
       height={size}
-      viewBox="0 0 32 32"
+      viewBox={bare ? "3.5 2.5 25 26" : "0 0 32 32"}
       fill="none"
       aria-hidden="true"
       className={className}
@@ -35,18 +36,20 @@ export function WatchPartyIcon({ size = 24, className = "" }: LobbyIconProps) {
         </linearGradient>
       </defs>
 
-      {/* Soft glass squircle housing */}
-      <rect
-        x="1"
-        y="1"
-        width="30"
-        height="30"
-        rx="10"
-        fill={`url(#${badgeId})`}
-        stroke="#DDD6FE"
-        strokeOpacity="0.34"
-        strokeWidth="1"
-      />
+      {!bare && (
+        /* Soft glass squircle housing */
+        <rect
+          x="1"
+          y="1"
+          width="30"
+          height="30"
+          rx="10"
+          fill={`url(#${badgeId})`}
+          stroke="#DDD6FE"
+          strokeOpacity="0.34"
+          strokeWidth="1"
+        />
+      )}
 
       {/* Subtle sync signal arc above cinema screen */}
       <path
@@ -102,7 +105,7 @@ export function WatchPartyIcon({ size = 24, className = "" }: LobbyIconProps) {
  * Dedicated multi-layered icon for Open Media:
  * sculpted obsidian-silver cinema clapper slate paired with a luminous play lens.
  */
-export function OpenMediaIcon({ size = 24, className = "" }: LobbyIconProps) {
+export function OpenMediaIcon({ size = 24, className = "", bare = false }: LobbyIconProps) {
   const uid = useId().replace(/:/g, "");
   const badgeId = `ep-media-badge-${uid}`;
   const slateId = `ep-media-slate-${uid}`;
@@ -112,7 +115,7 @@ export function OpenMediaIcon({ size = 24, className = "" }: LobbyIconProps) {
     <svg
       width={size}
       height={size}
-      viewBox="0 0 32 32"
+      viewBox={bare ? "3.5 2.5 26 26" : "0 0 32 32"}
       fill="none"
       aria-hidden="true"
       className={className}
@@ -132,18 +135,20 @@ export function OpenMediaIcon({ size = 24, className = "" }: LobbyIconProps) {
         </linearGradient>
       </defs>
 
-      {/* Soft obsidian-silver frosted glass housing */}
-      <rect
-        x="1"
-        y="1"
-        width="30"
-        height="30"
-        rx="10"
-        fill={`url(#${badgeId})`}
-        stroke="#FFFFFF"
-        strokeOpacity="0.24"
-        strokeWidth="1"
-      />
+      {!bare && (
+        /* Soft obsidian-silver frosted glass housing */
+        <rect
+          x="1"
+          y="1"
+          width="30"
+          height="30"
+          rx="10"
+          fill={`url(#${badgeId})`}
+          stroke="#FFFFFF"
+          strokeOpacity="0.24"
+          strokeWidth="1"
+        />
+      )}
 
       {/* Tilted open cinema clapper top arm */}
       <g transform="rotate(-12 6.5 11.5)">

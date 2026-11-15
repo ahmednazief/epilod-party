@@ -5,5 +5,12 @@
     "assetPattern": "mpv-x86_64-*.7z",
     "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-x86_64-20261111-git-bcde6b93cc.7z",
     "sha256": "f259b5fd4b5c395617c948a4fadcdf55bba1c5282fb7c13e88626b3f71072baf"
+  },
+  "ffmpeg": {
+    "repository": "shinchiro/mpv-winbuild-cmake",
+    "version": "git-cd4e96eb3",
+    "assetPattern": "ffmpeg-x86_64-git-*.7z",
+    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/ffmpeg-x86_64-git-cd4e96eb3.7z",
+    "sha256": "b943ccb7b7760fd5d2c449ebcbedaac5ce85b64437a9d877af0761ba402ed118"
   }
 }

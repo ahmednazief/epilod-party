@@ -718,4 +718,232 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn built_release_sfx_installer_fresh_install_and_in_place_update_end_to_end() {
+        use epilod_installer_core::archive::{
+            copy_uninstaller_executable, hash_file, read_manifest,
+        };
+        use epilod_installer_core::engine::{
+            run_install_pipeline, IntegrationResult, SystemIntegrator,
+        };
+        use epilod_installer_core::plan::{ComponentId, InstallOptions};
+        use epilod_installer_core::receipt::{
+            read_receipt, write_receipt_atomic, InstallReceipt, ManagedFileRecord,
+            INSTALL_RECEIPT_FILENAME, UNINSTALLER_FILENAME,
+        };
+        use std::sync::atomic::AtomicBool;
+
+        struct TestSandboxIntegrator {
+            setup_exe: PathBuf,
+        }
+
+        impl SystemIntegrator for TestSandboxIntegrator {
+            fn check_destination(&self, dir: &Path) -> Result<Option<u64>, String> {
+                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                Ok(Some(50 * 1024 * 1024 * 1024))
+            }
+
+            fn install_uninstaller(
+                &self,
+                install_dir: &Path,
+                _backup_dir: &Path,
+            ) -> Result<bool, String> {
+                copy_uninstaller_executable(
+                    &self.setup_exe,
+                    &install_dir.join(UNINSTALLER_FILENAME),
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+
+            fn apply_shortcuts_and_registry(
+                &self,
+                _install_dir: &Path,
+                _options: &InstallOptions,
+                _target_version: &str,
+                _previous_receipt: Option<&InstallReceipt>,
+                _report: &mut dyn FnMut(&str, usize, usize),
+            ) -> Result<IntegrationResult, String> {
+                Ok(IntegrationResult {
+                    created_shortcuts: vec!["Desktop\\Epilod Party.lnk".into()],
+                    created_registry_keys: vec![
+                        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\EpilodParty"
+                            .into(),
+                    ],
+                    user_data_dir: None,
+                })
+            }
+        }
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let setup_exe = repo_root.join("target/release/Epilod Party Setup.exe");
+        let release_app_exe = repo_root.join("target/release/epilod-party.exe");
+        let update_manifest_path = repo_root.join("target/release/epilod-update-manifest.json");
+        if !setup_exe.is_file() || !release_app_exe.is_file() {
+            return;
+        }
+
+        let (manifest, _) = read_manifest(&setup_exe).expect("read sfx manifest");
+        let required_paths = [
+            "Epilod Party.exe",
+            "resources/mpv/mpv.exe",
+            "resources/mpv/ffmpeg.exe",
+            "resources/fonts/Inter-Regular.ttf",
+            "resources/fonts/NotoSansArabic-Regular.ttf",
+            "resources/licenses/GPL-3.0.txt",
+            "resources/licenses/SOURCE_OFFER.txt",
+        ];
+        for rel in required_paths {
+            assert!(
+                manifest
+                    .entries
+                    .iter()
+                    .any(|e| e.relative_path.replace('\\', "/") == rel),
+                "SFX installer missing required payload entry: {rel}"
+            );
+        }
+
+        let (app_size, app_sha) = hash_file(&release_app_exe).expect("hash release app exe");
+        let packed_app = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative_path.replace('\\', "/") == "Epilod Party.exe")
+            .expect("Epilod Party.exe entry");
+        assert_eq!(
+            (packed_app.size, packed_app.sha256.to_ascii_lowercase()),
+            (app_size, app_sha.to_ascii_lowercase()),
+            "SFX installer Epilod Party.exe does not match target/release/epilod-party.exe"
+        );
+
+        assert!(
+            update_manifest_path.is_file(),
+            "missing release update manifest at {}",
+            update_manifest_path.display()
+        );
+        let (setup_size, setup_sha) = hash_file(&setup_exe).expect("hash setup exe");
+        let um_bytes = fs::read(&update_manifest_path).expect("read update manifest");
+        let um_json: serde_json::Value =
+            serde_json::from_slice(&um_bytes).expect("parse update manifest");
+        assert_eq!(um_json["sizeBytes"].as_u64(), Some(setup_size));
+        assert_eq!(
+            um_json["sha256"]
+                .as_str()
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
+            Some(setup_sha.to_ascii_lowercase().as_str())
+        );
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let install_dir =
+            std::env::temp_dir().join(format!("epilod_release_e2e_{}_{nanos}", std::process::id()));
+        let _ = fs::remove_dir_all(&install_dir);
+
+        let integrator = TestSandboxIntegrator {
+            setup_exe: setup_exe.clone(),
+        };
+        let cancel = AtomicBool::new(false);
+        let opts = InstallOptions {
+            install_dir: install_dir.to_string_lossy().into_owned(),
+            create_desktop_shortcut: true,
+            create_start_menu_shortcut: true,
+            register_file_associations: true,
+            auto_launch: false,
+            force_reunpack: false,
+            wait_pid: None,
+            force_close_running: false,
+            allow_downgrade: false,
+        };
+
+        // 1) Fresh install verification
+        run_install_pipeline(&setup_exe, &opts, &integrator, &cancel, |_| {})
+            .expect("fresh install failed");
+        for rel in required_paths {
+            assert!(
+                install_dir.join(rel).is_file(),
+                "fresh install missing {rel}"
+            );
+        }
+        assert!(install_dir.join(UNINSTALLER_FILENAME).is_file());
+        assert!(install_dir.join(INSTALL_RECEIPT_FILENAME).is_file());
+        let (installed_app_size, installed_app_sha) =
+            hash_file(&install_dir.join("Epilod Party.exe")).expect("hash installed app");
+        assert_eq!(installed_app_size, app_size);
+        assert_eq!(
+            installed_app_sha.to_ascii_lowercase(),
+            app_sha.to_ascii_lowercase()
+        );
+
+        // 2) In-place update verification
+        fs::write(install_dir.join("Epilod Party.exe"), b"old-version-binary")
+            .expect("simulate older app exe");
+        let obsolete_rel = "resources/mpv/obsolete-old.dll";
+        let obsolete_path = install_dir.join(obsolete_rel);
+        fs::write(&obsolete_path, b"old-dll").expect("write obsolete managed file");
+        let user_sub_path = install_dir.join("my-custom-subtitles.srt");
+        fs::write(&user_sub_path, "custom user subtitle").expect("write user file");
+
+        let mut prev_receipt = read_receipt(&install_dir).expect("read fresh receipt");
+        prev_receipt.version = "0.0.9".to_string();
+        prev_receipt.managed_files.push(ManagedFileRecord {
+            relative_path: obsolete_rel.to_string(),
+            component: ComponentId::Mpv,
+            size: 7,
+            sha256: "0".repeat(64),
+        });
+        write_receipt_atomic(&install_dir, &prev_receipt).expect("write simulated old receipt");
+
+        run_install_pipeline(&setup_exe, &opts, &integrator, &cancel, |_| {})
+            .expect("in-place update failed");
+
+        let (updated_app_size, updated_app_sha) =
+            hash_file(&install_dir.join("Epilod Party.exe")).expect("hash updated app");
+        assert_eq!(updated_app_size, app_size);
+        assert_eq!(
+            updated_app_sha.to_ascii_lowercase(),
+            app_sha.to_ascii_lowercase()
+        );
+
+        let mpv_entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative_path.replace('\\', "/") == "resources/mpv/mpv.exe")
+            .expect("mpv entry");
+        let ffmpeg_entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative_path.replace('\\', "/") == "resources/mpv/ffmpeg.exe")
+            .expect("ffmpeg entry");
+        assert_eq!(
+            hash_file(&install_dir.join("resources/mpv/mpv.exe")).expect("hash mpv.exe"),
+            (mpv_entry.size, mpv_entry.sha256.to_ascii_lowercase())
+        );
+        assert_eq!(
+            hash_file(&install_dir.join("resources/mpv/ffmpeg.exe")).expect("hash ffmpeg.exe"),
+            (ffmpeg_entry.size, ffmpeg_entry.sha256.to_ascii_lowercase())
+        );
+
+        assert!(
+            !obsolete_path.exists(),
+            "obsolete managed file should be pruned on update"
+        );
+        assert_eq!(
+            fs::read_to_string(&user_sub_path).expect("read preserved user file"),
+            "custom user subtitle"
+        );
+        assert_eq!(
+            read_receipt(&install_dir)
+                .expect("read updated receipt")
+                .version,
+            manifest.version
+        );
+
+        let _ = fs::remove_dir_all(&install_dir);
+    }
 }

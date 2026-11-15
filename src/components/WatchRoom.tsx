@@ -1,30 +1,27 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  AudioLines,
-  Captions,
-  CheckCircle2,
-  ChevronLeft,
-  EyeOff,
-  FolderOpen,
-  Keyboard,
-  ListVideo,
-  LogOut,
-  Maximize,
-  Minimize,
-  Pause,
-  Play,
-  RefreshCw,
-  RotateCcw,
-  RotateCw,
-  Settings,
-  SkipBack,
-  SkipForward,
-  Users,
-  Volume2,
-  VolumeX,
-  X,
-} from "lucide-react";
+  AppChevronIcon,
+  AppFolderIcon,
+  AppKeyboardIcon,
+} from "./ui/AppIcons";
+import { WatchPartyIcon } from "./ui/LobbyIcons";
+import {
+  PartyLeaveIcon,
+  PlayerAudioIcon,
+  PlayerCaptionsIcon,
+  PlayerEpisodesIcon,
+  PlayerEyeIcon,
+  PlayerFullscreenIcon,
+  PlayerPauseIcon,
+  PlayerPlayIcon,
+  PlayerReadyIcon,
+  PlayerResyncIcon,
+  PlayerSeekIcon,
+  PlayerSettingsIcon,
+  PlayerSkipEpisodeIcon,
+  PlayerVolumeIcon,
+} from "./ui/PlayerIcons";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { usePlayerShortcuts } from "../hooks/usePlayerShortcuts";
@@ -70,6 +67,8 @@ import {
 } from "../lib/mpv";
 import { classifyMpvEnd, shouldReplayFromStart } from "../lib/playbackEnd";
 import {
+  autoEnableEmbeddedSubtitle,
+  ensureSubtitlesOn,
   cycleAudioTrack,
   cycleSubtitleTrack,
   seekPlaybackRelative,
@@ -115,6 +114,10 @@ import { measurePhysicalRect, useViewportRect } from "../lib/useViewportRect";
 import { ViewportSyncTracker } from "../lib/viewportSync";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
+import {
+  useAnimatedPresence,
+  usePresencePayload,
+} from "../lib/useAnimatedPresence";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSubtitleStore } from "../store/useSubtitleStore";
@@ -132,7 +135,6 @@ import { VideoGlassBackdrop } from "./VideoGlassBackdrop";
 import { ViewportPlaceholder } from "./ViewportPlaceholder";
 import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
 import { NotificationStrip } from "./ui/NotificationStrip";
-import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { StatusDot } from "./ui/StatusDot";
 
 type SideTab = CapsuleTab;
@@ -144,12 +146,12 @@ interface CapsulePopoverLayout {
 }
 
 /**
- * Anchors compact capsule menus (Episodes, CC, Audio) centered directly above their
- * trigger button and clamped inside the play bar's resting horizontal footprint.
+ * Anchors play bar menus (Watch Party, Episodes, CC, Audio) centered directly above
+ * their trigger button and clamped inside the play bar's horizontal footprint.
  */
 function computeCapsulePopoverLayout(tab: SideTab): CapsulePopoverLayout {
   const winW = window.innerWidth;
-  const maxWidth = tab === "episodes" ? 344 : 304;
+  const maxWidth = tab === "room" ? 352 : tab === "episodes" ? 344 : 304;
   const width = Math.min(maxWidth, Math.max(240, winW - 32));
   const barEl = document.querySelector<HTMLElement>('[data-capsule-bar="true"]');
   const anchorEl = document.querySelector<HTMLElement>(`[data-capsule-anchor="${tab}"]`);
@@ -1052,7 +1054,9 @@ export function WatchRoom() {
             }
           }),
           onMpvTracks((tracks) => {
-            if (active) usePlayerStore.getState().setTracks(tracks);
+            if (!active) return;
+            usePlayerStore.getState().setTracks(tracks);
+            autoEnableEmbeddedSubtitle(tracks);
           }),
           onMpvCommandWarning((msg) => {
             if (active) pushNote("warn", msg);
@@ -1394,6 +1398,21 @@ export function WatchRoom() {
     isFullscreen,
   ]);
 
+  const activePopover =
+    panelOpen &&
+    popoverPos &&
+    (sideTab === "room" ||
+      sideTab === "playback" ||
+      sideTab === "subtitles" ||
+      (sideTab === "episodes" && hasFolderEpisodes))
+      ? { tab: sideTab, pos: popoverPos }
+      : null;
+  const popover = usePresencePayload(activePopover, 200);
+  const backdropPresence = useAnimatedPresence(
+    Boolean(showFloatingCapsule || showWindowBar || popover.mounted || contextMenu),
+    420,
+  );
+
   const handleToggleCapsuleTab = (tab: SideTab) => {
     wakeChrome();
     if (panelOpen && sideTab === tab) {
@@ -1401,6 +1420,8 @@ export function WatchRoom() {
     } else {
       setSideTab(tab);
       setPanelOpen(true);
+      // CC button: open the menu AND make sure subtitles are on.
+      if (tab === "subtitles") ensureSubtitlesOn();
     }
   };
 
@@ -1428,7 +1449,7 @@ export function WatchRoom() {
       id: "play-pause",
       label: paused ? "Play" : "Pause",
       shortcut: "Space",
-      icon: paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />,
+      icon: paused ? <PlayerPlayIcon size={14} /> : <PlayerPauseIcon size={14} />,
       disabled: !loaded || ctrlLockNow.lockedForLocalUser,
       onSelect: toggleViewportPlayback,
     },
@@ -1436,7 +1457,7 @@ export function WatchRoom() {
       id: "seek-back",
       label: "Seek Backward 10s",
       shortcut: "J",
-      icon: <RotateCcw className="h-3.5 w-3.5" />,
+      icon: <PlayerSeekIcon direction="back" size={14} />,
       disabled: !loaded || ctrlLockNow.lockedForLocalUser,
       onSelect: () => seekPlaybackRelative(-10),
     },
@@ -1444,7 +1465,7 @@ export function WatchRoom() {
       id: "seek-forward",
       label: "Seek Forward 10s",
       shortcut: "L",
-      icon: <RotateCw className="h-3.5 w-3.5" />,
+      icon: <PlayerSeekIcon direction="forward" size={14} />,
       disabled: !loaded || ctrlLockNow.lockedForLocalUser,
       onSelect: () => seekPlaybackRelative(10),
     },
@@ -1453,14 +1474,14 @@ export function WatchRoom() {
           {
             id: "prev-ep",
             label: "Previous Episode",
-            icon: <SkipBack className="h-3.5 w-3.5" />,
+            icon: <PlayerSkipEpisodeIcon direction="prev" size={14} />,
             disabled: !hasPrevEpisodeNow || ctrlLockNow.lockedForLocalUser,
             onSelect: handlePrevEpisode,
           },
           {
             id: "next-ep",
             label: "Next Episode",
-            icon: <SkipForward className="h-3.5 w-3.5" />,
+            icon: <PlayerSkipEpisodeIcon direction="next" size={14} />,
             disabled: !hasNextEpisodeNow || ctrlLockNow.lockedForLocalUser,
             onSelect: handleNextEpisode,
           },
@@ -1470,13 +1491,13 @@ export function WatchRoom() {
     {
       id: "open-file",
       label: "Open Video File(s)…",
-      icon: <FolderOpen className="h-3.5 w-3.5" />,
+      icon: <AppFolderIcon size={14} />,
       onSelect: () => void handleChooseFile(),
     },
     {
       id: "open-folder",
       label: "Open Season Folder…",
-      icon: <ListVideo className="h-3.5 w-3.5" />,
+      icon: <PlayerEpisodesIcon size={14} />,
       onSelect: () => void handleChooseSeasonFolder(),
     },
     ...(hasFolderEpisodes
@@ -1484,7 +1505,7 @@ export function WatchRoom() {
           {
             id: "open-episodes",
             label: "Episodes Queue",
-            icon: <ListVideo className="h-3.5 w-3.5 text-accent-soft" />,
+            icon: <PlayerEpisodesIcon active size={14} className="text-accent-soft" />,
             accent: true,
             onSelect: () => {
               setSideTab("episodes");
@@ -1499,7 +1520,7 @@ export function WatchRoom() {
       label: subVisible ? "Hide Subtitles" : "Show Subtitles",
       shortcut: "V",
       checked: loaded && subVisible,
-      icon: <Captions className="h-3.5 w-3.5" />,
+      icon: <PlayerCaptionsIcon size={14} />,
       disabled: !loaded,
       onSelect: toggleSubtitlesVisibility,
     },
@@ -1507,14 +1528,14 @@ export function WatchRoom() {
       id: "cycle-sub",
       label: "Cycle Subtitle Track",
       shortcut: "S",
-      icon: <Captions className="h-3.5 w-3.5" />,
+      icon: <PlayerCaptionsIcon size={14} />,
       disabled: !loaded,
       onSelect: cycleSubtitleTrack,
     },
     {
       id: "open-subtitles",
       label: "Subtitles & Sync…",
-      icon: <Captions className="h-3.5 w-3.5 text-accent-soft" />,
+      icon: <PlayerCaptionsIcon active size={14} className="text-accent-soft" />,
       onSelect: () => {
         setSideTab("subtitles");
         setPanelOpen(true);
@@ -1523,14 +1544,14 @@ export function WatchRoom() {
     {
       id: "cycle-audio",
       label: "Cycle Audio Track",
-      icon: <AudioLines className="h-3.5 w-3.5" />,
+      icon: <PlayerAudioIcon size={14} />,
       disabled: !loaded,
       onSelect: cycleAudioTrack,
     },
     {
       id: "open-audio",
       label: "Audio & Speed…",
-      icon: <AudioLines className="h-3.5 w-3.5 text-accent-soft" />,
+      icon: <PlayerAudioIcon active size={14} className="text-accent-soft" />,
       onSelect: () => {
         setSideTab("playback");
         setPanelOpen(true);
@@ -1540,7 +1561,7 @@ export function WatchRoom() {
       id: "mute-toggle",
       label: muted ? "Unmute" : "Mute",
       shortcut: "M",
-      icon: muted ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />,
+      icon: <PlayerVolumeIcon muted={!muted} size={14} />,
       onSelect: toggleMutePlayback,
     },
     { type: "divider", id: "div-party" },
@@ -1551,14 +1572,14 @@ export function WatchRoom() {
             label: localReady && loaded ? "Mark Not Ready" : "Mark Ready",
             shortcut: "R",
             checked: localReady && loaded,
-            icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+            icon: <PlayerReadyIcon ready={localReady && loaded} size={14} />,
             disabled: !loaded,
             onSelect: toggleReadyStatus,
           },
           {
             id: "force-resync",
             label: "Resync With Party",
-            icon: <RefreshCw className="h-3.5 w-3.5" />,
+            icon: <PlayerResyncIcon tone="ok" size={14} />,
             disabled: !syncConnectedNow,
             onSelect: () => {
               void syncForceResync().then(() => {
@@ -1571,7 +1592,7 @@ export function WatchRoom() {
     {
       id: "party-lounge",
       label: roomCode ? "Party Lounge…" : "Start Watch Party…",
-      icon: <Users className="h-3.5 w-3.5 text-accent-soft" />,
+      icon: <WatchPartyIcon bare size={14} />,
       onSelect: () => {
         setSideTab("room");
         setPanelOpen(true);
@@ -1581,7 +1602,7 @@ export function WatchRoom() {
       id: "toggle-fullscreen",
       label: isFullscreen ? "Exit Fullscreen" : "Fullscreen",
       shortcut: "F",
-      icon: isFullscreen ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />,
+      icon: <PlayerFullscreenIcon isFullscreen={isFullscreen} size={14} />,
       onSelect: toggleFullscreen,
     },
     ...(loaded
@@ -1589,7 +1610,7 @@ export function WatchRoom() {
           {
             id: "hide-chrome",
             label: "Hide Player Controls",
-            icon: <EyeOff className="h-3.5 w-3.5" />,
+            icon: <PlayerEyeIcon hidden size={14} />,
             onSelect: () => setChromeIdle(true),
           },
         ] satisfies ContextMenuEntry[])
@@ -1599,19 +1620,19 @@ export function WatchRoom() {
       id: "shortcuts",
       label: "Keyboard Shortcuts…",
       shortcut: "?",
-      icon: <Keyboard className="h-3.5 w-3.5" />,
+      icon: <AppKeyboardIcon size={14} />,
       onSelect: openShortcuts,
     },
     {
       id: "preferences",
       label: "Preferences…",
-      icon: <Settings className="h-3.5 w-3.5" />,
+      icon: <PlayerSettingsIcon size={14} />,
       onSelect: () => openSettings("prefs"),
     },
     {
       id: "leave-room",
       label: roomCode ? "Leave Watch Party" : "Back to Lobby",
-      icon: <LogOut className="h-3.5 w-3.5" />,
+      icon: <PartyLeaveIcon size={14} />,
       onSelect: handleLeaveRoom,
     },
   ];
@@ -1633,19 +1654,19 @@ export function WatchRoom() {
     >
       <VideoGlassBackdrop
         active={showVideoBackdrop}
-        visible={Boolean(showFloatingCapsule || showWindowBar || panelOpen || contextMenu)}
+        visible={backdropPresence.mounted}
         playing={!paused}
         viewportRef={viewportRef}
-        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${panelOpen}:${sideTab}:${popoverPos?.left ?? 0}:${popoverPos?.bottom ?? 0}:${popoverPos?.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${viewportTick}`}
+        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${viewportTick}`}
       />
       <NotificationStrip />
 
       <div
         aria-hidden={!showWindowBar}
-        className={`ep-top-scrim absolute top-0 inset-x-0 z-30 ep-chrome-transition ${
+        className={`ep-top-scrim absolute top-0 inset-x-0 z-30 ep-chrome-transition origin-top ${
           showWindowBar
-            ? "opacity-100 translate-y-0"
-            : "opacity-0 -translate-y-1.5 pointer-events-none"
+            ? "opacity-100 translate-y-0 scale-100"
+            : "opacity-0 -translate-y-3 scale-[0.988] pointer-events-none"
         }`}
       >
         <TitleBar
@@ -1658,7 +1679,7 @@ export function WatchRoom() {
                 title={roomCode ? "Leave room" : "Back to lobby"}
                 className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-white/80 hover:text-white cursor-pointer shrink-0"
               >
-                <ChevronLeft className="h-4 w-4" />
+                <AppChevronIcon direction="left" size={16} />
               </button>
               <span
                 data-tauri-drag-region
@@ -1680,7 +1701,7 @@ export function WatchRoom() {
                   onClick={() => handleToggleCapsuleTab("room")}
                   aria-label="Open Watch Party panel"
                   title="Watch Party room · Click to view invite & viewers"
-                  className="ep-press shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] text-white/80 hover:text-white hover:bg-white/[0.12] num transition-colors cursor-pointer"
+                  className="ep-press shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] text-white/80 hover:text-white hover:bg-white/[0.12] num cursor-pointer"
                 >
                   <StatusDot
                     tone={
@@ -1787,76 +1808,47 @@ export function WatchRoom() {
         )}
       </div>
 
-      {panelOpen && sideTab === "room" && (
-        <div
-          style={{ bottom: popoverPos?.bottom ?? 136 }}
-          className="fixed inset-x-4 z-40 flex justify-center pointer-events-none"
-        >
-          <aside
-            aria-label="Watch Party"
-            data-glass-region="true"
-            style={{
-              maxHeight: `calc(100vh - ${(popoverPos?.bottom ?? 136) + 58}px)`,
-            }}
-            className="ep-glass-sheet ep-popover-bloom pointer-events-auto w-full max-w-[1060px] rounded-[26px] p-3.5 flex flex-col gap-2.5 overflow-hidden"
-          >
-            <div className="flex items-center justify-between gap-2 shrink-0">
-              <SegmentedTabs
-                ariaLabel="Panel section"
-                value={sideTab}
-                onChange={setSideTab}
-                className="w-full max-w-[280px]"
-                items={[
-                  { value: "room", label: "Party" },
-                  { value: "playback", label: "Playback" },
-                  { value: "subtitles", label: "Subtitles" },
-                ]}
-              />
-              <button
-                type="button"
-                onClick={() => setPanelOpen(false)}
-                aria-label="Close Watch Party menu"
-                title="Close (Esc)"
-                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-0.5">
-              <RoomPanel />
-            </div>
-          </aside>
-        </div>
-      )}
-
-      {panelOpen &&
-        popoverPos &&
-        (sideTab === "playback" ||
-          sideTab === "subtitles" ||
-          (sideTab === "episodes" && hasFolderEpisodes)) && (
-          <aside
-            key={sideTab}
-            aria-label={
-              sideTab === "episodes"
+      {popover.mounted && popover.value && (
+        <aside
+          key="capsule-popover"
+          aria-label={
+            popover.value.tab === "room"
+              ? "Watch Party"
+              : popover.value.tab === "episodes"
                 ? "Season episodes"
-                : sideTab === "playback"
+                : popover.value.tab === "playback"
                   ? "Audio and playback menu"
                   : "Subtitles menu"
+          }
+          data-glass-region="true"
+          style={{
+            left: popover.value.pos.left,
+            bottom: popover.value.pos.bottom,
+            width: popover.value.pos.width,
+            maxHeight: `calc(100vh - ${popover.value.pos.bottom + 58}px)`,
+          }}
+          className={`ep-glass-capsule ep-capsule-morph fixed z-40 select-none ${
+            popover.exiting
+              ? "ep-popover-bloom-out pointer-events-none"
+              : "ep-popover-bloom"
+          } ${
+            popover.value.tab === "room" || popover.value.tab === "episodes"
+              ? "flex flex-col overflow-hidden rounded-[22px] p-3"
+              : "overflow-y-auto overflow-x-hidden rounded-[20px] p-1.5"
+          }`}
+        >
+          <div
+            key={popover.value.tab}
+            className={
+              popover.value.tab === "room" || popover.value.tab === "episodes"
+                ? "flex flex-col flex-1 min-h-0 anim-tab-in"
+                : "anim-tab-in"
             }
-            data-glass-region="true"
-            style={{
-              left: popoverPos.left,
-              bottom: popoverPos.bottom,
-              width: popoverPos.width,
-              maxHeight: `calc(100vh - ${popoverPos.bottom + 58}px)`,
-            }}
-            className={`ep-popover-bloom fixed z-40 select-none ${
-              sideTab === "episodes"
-                ? "ep-glass-capsule flex flex-col overflow-hidden rounded-[22px] p-3.5"
-                : "ep-glass-sheet overflow-y-auto overflow-x-hidden rounded-[18px] p-1.5"
-            }`}
           >
-            {sideTab === "episodes" && (
+            {popover.value.tab === "room" && (
+              <RoomPanel onClose={() => setPanelOpen(false)} />
+            )}
+            {popover.value.tab === "episodes" && (
               <EpisodesPanel
                 onSelectEpisode={(idx) => void selectEpisodeAtIndex(idx)}
                 onOpenSeasonFolder={() => void handleChooseSeasonFolder()}
@@ -1864,10 +1856,11 @@ export function WatchRoom() {
                 onClose={() => setPanelOpen(false)}
               />
             )}
-            {sideTab === "playback" && <PlaybackPanel />}
-            {sideTab === "subtitles" && <SubtitlePanel />}
-          </aside>
-        )}
+            {popover.value.tab === "playback" && <PlaybackPanel />}
+            {popover.value.tab === "subtitles" && <SubtitlePanel />}
+          </div>
+        </aside>
+      )}
 
       <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">
         <TransportBar

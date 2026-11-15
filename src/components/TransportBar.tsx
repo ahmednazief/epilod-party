@@ -1,28 +1,4 @@
-import {
-  AudioLines,
-  Captions,
-  CheckCircle2,
-  ChevronDown,
-  Circle,
-  Eye,
-  EyeOff,
-  FolderOpen,
-  ListVideo,
-  Maximize,
-  Minimize,
-  Pause,
-  Play,
-  RefreshCw,
-  RotateCcw,
-  RotateCw,
-  Settings,
-  SkipBack,
-  SkipForward,
-  Users,
-  Volume2,
-  VolumeX,
-  X,
-} from "lucide-react";
+import { AppCloseIcon } from "./ui/AppIcons";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatUserError } from "../lib/errors";
 import { mpvSeek, mpvSetMute, mpvSetPause, mpvSetVolume, safeMpvCall } from "../lib/mpv";
@@ -45,6 +21,23 @@ import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
+import {
+  PlayerAudioIcon,
+  PlayerCaptionsIcon,
+  PlayerEpisodesIcon,
+  PlayerEyeIcon,
+  PlayerFullscreenIcon,
+  PlayerHideBarIcon,
+  PlayerPauseIcon,
+  PlayerPlayIcon,
+  PlayerReadyIcon,
+  PlayerResyncIcon,
+  PlayerSeekIcon,
+  PlayerSettingsIcon,
+  PlayerSkipEpisodeIcon,
+  PlayerVolumeIcon,
+} from "./ui/PlayerIcons";
 import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
 
@@ -193,7 +186,11 @@ const ResyncButton = memo(function ResyncButton({
           : "ep-bar-icon-btn text-secondary hover:text-white"
       }`}
     >
-      <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${busy ? "animate-spin" : ""}`} />
+      <PlayerResyncIcon
+        tone={health.needsResync ? "warn" : "ok"}
+        size={15}
+        className={`shrink-0 ${busy ? "animate-spin" : ""}`}
+      />
       <span className="hidden sm:inline truncate">
         {health.maxDriftSecs >= 2.0 ? `Resync · ${health.maxDriftSecs.toFixed(1)}s` : "Resync"}
       </span>
@@ -374,8 +371,10 @@ export const TransportBar = memo(function TransportBar({
   return (
     <div
       aria-hidden={!visible}
-      className={`w-full px-4 pb-4 pt-2 flex flex-col items-center gap-2 select-none pointer-events-none ep-chrome-transition ${
-        visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
+      className={`w-full px-4 pb-4 pt-2 flex flex-col items-center gap-2 select-none pointer-events-none ep-chrome-transition origin-bottom ${
+        visible
+          ? "opacity-100 translate-y-0 scale-100"
+          : "opacity-0 translate-y-5 scale-[0.982]"
       }`}
     >
       {feedback && (
@@ -407,7 +406,7 @@ export const TransportBar = memo(function TransportBar({
                   title="Collapse extended deck (Esc)"
                   className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
                 >
-                  <X className="h-3.5 w-3.5" />
+                  <AppCloseIcon size={14} />
                 </button>
               )}
             </div>
@@ -437,11 +436,12 @@ export const TransportBar = memo(function TransportBar({
                       : "text-secondary hover:text-white"
                   }`}
                 >
-                  {localReady && loaded ? (
-                    <CheckCircle2 key="ready" className="h-3.5 w-3.5 text-ok shrink-0 anim-icon-pop" />
-                  ) : (
-                    <Circle key="not-ready" className="h-3.5 w-3.5 text-muted shrink-0 anim-icon-pop" />
-                  )}
+                  <PlayerReadyIcon
+                    key={localReady && loaded ? "ready" : "not-ready"}
+                    ready={localReady && loaded}
+                    size={15}
+                    className="shrink-0 anim-icon-pop"
+                  />
                   <span className="hidden sm:inline truncate">
                     {localReady && loaded ? "Ready" : "Not Ready"}
                   </span>
@@ -453,6 +453,7 @@ export const TransportBar = memo(function TransportBar({
                   {!hideParticipants ? (
                     <button
                       type="button"
+                      data-capsule-anchor="room"
                       onClick={() => onToggleTab("room")}
                       aria-label="Open party lounge"
                       title="Friends watching together"
@@ -495,7 +496,7 @@ export const TransportBar = memo(function TransportBar({
                         </>
                       ) : (
                         <>
-                          <Users className="h-3.5 w-3.5 text-accent-soft ml-0.5 shrink-0" />
+                          <WatchPartyIcon bare size={15} className="ml-0.5 shrink-0" />
                           <span className="hidden lg:inline text-[11px]">Party</span>
                         </>
                       )}
@@ -503,6 +504,7 @@ export const TransportBar = memo(function TransportBar({
                   ) : (
                     <button
                       type="button"
+                      data-capsule-anchor="room"
                       onClick={() => onToggleTab("room")}
                       aria-label="Open party lounge"
                       title="Party lounge (profile icons hidden)"
@@ -512,7 +514,7 @@ export const TransportBar = memo(function TransportBar({
                           : "text-muted hover:text-white hover:bg-white/[0.08]"
                       }`}
                     >
-                      <Users className="h-3.5 w-3.5 shrink-0" />
+                      <WatchPartyIcon bare size={15} className="shrink-0" />
                     </button>
                   )}
 
@@ -527,17 +529,14 @@ export const TransportBar = memo(function TransportBar({
                     }
                     className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
                   >
-                    {hideParticipants ? (
-                      <EyeOff className="h-3.5 w-3.5 text-accent-soft" />
-                    ) : (
-                      <Eye className="h-3.5 w-3.5" />
-                    )}
+                    <PlayerEyeIcon hidden={hideParticipants} size={15} />
                   </button>
                 </div>
               </>
             ) : (
               <button
                 type="button"
+                data-capsule-anchor="room"
                 onClick={() => onToggleTab("room")}
                 aria-label="Open party lounge"
                 title="Start or join a Watch Party"
@@ -547,7 +546,7 @@ export const TransportBar = memo(function TransportBar({
                     : "ep-bar-pill text-secondary hover:text-white"
                 }`}
               >
-                <Users className="h-3.5 w-3.5 text-accent-soft shrink-0" />
+                <WatchPartyIcon bare size={16} className="shrink-0" />
                 <span className="hidden sm:inline whitespace-nowrap">Watch Party</span>
               </button>
             )}
@@ -565,11 +564,12 @@ export const TransportBar = memo(function TransportBar({
                 title="Mute (M)"
                 className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
               >
-                {muted || volume === 0 ? (
-                  <VolumeX key="muted" className="h-3.5 w-3.5 text-muted anim-icon-pop" />
-                ) : (
-                  <Volume2 key="unmuted" className="h-3.5 w-3.5 anim-icon-pop" />
-                )}
+                <PlayerVolumeIcon
+                  key={muted || volume === 0 ? "muted" : "unmuted"}
+                  muted={muted || volume === 0}
+                  size={17}
+                  className="anim-icon-pop"
+                />
               </button>
               <div className="hidden sm:block w-14 shrink-0">
                 <Scrubber
@@ -610,7 +610,7 @@ export const TransportBar = memo(function TransportBar({
                 title="Previous episode"
                 className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
               >
-                <SkipBack className="h-3.5 w-3.5" />
+                <PlayerSkipEpisodeIcon direction="prev" size={16} />
               </button>
             )}
 
@@ -622,7 +622,7 @@ export const TransportBar = memo(function TransportBar({
               title="Seek -10s (J)"
               className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
+              <PlayerSeekIcon direction="back" size={19} />
             </button>
 
             <button
@@ -640,9 +640,9 @@ export const TransportBar = memo(function TransportBar({
               className="ep-orb-play h-11 w-11 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
             >
               {paused ? (
-                <Play key="play" className="h-[17px] w-[17px] fill-current ml-0.5 relative z-10 anim-icon-pop" />
+                <PlayerPlayIcon key="play" size={24} className="relative z-10 anim-icon-pop" />
               ) : (
-                <Pause key="pause" className="h-[17px] w-[17px] fill-current relative z-10 anim-icon-pop" />
+                <PlayerPauseIcon key="pause" size={24} className="relative z-10 anim-icon-pop" />
               )}
             </button>
 
@@ -654,7 +654,7 @@ export const TransportBar = memo(function TransportBar({
               title="Seek +10s (L)"
               className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
-              <RotateCw className="h-3.5 w-3.5" />
+              <PlayerSeekIcon direction="forward" size={19} />
             </button>
 
             {hasFolderEpisodes && playlistItems.length > 1 && onNextEpisode && (
@@ -666,7 +666,7 @@ export const TransportBar = memo(function TransportBar({
                 title="Next episode"
                 className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
               >
-                <SkipForward className="h-3.5 w-3.5" />
+                <PlayerSkipEpisodeIcon direction="next" size={16} />
               </button>
             )}
           </div>
@@ -680,7 +680,7 @@ export const TransportBar = memo(function TransportBar({
               title="Open video file(s)"
               className="ep-bar-icon-btn h-7.5 w-7.5 2xl:w-auto 2xl:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs text-secondary hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+              <OpenMediaIcon bare size={16} className="shrink-0" />
               <span className="hidden 2xl:inline">Open</span>
             </button>
 
@@ -693,11 +693,11 @@ export const TransportBar = memo(function TransportBar({
                 title="Season folder & episodes queue"
                 className={`ep-bar-icon-btn h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium min-w-0 max-w-full cursor-pointer ${
                   activeTab === "episodes"
-                    ? "text-white [&_svg]:text-accent-soft"
+                    ? "text-white"
                     : "text-secondary hover:text-white"
                 }`}
               >
-                <ListVideo className="h-3.5 w-3.5 shrink-0" />
+                <PlayerEpisodesIcon active={activeTab === "episodes"} size={17} className="shrink-0" />
                 <span className="hidden sm:inline truncate num">
                   {activePlaylistItem?.episodeBadge ||
                     (playlistItems.length > 1 ? `Episodes (${playlistItems.length})` : "Episodes")}
@@ -713,11 +713,11 @@ export const TransportBar = memo(function TransportBar({
               title="Subtitles & Magic Sync"
               className={`ep-bar-icon-btn h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer ${
                 activeTab === "subtitles"
-                  ? "text-white [&_svg]:text-accent-soft"
+                  ? "text-white"
                   : "text-secondary hover:text-white"
               }`}
             >
-              <Captions className="h-3.5 w-3.5 shrink-0" />
+              <PlayerCaptionsIcon active={activeTab === "subtitles"} size={17} className="shrink-0" />
               <span className="hidden sm:inline">CC</span>
             </button>
 
@@ -729,11 +729,11 @@ export const TransportBar = memo(function TransportBar({
               title="Audio & Playback"
               className={`ep-bar-icon-btn h-7.5 w-7.5 sm:w-auto sm:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer ${
                 activeTab === "playback"
-                  ? "text-white [&_svg]:text-accent-soft"
+                  ? "text-white"
                   : "text-secondary hover:text-white"
               }`}
             >
-              <AudioLines className="h-3.5 w-3.5 shrink-0" />
+              <PlayerAudioIcon active={activeTab === "playback"} size={17} className="shrink-0" />
               <span className="hidden sm:inline">Audio</span>
             </button>
 
@@ -745,7 +745,7 @@ export const TransportBar = memo(function TransportBar({
                 title="Pure video (hover bottom edge to wake controls)"
                 className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full hidden sm:flex items-center justify-center shrink-0 text-muted hover:text-white cursor-pointer"
               >
-                <ChevronDown className="h-3.5 w-3.5" />
+                <PlayerHideBarIcon size={16} />
               </button>
             )}
 
@@ -756,7 +756,7 @@ export const TransportBar = memo(function TransportBar({
               title="Preferences"
               className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center shrink-0 text-muted hover:text-white cursor-pointer"
             >
-              <Settings className="h-3.5 w-3.5" />
+              <PlayerSettingsIcon size={16} />
             </button>
 
             <button
@@ -766,11 +766,12 @@ export const TransportBar = memo(function TransportBar({
               title="Fullscreen (F)"
               className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center shrink-0 text-secondary hover:text-white cursor-pointer"
             >
-              {isFullscreen ? (
-                <Minimize key="min" className="h-3.5 w-3.5 anim-icon-pop" />
-              ) : (
-                <Maximize key="max" className="h-3.5 w-3.5 anim-icon-pop" />
-              )}
+              <PlayerFullscreenIcon
+                key={isFullscreen ? "min" : "max"}
+                isFullscreen={isFullscreen}
+                size={16}
+                className="anim-icon-pop"
+              />
             </button>
           </div>
         </div>

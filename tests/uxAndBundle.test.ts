@@ -48,7 +48,8 @@ test("ViewportPlaceholder and WatchRoom uphold child HWND empty-surface and over
     true,
   );
   assert.equal(watchRoom.includes("useShallow"), true);
-  assert.equal(watchRoom.includes("<SegmentedTabs"), true);
+  assert.equal(watchRoom.includes("<PlaybackPanel />"), true);
+  assert.equal(watchRoom.includes("<SubtitlePanel />"), true);
   assert.equal(watchRoom.includes("<ViewportPlaceholder"), true);
   assert.equal(watchRoom.includes("<RoomPanel"), true);
   assert.equal(watchRoom.includes("usePlayerShortcuts"), true);
@@ -165,9 +166,11 @@ test("Custom frameless TitleBar and consumer Smoked-Amethyst UX invariants hold 
 
   const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
   assert.equal(watchSrc.includes("<TitleBar"), true);
-  assert.equal(watchSrc.includes('{ value: "room", label: "Party" }'), true);
-  assert.equal(watchSrc.includes('{ value: "playback", label: "Playback" }'), true);
-  assert.equal(watchSrc.includes('{ value: "subtitles", label: "Subtitles" }'), true);
+  assert.equal(watchSrc.includes('"Watch Party"'), true);
+  assert.equal(watchSrc.includes("<SegmentedTabs"), false);
+  assert.equal(watchSrc.includes("<RoomPanel"), true);
+  assert.equal(watchSrc.includes("<PlaybackPanel />"), true);
+  assert.equal(watchSrc.includes("<SubtitlePanel />"), true);
 
   const settingsSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
@@ -233,6 +236,136 @@ test("Real-time liquid-glass backdrop sampling and convex bezel lens invariants 
 
   const rustLib = fs.readFileSync(path.join(REPO_ROOT, "src-tauri/src/lib.rs"), "utf8");
   assert.equal(rustLib.includes("async fn mpv_backdrop_frame"), true);
+});
+
+test("Hero play/pause button uses custom faceted crystal icons and purplish smoked-amethyst glass orb", () => {
+  const iconsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/PlayerIcons.tsx"),
+    "utf8",
+  );
+  const playSection = iconsSrc.slice(
+    iconsSrc.indexOf("export function PlayerPlayIcon"),
+    iconsSrc.indexOf("export function PlayerPauseIcon"),
+  );
+  const pauseSection = iconsSrc.slice(
+    iconsSrc.indexOf("export function PlayerPauseIcon"),
+    iconsSrc.indexOf("export function PlayerSeekIcon"),
+  );
+  assert.equal(playSection.includes("<clipPath"), true);
+  assert.equal(playSection.includes("#7C3AED"), true);
+  assert.equal(pauseSection.includes("<clipPath"), true);
+  assert.equal(pauseSection.includes("#7C3AED"), true);
+
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.match(transportSrc, /ep-orb-play[\s\S]*<PlayerPlayIcon[\s\S]*<PlayerPauseIcon/);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.match(globalsCss, /\.ep-orb-play\s*\{[\s\S]*rgba\(124,\s*58,\s*237/);
+  assert.match(globalsCss, /\.ep-orb-play:hover:not\(:disabled\)[\s\S]*rgba\(139,\s*92,\s*246/);
+});
+
+test("Auto-hiding and re-showing play bar, top bar, and video backdrop glide smoothly together", () => {
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.match(globalsCss, /\.ep-chrome-transition\s*\{[\s\S]*opacity[\s\S]*transform/);
+  assert.match(
+    globalsCss,
+    /\.ep-chrome-transition\[aria-hidden="true"\]\s*\{[\s\S]*cubic-bezier\(0\.32,\s*0\.72,\s*0,\s*1\)/,
+  );
+
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.equal(transportSrc.includes("ep-chrome-transition"), true);
+  assert.equal(transportSrc.includes("translate-y-0 scale-100"), true);
+  assert.equal(transportSrc.includes("translate-y-5 scale-[0.982]"), true);
+
+  const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  assert.equal(watchSrc.includes("backdropPresence.mounted"), true);
+  assert.equal(watchSrc.includes("ep-chrome-transition"), true);
+  assert.equal(watchSrc.includes("-translate-y-3 scale-[0.988]"), true);
+
+  const backdropSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"),
+    "utf8",
+  );
+  assert.match(backdropSrc, /globalAlpha\s*=\s*0\.92\s*\*\s*regionAlpha/);
+});
+
+test("Menus, popovers, tabs, modals, notifications, switches, and collapsible panels animate enter/exit cleanly", () => {
+  const presenceSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/lib/useAnimatedPresence.ts"),
+    "utf8",
+  );
+  assert.equal(presenceSrc.includes("export function useAnimatedPresence"), true);
+  assert.equal(presenceSrc.includes("export function usePresencePayload"), true);
+  assert.equal(presenceSrc.includes("prefersReducedMotion"), true);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  for (const className of [
+    ".anim-pop-out",
+    ".ep-popover-bloom-out",
+    ".anim-backdrop-out",
+    ".anim-modal-out",
+    ".anim-fade-slide-down",
+    ".ep-capsule-morph",
+    ".ep-collapse",
+    ".ep-switch-slide",
+  ]) {
+    assert.equal(globalsCss.includes(className), true, `Missing ${className} in globals.css`);
+  }
+
+  for (const rel of [
+    "src/components/WatchRoom.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/ShortcutsModal.tsx",
+    "src/components/HomeScreen.tsx",
+    "src/components/ui/ContextMenu.tsx",
+    "src/components/ui/SelectMenu.tsx",
+    "src/components/ui/NotificationStrip.tsx",
+  ]) {
+    const src = fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+    assert.match(
+      src,
+      /(useAnimatedPresence|usePresencePayload|anim-fade-slide-down)/,
+      `Expected animated exit support in ${rel}`,
+    );
+  }
+
+  // Ensure every .ep-switch-track translates on GPU transforms rather than non-animatable justify-content,
+  // and no .ep-press button conflicts with Tailwind transition utilities.
+  const componentFiles: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) componentFiles.push(full);
+    }
+  };
+  walk(path.join(REPO_ROOT, "src/components"));
+
+  for (const file of componentFiles) {
+    const src = fs.readFileSync(file, "utf8");
+    const rel = path.relative(REPO_ROOT, file);
+    assert.equal(
+      src.includes("ep-btn-ghost"),
+      false,
+      `${rel} must not reference removed ep-btn-ghost class`,
+    );
+    assert.equal(
+      /ep-switch-track[^`"}]*justify-(?:start|end)/.test(src),
+      false,
+      `${rel} must use transform slide on switch thumb instead of justify-start/end`,
+    );
+    assert.equal(
+      /className=(?:"|`)[^"`]*\bep-press\b[^"`]*\btransition-(?:colors|all|transform)\b/.test(src),
+      false,
+      `${rel} must not override .ep-press transition with Tailwind transition utilities`,
+    );
+  }
 });
 
 

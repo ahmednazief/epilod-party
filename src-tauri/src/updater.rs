@@ -157,12 +157,7 @@ impl UpdaterState {
         }
         if self
             .applying
-            .compare_exchange(
-                false,
-                true,
-                AtomicOrdering::SeqCst,
-                AtomicOrdering::SeqCst,
-            )
+            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
             .is_err()
         {
             return Err("Update installer is already launching.".to_string());
@@ -1577,7 +1572,8 @@ async fn stream_https_download_resumable(
             return Err("Download paused cleanly.".to_string());
         }
 
-        match stream_https_download_once(release, part_path, cancel_flag, cancel_notify, app).await {
+        match stream_https_download_once(release, part_path, cancel_flag, cancel_notify, app).await
+        {
             Ok(()) => return Ok(()),
             Err(StreamAttemptError::Paused) => {
                 return Err("Download paused cleanly.".to_string());
@@ -1706,10 +1702,14 @@ async fn stream_https_download_once(
             .truncate(false)
             .write(true)
             .open(part_path)
-            .map_err(|e| StreamAttemptError::Fatal(format!("Cannot open partial update file: {e}")))?;
+            .map_err(|e| {
+                StreamAttemptError::Fatal(format!("Cannot open partial update file: {e}"))
+            })?;
         f.set_len(offset)
             .and_then(|()| f.seek(SeekFrom::Start(offset)))
-            .map_err(|e| StreamAttemptError::Fatal(format!("Failed seeking partial update file: {e}")))?;
+            .map_err(|e| {
+                StreamAttemptError::Fatal(format!("Failed seeking partial update file: {e}"))
+            })?;
         f
     } else {
         File::create(part_path)
@@ -1740,8 +1740,9 @@ async fn stream_https_download_once(
                 "Downloaded stream exceeded declared installer size.".to_string(),
             ));
         }
-        file.write_all(chunk)
-            .map_err(|e| StreamAttemptError::Fatal(format!("Disk write error during update download: {e}")))?;
+        file.write_all(chunk).map_err(|e| {
+            StreamAttemptError::Fatal(format!("Disk write error during update download: {e}"))
+        })?;
         Ok(())
     };
 
@@ -1819,8 +1820,9 @@ async fn stream_https_download_once(
         }
     }
 
-    file.flush()
-        .map_err(|e| StreamAttemptError::Fatal(format!("Failed flushing downloaded installer: {e}")))?;
+    file.flush().map_err(|e| {
+        StreamAttemptError::Fatal(format!("Failed flushing downloaded installer: {e}"))
+    })?;
 
     if downloaded != expected_size {
         return Err(StreamAttemptError::Retryable(format!(
@@ -2325,11 +2327,15 @@ mod tests {
             *dl = false;
         }
 
-        let guard = state.try_begin_apply().expect("first apply should acquire guard");
+        let guard = state
+            .try_begin_apply()
+            .expect("first apply should acquire guard");
         assert!(state.try_begin_apply().is_err());
         drop(guard);
 
-        let guard2 = state.try_begin_apply().expect("dropping guard frees apply slot");
+        let guard2 = state
+            .try_begin_apply()
+            .expect("dropping guard frees apply slot");
         guard2.disarm();
         assert!(state.try_begin_apply().is_err());
     }
@@ -2364,8 +2370,14 @@ mod tests {
                 || err.contains("SHA-256"),
             "Unexpected error: {err}"
         );
-        assert!(!exe_path.exists(), "Corrupted installer must be purged automatically");
-        assert!(!ready_meta.exists(), "Corrupted ready sidecar must be purged automatically");
+        assert!(
+            !exe_path.exists(),
+            "Corrupted installer must be purged automatically"
+        );
+        assert!(
+            !ready_meta.exists(),
+            "Corrupted ready sidecar must be purged automatically"
+        );
 
         let _ = fs::remove_dir_all(&cache_dir);
     }

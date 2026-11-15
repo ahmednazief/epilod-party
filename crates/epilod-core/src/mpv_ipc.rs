@@ -355,6 +355,8 @@ pub fn launch_args_with_fonts(
         "--audio-channels=auto-safe".to_string(),
         "--audio-pitch-correction=yes".to_string(),
         "--embeddedfonts=yes".to_string(),
+        "--background=color".to_string(),
+        "--background-color=#060608".to_string(),
         "--no-config".to_string(),
         "--load-scripts=no".to_string(),
         "--ytdl=no".to_string(),
@@ -431,6 +433,9 @@ pub fn autosync_extract_args_mpv(
         "--ytdl=no".to_string(),
         "--vid=no".to_string(),
         "--sub=no".to_string(),
+        // Silence the terminal status line / log spam so an undrained stderr pipe can never fill up.
+        "--msg-level=all=error".to_string(),
+        "--term-status-msg=".to_string(),
         "--audio-channels=mono".to_string(),
         "--audio-samplerate=16000".to_string(),
         "--of=s16le".to_string(),
@@ -449,12 +454,19 @@ pub fn autosync_extract_args_ffmpeg(
     out_pcm_path: &str,
     audio_stream_idx: Option<usize>,
 ) -> Vec<String> {
+    // NOTE: `-vn`/`-sn` are output options and must come AFTER `-i`; before it older ffmpeg builds
+    // abort with "cannot be applied to input url".
     let mut args = vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
         "-y".to_string(),
-        "-vn".to_string(),
-        "-sn".to_string(),
         "-i".to_string(),
         video_path.to_string(),
+        "-vn".to_string(),
+        "-sn".to_string(),
     ];
     if let Some(idx) = audio_stream_idx {
         args.push("-map".to_string());
@@ -484,11 +496,16 @@ pub fn autosync_extract_sub_args_ffmpeg(
     sub_stream_idx: usize,
 ) -> Vec<String> {
     vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
         "-y".to_string(),
-        "-vn".to_string(),
-        "-an".to_string(),
         "-i".to_string(),
         video_path.to_string(),
+        "-vn".to_string(),
+        "-an".to_string(),
         "-map".to_string(),
         format!("0:s:{sub_stream_idx}"),
         out_sub_path.to_string(),
@@ -613,6 +630,20 @@ mod tests {
         assert!(ff_ext.iter().any(|a| a == "0:a:1"));
         let sub_ext = autosync_extract_sub_args_ffmpeg("movie.mkv", "out.srt", 0);
         assert!(sub_ext.iter().any(|a| a == "0:s:0"));
+
+        // Extractors must be quiet (undrained stderr pipes can deadlock) and keep output-only
+        // ffmpeg flags after `-i`.
+        assert!(mpv_ext.iter().any(|a| a == "--msg-level=all=error"));
+        assert!(mpv_ext.iter().any(|a| a == "--term-status-msg="));
+        for args in [&ff_ext, &sub_ext] {
+            let i_pos = args.iter().position(|a| a == "-i").unwrap();
+            for out_flag in ["-vn", "-sn", "-an"] {
+                if let Some(p) = args.iter().position(|a| a == out_flag) {
+                    assert!(p > i_pos, "{out_flag} must follow -i");
+                }
+            }
+            assert!(args.iter().any(|a| a == "-nostdin"));
+        }
     }
 
     #[test]

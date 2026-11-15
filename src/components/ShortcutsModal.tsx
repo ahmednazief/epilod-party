@@ -1,5 +1,6 @@
-import { X } from "lucide-react";
+import { AppCloseIcon } from "./ui/AppIcons";
 import { PLAYER_SHORTCUTS, SHORTCUT_CATEGORIES } from "../lib/shortcuts";
+import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 
 interface ShortcutsModalProps {
   open: boolean;
@@ -7,11 +8,14 @@ interface ShortcutsModalProps {
 }
 
 export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
-  if (!open) return null;
+  const { mounted, exiting } = useAnimatedPresence(open, 200);
+  if (!mounted) return null;
 
   return (
     <div
-      className="ep-modal-backdrop anim-backdrop-in fixed inset-0 z-50 flex items-center justify-center p-4"
+      className={`ep-modal-backdrop ${
+        exiting ? "anim-backdrop-out pointer-events-none" : "anim-backdrop-in"
+      } fixed inset-0 z-50 flex items-center justify-center p-4`}
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard Shortcuts"
@@ -19,7 +23,11 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="ep-glass-sheet anim-modal-in w-full max-w-lg rounded-[26px] overflow-hidden">
+      <div
+        className={`ep-glass-sheet ${
+          exiting ? "anim-modal-out" : "anim-modal-in"
+        } w-full max-w-lg rounded-[26px] overflow-hidden`}
+      >
         <div className="flex items-center justify-between px-6 py-4">
           <h2 className="text-sm font-semibold tracking-tight text-white">
             Keyboard Shortcuts
@@ -28,9 +36,9 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
             type="button"
             onClick={onClose}
             aria-label="Close shortcuts"
-            className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+            className="ep-bar-icon-btn ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
           >
-            <X className="h-4 w-4" />
+            <AppCloseIcon size={16} />
           </button>
         </div>
 

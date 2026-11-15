@@ -9,8 +9,9 @@ try {
     npm --version
 
     $MpvExe = Join-Path $RepoRoot "src-tauri\resources\mpv\mpv.exe"
-    if (-not (Test-Path $MpvExe)) {
-        Write-Host "==> mpv.exe missing; attempting fetch-mpv.ps1..."
+    $FfmpegExe = Join-Path $RepoRoot "src-tauri\resources\mpv\ffmpeg.exe"
+    if (-not (Test-Path $MpvExe) -or -not (Test-Path $FfmpegExe)) {
+        Write-Host "==> mpv.exe and/or ffmpeg.exe missing; attempting fetch-mpv.ps1..."
         & (Join-Path $PSScriptRoot "fetch-mpv.ps1")
     }
 

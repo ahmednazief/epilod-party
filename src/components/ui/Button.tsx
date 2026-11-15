@@ -11,9 +11,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary: "ep-glass-primary-pill ep-press text-white font-medium",
-  secondary: "ep-glass-pill ep-press text-primary hover:bg-hover/80",
+  secondary: "ep-glass-pill ep-press text-primary hover:text-white hover:brightness-110",
   ghost:
-    "ep-press bg-transparent text-secondary hover:text-primary hover:bg-accent/12",
+    "ep-press bg-transparent text-secondary hover:text-primary hover:bg-white/[0.08]",
   danger:
     "ep-glass-pill ep-press text-bad hover:bg-bad/15",
 };

@@ -1,4 +1,4 @@
-import { Shuffle } from "lucide-react";
+import { AppShuffleIcon } from "./AppIcons";
 import { useState, type ReactNode } from "react";
 
 export type AvatarCategory = "girls" | "boys" | "characters";
@@ -473,7 +473,7 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
                 key={cat.value}
                 type="button"
                 onClick={() => setFilter(cat.value)}
-                className={`ep-press whitespace-nowrap px-2.5 py-1 rounded-full text-[11px] font-medium cursor-pointer transition-colors ${
+                className={`ep-press whitespace-nowrap px-2.5 py-1 rounded-full text-[11px] font-medium cursor-pointer ${
                   active ? "ep-droplet-indicator text-white" : "text-muted hover:text-primary"
                 }`}
               >
@@ -489,7 +489,7 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
           title="Pick a random look"
           className="ep-press whitespace-nowrap shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/[0.07] hover:bg-white/[0.13] text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
         >
-          <Shuffle className="h-3 w-3" />
+          <AppShuffleIcon size={12} />
           <span>Surprise me</span>
         </button>
       </div>
@@ -498,17 +498,17 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
         {visiblePresets.map((preset) => {
           const selected = preset.id === value;
           return (
-            <button
-              key={preset.id}
-              type="button"
-              onClick={() => onChange(preset.id)}
-              aria-pressed={selected}
-              className={`ep-press rounded-2xl py-2 px-1 flex flex-col items-center gap-1 cursor-pointer transition-colors ${
-                selected
-                  ? "bg-accent/25 ring-2 ring-accent-soft text-white"
-                  : "bg-white/[0.04] hover:bg-white/[0.09] text-secondary hover:text-white"
-              }`}
-            >
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => onChange(preset.id)}
+                aria-pressed={selected}
+                className={`ep-press rounded-2xl py-2 px-1 flex flex-col items-center gap-1 cursor-pointer ${
+                  selected
+                    ? "bg-accent/25 ring-2 ring-accent-soft text-white"
+                    : "bg-white/[0.04] hover:bg-white/[0.09] text-secondary hover:text-white"
+                }`}
+              >
               <ProfileAvatar avatarId={preset.id} size={compact ? 34 : 38} />
               <span className="text-[10px] font-medium leading-none truncate max-w-full">
                 {preset.label}

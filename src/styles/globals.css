@@ -183,13 +183,20 @@ html.ep-video-active #root {
 }
 
 button.ep-glass-pill:hover:not(:disabled) {
-  background-color: rgba(34, 34, 44, 0.48);
-  border-color: rgba(255, 255, 255, 0.34);
+  transform: translateY(-0.5px) scale(1.015);
+  background-color: rgba(34, 34, 44, 0.50);
+  border-color: rgba(255, 255, 255, 0.36);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.60),
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.62),
     inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.18),
-    inset 0 0 12px 0 rgba(255, 255, 255, 0.07),
+    inset 0 0 12px 0 rgba(255, 255, 255, 0.08),
     0 10px 24px -8px rgba(0, 0, 0, 0.68);
+}
+
+button.ep-glass-pill:active:not(:disabled) {
+  transform: scale(0.955);
+  transition-duration: 70ms;
+  transition-timing-function: ease-out;
 }
 
 .ep-update-pill {
@@ -220,19 +227,27 @@ button.ep-glass-pill:hover:not(:disabled) {
     inset 0 -1px 0.5px 0 rgba(196, 181, 253, 0.20),
     0 10px 26px -8px rgba(124, 58, 237, 0.38);
   transition:
-    transform 200ms var(--ease-glass),
+    transform 210ms var(--spring-fluid),
     background-color 180ms var(--ease-glass),
     border-color 180ms var(--ease-glass),
-    box-shadow 200ms var(--ease-glass);
+    box-shadow 200ms var(--ease-glass),
+    filter 180ms var(--ease-glass);
 }
 
-.ep-glass-btn-party:hover {
-  background-color: rgba(124, 58, 237, 0.44);
-  border-color: rgba(237, 233, 254, 0.44);
+.ep-glass-btn-party:hover:not(:disabled) {
+  transform: translateY(-1px) scale(1.012);
+  background-color: rgba(124, 58, 237, 0.46);
+  border-color: rgba(237, 233, 254, 0.48);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.62),
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.64),
     inset 0 -1px 0.5px 0 rgba(221, 214, 254, 0.28),
-    0 14px 32px -8px rgba(124, 58, 237, 0.48);
+    0 16px 34px -8px rgba(124, 58, 237, 0.52);
+}
+
+.ep-glass-btn-party:active:not(:disabled) {
+  transform: scale(0.975);
+  transition-duration: 75ms;
+  transition-timing-function: ease-out;
 }
 
 .ep-glass-btn-media {
@@ -252,19 +267,27 @@ button.ep-glass-pill:hover:not(:disabled) {
     inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.12),
     0 10px 26px -8px rgba(0, 0, 0, 0.68);
   transition:
-    transform 200ms var(--ease-glass),
+    transform 210ms var(--spring-fluid),
     background-color 180ms var(--ease-glass),
     border-color 180ms var(--ease-glass),
-    box-shadow 200ms var(--ease-glass);
+    box-shadow 200ms var(--ease-glass),
+    filter 180ms var(--ease-glass);
 }
 
-.ep-glass-btn-media:hover {
-  background-color: rgba(34, 34, 46, 0.52);
-  border-color: rgba(255, 255, 255, 0.34);
+.ep-glass-btn-media:hover:not(:disabled) {
+  transform: translateY(-1px) scale(1.012);
+  background-color: rgba(36, 36, 50, 0.54);
+  border-color: rgba(255, 255, 255, 0.36);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.56),
-    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.18),
-    0 14px 30px -8px rgba(0, 0, 0, 0.78);
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.58),
+    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.20),
+    0 16px 32px -8px rgba(0, 0, 0, 0.80);
+}
+
+.ep-glass-btn-media:active:not(:disabled) {
+  transform: scale(0.975);
+  transition-duration: 75ms;
+  transition-timing-function: ease-out;
 }
 
 .ep-glass-well {
@@ -323,19 +346,27 @@ button.ep-glass-pill:hover:not(:disabled) {
     inset 0 -1px 0.5px 0 rgba(196, 181, 253, 0.22),
     0 8px 22px -6px rgba(124, 58, 237, 0.46);
   transition:
-    transform 160ms var(--ease-glass),
+    transform 190ms var(--spring-fluid),
     background-color 160ms var(--ease-glass),
     border-color 160ms var(--ease-glass),
-    box-shadow 160ms var(--ease-glass);
+    box-shadow 180ms var(--ease-glass),
+    filter 160ms var(--ease-glass);
 }
 
 .ep-glass-primary-pill:hover:not(:disabled) {
-  background-color: rgba(139, 92, 246, 0.64);
-  border-color: rgba(245, 243, 255, 0.48);
+  transform: translateY(-0.5px) scale(1.018);
+  background-color: rgba(139, 92, 246, 0.66);
+  border-color: rgba(245, 243, 255, 0.52);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.68),
-    inset 0 -1px 0.5px 0 rgba(221, 214, 254, 0.28),
-    0 12px 26px -6px rgba(139, 92, 246, 0.56);
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.70),
+    inset 0 -1px 0.5px 0 rgba(221, 214, 254, 0.30),
+    0 12px 28px -6px rgba(139, 92, 246, 0.60);
+}
+
+.ep-glass-primary-pill:active:not(:disabled) {
+  transform: scale(0.955);
+  transition-duration: 70ms;
+  transition-timing-function: ease-out;
 }
 
 .ep-glass-input {
@@ -429,18 +460,31 @@ button.ep-glass-pill:hover:not(:disabled) {
 .ep-menu-row {
   border-radius: 12px;
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    transform 220ms var(--spring-fluid);
+    background-color 160ms var(--ease-glass),
+    color 150ms var(--ease-glass),
+    box-shadow 170ms var(--ease-glass),
+    transform 190ms var(--spring-fluid);
 }
 
-.ep-menu-row:hover {
-  background-color: rgba(255, 255, 255, 0.065);
+.ep-menu-row:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: rgba(255, 255, 255, 0.085);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.09);
+}
+
+.ep-menu-row:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: scale(0.978);
+  background-color: rgba(255, 255, 255, 0.12);
+  transition-duration: 70ms;
+  transition-timing-function: ease-out;
 }
 
 .ep-menu-row[data-active="true"] {
-  background-color: rgba(124, 58, 237, 0.14);
-  box-shadow: inset 0 1px 0 0 rgba(221, 214, 254, 0.14);
+  background-color: rgba(124, 58, 237, 0.16);
+  box-shadow: inset 0 1px 0 0 rgba(221, 214, 254, 0.18);
+}
+
+.ep-menu-row[data-active="true"]:hover:not(:disabled) {
+  background-color: rgba(124, 58, 237, 0.24);
 }
 
 .ep-orb-play {
@@ -448,61 +492,93 @@ button.ep-glass-pill:hover:not(:disabled) {
   overflow: hidden;
   isolation: isolate;
   color: #FFFFFF;
-  background-color: rgba(255, 255, 255, 0.14);
-  background-image: linear-gradient(
-    168deg,
-    rgba(255, 255, 255, 0.30) 0%,
-    rgba(255, 255, 255, 0.07) 44%,
-    rgba(255, 255, 255, 0.03) 72%,
-    rgba(255, 255, 255, 0.18) 100%
-  );
-  backdrop-filter: blur(22px) saturate(180%) brightness(1.12);
-  -webkit-backdrop-filter: blur(22px) saturate(180%) brightness(1.12);
-  border: 1px solid rgba(255, 255, 255, 0.38);
+  background-color: rgba(124, 58, 237, 0.34);
+  background-image:
+    radial-gradient(
+      115% 100% at 30% 18%,
+      rgba(245, 243, 255, 0.30) 0%,
+      rgba(196, 181, 253, 0.16) 40%,
+      rgba(124, 58, 237, 0.24) 74%,
+      rgba(91, 33, 182, 0.36) 100%
+    ),
+    linear-gradient(
+      170deg,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(139, 92, 246, 0.12) 52%,
+      rgba(221, 214, 254, 0.18) 100%
+    );
+  backdrop-filter: blur(18px) saturate(165%) brightness(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(165%) brightness(1.08);
+  border: 1px solid rgba(221, 214, 254, 0.44);
   box-shadow:
-    inset 0 1px 1px 0 rgba(255, 255, 255, 0.78),
-    inset 0 -1.5px 2px 0 rgba(255, 255, 255, 0.24),
-    inset 0 0 14px 0 rgba(255, 255, 255, 0.08),
-    0 8px 20px -4px rgba(0, 0, 0, 0.52),
-    0 2px 6px -1px rgba(0, 0, 0, 0.32);
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.72),
+    inset 0 -1.5px 2.5px 0 rgba(196, 181, 253, 0.34),
+    inset 0 0 14px 0 rgba(139, 92, 246, 0.28),
+    0 8px 20px -4px rgba(8, 3, 20, 0.58),
+    0 0 20px -4px rgba(124, 58, 237, 0.42);
   transition:
-    transform 150ms var(--ease-glass),
+    transform 160ms var(--ease-glass),
     background-color 180ms var(--ease-glass),
     border-color 180ms var(--ease-glass),
     box-shadow 180ms var(--ease-glass),
     opacity 180ms var(--ease-glass);
 }
 
+.ep-orb-play svg {
+  filter: drop-shadow(0 1px 2.5px rgba(18, 6, 44, 0.48));
+}
+
 .ep-orb-play::before {
   content: "";
   position: absolute;
-  inset: 1px 4px auto 4px;
-  height: 42%;
+  inset: 1.5px 5px auto 5px;
+  height: 40%;
   border-radius: 9999px;
   pointer-events: none;
   background: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.48) 0%,
-    rgba(255, 255, 255, 0.06) 58%,
+    rgba(255, 255, 255, 0.54) 0%,
+    rgba(237, 233, 254, 0.14) 55%,
     rgba(255, 255, 255, 0) 100%
   );
-  opacity: 0.78;
+  opacity: 0.84;
+  transition: opacity 180ms var(--ease-glass);
+}
+
+.ep-orb-play::after {
+  content: "";
+  position: absolute;
+  inset: auto 7px 2px 7px;
+  height: 28%;
+  border-radius: 9999px;
+  pointer-events: none;
+  background: radial-gradient(
+    85% 100% at 50% 100%,
+    rgba(196, 181, 253, 0.40) 0%,
+    rgba(139, 92, 246, 0) 100%
+  );
+  opacity: 0.72;
   transition: opacity 180ms var(--ease-glass);
 }
 
 .ep-orb-play:hover:not(:disabled) {
-  background-color: rgba(255, 255, 255, 0.22);
-  border-color: rgba(255, 255, 255, 0.56);
+  transform: scale(1.045);
+  background-color: rgba(139, 92, 246, 0.46);
+  border-color: rgba(237, 233, 254, 0.62);
   box-shadow:
-    inset 0 1px 1.5px 0 rgba(255, 255, 255, 0.90),
-    inset 0 -1.5px 2px 0 rgba(255, 255, 255, 0.32),
-    inset 0 0 18px 0 rgba(255, 255, 255, 0.14),
-    0 10px 24px -4px rgba(0, 0, 0, 0.58),
-    0 0 16px -4px rgba(255, 255, 255, 0.18);
+    inset 0 1px 1.5px 0 rgba(255, 255, 255, 0.86),
+    inset 0 -1.5px 3px 0 rgba(221, 214, 254, 0.42),
+    inset 0 0 18px 0 rgba(167, 139, 250, 0.36),
+    0 10px 24px -4px rgba(8, 3, 20, 0.64),
+    0 0 26px -2px rgba(139, 92, 246, 0.56);
 }
 
 .ep-orb-play:hover:not(:disabled)::before {
-  opacity: 0.95;
+  opacity: 0.96;
+}
+
+.ep-orb-play:hover:not(:disabled)::after {
+  opacity: 0.92;
 }
 
 .ep-orb-play:active:not(:disabled) {
@@ -511,8 +587,13 @@ button.ep-glass-pill:hover:not(:disabled) {
   transition-timing-function: ease-out;
 }
 
+.ep-orb-play:focus-visible {
+  outline: 2px solid rgba(196, 181, 253, 0.85);
+  outline-offset: 2px;
+}
+
 .ep-orb-play:disabled {
-  opacity: 0.45;
+  opacity: 0.46;
 }
 
 .ep-bar-pill,
@@ -530,26 +611,27 @@ button.ep-glass-pill:hover:not(:disabled) {
     inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.04),
     0 4px 12px -6px rgba(0, 0, 0, 0.45);
   transition:
-    transform 140ms var(--ease-glass),
+    transform 190ms var(--spring-fluid),
     background-color 160ms var(--ease-glass),
     border-color 160ms var(--ease-glass),
-    box-shadow 160ms var(--ease-glass),
+    box-shadow 170ms var(--ease-glass),
     color 150ms var(--ease-glass),
     opacity 160ms var(--ease-glass);
 }
 
 .ep-bar-pill:hover:not(:disabled) {
-  background-color: rgba(255, 255, 255, 0.11);
-  border-color: rgba(255, 255, 255, 0.22);
+  transform: scale(1.028);
+  background-color: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.26);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.34),
-    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.08),
-    0 6px 16px -4px rgba(0, 0, 0, 0.52);
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.09),
+    0 6px 18px -4px rgba(0, 0, 0, 0.54);
 }
 
 .ep-bar-pill:active:not(:disabled) {
-  transform: scale(0.95);
-  transition-duration: 75ms;
+  transform: scale(0.945);
+  transition-duration: 70ms;
   transition-timing-function: ease-out;
 }
 
@@ -557,27 +639,28 @@ button.ep-glass-pill:hover:not(:disabled) {
   background-color: transparent;
   border: 1px solid transparent;
   transition:
-    transform 140ms var(--ease-glass),
+    transform 190ms var(--spring-fluid),
     background-color 160ms var(--ease-glass),
     border-color 160ms var(--ease-glass),
-    box-shadow 160ms var(--ease-glass),
+    box-shadow 170ms var(--ease-glass),
     color 150ms var(--ease-glass),
     opacity 160ms var(--ease-glass);
 }
 
 .ep-bar-icon-btn:hover:not(:disabled) {
-  background-color: rgba(255, 255, 255, 0.11);
-  border-color: rgba(255, 255, 255, 0.16);
+  transform: scale(1.06);
+  background-color: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.22);
   box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.34),
-    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.08),
-    0 4px 12px -4px rgba(0, 0, 0, 0.44);
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.10),
+    0 6px 14px -4px rgba(0, 0, 0, 0.48);
 }
 
 .ep-bar-icon-btn:active:not(:disabled) {
-  transform: scale(0.92);
-  background-color: rgba(255, 255, 255, 0.16);
-  transition-duration: 75ms;
+  transform: scale(0.90);
+  background-color: rgba(255, 255, 255, 0.18);
+  transition-duration: 70ms;
   transition-timing-function: ease-out;
 }
 
@@ -601,18 +684,31 @@ button.ep-glass-pill:hover:not(:disabled) {
 
 .ep-press {
   transition:
-    transform 190ms var(--ease-glass),
-    background-color 180ms var(--ease-glass),
-    border-color 180ms var(--ease-glass),
-    box-shadow 190ms var(--ease-glass),
-    color 170ms var(--ease-glass),
-    opacity 190ms var(--ease-glass);
+    transform 190ms var(--spring-fluid),
+    background-color 170ms var(--ease-glass),
+    border-color 170ms var(--ease-glass),
+    box-shadow 180ms var(--ease-glass),
+    color 160ms var(--ease-glass),
+    opacity 180ms var(--ease-glass),
+    filter 170ms var(--ease-glass);
 }
 
-.ep-press:active {
-  transform: scale(0.94);
+.ep-press:active:not(:disabled) {
+  transform: scale(0.945);
   transition-duration: 70ms;
   transition-timing-function: ease-out;
+}
+
+.ep-menu-row.ep-press:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: scale(0.978);
+}
+
+.ep-press:focus-visible,
+.ep-bar-pill:focus-visible,
+.ep-bar-icon-btn:focus-visible,
+.ep-menu-row:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.68);
+  outline-offset: 2px;
 }
 
 .ep-modal-backdrop {
@@ -636,14 +732,36 @@ button.ep-glass-pill:hover:not(:disabled) {
   }
 }
 
+@keyframes ep-pop-out {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.945) translateY(3px);
+  }
+}
+
 @keyframes ep-popover-bloom {
   from {
     opacity: 0;
-    transform: translateY(14px) scale(0.92);
+    transform: translateY(8px) scale(0.955);
   }
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ep-popover-bloom-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.955);
   }
 }
 
@@ -653,6 +771,15 @@ button.ep-glass-pill:hover:not(:disabled) {
   }
   to {
     opacity: 1;
+  }
+}
+
+@keyframes ep-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
   }
 }
 
@@ -667,14 +794,36 @@ button.ep-glass-pill:hover:not(:disabled) {
   }
 }
 
+@keyframes ep-modal-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+}
+
 @keyframes ep-fade-slide-up {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(8px) scale(0.99);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ep-fade-slide-down {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
   }
 }
 
@@ -722,24 +871,52 @@ button.ep-glass-pill:hover:not(:disabled) {
 }
 
 .anim-pop-in {
-  animation: ep-pop-in 240ms var(--spring-fluid) both;
+  animation: ep-pop-in 220ms var(--spring-fluid) both;
+}
+
+.anim-pop-out {
+  animation: ep-pop-out 160ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
 }
 
 .ep-popover-bloom {
   transform-origin: bottom center;
-  animation: ep-popover-bloom 320ms var(--spring-fluid) both;
+  animation: ep-popover-bloom 300ms var(--spring-fluid) both;
+}
+
+.ep-popover-bloom-out {
+  transform-origin: bottom center;
+  animation: ep-popover-bloom-out 190ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+.ep-capsule-morph {
+  transition:
+    left 260ms var(--spring-fluid),
+    width 260ms var(--spring-fluid),
+    max-height 260ms var(--spring-fluid);
 }
 
 .anim-backdrop-in {
   animation: ep-backdrop-in 200ms var(--spring-soft) both;
 }
 
+.anim-backdrop-out {
+  animation: ep-backdrop-out 180ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
 .anim-modal-in {
-  animation: ep-modal-in 320ms var(--spring-fluid) both;
+  animation: ep-modal-in 300ms var(--spring-fluid) both;
+}
+
+.anim-modal-out {
+  animation: ep-modal-out 190ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
 }
 
 .anim-fade-slide-up {
   animation: ep-fade-slide-up 240ms var(--spring-soft) both;
+}
+
+.anim-fade-slide-down {
+  animation: ep-fade-slide-down 170ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
 }
 
 .anim-tab-in {
@@ -759,16 +936,41 @@ button.ep-glass-pill:hover:not(:disabled) {
   animation: ep-chrome-in 240ms var(--spring-soft) both;
 }
 
+.ep-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition:
+    grid-template-rows 250ms var(--ease-glass),
+    opacity 190ms var(--ease-glass),
+    transform 250ms var(--ease-glass);
+}
+
+.ep-collapse[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.ep-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
 .ep-chrome-transition {
   transition:
-    opacity 320ms var(--ease-glass),
-    transform 420ms var(--ease-glass);
+    opacity 340ms var(--ease-glass),
+    transform 440ms var(--spring-fluid);
   will-change: opacity, transform;
 }
 
 .ep-chrome-transition[aria-hidden="true"] {
-  transition-duration: 180ms, 220ms;
-  transition-timing-function: ease-in;
+  transition:
+    opacity 300ms cubic-bezier(0.32, 0.72, 0, 1),
+    transform 380ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .anim-icon-pop {
@@ -779,14 +981,31 @@ button.ep-glass-pill:hover:not(:disabled) {
   animation: ep-drop-float 1.8s ease-in-out infinite;
 }
 
-.ep-switch-thumb {
+.ep-switch-track {
   transition:
-    transform 300ms var(--spring-fluid),
-    width 180ms ease;
+    background-color 220ms var(--ease-glass),
+    box-shadow 220ms var(--ease-glass),
+    filter 160ms var(--ease-glass);
 }
 
-.ep-switch-track:active .ep-switch-thumb {
-  width: 22px;
+.ep-switch-track:hover {
+  filter: brightness(1.1);
+}
+
+.ep-switch-slide {
+  transition: transform 300ms var(--spring-fluid);
+  will-change: transform;
+}
+
+.ep-switch-thumb {
+  transition: transform 150ms var(--ease-glass);
+  transform-origin: center;
+}
+
+.ep-switch-track:active .ep-switch-thumb,
+:active > .ep-switch-track .ep-switch-thumb {
+  transform: scaleX(1.16) scaleY(0.92);
+  transition-duration: 75ms;
 }
 
 .ep-episode-active {
@@ -816,15 +1035,25 @@ button.ep-glass-pill:hover:not(:disabled) {
 
 @media (prefers-reduced-motion: reduce) {
   .anim-pop-in,
+  .anim-pop-out,
   .ep-popover-bloom,
+  .ep-popover-bloom-out,
+  .ep-capsule-morph,
   .anim-backdrop-in,
+  .anim-backdrop-out,
   .anim-modal-in,
+  .anim-modal-out,
   .anim-fade-slide-up,
+  .anim-fade-slide-down,
   .anim-tab-in,
   .anim-drawer-in,
   .anim-drawer-bloom,
   .anim-chrome-in,
+  .ep-collapse,
   .ep-chrome-transition,
+  .ep-switch-track,
+  .ep-switch-slide,
+  .ep-switch-thumb,
   .anim-icon-pop,
   .anim-drop-float,
   .ep-eq-bar {
