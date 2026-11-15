@@ -3,7 +3,6 @@ import {
   Captions,
   CheckCircle2,
   ChevronDown,
-  ChevronLeft,
   Circle,
   Eye,
   EyeOff,
@@ -49,7 +48,6 @@ import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
-import { StatusDot } from "./ui/StatusDot";
 
 export type CapsuleTab = "room" | "episodes" | "playback" | "subtitles";
 
@@ -99,7 +97,7 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
 
   return (
     <div className="flex items-center gap-3 w-full">
-      <span className="num text-[11px] text-secondary w-13 text-right shrink-0">
+      <span className="num text-[11px] text-secondary w-11 text-left shrink-0">
         {formatClock(displayedPos)}
       </span>
       <Scrubber
@@ -134,7 +132,7 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
           }
         }}
       />
-      <span className="num text-[11px] text-muted w-13 shrink-0">
+      <span className="num text-[11px] text-muted w-11 text-right shrink-0">
         {formatClock(durationSecs)}
       </span>
     </div>
@@ -190,10 +188,10 @@ const ResyncButton = memo(function ResyncButton({
           ? `Resync now (${health.statusLabel}) — snaps playback & connection back in sync`
           : "Force instant resync with party timestamp"
       }
-      className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 ${
+      className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 ${
         health.needsResync
-          ? "bg-warn/20 text-warn ring-1 ring-warn/45 hover:bg-warn/30"
-          : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+          ? "ep-press bg-warn/20 border border-warn/45 text-warn hover:bg-warn/30"
+          : "ep-bar-pill text-secondary hover:text-white"
       }`}
     >
       <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${busy ? "animate-spin" : ""}`} />
@@ -209,7 +207,7 @@ interface TransportBarProps {
   onToggleTab: (tab: CapsuleTab) => void;
   onCloseDrawer?: () => void;
   onChooseFile: () => void;
-  onLeaveRoom: () => void;
+  onLeaveRoom?: () => void;
   onHideControls?: () => void;
   onToggleFullscreen: () => void;
   onPrevEpisode?: () => void;
@@ -223,7 +221,6 @@ export const TransportBar = memo(function TransportBar({
   onToggleTab,
   onCloseDrawer,
   onChooseFile,
-  onLeaveRoom,
   onHideControls,
   onToggleFullscreen,
   onPrevEpisode,
@@ -254,7 +251,6 @@ export const TransportBar = memo(function TransportBar({
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
   const roomCode = useAppStore((s) => s.roomCode);
-  const selectedFileName = useAppStore((s) => s.selectedFileName);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const setHideParticipants = useAppStore((s) => s.setHideParticipants);
   const openSettings = useAppStore((s) => s.openSettings);
@@ -372,7 +368,16 @@ export const TransportBar = memo(function TransportBar({
   const isExtended = activeTab !== null && activeTab !== "episodes" && Boolean(expandedDrawer);
 
   return (
-    <div className="w-full px-4 pb-4 pt-2 flex justify-center select-none pointer-events-none">
+    <div className="w-full px-4 pb-4 pt-2 flex flex-col items-center gap-2 select-none pointer-events-none">
+      {feedback && (
+        <span
+          key={feedback.id}
+          className="ep-glass-pill anim-pop-in px-3 py-1 text-[11px] font-medium text-accent-soft rounded-full whitespace-nowrap"
+        >
+          {feedback.text}
+        </span>
+      )}
+
       <div className="ep-glass-capsule pointer-events-auto anim-fade-slide-up w-full max-w-[1060px] rounded-[26px] px-4 py-2.5 space-y-2">
         {isExtended && (
           <div className="anim-fade-slide-up pb-1.5 space-y-2.5">
@@ -384,7 +389,7 @@ export const TransportBar = memo(function TransportBar({
                   onClick={onCloseDrawer}
                   aria-label="Close popover"
                   title="Collapse extended deck (Esc)"
-                  className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
+                  className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -394,54 +399,9 @@ export const TransportBar = memo(function TransportBar({
           </div>
         )}
 
-        {/* Top capsule line: movie title/leave status + elastic scrubber */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 shrink-0 max-w-[230px]">
-            <button
-              type="button"
-              onClick={onLeaveRoom}
-              aria-label={roomCode ? "Leave room" : "Back to lobby"}
-              title={roomCode ? "Leave room" : "Back to lobby"}
-              className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-            {roomCode && (
-              <StatusDot
-                tone={
-                  syncStatus.state === "connected"
-                    ? "ok"
-                    : syncStatus.state === "error"
-                      ? "bad"
-                      : "warn"
-                }
-                pulse={
-                  syncStatus.state === "connecting" || syncStatus.state === "reconnecting"
-                }
-              />
-            )}
-            <button
-              type="button"
-              onClick={onChooseFile}
-              title={selectedFileName ? `Playing: ${selectedFileName} (Click to change)` : "Choose a movie file"}
-              className="ep-press truncate text-xs font-medium text-primary/90 hover:text-white cursor-pointer"
-            >
-              {selectedFileName || "Open Movie…"}
-            </button>
-          </div>
-
-          <div className="flex-1 min-w-0">
-            <PlaybackScrubber locked={ctrlLock.lockedForLocalUser} />
-          </div>
-
-          {feedback && (
-            <span
-              key={feedback.id}
-              className="anim-pop-in hidden md:inline-flex px-2.5 py-0.5 text-[11px] font-medium bg-accent/25 text-accent-soft rounded-full whitespace-nowrap shrink-0"
-            >
-              {feedback.text}
-            </span>
-          )}
+        {/* Top capsule line: full-width symmetric elastic scrubber */}
+        <div className="w-full px-0.5">
+          <PlaybackScrubber locked={ctrlLock.lockedForLocalUser} />
         </div>
 
         {/* Bottom capsule line: Ready & Avatars / Start Party + Volume | Transport Cluster | File, (Episodes if folder), CC, Audio, Shortcuts, Settings, Fullscreen */}
@@ -455,10 +415,10 @@ export const TransportBar = memo(function TransportBar({
                   disabled={!canToggleReady(loaded)}
                   onClick={handleToggleReady}
                   title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
-                  className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
+                  className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
                     localReady && loaded
-                      ? "ep-glass-pill-active text-white"
-                      : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                      ? "ep-press ep-glass-pill-active text-white"
+                      : "ep-bar-pill text-secondary hover:text-white"
                   }`}
                 >
                   {localReady && loaded ? (
@@ -473,17 +433,17 @@ export const TransportBar = memo(function TransportBar({
 
                 <ResyncButton loaded={loaded} paused={paused} />
 
-                <div className="inline-flex items-center rounded-full bg-white/6 p-0.5 gap-0.5 shrink-0">
+                <div className="inline-flex items-center rounded-full bg-white/[0.06] border border-white/[0.08] p-0.5 gap-0.5 shrink-0">
                   {!hideParticipants ? (
                     <button
                       type="button"
                       onClick={() => onToggleTab("room")}
                       aria-label="Open party lounge"
                       title="Friends watching together"
-                      className={`ep-press h-6.5 pl-1 pr-2 rounded-full inline-flex items-center gap-1.5 text-xs cursor-pointer transition-colors ${
+                      className={`ep-press h-6.5 pl-1 pr-2 rounded-full inline-flex items-center gap-1.5 text-xs cursor-pointer ${
                         activeTab === "room"
-                          ? "bg-accent/30 text-white"
-                          : "text-secondary hover:text-white"
+                          ? "bg-accent/35 text-white"
+                          : "text-secondary hover:text-white hover:bg-white/[0.08]"
                       }`}
                     >
                       {visiblePeers.length > 0 ? (
@@ -531,7 +491,9 @@ export const TransportBar = memo(function TransportBar({
                       aria-label="Open party lounge"
                       title="Party lounge (profile icons hidden)"
                       className={`ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[11px] cursor-pointer ${
-                        activeTab === "room" ? "bg-accent/30 text-white" : "text-muted hover:text-white"
+                        activeTab === "room"
+                          ? "bg-accent/35 text-white"
+                          : "text-muted hover:text-white hover:bg-white/[0.08]"
                       }`}
                     >
                       <Users className="h-3.5 w-3.5" />
@@ -547,7 +509,7 @@ export const TransportBar = memo(function TransportBar({
                         ? "Show friend profile icons"
                         : "Hide all profile icons for pure focus"
                     }
-                    className="ep-press h-6.5 w-6.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+                    className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
                   >
                     {hideParticipants ? (
                       <EyeOff className="h-3 w-3 text-accent-soft" />
@@ -563,10 +525,10 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleTab("room")}
                 aria-label="Open party lounge"
                 title="Start or join a Watch Party"
-                className={`ep-press h-7.5 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+                className={`h-7.5 px-3 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
                   activeTab === "room"
-                    ? "ep-glass-pill-active text-white"
-                    : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                    ? "ep-press ep-glass-pill-active text-white"
+                    : "ep-bar-pill text-secondary hover:text-white"
                 }`}
               >
                 <Users className="h-3.5 w-3.5 text-accent-soft" />
@@ -585,7 +547,7 @@ export const TransportBar = memo(function TransportBar({
                 }}
                 aria-label={muted ? "Unmute" : "Mute"}
                 title="Mute (M)"
-                className="ep-press h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
               >
                 {muted || volume === 0 ? (
                   <VolumeX className="h-3.5 w-3.5 text-muted" />
@@ -630,7 +592,7 @@ export const TransportBar = memo(function TransportBar({
                 onClick={onPrevEpisode}
                 aria-label="Previous episode"
                 title="Previous episode"
-                className="ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
               >
                 <SkipBack className="h-3.5 w-3.5" />
               </button>
@@ -642,7 +604,7 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => handleSeekRelative(-10)}
               aria-label="Seek back 10 seconds"
               title="Seek -10s (J)"
-              className="ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" />
             </button>
@@ -659,7 +621,7 @@ export const TransportBar = memo(function TransportBar({
                     ? "Play (Space)"
                     : "Pause (Space)"
               }
-              className="ep-orb-play h-9.5 w-9.5 rounded-full flex items-center justify-center disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="ep-orb-play h-10 w-10 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
             >
               {paused ? (
                 <Play className="h-4 w-4 fill-current ml-0.5" />
@@ -674,7 +636,7 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => handleSeekRelative(10)}
               aria-label="Seek forward 10 seconds"
               title="Seek +10s (L)"
-              className="ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
               <RotateCw className="h-3.5 w-3.5" />
             </button>
@@ -686,7 +648,7 @@ export const TransportBar = memo(function TransportBar({
                 onClick={onNextEpisode}
                 aria-label="Next episode"
                 title="Next episode"
-                className="ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                className="ep-bar-icon-btn h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
               >
                 <SkipForward className="h-3.5 w-3.5" />
               </button>
@@ -700,7 +662,7 @@ export const TransportBar = memo(function TransportBar({
               onClick={onChooseFile}
               aria-label="Open video file"
               title="Open video file(s)"
-              className="ep-press h-7.5 w-7.5 2xl:w-auto 2xl:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs text-secondary hover:text-white hover:bg-white/10 whitespace-nowrap cursor-pointer"
+              className="ep-bar-icon-btn h-7.5 w-7.5 2xl:w-auto 2xl:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs text-secondary hover:text-white whitespace-nowrap cursor-pointer"
             >
               <FolderOpen className="h-3.5 w-3.5 shrink-0" />
               <span className="hidden 2xl:inline">Open</span>
@@ -712,10 +674,10 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleTab("episodes")}
                 aria-label="Episodes drawer"
                 title="Season folder & episodes queue"
-                className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap cursor-pointer ${
+                className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap cursor-pointer ${
                   activeTab === "episodes"
-                    ? "ep-glass-pill-active text-white"
-                    : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                    ? "ep-press ep-glass-pill-active text-white"
+                    : "ep-bar-pill text-secondary hover:text-white"
                 }`}
               >
                 <ListVideo className="h-3.5 w-3.5 shrink-0" />
@@ -731,10 +693,10 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => onToggleTab("subtitles")}
               aria-label="Subtitles popover"
               title="Subtitles & Magic Sync"
-              className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+              className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
                 activeTab === "subtitles"
-                  ? "ep-glass-pill-active text-white"
-                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                  ? "ep-press ep-glass-pill-active text-white"
+                  : "ep-bar-pill text-secondary hover:text-white"
               }`}
             >
               <Captions className="h-3.5 w-3.5" />
@@ -746,10 +708,10 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => onToggleTab("playback")}
               aria-label="Audio & playback popover"
               title="Audio & Playback"
-              className={`ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
+              className={`h-7.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer ${
                 activeTab === "playback"
-                  ? "ep-glass-pill-active text-white"
-                  : "bg-white/8 text-secondary hover:text-white hover:bg-white/14"
+                  ? "ep-press ep-glass-pill-active text-white"
+                  : "ep-bar-pill text-secondary hover:text-white"
               }`}
             >
               <AudioLines className="h-3.5 w-3.5" />
@@ -762,7 +724,7 @@ export const TransportBar = memo(function TransportBar({
                 onClick={onHideControls}
                 aria-label="Hide player controls"
                 title="Pure video (hover bottom edge to wake controls)"
-                className="ep-press h-7.5 w-7.5 rounded-full hidden sm:flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+                className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full hidden sm:flex items-center justify-center text-muted hover:text-white cursor-pointer"
               >
                 <ChevronDown className="h-3.5 w-3.5" />
               </button>
@@ -773,7 +735,7 @@ export const TransportBar = memo(function TransportBar({
               onClick={openShortcuts}
               aria-label="Keyboard shortcuts"
               title="Keyboard shortcuts (?)"
-              className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
             >
               <Keyboard className="h-3.5 w-3.5" />
             </button>
@@ -783,7 +745,7 @@ export const TransportBar = memo(function TransportBar({
               onClick={() => openSettings("prefs")}
               aria-label="Preferences"
               title="Preferences"
-              className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/10 cursor-pointer"
+              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
             >
               <Settings className="h-3.5 w-3.5" />
             </button>
@@ -793,7 +755,7 @@ export const TransportBar = memo(function TransportBar({
               onClick={onToggleFullscreen}
               aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               title="Fullscreen (F)"
-              className="ep-press h-7.5 w-7.5 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
+              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer"
             >
               {isFullscreen ? (
                 <Minimize className="h-3.5 w-3.5" />

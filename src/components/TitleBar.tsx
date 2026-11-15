@@ -9,9 +9,10 @@ interface TitleBarProps {
   leftSlot: ReactNode;
   rightActions?: ReactNode;
   onOpenUpdates?: () => void;
+  glassControls?: boolean;
 }
 
-export function TitleBar({ leftSlot, rightActions, onOpenUpdates }: TitleBarProps) {
+export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls = false }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   const openSettings = useAppStore((s) => s.openSettings);
@@ -238,13 +239,17 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates }: TitleBarProp
           </div>
         )}
 
-        <div className="flex items-center gap-1 pl-1">
+        <div
+          className={`flex items-center gap-1 ${
+            glassControls ? "ep-glass-pill h-8 px-1 rounded-full" : "pl-1"
+          }`}
+        >
           <button
             type="button"
             aria-label="Minimize window"
             title="Minimize"
             onClick={() => void handleMinimize()}
-            className="ep-press h-7 w-7 rounded-full inline-flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
             <Minus className="h-3.5 w-3.5" />
           </button>
@@ -254,7 +259,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates }: TitleBarProp
             aria-label={isMaximized ? "Restore window" : "Maximize window"}
             title={isMaximized ? "Restore" : "Maximize"}
             onClick={() => void handleToggleMaximize()}
-            className="ep-press h-7 w-7 rounded-full inline-flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
             {isMaximized ? (
               <svg
@@ -303,7 +308,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates }: TitleBarProp
             aria-label="Close window"
             title="Close"
             onClick={() => void handleClose()}
-            className="ep-press h-7 w-7 rounded-full inline-flex items-center justify-center text-secondary hover:text-[#FCA5A5] hover:bg-[#FCA5A5]/15 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-6.5 w-6.5 rounded-full inline-flex items-center justify-center text-secondary hover:text-[#FCA5A5] hover:bg-[#FCA5A5]/15 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
           >
             <X className="h-3.5 w-3.5" />
           </button>

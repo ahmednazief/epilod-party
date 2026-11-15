@@ -1,5 +1,29 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  AudioLines,
+  Captions,
+  CheckCircle2,
+  ChevronLeft,
+  EyeOff,
+  FolderOpen,
+  Keyboard,
+  ListVideo,
+  LogOut,
+  Maximize,
+  Minimize,
+  Pause,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  RotateCw,
+  Settings,
+  SkipBack,
+  SkipForward,
+  Users,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { usePlayerShortcuts } from "../hooks/usePlayerShortcuts";
@@ -38,6 +62,14 @@ import {
   windowSetFullscreen,
 } from "../lib/mpv";
 import { classifyMpvEnd, shouldReplayFromStart } from "../lib/playbackEnd";
+import {
+  cycleAudioTrack,
+  cycleSubtitleTrack,
+  seekPlaybackRelative,
+  toggleMutePlayback,
+  toggleReadyStatus,
+  toggleSubtitlesVisibility,
+} from "../lib/playerActions";
 import { checkDropDuringDialog, handlePlayerCrashSync } from "../lib/playerLifecycle";
 import { resetMpvPlaybackDefaults } from "../lib/playbackReset";
 import {
@@ -46,6 +78,7 @@ import {
   scanMediaPaths,
   type PlaylistItem,
 } from "../lib/playlist";
+import { isTextEntryElement } from "../lib/shortcuts";
 import {
   formatControllerOverrideNotice,
   getControllerLockState,
@@ -63,6 +96,7 @@ import {
   onSyncStatus,
   syncConnect,
   syncDisconnect,
+  syncForceResync,
   syncSetFile,
   syncSetReady,
   syncUserPause,
@@ -78,6 +112,7 @@ import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSubtitleStore } from "../store/useSubtitleStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { EpisodesPanel } from "./EpisodesPanel";
+import { formatRoomCodeDisplay } from "./HomeScreen";
 import { PlaybackPanel } from "./PlaybackPanel";
 import { RoomPanel } from "./RoomPanel";
 import { SettingsModal } from "./SettingsModal";
@@ -86,9 +121,11 @@ import { SubtitlePanel } from "./SubtitlePanel";
 import { TitleBar } from "./TitleBar";
 import { TransportBar, type CapsuleTab } from "./TransportBar";
 import { ViewportPlaceholder } from "./ViewportPlaceholder";
+import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
 import { LogoMark } from "./ui/LogoMark";
 import { NotificationStrip } from "./ui/NotificationStrip";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
+import { StatusDot } from "./ui/StatusDot";
 
 type SideTab = CapsuleTab;
 
@@ -122,12 +159,15 @@ export function WatchRoom() {
   );
 
   const closeSettings = useAppStore((s) => s.closeSettings);
+  const openSettings = useAppStore((s) => s.openSettings);
   const closeShortcuts = useAppStore((s) => s.closeShortcuts);
+  const openShortcuts = useAppStore((s) => s.openShortcuts);
   const leaveRoom = useAppStore((s) => s.leaveRoom);
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
 
   const loaded = usePlayerStore((s) => s.loaded);
   const paused = usePlayerStore((s) => s.paused);
+  const muted = usePlayerStore((s) => s.muted);
   const durationSecs = usePlayerStore((s) => s.durationSecs);
   const speed = usePlayerStore((s) => s.speed);
   const isFullscreen = usePlayerStore((s) => s.isFullscreen);
@@ -135,6 +175,8 @@ export function WatchRoom() {
 
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
+  const localReady = useSyncStore((s) => s.localReady);
+  const subVisible = useSubtitleStore((s) => s.visible);
   const pushNote = useNotificationStore((s) => s.push);
 
   const playlistItems = usePlaylistStore((s) => s.items);
@@ -152,6 +194,7 @@ export function WatchRoom() {
   const [chromeIdle, setChromeIdle] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
@@ -160,6 +203,7 @@ export function WatchRoom() {
   const mpvStartPromiseRef = useRef<Promise<void> | null>(null);
   const roomSessionStartedRef = useRef(false);
   const panelOpenRef = useRef(false);
+  const contextMenuOpenRef = useRef(false);
   const idleTimerRef = useRef<number | null>(null);
   const announcedFileKeyRef = useRef<string | null>(null);
   const autoReadyMarkedRef = useRef(false);
@@ -174,6 +218,7 @@ export function WatchRoom() {
   const surfaceClickTimerRef = useRef<number | null>(null);
 
   panelOpenRef.current = panelOpen;
+  contextMenuOpenRef.current = contextMenu !== null;
 
   const wakeChrome = useCallback(() => {
     setChromeIdle(false);
@@ -187,6 +232,7 @@ export function WatchRoom() {
       p.loaded &&
       !p.paused &&
       !panelOpenRef.current &&
+      !contextMenuOpenRef.current &&
       !app.settingsOpen &&
       !app.shortcutsOpen &&
       !p.playerError
@@ -934,7 +980,7 @@ export function WatchRoom() {
         idleTimerRef.current = null;
       }
     };
-  }, [loaded, paused, panelOpen, settingsOpen, shortcutsOpen, playerError, wakeChrome]);
+  }, [loaded, paused, panelOpen, contextMenu, settingsOpen, shortcutsOpen, playerError, wakeChrome]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1111,10 +1157,217 @@ export function WatchRoom() {
     leaveRoom();
   };
 
+  const syncConnectedNow = syncStatus.state === "connected";
+  const effectiveUserNow = resolveEffectiveUsername(syncStatus, username);
+  const ctrlLockNow = getControllerLockState(syncConnectedNow, participants, effectiveUserNow);
+  const hasPrevEpisodeNow = playlistItems.length > 1 && playlistIndex > 0;
+  const hasNextEpisodeNow =
+    playlistItems.length > 1 && playlistIndex >= 0 && playlistIndex < playlistItems.length - 1;
+
+  const contextMenuEntries: ContextMenuEntry[] = [
+    {
+      id: "play-pause",
+      label: paused ? "Play" : "Pause",
+      shortcut: "Space",
+      icon: paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />,
+      disabled: !loaded || ctrlLockNow.lockedForLocalUser,
+      onSelect: toggleViewportPlayback,
+    },
+    {
+      id: "seek-back",
+      label: "Seek Backward 10s",
+      shortcut: "J",
+      icon: <RotateCcw className="h-3.5 w-3.5" />,
+      disabled: !loaded || ctrlLockNow.lockedForLocalUser,
+      onSelect: () => seekPlaybackRelative(-10),
+    },
+    {
+      id: "seek-forward",
+      label: "Seek Forward 10s",
+      shortcut: "L",
+      icon: <RotateCw className="h-3.5 w-3.5" />,
+      disabled: !loaded || ctrlLockNow.lockedForLocalUser,
+      onSelect: () => seekPlaybackRelative(10),
+    },
+    ...(hasFolderEpisodes && playlistItems.length > 1
+      ? ([
+          {
+            id: "prev-ep",
+            label: "Previous Episode",
+            icon: <SkipBack className="h-3.5 w-3.5" />,
+            disabled: !hasPrevEpisodeNow || ctrlLockNow.lockedForLocalUser,
+            onSelect: handlePrevEpisode,
+          },
+          {
+            id: "next-ep",
+            label: "Next Episode",
+            icon: <SkipForward className="h-3.5 w-3.5" />,
+            disabled: !hasNextEpisodeNow || ctrlLockNow.lockedForLocalUser,
+            onSelect: handleNextEpisode,
+          },
+        ] satisfies ContextMenuEntry[])
+      : []),
+    { type: "divider", id: "div-media" },
+    {
+      id: "open-file",
+      label: "Open Video File(s)…",
+      icon: <FolderOpen className="h-3.5 w-3.5" />,
+      onSelect: () => void handleChooseFile(),
+    },
+    {
+      id: "open-folder",
+      label: "Open Season Folder…",
+      icon: <ListVideo className="h-3.5 w-3.5" />,
+      onSelect: () => void handleChooseSeasonFolder(),
+    },
+    ...(hasFolderEpisodes
+      ? ([
+          {
+            id: "open-episodes",
+            label: "Episodes Queue",
+            icon: <ListVideo className="h-3.5 w-3.5 text-accent-soft" />,
+            accent: true,
+            onSelect: () => {
+              setSideTab("episodes");
+              setPanelOpen(true);
+            },
+          },
+        ] satisfies ContextMenuEntry[])
+      : []),
+    { type: "divider", id: "div-tracks" },
+    {
+      id: "toggle-subs",
+      label: subVisible ? "Hide Subtitles" : "Show Subtitles",
+      shortcut: "V",
+      checked: loaded && subVisible,
+      icon: <Captions className="h-3.5 w-3.5" />,
+      disabled: !loaded,
+      onSelect: toggleSubtitlesVisibility,
+    },
+    {
+      id: "cycle-sub",
+      label: "Cycle Subtitle Track",
+      shortcut: "S",
+      icon: <Captions className="h-3.5 w-3.5" />,
+      disabled: !loaded,
+      onSelect: cycleSubtitleTrack,
+    },
+    {
+      id: "open-subtitles",
+      label: "Subtitles & Sync…",
+      icon: <Captions className="h-3.5 w-3.5 text-accent-soft" />,
+      onSelect: () => {
+        setSideTab("subtitles");
+        setPanelOpen(true);
+      },
+    },
+    {
+      id: "cycle-audio",
+      label: "Cycle Audio Track",
+      icon: <AudioLines className="h-3.5 w-3.5" />,
+      disabled: !loaded,
+      onSelect: cycleAudioTrack,
+    },
+    {
+      id: "open-audio",
+      label: "Audio & Speed…",
+      icon: <AudioLines className="h-3.5 w-3.5 text-accent-soft" />,
+      onSelect: () => {
+        setSideTab("playback");
+        setPanelOpen(true);
+      },
+    },
+    {
+      id: "mute-toggle",
+      label: muted ? "Unmute" : "Mute",
+      shortcut: "M",
+      icon: muted ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />,
+      onSelect: toggleMutePlayback,
+    },
+    { type: "divider", id: "div-party" },
+    ...(roomCode
+      ? ([
+          {
+            id: "toggle-ready",
+            label: localReady && loaded ? "Mark Not Ready" : "Mark Ready",
+            shortcut: "R",
+            checked: localReady && loaded,
+            icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+            disabled: !loaded,
+            onSelect: toggleReadyStatus,
+          },
+          {
+            id: "force-resync",
+            label: "Resync With Party",
+            icon: <RefreshCw className="h-3.5 w-3.5" />,
+            disabled: !syncConnectedNow,
+            onSelect: () => {
+              void syncForceResync().then(() => {
+                usePlayerStore.getState().flashFeedback("Resynced with room");
+              });
+            },
+          },
+        ] satisfies ContextMenuEntry[])
+      : []),
+    {
+      id: "party-lounge",
+      label: roomCode ? "Party Lounge…" : "Start Watch Party…",
+      icon: <Users className="h-3.5 w-3.5 text-accent-soft" />,
+      onSelect: () => {
+        setSideTab("room");
+        setPanelOpen(true);
+      },
+    },
+    {
+      id: "toggle-fullscreen",
+      label: isFullscreen ? "Exit Fullscreen" : "Fullscreen",
+      shortcut: "F",
+      icon: isFullscreen ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />,
+      onSelect: toggleFullscreen,
+    },
+    ...(loaded
+      ? ([
+          {
+            id: "hide-chrome",
+            label: "Hide Player Controls",
+            icon: <EyeOff className="h-3.5 w-3.5" />,
+            onSelect: () => setChromeIdle(true),
+          },
+        ] satisfies ContextMenuEntry[])
+      : []),
+    { type: "divider", id: "div-app" },
+    {
+      id: "shortcuts",
+      label: "Keyboard Shortcuts…",
+      shortcut: "?",
+      icon: <Keyboard className="h-3.5 w-3.5" />,
+      onSelect: openShortcuts,
+    },
+    {
+      id: "preferences",
+      label: "Preferences…",
+      icon: <Settings className="h-3.5 w-3.5" />,
+      onSelect: () => openSettings("prefs"),
+    },
+    {
+      id: "leave-room",
+      label: roomCode ? "Leave Watch Party" : "Back to Lobby",
+      icon: <LogOut className="h-3.5 w-3.5" />,
+      onSelect: handleLeaveRoom,
+    },
+  ];
+
   return (
     <div
       onMouseMove={wakeChrome}
       onPointerDown={wakeChrome}
+      onContextMenu={(e) => {
+        if (isTextEntryElement(e.target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        wakeChrome();
+        setContextMenu({ x: e.clientX, y: e.clientY });
+      }}
       className={`relative h-full w-full text-primary overflow-hidden ${
         showVideoBackdrop ? "bg-transparent" : "bg-canvas"
       }`}
@@ -1122,36 +1375,53 @@ export function WatchRoom() {
       <NotificationStrip />
 
       {showWindowBar ? (
-        <div
-          className={`absolute top-0 inset-x-0 z-30 ${
-            showVideoBackdrop ? "[text-shadow:0_1px_6px_rgba(0,0,0,0.9)]" : ""
-          }`}
-        >
+        <div className="absolute top-0 inset-x-0 z-30">
           <TitleBar
+            glassControls
             leftSlot={
               <div
                 data-tauri-drag-region
-                className={`flex items-center gap-2.5 min-w-0 ${
-                  showVideoBackdrop
-                    ? "rounded-full bg-canvas/55 px-2.5 py-1 border border-white/10"
-                    : ""
-                }`}
+                className="ep-glass-pill h-8 pl-1.5 pr-3 rounded-full inline-flex items-center gap-2 min-w-0 max-w-[66vw]"
               >
-                <LogoMark size={20} />
+                <button
+                  type="button"
+                  onClick={handleLeaveRoom}
+                  aria-label={roomCode ? "Leave room" : "Back to lobby"}
+                  title={roomCode ? "Leave room" : "Back to lobby"}
+                  className="ep-bar-icon-btn h-5.5 w-5.5 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <LogoMark size={18} />
                 {activePlaylistItem?.episodeBadge && (
-                  <span className="shrink-0 rounded-full bg-accent/18 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-accent-soft border border-accent/30">
+                  <span className="ep-glass-pill-active shrink-0 rounded-full px-2 py-0.5 text-[10px] font-mono font-semibold tracking-wide text-accent-soft">
                     {activePlaylistItem.episodeBadge}
                   </span>
                 )}
-                <span className="text-xs font-medium text-primary truncate max-w-[300px]">
+                <span
+                  data-tauri-drag-region
+                  className="text-xs font-medium text-white/95 truncate max-w-[300px]"
+                >
                   {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
                 </span>
                 {roomCode ? (
-                  <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full truncate max-w-[140px]">
-                    {roomCode}
+                  <span className="shrink-0 inline-flex items-center gap-1.5 rounded-full bg-white/[0.08] border border-white/[0.10] px-2 py-0.5 text-[10.5px] font-medium text-white/90 num">
+                    <StatusDot
+                      tone={
+                        syncStatus.state === "connected"
+                          ? "ok"
+                          : syncStatus.state === "error"
+                            ? "bad"
+                            : "warn"
+                      }
+                      pulse={
+                        syncStatus.state === "connecting" || syncStatus.state === "reconnecting"
+                      }
+                    />
+                    <span>{formatRoomCodeDisplay(roomCode)}</span>
                   </span>
                 ) : (
-                  <span className="text-[11px] text-secondary bg-white/[0.06] px-2 py-0.5 rounded-full">
+                  <span className="shrink-0 text-[10.5px] font-medium text-secondary bg-white/[0.08] border border-white/[0.08] px-2 py-0.5 rounded-full">
                     Solo
                   </span>
                 )}
@@ -1297,6 +1567,12 @@ export function WatchRoom() {
           className="absolute bottom-0 inset-x-0 h-3 z-20 cursor-pointer"
         />
       )}
+
+      <ContextMenu
+        position={contextMenu}
+        entries={contextMenuEntries}
+        onClose={() => setContextMenu(null)}
+      />
 
       <SettingsModal
         open={settingsOpen}

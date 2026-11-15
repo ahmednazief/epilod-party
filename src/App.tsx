@@ -1,8 +1,10 @@
 import { useEffect } from "react";
 import { SettingsModal } from "./components/SettingsModal";
+import { ShortcutsModal } from "./components/ShortcutsModal";
 import { HomeScreen } from "./components/HomeScreen";
 import { WatchRoom } from "./components/WatchRoom";
 import { isDesktop } from "./lib/bridge";
+import { isTextEntryElement } from "./lib/shortcuts";
 import { useAppStore } from "./store/useAppStore";
 import { useUpdaterStore } from "./store/useUpdaterStore";
 
@@ -12,6 +14,8 @@ export function App() {
   const screen = useAppStore((s) => s.screen);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const closeSettings = useAppStore((s) => s.closeSettings);
+  const shortcutsOpen = useAppStore((s) => s.shortcutsOpen);
+  const closeShortcuts = useAppStore((s) => s.closeShortcuts);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const autoDownloadUpdates = useAppStore((s) => s.autoDownloadUpdates);
 
@@ -114,19 +118,30 @@ export function App() {
 
   if (screen === "room") {
     return (
-      <>
+      <div
+        className="h-full w-full"
+        onContextMenu={(e) => {
+          if (!isTextEntryElement(e.target)) e.preventDefault();
+        }}
+      >
         {liquidLensSvg}
         <WatchRoom />
-      </>
+      </div>
     );
   }
 
   return (
-    <>
+    <div
+      className="h-full w-full"
+      onContextMenu={(e) => {
+        if (!isTextEntryElement(e.target)) e.preventDefault();
+      }}
+    >
       {liquidLensSvg}
       <HomeScreen />
       <SettingsModal open={settingsOpen} onClose={closeSettings} />
-    </>
+      <ShortcutsModal open={shortcutsOpen} onClose={closeShortcuts} />
+    </div>
   );
 }
 

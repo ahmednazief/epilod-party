@@ -318,4 +318,13 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
     "mpv child HWND must not clip the sibling WebView2 overlay",
   );
   assert.ok(hwndRs.includes("HWND_BOTTOM"), "mpv child HWND must sit behind WebView2");
+
+  // Full-width scrubber row, frosted glass TitleBar pill, translucent crystal play orb, and custom right-click ContextMenu
+  assert.match(transportSrc, /<div className="w-full px-0\.5">\s*<PlaybackScrubber/);
+  assert.match(transportSrc, /ep-bar-pill/);
+  assert.match(transportSrc, /ep-bar-icon-btn/);
+  assert.match(watchRoomSrc, /<TitleBar\s+glassControls/);
+  assert.match(watchRoomSrc, /className="ep-glass-pill h-8 pl-1\.5 pr-3 rounded-full/);
+  assert.match(watchRoomSrc, /<ContextMenu/);
+  assert.match(globalsCss, /\.ep-orb-play[\s\S]*backdrop-filter:/);
 });

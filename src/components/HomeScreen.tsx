@@ -6,16 +6,23 @@ import {
   Check,
   ClipboardPaste,
   Copy,
+  Download,
+  FolderOpen,
+  Keyboard,
   KeyRound,
+  ListVideo,
   Pencil,
+  Play,
   RefreshCw,
   Settings,
+  Users,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
 import { getFileDisplayName } from "../lib/fileDrop";
 import { scanMediaPaths } from "../lib/playlist";
+import { isTextEntryElement } from "../lib/shortcuts";
 import { playSoundCue } from "../lib/soundEffects";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
@@ -23,6 +30,7 @@ import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
+import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
 import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
 import { LogoMark } from "./ui/LogoMark";
 import { OtpCodeInput } from "./ui/OtpCodeInput";
@@ -60,6 +68,7 @@ export function HomeScreen() {
   const setAvatarId = useAppStore((s) => s.setAvatarId);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const openSettings = useAppStore((s) => s.openSettings);
+  const openShortcuts = useAppStore((s) => s.openShortcuts);
   const enterRoom = useAppStore((s) => s.enterRoom);
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
 
@@ -77,6 +86,7 @@ export function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [openingMedia, setOpeningMedia] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
   const profileRef = useRef<HTMLDivElement | null>(null);
 
@@ -329,10 +339,98 @@ export function HomeScreen() {
     enterRoom(cleaned, standardRoomName);
   };
 
+  const handleOpenFolderSolo = async () => {
+    if (openingMedia) return;
+    setError(null);
+    if (!isDesktop()) {
+      await handleOpenMediaSolo();
+      return;
+    }
+    setOpeningMedia(true);
+    try {
+      const chosen = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose Season Folder",
+      });
+      if (typeof chosen !== "string" || !chosen) return;
+      const scan = await scanMediaPaths([chosen]);
+      if (scan.items.length > 0) {
+        const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+        usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
+        const target = scan.items[idx];
+        setSelectedFile(target.path, target.fileName);
+        enterRoom("", false);
+      } else {
+        setError("No playable video files found inside the selected folder.");
+      }
+    } catch (err) {
+      setError(formatUserError(err, "Could not open season folder."));
+    } finally {
+      setOpeningMedia(false);
+    }
+  };
+
   const hasJoinCode = joinInput.trim().length > 0;
 
+  const lobbyContextEntries: ContextMenuEntry[] = [
+    {
+      id: "open-media",
+      label: "Open Media File(s)…",
+      icon: <Play className="h-3.5 w-3.5 text-accent-soft" />,
+      accent: true,
+      onSelect: () => void handleOpenMediaSolo(),
+    },
+    {
+      id: "open-folder",
+      label: "Choose Season Folder…",
+      icon: <ListVideo className="h-3.5 w-3.5" />,
+      onSelect: () => void handleOpenFolderSolo(),
+    },
+    {
+      id: "party-view",
+      label: lobbyView === "party" ? "Back to Main Lobby" : "Start or Join Watch Party",
+      icon: <Users className="h-3.5 w-3.5" />,
+      onSelect: () => setLobbyView(lobbyView === "party" ? "entry" : "party"),
+    },
+    { type: "divider", id: "lobby-div" },
+    {
+      id: "edit-profile",
+      label: "Edit Profile & Avatar",
+      icon: <FolderOpen className="h-3.5 w-3.5" />,
+      onSelect: () => setEditingName(true),
+    },
+    {
+      id: "check-updates",
+      label: "Check for Updates…",
+      icon: <Download className="h-3.5 w-3.5" />,
+      onSelect: () => openSettings("updates"),
+    },
+    {
+      id: "shortcuts",
+      label: "Keyboard Shortcuts…",
+      shortcut: "?",
+      icon: <Keyboard className="h-3.5 w-3.5" />,
+      onSelect: openShortcuts,
+    },
+    {
+      id: "preferences",
+      label: "Preferences…",
+      icon: <Settings className="h-3.5 w-3.5" />,
+      onSelect: () => openSettings("prefs"),
+    },
+  ];
+
   return (
-    <div className="ep-amethyst-canvas relative min-h-full w-full flex flex-col justify-between text-primary select-none">
+    <div
+      onContextMenu={(e) => {
+        if (isTextEntryElement(e.target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setContextMenu({ x: e.clientX, y: e.clientY });
+      }}
+      className="ep-amethyst-canvas relative min-h-full w-full flex flex-col justify-between text-primary select-none"
+    >
       {/* Subtle luminous contours behind glass surfaces so liquid lens distortion melts shapes cleanly */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden z-0" aria-hidden="true">
         <div className="ep-ambient-orb-purple absolute left-[24%] top-[28%] h-72 w-72 rounded-full" />
@@ -678,6 +776,12 @@ export function HomeScreen() {
           </span>
         </div>
       )}
+
+      <ContextMenu
+        position={contextMenu}
+        entries={lobbyContextEntries}
+        onClose={() => setContextMenu(null)}
+      />
     </div>
   );
 }
