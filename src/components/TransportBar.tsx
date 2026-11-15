@@ -371,7 +371,7 @@ export const TransportBar = memo(function TransportBar({
     <div
       aria-hidden={!visible}
       className={`w-full px-4 pb-4 pt-2 flex flex-col items-center gap-2 select-none pointer-events-none ep-chrome-transition ${
-        visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3"
+        visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
       }`}
     >
       {feedback && (

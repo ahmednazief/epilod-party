@@ -23,6 +23,7 @@ import {
   Users,
   Volume2,
   VolumeX,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
@@ -123,7 +124,6 @@ import { TransportBar, type CapsuleTab } from "./TransportBar";
 import { VideoGlassBackdrop } from "./VideoGlassBackdrop";
 import { ViewportPlaceholder } from "./ViewportPlaceholder";
 import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
-import { LogoMark } from "./ui/LogoMark";
 import { NotificationStrip } from "./ui/NotificationStrip";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { StatusDot } from "./ui/StatusDot";
@@ -1384,44 +1384,40 @@ export function WatchRoom() {
 
       <div
         aria-hidden={!showWindowBar}
-        className={`absolute top-0 inset-x-0 z-30 ep-chrome-transition ${
+        className={`ep-top-scrim absolute top-0 inset-x-0 z-30 ep-chrome-transition ${
           showWindowBar
             ? "opacity-100 translate-y-0"
-            : "opacity-0 -translate-y-2 pointer-events-none"
+            : "opacity-0 -translate-y-1.5 pointer-events-none"
         }`}
       >
         <TitleBar
-          glassControls
           leftSlot={
             <div
               data-tauri-drag-region
-              data-glass-region="true"
-              className="ep-glass-pill h-8 pl-1.5 pr-3 rounded-full inline-flex items-center gap-2 min-w-0 max-w-[52vw]"
+              className="inline-flex items-center gap-2.5 min-w-0 max-w-[60vw] pl-1"
             >
               <button
                 type="button"
                 onClick={handleLeaveRoom}
                 aria-label={roomCode ? "Leave room" : "Back to lobby"}
                 title={roomCode ? "Leave room" : "Back to lobby"}
-                className="ep-bar-icon-btn h-5.5 w-5.5 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-white/80 hover:text-white cursor-pointer shrink-0"
               >
-                <ChevronLeft className="h-3.5 w-3.5" />
+                <ChevronLeft className="h-4 w-4" />
               </button>
-              <LogoMark size={16} />
-              {activePlaylistItem?.episodeBadge && (
-                <span className="shrink-0 font-mono text-[10.5px] font-semibold tracking-wide text-accent-soft">
-                  {activePlaylistItem.episodeBadge}
-                </span>
-              )}
               <span
                 data-tauri-drag-region
-                className="text-xs font-medium text-white/95 truncate max-w-[280px]"
+                className="text-[13px] font-medium text-white/90 truncate max-w-[340px]"
               >
                 {selectedFileName || (roomCode ? "Watch Theater" : "Media Player")}
               </span>
-              <span className="h-3 w-px bg-white/15 shrink-0" aria-hidden="true" />
-              {roomCode ? (
-                <span className="shrink-0 inline-flex items-center gap-1.5 text-[11px] font-medium text-white/85 num">
+              {activePlaylistItem?.episodeBadge && (
+                <span className="shrink-0 font-mono text-[11px] text-white/55">
+                  {activePlaylistItem.episodeBadge}
+                </span>
+              )}
+              {roomCode && (
+                <span className="shrink-0 inline-flex items-center gap-1.5 text-[11px] text-white/55 num">
                   <StatusDot
                     tone={
                       syncStatus.state === "connected"
@@ -1435,10 +1431,6 @@ export function WatchRoom() {
                     }
                   />
                   <span>{formatRoomCodeDisplay(roomCode)}</span>
-                </span>
-              ) : (
-                <span className="shrink-0 text-[11px] font-medium text-secondary">
-                  Solo
                 </span>
               )}
             </div>
@@ -1542,6 +1534,42 @@ export function WatchRoom() {
         </aside>
       )}
 
+      {panelOpen && sideTab !== "episodes" && (
+        <aside
+          aria-label="Party and playback settings"
+          data-glass-region="true"
+          className="ep-glass-capsule anim-drawer-in absolute right-4 bottom-[112px] z-30 w-[372px] max-w-[calc(100vw-2rem)] max-h-[calc(100%-176px)] rounded-[24px] p-3.5 flex flex-col gap-3 overflow-hidden"
+        >
+          <div className="flex items-center gap-2">
+            <SegmentedTabs
+              ariaLabel="Panel section"
+              value={sideTab}
+              onChange={setSideTab}
+              className="flex-1 min-w-0"
+              items={[
+                { value: "room", label: "Party" },
+                { value: "playback", label: "Playback" },
+                { value: "subtitles", label: "Subtitles" },
+              ]}
+            />
+            <button
+              type="button"
+              onClick={() => setPanelOpen(false)}
+              aria-label="Close panel"
+              title="Close (Esc)"
+              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer shrink-0"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="min-h-0 overflow-y-auto pr-0.5">
+            {sideTab === "room" && <RoomPanel />}
+            {sideTab === "playback" && <PlaybackPanel />}
+            {sideTab === "subtitles" && <SubtitlePanel />}
+          </div>
+        </aside>
+      )}
+
       <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">
         <TransportBar
           visible={showFloatingCapsule}
@@ -1554,30 +1582,8 @@ export function WatchRoom() {
           onToggleFullscreen={toggleFullscreen}
           onPrevEpisode={handlePrevEpisode}
           onNextEpisode={handleNextEpisode}
-          drawerTabs={
-            panelOpen && sideTab !== "episodes" ? (
-              <SegmentedTabs
-                ariaLabel="Inspector panel"
-                value={sideTab}
-                onChange={setSideTab}
-                className="w-full max-w-[360px]"
-                items={[
-                  { value: "room", label: "Party" },
-                  { value: "playback", label: "Playback" },
-                  { value: "subtitles", label: "Subtitles" },
-                ]}
-              />
-            ) : null
-          }
-          expandedDrawer={
-            panelOpen && sideTab !== "episodes" ? (
-              <>
-                {sideTab === "room" && <RoomPanel />}
-                {sideTab === "playback" && <PlaybackPanel />}
-                {sideTab === "subtitles" && <SubtitlePanel />}
-              </>
-            ) : null
-          }
+          drawerTabs={null}
+          expandedDrawer={null}
         />
       </div>
       {!showFloatingCapsule && (

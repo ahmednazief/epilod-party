@@ -319,12 +319,14 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   );
   assert.ok(hwndRs.includes("HWND_BOTTOM"), "mpv child HWND must sit behind WebView2");
 
-  // Full-width scrubber row, frosted glass TitleBar pill, translucent crystal play orb, and custom right-click ContextMenu
+  // Full-width scrubber row, symmetric centered transport cluster, frosted glass TitleBar pill, translucent crystal play orb, and custom right-click ContextMenu
   assert.match(transportSrc, /<div className="w-full px-0\.5">\s*<PlaybackScrubber/);
+  assert.match(transportSrc, /grid-cols-\[minmax\(0,1fr\)_auto_minmax\(0,1fr\)\]/);
+  assert.match(transportSrc, /\{\/\* Center: Hero Transport Cluster \*\/\}\s*<div className="flex items-center gap-1\.5 shrink-0 justify-self-center">/);
   assert.match(transportSrc, /ep-bar-pill/);
   assert.match(transportSrc, /ep-bar-icon-btn/);
-  assert.match(watchRoomSrc, /<TitleBar\s+glassControls/);
-  assert.match(watchRoomSrc, /className="ep-glass-pill h-8 pl-1\.5 pr-3 rounded-full/);
+  assert.match(watchRoomSrc, /<TitleBar\s+leftSlot/);
+  assert.doesNotMatch(watchRoomSrc, /ep-glass-pill h-8 pl-1\.5 pr-3 rounded-full/);
   assert.match(watchRoomSrc, /<ContextMenu/);
   assert.match(watchRoomSrc, /Keyboard Shortcuts/);
   assert.equal(transportSrc.includes("openShortcuts"), false, "Shortcuts button belongs in right-click ContextMenu, not TransportBar");
