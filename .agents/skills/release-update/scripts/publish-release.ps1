@@ -350,7 +350,7 @@ if ($localTagCheck.ExitCode -eq 0 -and -not $OverwriteRelease -and -not $CommitA
     Write-Warning "Local tag '$releaseTag' already exists at $($localTagCheck.Output.Trim())."
 }
 
-$otherDirty = Get-NonVersionDirtyPaths -PorcelainLines $porcelain
+$otherDirty = @(Get-NonVersionDirtyPaths -PorcelainLines $porcelain)
 if ($otherDirty.Count -gt 0) {
     Write-Warning ("Working tree has {0} non-version uncommitted change(s): {1}" -f $otherDirty.Count, ($otherDirty -join ", "))
     if ($CommitAndTag -and -not $IncludeAllDirtyChanges) {
