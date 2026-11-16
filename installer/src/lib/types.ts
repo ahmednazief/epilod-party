@@ -108,6 +108,8 @@ export interface DestinationInspection {
   savedDesktopShortcut: boolean | null;
   savedStartMenuShortcut: boolean | null;
   savedFileAssociations: boolean | null;
+  otherInstallDir?: string | null;
+  otherInstallVersion?: string | null;
 }
 
 export interface PreflightResult {
@@ -118,6 +120,8 @@ export interface PreflightResult {
   protectedDir: boolean;
   report: ExistingInstallReport;
   peakRequiredBytes: number;
+  otherInstallDir?: string | null;
+  otherInstallVersion?: string | null;
 }
 
 export interface StepProgress {
@@ -169,6 +173,8 @@ export interface InstallerDefaults {
   savedDesktopShortcut: boolean | null;
   savedStartMenuShortcut: boolean | null;
   savedFileAssociations: boolean | null;
+  otherInstallDir?: string | null;
+  otherInstallVersion?: string | null;
   readyTelemetry: InstallTelemetry;
 }
 

@@ -19,7 +19,15 @@ interface RenderedNotification {
   exiting: boolean;
 }
 
-export function NotificationStrip() {
+interface NotificationStripProps {
+  inline?: boolean;
+  belowTitleBar?: boolean;
+}
+
+export function NotificationStrip({
+  inline = false,
+  belowTitleBar = true,
+}: NotificationStripProps = {}) {
   const items = useNotificationStore((s) => s.items);
   const dismiss = useNotificationStore((s) => s.dismiss);
   const [entries, setEntries] = useState<RenderedNotification[]>(() =>
@@ -67,11 +75,20 @@ export function NotificationStrip() {
   }
 
   return (
-    <div className="pointer-events-none fixed top-4 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-1.5 max-w-md w-full px-4">
+    <div
+      className={
+        inline
+          ? "pointer-events-none flex flex-col items-center gap-1.5 max-w-md w-full"
+          : `pointer-events-none fixed left-1/2 -translate-x-1/2 z-[45] flex flex-col items-center gap-1.5 max-w-md w-full px-4 transition-[top] duration-300 ${
+              belowTitleBar ? "top-14" : "top-4"
+            }`
+      }
+    >
       {entries.map(({ item, exiting }) => (
         <div
           key={item.id}
           role="status"
+          data-glass-region="true"
           className={`${
             exiting
               ? "pointer-events-none anim-fade-slide-down"

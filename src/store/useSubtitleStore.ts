@@ -1,5 +1,26 @@
 import { create } from "zustand";
-import type { AutoSyncResult, SubtitleEncodingHint } from "../lib/mpv";
+import type { AutoSyncResult, SubStyleParams, SubtitleEncodingHint } from "../lib/mpv";
+
+function readBoldStorage(): boolean {
+  try {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("ep.subBold") === "true";
+    }
+  } catch {
+    // Ignore storage read restrictions
+  }
+  return false;
+}
+
+function writeBoldStorage(enabled: boolean): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("ep.subBold", enabled ? "true" : "false");
+    }
+  } catch {
+    // Ignore storage write restrictions
+  }
+}
 
 export const SUBTITLE_FONTS = [
   "Noto Sans Arabic",
@@ -35,6 +56,7 @@ interface SubtitleState {
   loadedFilePath: string | null;
   originalFilePath: string | null;
   font: string;
+  bold: boolean;
   fontSize: number;
   color: string;
   borderSize: number;
@@ -48,6 +70,7 @@ interface SubtitleState {
   autoSyncOutcome: AutoSyncResult | null;
   autoSyncError: string | null;
   setFont: (font: string) => void;
+  setBold: (bold: boolean) => void;
   setFontSize: (fontSize: number) => void;
   setColor: (color: string) => void;
   setBorderSize: (borderSize: number) => void;
@@ -65,10 +88,30 @@ interface SubtitleState {
   resetDefaults: () => void;
 }
 
+export function buildSubStyleParams(
+  s: Pick<
+    SubtitleState,
+    "font" | "bold" | "fontSize" | "color" | "borderSize" | "pos" | "visible" | "overrideAssStyle"
+  >,
+  overrides?: Partial<Pick<SubStyleParams, "visible" | "overrideAss" | "bold">>,
+): SubStyleParams {
+  return {
+    font: s.font,
+    bold: overrides?.bold ?? s.bold,
+    fontSize: s.fontSize,
+    color: s.color,
+    borderSize: s.borderSize,
+    pos: s.pos,
+    visible: overrides?.visible ?? s.visible,
+    overrideAss: overrides?.overrideAss ?? s.overrideAssStyle,
+  };
+}
+
 export const useSubtitleStore = create<SubtitleState>((set, get) => ({
   loadedFilePath: null,
   originalFilePath: null,
   font: "Noto Sans Arabic",
+  bold: readBoldStorage(),
   fontSize: 44,
   color: "#FFFFFF",
   borderSize: 2.5,
@@ -83,6 +126,10 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
   autoSyncError: null,
 
   setFont: (font) => set({ font }),
+  setBold: (bold) => {
+    writeBoldStorage(bold);
+    set({ bold });
+  },
   setFontSize: (fontSize) => set({ fontSize: Math.max(16, Math.min(96, Math.round(fontSize))) }),
   setColor: (color) => set({ color }),
   setBorderSize: (borderSize) => set({ borderSize: Math.max(0, Math.min(8, Math.round(borderSize * 2) / 2)) }),
@@ -130,9 +177,11 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
     }),
   setAutoSyncError: (autoSyncError) => set({ autoSyncError, autoSyncBusy: false }),
 
-  resetDefaults: () =>
+  resetDefaults: () => {
+    writeBoldStorage(false);
     set({
       font: "Noto Sans Arabic",
+      bold: false,
       fontSize: 44,
       color: "#FFFFFF",
       borderSize: 2.5,
@@ -141,5 +190,6 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
       overrideAssStyle: false,
       encodingHint: "auto",
       delaySecs: 0,
-    }),
+    });
+  },
 }));

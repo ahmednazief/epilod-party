@@ -3,16 +3,23 @@ import {
   AppAlertIcon,
   AppCheckIcon,
   AppChevronIcon,
-  AppFolderIcon,
   AppResetIcon,
   AppSlidersIcon,
   AppSparkleIcon,
   AppStopIcon,
 } from "./ui/AppIcons";
+import {
+  MenuAddFileIcon,
+  MenuBoldIcon,
+  MenuEncodingIcon,
+  MenuFontIcon,
+  MenuOverrideFansubIcon,
+  MenuSubtitlesOffIcon,
+} from "./ui/MenuIcons";
 import { PlayerCaptionsIcon } from "./ui/PlayerIcons";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { isDesktop } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
 import { getFileDisplayName } from "../lib/fileDrop";
@@ -22,54 +29,45 @@ import {
   mpvSetSubDelay,
   mpvSetSubStyle,
   mpvSetSubTrack,
-  mpvSetVisible,
   safeMpvCall,
   subtitleAutoSync,
   subtitleCancelAutoSync,
-  subtitleTwoAnchorSync,
   type SubtitleEncodingHint,
 } from "../lib/mpv";
+import { runWithHiddenMpvSurface } from "../lib/playerActions";
+import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
   buildSubTrackOptions,
   formatDelayLabel,
   isBitmapSubtitleTrack,
+  resolveEmbeddedSyncTarget,
   selectSubTrack,
 } from "../lib/tracks";
-import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import {
+  buildSubStyleParams,
   SUBTITLE_COLORS,
   SUBTITLE_ENCODING_OPTIONS,
   SUBTITLE_FONTS,
   useSubtitleStore,
 } from "../store/useSubtitleStore";
-import { Button } from "./ui/Button";
 import { Scrubber } from "./ui/Scrubber";
+import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { SelectMenu } from "./ui/SelectMenu";
-import { TextField } from "./ui/TextField";
 
 const QUICK_SIZES = [
   { label: "Small", px: 36 },
-  { label: "Medium", px: 48 },
-  { label: "Large", px: 60 },
+  { label: "Medium", px: 44 },
+  { label: "Large", px: 58 },
 ] as const;
 
-function applyStyleNow(): void {
+function applyStyleNow(
+  overrides?: Parameters<typeof buildSubStyleParams>[1],
+): void {
   const s = useSubtitleStore.getState();
-  safeMpvCall(
-    mpvSetSubStyle({
-      font: s.font,
-      fontSize: s.fontSize,
-      color: s.color,
-      borderSize: s.borderSize,
-      pos: s.pos,
-      visible: s.visible,
-      overrideAss: s.overrideAssStyle,
-    }),
-    "mpvSetSubStyle",
-  );
+  safeMpvCall(mpvSetSubStyle(buildSubStyleParams(s, overrides)), "mpvSetSubStyle");
 }
 
 export const SubtitlePanel = memo(function SubtitlePanel() {
@@ -82,6 +80,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const loadedFilePath = useSubtitleStore((s) => s.loadedFilePath);
   const originalFilePath = useSubtitleStore((s) => s.originalFilePath);
   const font = useSubtitleStore((s) => s.font);
+  const bold = useSubtitleStore((s) => s.bold);
   const fontSize = useSubtitleStore((s) => s.fontSize);
   const color = useSubtitleStore((s) => s.color);
   const borderSize = useSubtitleStore((s) => s.borderSize);
@@ -95,6 +94,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const autoSyncError = useSubtitleStore((s) => s.autoSyncError);
 
   const setFont = useSubtitleStore((s) => s.setFont);
+  const setBold = useSubtitleStore((s) => s.setBold);
   const setFontSize = useSubtitleStore((s) => s.setFontSize);
   const setColor = useSubtitleStore((s) => s.setColor);
   const setBorderSize = useSubtitleStore((s) => s.setBorderSize);
@@ -109,41 +109,62 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const setAutoSyncBusy = useSubtitleStore((s) => s.setAutoSyncBusy);
   const setAutoSyncResult = useSubtitleStore((s) => s.setAutoSyncResult);
   const setAutoSyncError = useSubtitleStore((s) => s.setAutoSyncError);
-  const resetDefaults = useSubtitleStore((s) => s.resetDefaults);
 
   const pushNote = useNotificationStore((s) => s.push);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const throttledApplyStyle = useMemo(
-    () => createLeadingTrailingThrottle(applyStyleNow, 60),
+    () => createLeadingTrailingThrottle(() => applyStyleNow(), 60),
     [],
   );
 
   useEffect(() => () => throttledApplyStyle.cancel(), [throttledApplyStyle]);
 
-  const [showTools, setShowTools] = useState(false);
-  const [srcASecs, setSrcASecs] = useState("10");
-  const [dstASecs, setDstASecs] = useState("10");
-  const [srcBSecs, setSrcBSecs] = useState("600");
-  const [dstBSecs, setDstBSecs] = useState("600");
-
-  const subOptions = buildSubTrackOptions(tracks);
-  const selectedSub = tracks.find((t) => t.type === "sub" && t.selected) ?? null;
-  const currentSubVal = selectedSub ? String(selectedSub.id) : "none";
+  const subOptions = buildSubTrackOptions(tracks).filter((opt) => opt.track !== null);
   const selectedAudio = tracks.find((t) => t.type === "audio" && t.selected) ?? null;
-  const subIsBitmap = isBitmapSubtitleTrack(selectedSub);
 
-  const embeddedSubIdx =
-    selectedSub && !selectedSub.external
-      ? tracks
-          .filter((t) => t.type === "sub" && !t.external)
-          .findIndex((t) => t.id === selectedSub.id)
+  const {
+    selectedSub,
+    subIsBitmap,
+    fallbackEmbeddedSub,
+    syncTargetEmbedded,
+    isClosedCaption: subIsClosedCaption,
+    ffIndex: embeddedSubFfIdx,
+    embeddedSubIdx: resolvedEmbeddedSubIdx,
+  } = resolveEmbeddedSyncTarget(tracks);
+  const currentSubVal = selectedSub ? String(selectedSub.id) : "none";
+  const isEmbeddedSelected = Boolean(selectedSub && !selectedSub.external);
+  const effectiveExternalSubPath = isEmbeddedSelected
+    ? null
+    : originalFilePath || loadedFilePath || null;
+  const hasExternalFile = Boolean(effectiveExternalSubPath);
+
+  const prevSelectedSubRef = useRef<{ id: number; external?: boolean } | null>(
+    selectedSub ? { id: selectedSub.id, external: selectedSub.external } : null,
+  );
+  useEffect(() => {
+    const prev = prevSelectedSubRef.current;
+    prevSelectedSubRef.current = selectedSub
+      ? { id: selectedSub.id, external: selectedSub.external }
       : null;
+    const switchedToEmbedded =
+      Boolean(selectedSub && !selectedSub.external) &&
+      (prev === null || prev.id !== selectedSub?.id || prev.external !== selectedSub?.external);
+    if (switchedToEmbedded && (originalFilePath || loadedFilePath)) {
+      clearLoadedTrack();
+    }
+  }, [selectedSub, originalFilePath, loadedFilePath, clearLoadedTrack]);
+
+  const embeddedSubIdx = syncTargetEmbedded
+    ? subIsClosedCaption
+      ? 0
+      : resolvedEmbeddedSubIdx
+    : null;
 
   const canAutoSync =
     loaded &&
     Boolean(videoPath) &&
-    (Boolean(originalFilePath || loadedFilePath) ||
-      (selectedSub !== null && !selectedSub.external && !subIsBitmap));
+    (hasExternalFile || (syncTargetEmbedded !== null && !isBitmapSubtitleTrack(syncTargetEmbedded)));
 
   const handleLoadExternalSubtitle = async () => {
     if (!loaded) {
@@ -155,12 +176,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       return;
     }
     let chosen: string | null = null;
-    try {
-      await mpvSetVisible(false);
-    } catch {
-      // Engine may not be running before a file is loaded.
-    }
-    try {
+    await runWithHiddenMpvSurface(true, async () => {
       const picked = await open({
         multiple: false,
         title: "Choose Subtitle File",
@@ -171,14 +187,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       if (typeof picked === "string" && picked) {
         chosen = picked;
       }
-    } finally {
-      const appState = useAppStore.getState();
-      const pState = usePlayerStore.getState();
-      safeMpvCall(
-        mpvSetVisible(!appState.settingsOpen && !appState.shortcutsOpen && !pState.playerError),
-        "mpvSetVisible",
-      );
-    }
+    });
     if (!chosen) return;
     try {
       await mpvAddSubtitle(chosen, encodingHint);
@@ -202,7 +211,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         }
         await mpvAddSubtitle(targetPath, hint);
         applyStyleNow();
-        pushNote("info", `Reloaded subtitle encoding.`);
+        pushNote("info", "Reloaded subtitle encoding.");
       } catch (err) {
         pushNote("error", formatUserError(err, "Failed re-decoding subtitle."));
       }
@@ -216,15 +225,19 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
     setAutoSyncBusy(true);
     setAutoSyncError(null);
     try {
+      const useExternalSub = Boolean(!isEmbeddedSelected && (originalFilePath || loadedFilePath));
       const result = await subtitleAutoSync({
         videoPath,
-        subtitlePath: originalFilePath || loadedFilePath || null,
+        subtitlePath: useExternalSub ? originalFilePath || loadedFilePath || null : null,
         audioTrackId: selectedAudio?.id ?? null,
         embeddedSubIdx:
           !originalFilePath && !loadedFilePath && embeddedSubIdx !== null && embeddedSubIdx >= 0
             ? embeddedSubIdx
-            : null,
-        embeddedSubCodec: selectedSub?.codec ?? null,
+            : isEmbeddedSelected && embeddedSubIdx !== null && embeddedSubIdx >= 0
+              ? embeddedSubIdx
+              : null,
+        embeddedSubFfIdx: !useExternalSub ? embeddedSubFfIdx : null,
+        embeddedSubCodec: !useExternalSub ? (syncTargetEmbedded?.codec ?? null) : null,
         encodingHint,
         lowPower: lowPowerMode,
       });
@@ -246,7 +259,12 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       setLoadedTrack(result.syncedSubtitlePath, result.sourceSubtitlePath);
       setAutoSyncResult(result);
       applyStyleNow();
-      pushNote("success", "Subtitles matched cleanly to voice.");
+      pushNote(
+        "success",
+        result.segmentsApplied && result.segmentsApplied > 1
+          ? `Subtitles matched across ${result.segmentsApplied} timing segments.`
+          : "Subtitles matched cleanly to voice.",
+      );
     } catch (err) {
       if (
         useSubtitleStore.getState().sessionGen !== startGen ||
@@ -266,61 +284,6 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
     pushNote("info", "Magic Sync cancelled.");
   };
 
-  const handleTwoAnchorApply = async () => {
-    const targetSub = autoSyncOutcome?.sourceSubtitlePath || originalFilePath || loadedFilePath;
-    if (!targetSub) {
-      pushNote("warn", "Load an external subtitle file or run Magic Sync once first.");
-      return;
-    }
-    const a1 = Number.parseFloat(srcASecs);
-    const b1 = Number.parseFloat(dstASecs);
-    const a2 = Number.parseFloat(srcBSecs);
-    const b2 = Number.parseFloat(dstBSecs);
-    if (![a1, b1, a2, b2].every((n) => Number.isFinite(n) && n >= 0)) {
-      pushNote("error", "Enter valid non-negative timestamps for both anchor points.");
-      return;
-    }
-    const startGen = useSubtitleStore.getState().sessionGen;
-    const startVideoPath = videoPath;
-    try {
-      const result = await subtitleTwoAnchorSync({
-        subtitlePath: targetSub,
-        srcASecs: a1,
-        dstASecs: b1,
-        srcBSecs: a2,
-        dstBSecs: b2,
-        encodingHint,
-      });
-      if (
-        useSubtitleStore.getState().sessionGen !== startGen ||
-        useAppStore.getState().selectedFilePath !== startVideoPath
-      ) {
-        return;
-      }
-      const activeSub = usePlayerStore
-        .getState()
-        .tracks.find((t) => t.type === "sub" && t.selected);
-      if (activeSub?.external) {
-        await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
-      }
-      await mpvAddSubtitle(result.syncedSubtitlePath, "utf8");
-      await mpvSetSubDelay(0);
-      setDelaySecs(0);
-      setLoadedTrack(result.syncedSubtitlePath, targetSub);
-      setAutoSyncResult(result);
-      applyStyleNow();
-      pushNote("success", "Applied manual timing alignment.");
-    } catch (err) {
-      if (
-        useSubtitleStore.getState().sessionGen !== startGen ||
-        useAppStore.getState().selectedFilePath !== startVideoPath
-      ) {
-        return;
-      }
-      pushNote("error", formatUserError(err, "Manual alignment failed."));
-    }
-  };
-
   const handleNudge = (delta: number) => {
     const next = nudgeDelay(delta);
     safeMpvCall(mpvSetSubDelay(next), "mpvSetSubDelay");
@@ -334,400 +297,419 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const subsActive = visible && selectedSub !== null;
 
   return (
-    <div role="menu" aria-label="Subtitle options" className="flex flex-col">
+    <div role="menu" aria-label="Subtitle options" className="flex flex-col gap-4">
       {/* Top Quick Actions */}
-      <button
-        type="button"
-        role="menuitemcheckbox"
-        aria-checked={subsActive}
-        disabled={!loaded}
-        onClick={() => {
-          if (subsActive) {
-            setVisible(false);
-            safeMpvCall(
-              mpvSetSubStyle({
-                font,
-                fontSize,
-                color,
-                borderSize,
-                pos,
-                visible: false,
-                overrideAss: overrideAssStyle,
-              }),
-              "mpvSetSubStyle",
-            );
-          } else if (selectedSub !== null) {
-            setVisible(true);
-            safeMpvCall(
-              mpvSetSubStyle({
-                font,
-                fontSize,
-                color,
-                borderSize,
-                pos,
-                visible: true,
-                overrideAss: overrideAssStyle,
-              }),
-              "mpvSetSubStyle",
-            );
-          } else if (subTracks.length > 0) {
-            safeMpvCall(
-              selectSubTrack(subTracks[0].id, tracks, {
-                mpvSetSubTrack,
-                mpvSetSubDelay,
-                setDelaySecs,
-                setSubtitleVisible: setVisible,
-                clearExternalTrackState: clearLoadedTrack,
-              }).then(() => applyStyleNow()),
-              "selectSubTrack",
-            );
-          } else {
-            pushNote("info", "No subtitle tracks in this video yet — choose a subtitle file.");
-            void handleLoadExternalSubtitle();
-          }
-        }}
-        className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
-      >
-        <span className="flex items-center gap-2.5 min-w-0">
-          <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
-            <PlayerCaptionsIcon size={14} />
+      <div className="space-y-1.5">
+        <button
+          type="button"
+          role="menuitemcheckbox"
+          aria-checked={subsActive}
+          disabled={!loaded}
+          onClick={() => {
+            if (subsActive) {
+              setVisible(false);
+              applyStyleNow({ visible: false });
+            } else if (selectedSub !== null) {
+              setVisible(true);
+              applyStyleNow({ visible: true });
+            } else if (subTracks.length > 0) {
+              safeMpvCall(
+                selectSubTrack(subTracks[0].id, tracks, {
+                  mpvSetSubTrack,
+                  mpvSetSubDelay,
+                  setDelaySecs,
+                  setSubtitleVisible: setVisible,
+                  clearExternalTrackState: clearLoadedTrack,
+                }).then(() => applyStyleNow()),
+                "selectSubTrack",
+              );
+            } else {
+              pushNote("info", "No subtitle tracks in this video yet — choose a subtitle file.");
+              void handleLoadExternalSubtitle();
+            }
+          }}
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
+              {subsActive ? (
+                <PlayerCaptionsIcon size={14} />
+              ) : (
+                <MenuSubtitlesOffIcon size={14} className="opacity-75" />
+              )}
+            </span>
+            <span className="truncate">Show Subtitles</span>
           </span>
-          <span className="truncate">{subsActive ? "Show Subtitles" : "Subtitles Off"}</span>
-        </span>
-        <GlassSwitchTrack checked={subsActive} size="sm" />
-      </button>
+          <GlassSwitchTrack checked={subsActive} size="sm" />
+        </button>
 
-      <button
-        type="button"
-        role="menuitem"
-        disabled={!loaded}
-        onClick={() => void handleLoadExternalSubtitle()}
-        className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
-      >
-        <span className="flex items-center gap-2.5 min-w-0">
-          <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
-            <AppFolderIcon size={14} />
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!loaded}
+          onClick={() => void handleLoadExternalSubtitle()}
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
+              <MenuAddFileIcon size={14} />
+            </span>
+            <span className="truncate">Add Subtitle File…</span>
           </span>
-          <span className="truncate">Add Subtitle File…</span>
-        </span>
-      </button>
-
-      <div className="ep-hairline-divider my-1.5 mx-1.5" role="separator" />
-
-      {/* Subtitle Track List */}
-      <div className="px-2.5 pt-0.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
-        Subtitle Track
+        </button>
       </div>
 
-      {!loaded ? (
-        <div className="px-2.5 py-1.5 text-xs text-muted">
-          Open a video to select subtitles
+      {/* Subtitle Track List */}
+      <div className="space-y-2">
+        <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
+          <span>Subtitle Track</span>
+          {loaded && subOptions.length > 0 && (
+            <span className="num text-white/40">{subOptions.length}</span>
+          )}
         </div>
-      ) : (
-        <div className="max-h-36 overflow-y-auto space-y-0.5">
-          {subOptions.map((opt) => {
-            const active = opt.value === currentSubVal;
-            const t = opt.track;
-            const primaryLabel = t
-              ? t.title?.trim() ||
+
+        {!loaded ? (
+          <div className="px-3 py-1.5 text-xs text-muted">
+            Open a video to select subtitles
+          </div>
+        ) : subOptions.length === 0 ? (
+          <div className="px-3 py-1.5 text-xs text-muted">
+            No embedded tracks — add a subtitle file
+          </div>
+        ) : (
+          <div className="ep-menu-scroll max-h-40 overflow-y-auto overflow-x-hidden pr-1 space-y-1.5">
+            {subOptions.map((opt) => {
+              const active = opt.value === currentSubVal;
+              const t = opt.track!;
+              const primaryLabel =
+                t.title?.trim() ||
                 (t.external
                   ? loadedFilePath
                     ? getFileDisplayName(loadedFilePath)
                     : "External Subtitles"
                   : t.lang
                     ? `${t.lang.trim().toUpperCase()} Subtitles`
-                    : `Subtitle ${t.id}`)
-              : "Off";
-            const metaTags: string[] = [];
-            if (t?.title?.trim() && t.lang?.trim()) {
-              metaTags.push(t.lang.trim().toUpperCase());
-            }
-            if (t?.external) {
-              metaTags.push("External");
-            } else if (t?.codec?.trim()) {
-              metaTags.push(t.codec.trim().toUpperCase());
-            }
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                role="menuitemradio"
-                aria-checked={active}
-                data-active={active}
-                onClick={() => {
-                  const sid = opt.value === "none" ? null : Number(opt.value);
-                  void selectSubTrack(sid, tracks, {
-                    mpvSetSubTrack,
-                    mpvSetSubDelay,
-                    setDelaySecs,
-                    setSubtitleVisible: setVisible,
-                    clearExternalTrackState: clearLoadedTrack,
-                  });
-                }}
-                className={`ep-menu-row ep-press w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 text-left text-xs cursor-pointer ${
-                  active ? "text-white font-medium" : "text-primary/90 hover:text-white"
-                }`}
-              >
-                <span className="flex items-center gap-2.5 min-w-0">
-                  <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
-                    {active ? (
-                      <AppCheckIcon size={14} className="text-ok" />
-                    ) : t ? (
-                      <PlayerCaptionsIcon size={14} className="opacity-70" />
-                    ) : null}
+                    : `Subtitle ${t.id}`);
+              const metaTags: string[] = [];
+              if (t.title?.trim() && t.lang?.trim()) {
+                metaTags.push(t.lang.trim().toUpperCase());
+              }
+              if (t.external) {
+                metaTags.push("External");
+              } else if (t.codec?.trim()) {
+                metaTags.push(t.codec.trim().toUpperCase());
+              }
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={active}
+                  data-active={active}
+                  onClick={() => {
+                    void selectSubTrack(t.id, tracks, {
+                      mpvSetSubTrack,
+                      mpvSetSubDelay,
+                      setDelaySecs,
+                      setSubtitleVisible: setVisible,
+                      clearExternalTrackState: clearLoadedTrack,
+                    });
+                  }}
+                  className={`ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs cursor-pointer ${
+                    active ? "text-white font-medium" : "text-primary/90 hover:text-white"
+                  }`}
+                >
+                  <span className="flex items-center gap-3 min-w-0">
+                    <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                      {active ? (
+                        <AppCheckIcon size={14} className="text-ok" />
+                      ) : (
+                        <span className="h-1.5 w-1.5 rounded-full bg-white/25" aria-hidden="true" />
+                      )}
+                    </span>
+                    <span className="truncate">{primaryLabel}</span>
                   </span>
-                  <span className="truncate">{primaryLabel}</span>
+                  {metaTags.length > 0 && (
+                    <span className="text-[10px] num font-medium text-white/55 shrink-0">
+                      {metaTags.join(" · ")}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {(subIsBitmap || autoSyncError) && (
+          <div className="px-3 pt-1 text-[10.5px] space-y-1">
+            {subIsBitmap && (
+              <div className="flex items-start gap-1.5 text-warn">
+                <AppAlertIcon variant="info" size={12} className="shrink-0 mt-0.5" />
+                <span>
+                  {fallbackEmbeddedSub
+                    ? `Image subtitles (${selectedSub?.codec}) keep built-in timing; Magic Sync will align using ${
+                        fallbackEmbeddedSub.title?.trim() || `Subtitle ${fallbackEmbeddedSub.id}`
+                      }${fallbackEmbeddedSub.codec ? ` (${fallbackEmbeddedSub.codec.toUpperCase()})` : ""}.`
+                    : `Image subtitles (${selectedSub?.codec}) contain pictures rather than text and have no matching-language text track; add an external subtitle file to use Magic Sync.`}
                 </span>
-                {metaTags.length > 0 && (
-                  <span className="text-[10px] num font-medium text-muted shrink-0">
-                    {metaTags.join(" · ")}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {(subIsBitmap || autoSyncError) && (
-        <div className="px-2.5 pt-1 text-[10.5px] space-y-0.5">
-          {subIsBitmap && (
-            <div className="inline-flex items-center gap-1.5 text-warn">
-              <AppAlertIcon variant="info" size={12} className="shrink-0" />
-              <span>Image subtitles ({selectedSub?.codec}) keep built-in style &amp; timing.</span>
-            </div>
-          )}
-          {autoSyncError && <div className="text-bad">{autoSyncError}</div>}
-        </div>
-      )}
-
-      <div className="ep-hairline-divider my-1.5 mx-1.5" role="separator" />
+              </div>
+            )}
+            {autoSyncError && <div className="text-bad">{autoSyncError}</div>}
+          </div>
+        )}
+      </div>
 
       {/* Timing & Magic Sync */}
-      <div className="px-2.5 pt-0.5 pb-1 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-        <span>Timing &amp; Sync</span>
-        <span
-          className={`normal-case font-medium num ${
-            Math.abs(delaySecs) < 0.005 ? "text-muted" : "text-accent-soft"
-          }`}
-        >
-          {Math.abs(delaySecs) < 0.005 ? "In sync" : formatDelayLabel(delaySecs)}
-        </span>
-      </div>
-
-      {autoSyncBusy ? (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => void handleCancelAutoSync()}
-          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs font-medium text-bad cursor-pointer"
-        >
-          <span className="flex items-center gap-2.5 min-w-0">
-            <span className="w-4 h-4 flex items-center justify-center shrink-0">
-              <AppStopIcon size={12} />
-            </span>
-            <span className="truncate">Cancel Magic Sync</span>
+      <div className="space-y-2">
+        <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
+          <span>Timing &amp; Sync</span>
+          <span
+            className={`normal-case tracking-normal font-medium num ${
+              Math.abs(delaySecs) < 0.005 ? "text-white/55" : "text-accent-soft"
+            }`}
+          >
+            {Math.abs(delaySecs) < 0.005 ? "In sync" : formatDelayLabel(delaySecs)}
           </span>
-        </button>
-      ) : (
-        <button
-          type="button"
-          role="menuitem"
-          disabled={!canAutoSync}
-          onClick={() => void handleAutoSync()}
-          title="Automatically align subtitles to speech"
-          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs font-medium text-accent-soft hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
-        >
-          <span className="flex items-center gap-2.5 min-w-0">
-            <span className="w-4 h-4 flex items-center justify-center shrink-0">
-              <AppSparkleIcon size={14} />
-            </span>
-            <span className="truncate">{autoSyncOutcome ? "Magic Sync Matched" : "Magic Sync"}</span>
-          </span>
-          <span className="text-[10px] font-normal text-muted shrink-0">Auto-align</span>
-        </button>
-      )}
+        </div>
 
-      <div className="px-1.5 pt-1 pb-1">
-        <div className="ep-glass-input p-0.5 rounded-xl grid grid-cols-5 gap-0.5 text-[11px]">
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(-0.5)}
-            className="ep-press h-7 rounded-[10px] num text-secondary hover:text-white hover:bg-white/[0.08] disabled:opacity-35 cursor-pointer"
-          >
-            -0.5s
-          </button>
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(-0.1)}
-            className="ep-press h-7 rounded-[10px] num text-secondary hover:text-white hover:bg-white/[0.08] disabled:opacity-35 cursor-pointer"
-          >
-            -0.1s
-          </button>
-          <button
-            type="button"
-            disabled={!loaded || delaySecs === 0}
-            onClick={() => {
-              setDelaySecs(0);
-              safeMpvCall(mpvSetSubDelay(0), "mpvSetSubDelay");
-            }}
-            className="ep-press h-7 rounded-[10px] text-muted hover:text-white hover:bg-white/[0.08] disabled:opacity-30 cursor-pointer"
-          >
-            Reset
-          </button>
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(0.1)}
-            className="ep-press h-7 rounded-[10px] num text-secondary hover:text-white hover:bg-white/[0.08] disabled:opacity-35 cursor-pointer"
-          >
-            +0.1s
-          </button>
-          <button
-            type="button"
-            disabled={!loaded}
-            onClick={() => handleNudge(0.5)}
-            className="ep-press h-7 rounded-[10px] num text-secondary hover:text-white hover:bg-white/[0.08] disabled:opacity-35 cursor-pointer"
-          >
-            +0.5s
-          </button>
+        <div className="space-y-2">
+          {autoSyncBusy ? (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void handleCancelAutoSync()}
+              className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-bad cursor-pointer"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                  <AppStopIcon size={12} />
+                </span>
+                <span className="truncate">Cancel Magic Sync</span>
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!canAutoSync}
+              onClick={() => void handleAutoSync()}
+              title={
+                !canAutoSync
+                  ? subIsBitmap
+                    ? "Image subtitles cannot be auto-synced without an external text file"
+                    : "Select a subtitle track above or add a subtitle file first"
+                  : "Automatically align subtitles to speech"
+              }
+              className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-accent-soft hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                  <AppSparkleIcon size={14} />
+                </span>
+                <span className="truncate">{autoSyncOutcome ? "Magic Sync Matched" : "Magic Sync"}</span>
+              </span>
+              <span className="text-[10px] font-normal text-muted shrink-0">Auto-align</span>
+            </button>
+          )}
+
+          <div className="ep-glass-tray p-1 rounded-full grid grid-cols-5 gap-1 text-[11px]">
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(-0.5)}
+              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+            >
+              -0.5s
+            </button>
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(-0.1)}
+              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+            >
+              -0.1s
+            </button>
+            <button
+              type="button"
+              disabled={!loaded || delaySecs === 0}
+              onClick={() => {
+                setDelaySecs(0);
+                safeMpvCall(mpvSetSubDelay(0), "mpvSetSubDelay");
+              }}
+              className="ep-press ep-tray-option h-7.5 rounded-full text-muted hover:text-white disabled:opacity-30 cursor-pointer"
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(0.1)}
+              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+            >
+              +0.1s
+            </button>
+            <button
+              type="button"
+              disabled={!loaded}
+              onClick={() => handleNudge(0.5)}
+              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+            >
+              +0.5s
+            </button>
+          </div>
         </div>
       </div>
-
-      <div className="ep-hairline-divider my-1.5 mx-1.5" role="separator" />
 
       {/* Quick Size & Colors */}
-      <div className="px-2.5 pt-0.5 pb-1 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-        <span>Appearance</span>
-        <div className="flex items-center gap-1.5">
-          {SUBTITLE_COLORS.map((c) => {
-            const active = color.toUpperCase() === c.hex.toUpperCase();
-            return (
-              <button
-                key={c.hex}
-                type="button"
-                aria-label={`Color ${c.label}`}
-                title={c.label}
-                onClick={() => {
-                  setColor(c.hex);
-                  applyStyleNow();
-                }}
-                className={`ep-press h-3.5 w-3.5 rounded-full border border-white/25 cursor-pointer ${
-                  active ? "ring-2 ring-white scale-110" : "opacity-75 hover:opacity-100"
-                }`}
-                style={{ backgroundColor: c.hex }}
-              />
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="px-1.5 pb-1">
-        <div className="ep-glass-input p-0.5 rounded-xl grid grid-cols-3 gap-0.5">
-          {QUICK_SIZES.map((preset) => {
-            const active = nearestSizeLabel === preset.label;
-            return (
-              <button
-                key={preset.label}
-                type="button"
-                onClick={() => {
-                  setFontSize(preset.px);
-                  applyStyleNow();
-                }}
-                className={`ep-press h-7 rounded-[10px] text-[11px] font-medium cursor-pointer ${
-                  active ? "ep-droplet-indicator text-white" : "text-secondary hover:text-white"
-                }`}
-              >
-                {preset.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Expandable More Style & Encoding */}
-      <button
-        type="button"
-        role="menuitem"
-        aria-expanded={showTools}
-        onClick={() => setShowTools((s) => !s)}
-        className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-secondary hover:text-white cursor-pointer"
-      >
-        <span className="flex items-center gap-2.5 min-w-0">
-          <span className="w-4 h-4 flex items-center justify-center shrink-0">
-            <AppSlidersIcon size={14} />
-          </span>
-          <span className="truncate">Fine-tune Style &amp; Encoding</span>
-        </span>
-        <AppChevronIcon
-          direction="right"
-          size={14}
-          className={`text-muted shrink-0 transition-transform duration-200 ${
-            showTools ? "rotate-90" : ""
-          }`}
-        />
-      </button>
-
-      <AnimatedCollapse open={showTools}>
-        <div className="pt-1">
-          <div className="px-2 pb-1.5 pt-1.5 space-y-2.5 border-t border-white/[0.07]">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-secondary">Font Family</span>
+      <div className="space-y-2.5">
+        <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
+          <span>Appearance</span>
+          <div className="flex items-center gap-2">
+            {SUBTITLE_COLORS.map((c) => {
+              const active = color.toUpperCase() === c.hex.toUpperCase();
+              return (
                 <button
+                  key={c.hex}
                   type="button"
+                  aria-label={`Color ${c.label}`}
+                  title={c.label}
                   onClick={() => {
-                    resetDefaults();
+                    setColor(c.hex);
                     applyStyleNow();
                   }}
-                  className="ep-press inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
-                >
-                  <AppResetIcon size={12} />
-                  Reset
-                </button>
-              </div>
-              <SelectMenu
-                ariaLabel="Subtitle Font"
-                placement="top"
-                value={font}
-                options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
-                onChange={(val) => {
-                  setFont(val);
-                  applyStyleNow();
-                }}
-              />
-            </div>
+                  className={`ep-press h-4 w-4 rounded-full border border-white/25 cursor-pointer ${
+                    active
+                      ? "ring-2 ring-accent-soft shadow-[0_0_8px_rgba(167,139,250,0.45)] scale-110"
+                      : "opacity-80 hover:opacity-100"
+                  }`}
+                  style={{ backgroundColor: c.hex }}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        <SegmentedTabs
+          ariaLabel="Subtitle size"
+          size="sm"
+          fullWidth
+          value={nearestSizeLabel}
+          items={QUICK_SIZES.map((preset) => ({
+            value: preset.label,
+            label: preset.label,
+          }))}
+          onChange={(label) => {
+            const found = QUICK_SIZES.find((p) => p.label === label);
+            if (found) {
+              setFontSize(found.px);
+              applyStyleNow();
+            }
+          }}
+        />
+      </div>
+
+      {/* Encoding & Advanced Options */}
+      <div className="space-y-2">
+        {hasExternalFile && (
+          <div className="space-y-1.5">
+            <span className="px-3 inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
+              <span>Text Encoding</span>
+            </span>
+            <SelectMenu
+              ariaLabel="Subtitle Encoding"
+              placement="top"
+              triggerIcon={<MenuEncodingIcon size={13} />}
+              value={encodingHint}
+              options={SUBTITLE_ENCODING_OPTIONS}
+              onChange={(val) => void handleEncodingChange(val)}
+            />
+          </div>
+        )}
+
+        <button
+          type="button"
+          role="menuitem"
+          aria-expanded={showAdvanced}
+          onClick={() => setShowAdvanced((open) => !open)}
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-secondary hover:text-white cursor-pointer"
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="w-4 h-4 flex items-center justify-center shrink-0">
+              <AppSlidersIcon size={14} />
+            </span>
+            <span className="truncate">Advanced Options</span>
+          </span>
+          <AppChevronIcon
+            direction="right"
+            size={14}
+            className={`text-white/60 shrink-0 transition-transform duration-200 ${
+              showAdvanced ? "rotate-90" : ""
+            }`}
+          />
+        </button>
+
+        <AnimatedCollapse open={showAdvanced} innerClassName="pt-2 space-y-3">
+          <div className="space-y-1.5">
+            <span className="px-3 inline-flex items-center text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
+              <span>Font Family</span>
+            </span>
+            <SelectMenu
+              ariaLabel="Subtitle Font Family"
+              placement="top"
+              triggerIcon={<MenuFontIcon size={13} />}
+              value={font}
+              options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
+              onChange={(val) => {
+                setFont(val);
+                applyStyleNow();
+              }}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={bold}
+              onClick={() => {
+                const next = !bold;
+                setBold(next);
+                applyStyleNow({ bold: next });
+              }}
+              className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-secondary hover:text-white cursor-pointer"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                  <MenuBoldIcon size={14} />
+                </span>
+                <span className="truncate">Bold font</span>
+              </span>
+              <GlassSwitchTrack checked={bold} size="sm" />
+            </button>
 
             <button
               type="button"
-              role="menuitemcheckbox"
+              role="switch"
               aria-checked={overrideAssStyle}
               onClick={() => {
                 const next = !overrideAssStyle;
                 setOverrideAssStyle(next);
-                safeMpvCall(
-                  mpvSetSubStyle({
-                    font,
-                    fontSize,
-                    color,
-                    borderSize,
-                    pos,
-                    visible,
-                    overrideAss: next,
-                  }),
-                  "mpvSetSubStyle",
-                );
+                applyStyleNow({ overrideAss: next });
               }}
-              className="ep-menu-row ep-press w-full px-1.5 py-1.5 flex items-center justify-between gap-2 text-xs text-secondary hover:text-white cursor-pointer"
+              className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-secondary hover:text-white cursor-pointer"
             >
-              <span>Override styled fansubs</span>
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                  <MenuOverrideFansubIcon size={14} />
+                </span>
+                <span className="truncate">Override styled fansubs</span>
+              </span>
               <GlassSwitchTrack checked={overrideAssStyle} size="sm" />
             </button>
+          </div>
 
-          <div className="space-y-1.5">
-            <div>
+          <div className="space-y-2.5 pt-0.5">
+            <div className="px-3">
               <div className="flex justify-between text-[11px] text-secondary">
                 <span>Exact Size</span>
                 <span className="num">{fontSize}px</span>
@@ -746,7 +728,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               />
             </div>
 
-            <div>
+            <div className="px-3">
               <div className="flex justify-between text-[11px] text-secondary">
                 <span>Vertical Position</span>
                 <span className="num">{pos}%</span>
@@ -765,7 +747,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               />
             </div>
 
-            <div>
+            <div className="px-3">
               <div className="flex justify-between text-[11px] text-secondary">
                 <span>Outline Weight</span>
                 <span className="num">{borderSize.toFixed(1)}</span>
@@ -785,54 +767,26 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             </div>
           </div>
 
-          <div className="ep-hairline-divider" role="separator" />
-
-          <div className="space-y-2">
-            <div className="space-y-1">
-              <span className="text-[11px] text-secondary block">Text Encoding</span>
-              <SelectMenu
-                ariaLabel="Subtitle Encoding"
-                placement="top"
-                value={encodingHint}
-                options={SUBTITLE_ENCODING_OPTIONS}
-                onChange={(val) => void handleEncodingChange(val)}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-1.5">
-              <TextField
-                label="Early sub (s)"
-                value={srcASecs}
-                onChange={(e) => setSrcASecs(e.target.value)}
-              />
-              <TextField
-                label="Early voice (s)"
-                value={dstASecs}
-                onChange={(e) => setDstASecs(e.target.value)}
-              />
-              <TextField
-                label="Late sub (s)"
-                value={srcBSecs}
-                onChange={(e) => setSrcBSecs(e.target.value)}
-              />
-              <TextField
-                label="Late voice (s)"
-                value={dstBSecs}
-                onChange={(e) => setDstBSecs(e.target.value)}
-              />
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="w-full"
-              onClick={() => void handleTwoAnchorApply()}
-            >
-              Apply 2-Point Alignment
-            </Button>
-          </div>
-        </div>
-        </div>
-      </AnimatedCollapse>
+          <button
+            type="button"
+            onClick={() => {
+              throttledApplyStyle.cancel();
+              setFont("Noto Sans Arabic");
+              setBold(false);
+              setFontSize(44);
+              setColor("#FFFFFF");
+              setBorderSize(2.5);
+              setPos(95);
+              setOverrideAssStyle(false);
+              applyStyleNow({ bold: false, overrideAss: false });
+            }}
+            className="ep-menu-row ep-press w-full flex items-center justify-center gap-2 px-3 py-2 text-xs text-muted hover:text-white cursor-pointer"
+          >
+            <AppResetIcon size={13} />
+            <span>Reset Style Defaults</span>
+          </button>
+        </AnimatedCollapse>
+      </div>
     </div>
   );
 });

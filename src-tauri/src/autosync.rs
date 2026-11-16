@@ -1,6 +1,7 @@
 use epilod_core::subtitle_sync::{
-    decode_subtitle_bytes_with_hint, parse_subtitles, render_srt, render_vtt, rescale_ass_text,
-    rescale_cues, SubtitleEncodingHint,
+    decode_subtitle_bytes_with_hint, parse_subtitles, render_srt, render_vtt_with_transform,
+    rescale_ass_text_with_transform, rescale_cues_with_transform, SubtitleEncodingHint,
+    SubtitleTimingTransform,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -19,6 +20,8 @@ const BITMAP_SUB_CODECS: &[&str] = &[
     "xsub",
 ];
 
+const CLOSED_CAPTION_CODECS: &[&str] = &["eia_608", "cea_608", "cea_708", "cc_dec"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoSyncResultDto {
@@ -27,6 +30,7 @@ pub struct AutoSyncResultDto {
     pub confidence_z: f64,
     pub correlation: f64,
     pub drift_applied: bool,
+    pub segments_applied: usize,
     pub synced_subtitle_path: String,
     pub source_subtitle_path: String,
     pub audio_duration_secs: f64,
@@ -77,11 +81,19 @@ impl StallWatchdog {
     }
 }
 
-pub fn is_bitmap_subtitle_codec(codec: Option<&str>) -> bool {
+fn codec_in_list(codec: Option<&str>, list: &[&str]) -> bool {
     let Some(c) = codec.map(|s| s.trim().to_ascii_lowercase()) else {
         return false;
     };
-    BITMAP_SUB_CODECS.iter().any(|b| *b == c)
+    list.iter().any(|b| *b == c)
+}
+
+pub fn is_bitmap_subtitle_codec(codec: Option<&str>) -> bool {
+    codec_in_list(codec, BITMAP_SUB_CODECS)
+}
+
+pub fn is_closed_caption_codec(codec: Option<&str>) -> bool {
+    codec_in_list(codec, CLOSED_CAPTION_CODECS)
 }
 
 pub fn infer_sub_extension_from_codec(codec: Option<&str>) -> &'static str {
@@ -118,6 +130,24 @@ pub fn write_rescaled_subtitle_file(
     offset_ms: i64,
     encoding_hint: SubtitleEncodingHint,
 ) -> Result<PathBuf, String> {
+    write_rescaled_subtitle_file_with_transform(
+        source_path,
+        out_dir,
+        &SubtitleTimingTransform::Linear {
+            scale,
+            anchor_ms,
+            offset_ms,
+        },
+        encoding_hint,
+    )
+}
+
+pub fn write_rescaled_subtitle_file_with_transform(
+    source_path: &Path,
+    out_dir: &Path,
+    transform: &SubtitleTimingTransform,
+    encoding_hint: SubtitleEncodingHint,
+) -> Result<PathBuf, String> {
     fs::create_dir_all(out_dir)
         .map_err(|e| format!("Failed creating temp subtitle directory: {e}"))?;
 
@@ -135,15 +165,15 @@ pub fn write_rescaled_subtitle_file(
     let (out_ext, rendered) = match ext.as_str() {
         "vtt" => (
             "vtt",
-            render_vtt(&decoded, scale, anchor_ms, offset_ms).map_err(|e| e.to_string())?,
+            render_vtt_with_transform(&decoded, transform).map_err(|e| e.to_string())?,
         ),
         "ass" | "ssa" => (
             "ass",
-            rescale_ass_text(&decoded, scale, anchor_ms, offset_ms).map_err(|e| e.to_string())?,
+            rescale_ass_text_with_transform(&decoded, transform).map_err(|e| e.to_string())?,
         ),
         _ => {
             let mut cues = parse_subtitles(&decoded).map_err(|e| e.to_string())?;
-            rescale_cues(&mut cues, scale, anchor_ms, offset_ms).map_err(|e| e.to_string())?;
+            rescale_cues_with_transform(&mut cues, transform).map_err(|e| e.to_string())?;
             ("srt", render_srt(&cues))
         }
     };
@@ -177,7 +207,9 @@ mod windows_impl {
     use super::*;
     use crate::mpv::process::resolve_mpv_exe;
     use epilod_core::mpv_ipc::{
-        autosync_extract_args_ffmpeg, autosync_extract_args_mpv, autosync_extract_sub_args_ffmpeg,
+        autosync_extract_args_ffmpeg_dialogue, autosync_extract_args_mpv,
+        autosync_extract_cc_args_ffmpeg, autosync_extract_stream_args_ffmpeg,
+        autosync_extract_sub_args_ffmpeg, parse_ffmpeg_audio_stream_has_center,
     };
     use epilod_core::subtitle_sync::{
         auto_align_subtitles, fit_two_anchor_transform, AudioEnvelopeBuilder, AutoSyncConfig,
@@ -242,12 +274,15 @@ mod windows_impl {
 
     /// Best-effort removal of leftover extraction/synced files older than 24h so the temp dir
     /// cannot grow without bound across many sync runs.
-    fn prune_stale_work_files(dir: &Path) {
+    fn prune_stale_work_files(dir: &Path, preserve: Option<&Path>) {
         let cutoff = Duration::from_secs(24 * 60 * 60);
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
+            if preserve.is_some_and(|p| p == entry.path()) {
+                continue;
+            }
             let Ok(meta) = entry.metadata() else { continue };
             if !meta.is_file() {
                 continue;
@@ -381,6 +416,113 @@ mod windows_impl {
         }
     }
 
+    async fn probe_ffmpeg_audio_has_center(
+        ffmpeg_exe: &Path,
+        video_pb: &Path,
+        audio_stream_idx: usize,
+    ) -> bool {
+        let mut cmd = Command::new(ffmpeg_exe);
+        cmd.args([
+            "-nostdin",
+            "-hide_banner",
+            "-i",
+            video_pb.to_string_lossy().as_ref(),
+        ])
+        .kill_on_drop(true)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+
+        let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(5), cmd.output()).await else {
+            return false;
+        };
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        parse_ffmpeg_audio_stream_has_center(&stderr, audio_stream_idx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn extract_embedded_subtitle(
+        ffmpeg_exe: Option<&PathBuf>,
+        video_pb: &Path,
+        work_dir: &Path,
+        sub_idx: Option<usize>,
+        embedded_sub_ff_idx: Option<u64>,
+        embedded_sub_codec: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        low_power: bool,
+        pid: u32,
+        job_seq: u64,
+    ) -> Result<PathBuf, String> {
+        if is_bitmap_subtitle_codec(embedded_sub_codec) {
+            return Err(
+                "Bitmap subtitles (PGS/VobSub) cannot be auto-synced. Load a text subtitle file (.srt, .ass, .vtt).".to_string()
+            );
+        }
+        let Some(ff) = ffmpeg_exe else {
+            return Err(
+                "Extracting embedded subtitle tracks requires ffmpeg.exe alongside mpv.exe, or load an external subtitle file.".to_string()
+            );
+        };
+        let is_cc = is_closed_caption_codec(embedded_sub_codec);
+        let ext = if is_cc {
+            "srt"
+        } else {
+            infer_sub_extension_from_codec(embedded_sub_codec)
+        };
+        let out_sub = work_dir.join(format!("embedded_{pid}_{job_seq}.{ext}"));
+        let args = if is_cc {
+            autosync_extract_cc_args_ffmpeg(
+                video_pb.to_string_lossy().as_ref(),
+                out_sub.to_string_lossy().as_ref(),
+                None,
+            )
+        } else if let Some(ff_idx) = embedded_sub_ff_idx {
+            autosync_extract_stream_args_ffmpeg(
+                video_pb.to_string_lossy().as_ref(),
+                out_sub.to_string_lossy().as_ref(),
+                ff_idx,
+            )
+        } else if let Some(sub_idx) = sub_idx {
+            autosync_extract_sub_args_ffmpeg(
+                video_pb.to_string_lossy().as_ref(),
+                out_sub.to_string_lossy().as_ref(),
+                sub_idx,
+            )
+        } else {
+            return Err("No subtitle track index available for auto-sync extraction.".to_string());
+        };
+        // Subtitle packets can be sparse across a huge remux, so the output file may legitimately
+        // not grow for minutes while ffmpeg demuxes; rely on the overall ceiling instead of the
+        // short stall timer here.
+        if let Err(e) = run_command_with_watchdog(
+            ff,
+            &args,
+            &out_sub,
+            cancel,
+            low_power,
+            Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
+        )
+        .await
+        {
+            let _ = fs::remove_file(&out_sub);
+            return Err(e);
+        }
+        let extracted_bytes = tokio::fs::metadata(&out_sub)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if extracted_bytes == 0 {
+            let _ = fs::remove_file(&out_sub);
+            return Err(if is_cc {
+                "No closed-caption text was found in this video stream.".to_string()
+            } else {
+                "Embedded subtitle track contained no readable cues.".to_string()
+            });
+        }
+        Ok(out_sub)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_auto_sync(
         app: &AppHandle,
@@ -389,6 +531,7 @@ mod windows_impl {
         subtitle_path: Option<&str>,
         audio_track_id: Option<u64>,
         embedded_sub_idx: Option<usize>,
+        embedded_sub_ff_idx: Option<u64>,
         embedded_sub_codec: Option<&str>,
         encoding_hint: SubtitleEncodingHint,
         low_power: bool,
@@ -409,9 +552,6 @@ mod windows_impl {
                 let work_dir = temp_work_dir();
                 fs::create_dir_all(&work_dir)
                     .map_err(|e| format!("Failed creating auto-sync temp directory: {e}"))?;
-                prune_stale_work_files(&work_dir);
-                let ffmpeg_exe = resolve_ffmpeg_exe(&app_clone);
-                let mpv_exe = resolve_mpv_exe(&app_clone)?;
                 let ext_sub = match sub_owned {
                     Some(sp) => Some(
                         validate_existing_local_file_with_options(&sp, path_opts)
@@ -419,6 +559,9 @@ mod windows_impl {
                     ),
                     None => None,
                 };
+                prune_stale_work_files(&work_dir, ext_sub.as_deref());
+                let ffmpeg_exe = resolve_ffmpeg_exe(&app_clone);
+                let mpv_exe = resolve_mpv_exe(&app_clone)?;
                 Ok::<_, String>((video_pb, work_dir, ffmpeg_exe, mpv_exe, ext_sub))
             })
             .await
@@ -429,40 +572,20 @@ mod windows_impl {
         // Resolve external or embedded subtitle source
         let sub_pb = if let Some(sp) = external_sub_pb {
             sp
-        } else if let Some(sub_idx) = embedded_sub_idx {
-            if is_bitmap_subtitle_codec(embedded_sub_codec) {
-                return Err(
-                    "Bitmap subtitles (PGS/VobSub) cannot be auto-synced. Load a text subtitle file (.srt, .ass, .vtt).".to_string()
-                );
-            }
-            let Some(ref ff) = ffmpeg_exe else {
-                return Err(
-                    "Extracting embedded MKV subtitle tracks requires ffmpeg.exe alongside mpv.exe, or load an external subtitle file.".to_string()
-                );
-            };
-            let ext = infer_sub_extension_from_codec(embedded_sub_codec);
-            let out_sub = work_dir.join(format!("embedded_{pid}_{job_seq}.{ext}"));
-            let args = autosync_extract_sub_args_ffmpeg(
-                video_pb.to_string_lossy().as_ref(),
-                out_sub.to_string_lossy().as_ref(),
-                sub_idx,
-            );
-            // Subtitle packets can be sparse across a huge remux, so the output file may legitimately
-            // not grow for minutes while ffmpeg demuxes; rely on the overall ceiling instead of the
-            // short stall timer here.
-            if let Err(e) = run_command_with_watchdog(
-                ff,
-                &args,
-                &out_sub,
+        } else if embedded_sub_ff_idx.is_some() || embedded_sub_idx.is_some() {
+            let out_sub = extract_embedded_subtitle(
+                ffmpeg_exe.as_ref(),
+                &video_pb,
+                &work_dir,
+                embedded_sub_idx,
+                embedded_sub_ff_idx,
+                embedded_sub_codec,
                 &cancel,
                 low_power,
-                Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
+                pid,
+                job_seq,
             )
-            .await
-            {
-                let _ = fs::remove_file(&out_sub);
-                return Err(e);
-            }
+            .await?;
             temp_extracted_sub = Some(out_sub.clone());
             out_sub
         } else {
@@ -472,47 +595,61 @@ mod windows_impl {
         let pcm_path = work_dir.join(format!("audio_{pid}_{job_seq}.pcm"));
         let _ = tokio::fs::remove_file(&pcm_path).await;
 
-        let mpv_args = autosync_extract_args_mpv(
-            video_pb.to_string_lossy().as_ref(),
-            pcm_path.to_string_lossy().as_ref(),
-            audio_track_id,
-        );
         let stall = Duration::from_secs(DEFAULT_STALL_TIMEOUT_SECS);
-        let mpv_res =
-            run_command_with_watchdog(&mpv_exe, &mpv_args, &pcm_path, &cancel, low_power, stall)
-                .await;
+        let stream_idx = audio_track_id.map(|id| id.saturating_sub(1) as usize);
+        let mut extracted_ok = false;
+        let mut ff_err: Option<String> = None;
 
-        let extracted_ok = mpv_res.is_ok()
-            && tokio::fs::metadata(&pcm_path)
-                .await
-                .map(|m| m.len() > 16_000)
-                .unwrap_or(false);
+        if let Some(ref ff) = ffmpeg_exe {
+            let prefer_center =
+                probe_ffmpeg_audio_has_center(ff, &video_pb, stream_idx.unwrap_or(0)).await;
+            let ff_args = autosync_extract_args_ffmpeg_dialogue(
+                video_pb.to_string_lossy().as_ref(),
+                pcm_path.to_string_lossy().as_ref(),
+                stream_idx,
+                prefer_center,
+            );
+            let ff_res =
+                run_command_with_watchdog(ff, &ff_args, &pcm_path, &cancel, low_power, stall).await;
+            extracted_ok = ff_res.is_ok()
+                && tokio::fs::metadata(&pcm_path)
+                    .await
+                    .map(|m| m.len() > 16_000)
+                    .unwrap_or(false);
+            if !extracted_ok {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ = fs::remove_file(&pcm_path);
+                    return Err("Auto-sync cancelled.".to_string());
+                }
+                let _ = fs::remove_file(&pcm_path);
+                ff_err = ff_res.err();
+            }
+        }
 
         if !extracted_ok {
-            if cancel.load(Ordering::SeqCst) {
-                let _ = fs::remove_file(&pcm_path);
-                return Err("Auto-sync cancelled.".to_string());
-            }
-            let _ = fs::remove_file(&pcm_path);
-            if let Some(ref ff) = ffmpeg_exe {
-                let stream_idx = audio_track_id.map(|id| id.saturating_sub(1) as usize);
-                let ff_args = autosync_extract_args_ffmpeg(
-                    video_pb.to_string_lossy().as_ref(),
-                    pcm_path.to_string_lossy().as_ref(),
-                    stream_idx,
-                );
-                if let Err(e) =
-                    run_command_with_watchdog(ff, &ff_args, &pcm_path, &cancel, low_power, stall)
-                        .await
-                {
+            let mpv_args = autosync_extract_args_mpv(
+                video_pb.to_string_lossy().as_ref(),
+                pcm_path.to_string_lossy().as_ref(),
+                audio_track_id,
+            );
+            let mpv_res = run_command_with_watchdog(
+                &mpv_exe, &mpv_args, &pcm_path, &cancel, low_power, stall,
+            )
+            .await;
+            extracted_ok = mpv_res.is_ok()
+                && tokio::fs::metadata(&pcm_path)
+                    .await
+                    .map(|m| m.len() > 16_000)
+                    .unwrap_or(false);
+            if !extracted_ok {
+                if cancel.load(Ordering::SeqCst) {
                     let _ = fs::remove_file(&pcm_path);
-                    return Err(e);
+                    return Err("Auto-sync cancelled.".to_string());
                 }
-            } else {
                 let _ = fs::remove_file(&pcm_path);
                 return Err(format_missing_extractor_error(
-                    mpv_res.err().as_deref(),
-                    false,
+                    mpv_res.err().or(ff_err).as_deref(),
+                    ffmpeg_exe.is_some(),
                 ));
             }
         }
@@ -522,6 +659,13 @@ mod windows_impl {
         let sub_pb_clone = sub_pb.clone();
         let pcm_path_clone = pcm_path.clone();
         let work_dir_clone = work_dir.clone();
+        // Embedded subtitles extracted by ffmpeg are always UTF-8; never apply a legacy Windows
+        // codepage override from user preferences onto fresh UTF-8 extraction output.
+        let effective_hint = if temp_extracted_sub.is_some() {
+            SubtitleEncodingHint::Utf8
+        } else {
+            encoding_hint
+        };
         let (outcome, audio_duration_secs, synced_pb) = tokio::task::spawn_blocking(move || {
             let sub_bytes = match fs::read(&sub_pb_clone) {
                 Ok(b) => b,
@@ -530,7 +674,7 @@ mod windows_impl {
                     return Err(format!("Failed reading subtitle file: {e}"));
                 }
             };
-            let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, encoding_hint) {
+            let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, effective_hint) {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = fs::remove_file(&pcm_path_clone);
@@ -578,25 +722,25 @@ mod windows_impl {
             let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
                 .map_err(|e| e.to_string())?;
 
-            let synced_pb = write_rescaled_subtitle_file(
+            let synced_pb = write_rescaled_subtitle_file_with_transform(
                 &sub_pb_clone,
                 &work_dir_clone,
-                outcome.scale,
-                outcome.anchor_ms,
-                outcome.offset_ms,
-                encoding_hint,
+                &outcome.transform,
+                effective_hint,
             )?;
             Ok((outcome, audio_duration_secs, synced_pb))
         })
         .await
         .map_err(|e| format!("Auto-sync worker failed: {e}"))??;
 
+        let segments_applied = outcome.transform.segment_count();
         Ok(AutoSyncResultDto {
             offset_secs: outcome.offset_ms as f64 / 1000.0,
             scale: outcome.scale,
             confidence_z: outcome.confidence_z,
             correlation: outcome.correlation,
             drift_applied: outcome.drift_applied,
+            segments_applied,
             synced_subtitle_path: synced_pb.to_string_lossy().into_owned(),
             source_subtitle_path: temp_extracted_sub
                 .as_ref()
@@ -608,8 +752,14 @@ mod windows_impl {
         })
     }
 
-    pub fn execute_two_anchor_sync(
-        subtitle_path: &str,
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_two_anchor_sync(
+        app: &AppHandle,
+        subtitle_path: Option<&str>,
+        video_path: Option<&str>,
+        embedded_sub_idx: Option<usize>,
+        embedded_sub_ff_idx: Option<u64>,
+        embedded_sub_codec: Option<&str>,
         src_a_secs: f64,
         dst_a_secs: f64,
         src_b_secs: f64,
@@ -618,8 +768,6 @@ mod windows_impl {
         path_opts: LocalPathOptions,
     ) -> Result<AutoSyncResultDto, String> {
         let start = Instant::now();
-        let sub_pb = validate_existing_local_file_with_options(subtitle_path, path_opts)
-            .map_err(|e| e.to_string())?;
         if !src_a_secs.is_finite()
             || !dst_a_secs.is_finite()
             || !src_b_secs.is_finite()
@@ -639,14 +787,74 @@ mod windows_impl {
         let (scale, offset_ms) = fit_two_anchor_transform(src_a_ms, dst_a_ms, src_b_ms, dst_b_ms)
             .map_err(|e| e.to_string())?;
 
-        let synced_pb = write_rescaled_subtitle_file(
-            &sub_pb,
-            &temp_work_dir(),
-            scale,
-            src_a_ms,
-            offset_ms,
-            encoding_hint,
-        )?;
+        let (sub_pb, is_extracted) = if let Some(sp) =
+            subtitle_path.filter(|s| !s.trim().is_empty())
+        {
+            let sp_owned = sp.to_string();
+            let pb = tokio::task::spawn_blocking(move || {
+                validate_existing_local_file_with_options(&sp_owned, path_opts)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| format!("Two-anchor sync preparation failed: {e}"))??;
+            (pb, false)
+        } else if let (Some(vp), true) = (
+            video_path.filter(|s| !s.trim().is_empty()),
+            embedded_sub_ff_idx.is_some() || embedded_sub_idx.is_some(),
+        ) {
+            let app_clone = app.clone();
+            let vp_owned = vp.to_string();
+            let (video_pb, work_dir, ffmpeg_exe) = tokio::task::spawn_blocking(move || {
+                let video_pb = validate_existing_local_file_with_options(&vp_owned, path_opts)
+                    .map_err(|e| e.to_string())?;
+                let work_dir = temp_work_dir();
+                fs::create_dir_all(&work_dir)
+                    .map_err(|e| format!("Failed creating auto-sync temp directory: {e}"))?;
+                let ffmpeg_exe = resolve_ffmpeg_exe(&app_clone);
+                Ok::<_, String>((video_pb, work_dir, ffmpeg_exe))
+            })
+            .await
+            .map_err(|e| format!("Two-anchor sync preparation failed: {e}"))??;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let job_seq = AUTOSYNC_JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+            let extracted = extract_embedded_subtitle(
+                ffmpeg_exe.as_ref(),
+                &video_pb,
+                &work_dir,
+                embedded_sub_idx,
+                embedded_sub_ff_idx,
+                embedded_sub_codec,
+                &cancel,
+                false,
+                std::process::id(),
+                job_seq,
+            )
+            .await?;
+            (extracted, true)
+        } else {
+            return Err(
+                "Load an external subtitle file or select a text subtitle track first.".to_string(),
+            );
+        };
+
+        let effective_hint = if is_extracted {
+            SubtitleEncodingHint::Utf8
+        } else {
+            encoding_hint
+        };
+        let sub_pb_clone = sub_pb.clone();
+        let synced_pb = tokio::task::spawn_blocking(move || {
+            write_rescaled_subtitle_file(
+                &sub_pb_clone,
+                &temp_work_dir(),
+                scale,
+                src_a_ms,
+                offset_ms,
+                effective_hint,
+            )
+        })
+        .await
+        .map_err(|e| format!("Two-anchor sync task failed: {e}"))??;
 
         Ok(AutoSyncResultDto {
             offset_secs: offset_ms as f64 / 1000.0,
@@ -654,6 +862,7 @@ mod windows_impl {
             confidence_z: 10.0,
             correlation: 1.0,
             drift_applied: (scale - 1.0).abs() > 1e-4,
+            segments_applied: 1,
             synced_subtitle_path: synced_pb.to_string_lossy().into_owned(),
             source_subtitle_path: sub_pb.to_string_lossy().into_owned(),
             audio_duration_secs: 0.0,
@@ -1138,6 +1347,872 @@ mod tests {
             rescaled_cues[1].start_ms,
             speech_bursts[0].0
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_rescaled_subtitle_file_with_piecewise_transform_formats() {
+        use epilod_core::subtitle_sync::{
+            parse_subtitles, SubtitleEncodingHint, SubtitleTimingTransform, TimingSegment,
+        };
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("epilod_piecewise_fmt_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let out_dir = dir.join("out");
+
+        let transform = SubtitleTimingTransform::Piecewise {
+            segments: vec![
+                TimingSegment {
+                    start_src_ms: 0,
+                    scale: 1.0,
+                    anchor_ms: 0,
+                    offset_ms: 2_000,
+                },
+                TimingSegment {
+                    start_src_ms: 20_000,
+                    scale: 1.0,
+                    anchor_ms: 20_000,
+                    offset_ms: -4_000,
+                },
+            ],
+        };
+
+        // 1. SRT
+        let srt_path = dir.join("sample.srt");
+        fs::write(
+            &srt_path,
+            "1\n00:00:05,000 --> 00:00:07,000\nFirst act\n\n2\n00:00:25,000 --> 00:00:27,500\nSecond act\n",
+        )
+        .unwrap();
+        let synced_srt = write_rescaled_subtitle_file_with_transform(
+            &srt_path,
+            &out_dir,
+            &transform,
+            SubtitleEncodingHint::Utf8,
+        )
+        .expect("piecewise srt");
+        let parsed_srt = parse_subtitles(&fs::read_to_string(&synced_srt).unwrap()).unwrap();
+        assert_eq!(parsed_srt[0].start_ms, 7_000);
+        assert_eq!(parsed_srt[1].start_ms, 21_000);
+
+        // 2. WebVTT preserving cue settings
+        let vtt_path = dir.join("sample.vtt");
+        fs::write(
+            &vtt_path,
+            "WEBVTT\n\n00:00:05.000 --> 00:00:07.000 align:start position:10%\nFirst act\n\n00:00:25.000 --> 00:00:27.500 line:85%\nSecond act\n",
+        )
+        .unwrap();
+        let synced_vtt = write_rescaled_subtitle_file_with_transform(
+            &vtt_path,
+            &out_dir,
+            &transform,
+            SubtitleEncodingHint::Utf8,
+        )
+        .expect("piecewise vtt");
+        let vtt_text = fs::read_to_string(&synced_vtt).unwrap();
+        assert!(vtt_text.contains("00:00:07.000 --> 00:00:09.000 align:start position:10%"));
+        assert!(vtt_text.contains("00:00:21.000 --> 00:00:23.500 line:85%"));
+
+        // 3. ASS preserving vector drawing in segment 1 and shifting act 2 cleanly
+        let ass_path = dir.join("sample.ass");
+        fs::write(
+            &ass_path,
+            "[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:05.00,0:00:07.00,Sign,,0,0,0,,{\\p1}m 0 0 l 10 0 10 10{\\p0}\nDialogue: 0,0:00:25.00,0:00:27.50,Default,,0,0,0,,Second act line\n",
+        )
+        .unwrap();
+        let synced_ass = write_rescaled_subtitle_file_with_transform(
+            &ass_path,
+            &out_dir,
+            &transform,
+            SubtitleEncodingHint::Utf8,
+        )
+        .expect("piecewise ass");
+        let ass_text = fs::read_to_string(&synced_ass).unwrap();
+        assert!(ass_text.contains("Dialogue: 0,0:00:07.00,0:00:09.00,Sign"));
+        assert!(ass_text.contains("{\\p1}"));
+        assert!(ass_text.contains("Dialogue: 0,0:00:21.00,0:00:23.50,Default"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Real 5.1 surround MKV integration test with bundled `ffmpeg.exe`:
+    /// verifies that center-channel probe (`parse_ffmpeg_audio_stream_has_center`) detects 5.1,
+    /// center-weighted extraction (`autosync_extract_args_ffmpeg_dialogue`) isolates `FC` dialogue
+    /// away from heavy L/R/LFE music, and piecewise commercial-cut alignment recovers both acts.
+    #[cfg(windows)]
+    #[test]
+    fn test_real_5_1_surround_mkv_center_dialogue_and_piecewise_cut_autosync() {
+        use epilod_core::mpv_ipc::{
+            autosync_extract_args_ffmpeg_dialogue, parse_ffmpeg_audio_stream_has_center,
+        };
+        use epilod_core::subtitle_sync::{
+            auto_align_subtitles, AudioEnvelopeBuilder, AutoSyncConfig, SubtitleCue,
+        };
+        use std::fs;
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("resources/mpv/ffmpeg.exe");
+        if !ffmpeg.is_file() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("epilod_51_e2e_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let sample_rate = 48_000usize;
+        let duration_secs = 210usize;
+        let total_samples = sample_rate * duration_secs;
+        let channels = 6usize; // 5.1 layout: FL(0), FR(1), FC(2), LFE(3), BL(4), BR(5)
+
+        // Act 1 dialogue bursts (6..88s), commercial break gap (88..112s), Act 2 bursts (112..198s)
+        // Varied phrase lengths and conversational pauses (matching real dialogue cadence).
+        let speech_bursts: &[(u64, u64)] = &[
+            // Act 1 (15 bursts)
+            (6_200, 1_100),
+            (9_400, 2_800),
+            (15_900, 950),
+            (22_400, 3_400),
+            (28_100, 1_300),
+            (31_600, 1_900),
+            (39_800, 2_700),
+            (44_100, 1_050),
+            (51_200, 3_200),
+            (56_800, 1_400),
+            (60_500, 2_100),
+            (69_200, 1_150),
+            (72_900, 3_100),
+            (79_400, 1_500),
+            (84_200, 2_400),
+            // Act 2 (15 bursts)
+            (113_100, 2_600),
+            (117_800, 1_100),
+            (124_500, 3_300),
+            (130_200, 1_450),
+            (133_900, 2_200),
+            (141_600, 950),
+            (147_800, 2_900),
+            (153_200, 1_250),
+            (161_400, 3_100),
+            (166_900, 1_600),
+            (170_800, 2_000),
+            (179_100, 1_150),
+            (182_700, 3_400),
+            (189_600, 1_350),
+            (194_900, 2_500),
+        ];
+
+        let mut fc_samples = vec![0.0f32; total_samples];
+        for &(start_ms, len_ms) in speech_bursts {
+            let s_idx = (start_ms as usize * sample_rate) / 1000;
+            let e_idx = (((start_ms + len_ms) as usize) * sample_rate) / 1000;
+            for (i, sample) in fc_samples[s_idx..e_idx].iter_mut().enumerate() {
+                let t = i as f32 / sample_rate as f32;
+                *sample = 0.28 * (2.0 * std::f32::consts::PI * 680.0 * t).sin()
+                    + 0.12 * (2.0 * std::f32::consts::PI * 1360.0 * t).sin();
+            }
+        }
+
+        // Write 6-channel 16-bit PCM WAV directly with loud non-speech L/R/LFE background
+        let surround_wav = dir.join("surround_51.wav");
+        let data_len = (total_samples * channels * 2) as u32;
+        let mut wav_bytes = Vec::with_capacity(44 + data_len as usize);
+        wav_bytes.extend_from_slice(b"RIFF");
+        wav_bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav_bytes.extend_from_slice(b"WAVEfmt ");
+        wav_bytes.extend_from_slice(&16u32.to_le_bytes());
+        wav_bytes.extend_from_slice(&1u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&(channels as u16).to_le_bytes());
+        wav_bytes.extend_from_slice(&(sample_rate as u32).to_le_bytes());
+        wav_bytes.extend_from_slice(&((sample_rate * channels * 2) as u32).to_le_bytes());
+        wav_bytes.extend_from_slice(&((channels * 2) as u16).to_le_bytes());
+        wav_bytes.extend_from_slice(&16u16.to_le_bytes());
+        wav_bytes.extend_from_slice(b"data");
+        wav_bytes.extend_from_slice(&data_len.to_le_bytes());
+
+        for (n, &center) in fc_samples.iter().enumerate() {
+            let t = n as f32 / sample_rate as f32;
+            // Heavy music + bass in L/R/LFE across the whole timeline including silence gaps
+            let music_lr = 0.22 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                + 0.14 * (2.0 * std::f32::consts::PI * 880.0 * t).sin();
+            let bass_lfe = 0.35 * (2.0 * std::f32::consts::PI * 95.0 * t).sin();
+            let frame = [music_lr, -music_lr, center, bass_lfe, 0.0, 0.0];
+            for s in frame {
+                let pcm = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                wav_bytes.extend_from_slice(&pcm.to_le_bytes());
+            }
+        }
+        fs::write(&surround_wav, wav_bytes).expect("write 5.1 wav");
+
+        let mkv = dir.join("surround.mkv");
+        let mux_out = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=5:duration=210",
+                "-i",
+            ])
+            .arg(&surround_wav)
+            .args([
+                "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4", "-c:a", "aac", "-ac", "6",
+            ])
+            .arg(&mkv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("mux 5.1 mkv");
+        assert!(
+            mux_out.status.success(),
+            "5.1 mux failed: {}",
+            String::from_utf8_lossy(&mux_out.stderr)
+        );
+
+        let mkv_str = mkv.to_string_lossy().into_owned();
+        let probe_out = Command::new(&ffmpeg)
+            .args(["-nostdin", "-hide_banner", "-i", &mkv_str])
+            .stdin(Stdio::null())
+            .output()
+            .expect("probe 5.1 mkv");
+        let probe_stderr = String::from_utf8_lossy(&probe_out.stderr);
+        assert!(
+            parse_ffmpeg_audio_stream_has_center(&probe_stderr, 0),
+            "expected ffmpeg probe to detect 5.1 center channel in: {probe_stderr}"
+        );
+
+        let pcm_path = dir.join("dialogue.pcm");
+        let ff_args = autosync_extract_args_ffmpeg_dialogue(
+            &mkv_str,
+            &pcm_path.to_string_lossy(),
+            Some(0),
+            true,
+        );
+        let ff_out = Command::new(&ffmpeg)
+            .args(&ff_args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("extract 5.1 dialogue pcm");
+        assert!(
+            ff_out.status.success(),
+            "5.1 extract failed: {}",
+            String::from_utf8_lossy(&ff_out.stderr)
+        );
+
+        let pcm_bytes = fs::read(&pcm_path).expect("read extracted pcm");
+        let mut builder = AudioEnvelopeBuilder::new();
+        builder.push_pcm_s16le_bytes(&pcm_bytes);
+        let envelope = builder.finish().expect("envelope");
+
+        // Subtitles came from a broadcast cut: Act 1 runs 4.5s late, and a 15s commercial break
+        // was removed between acts so Act 2 runs 10.5s early (15s jump between acts).
+        let cues: Vec<SubtitleCue> = speech_bursts
+            .iter()
+            .enumerate()
+            .map(|(i, &(audio_start_ms, len_ms))| {
+                let sub_start = if i < 15 {
+                    audio_start_ms + 4_500
+                } else {
+                    audio_start_ms - 10_500
+                };
+                SubtitleCue {
+                    index: i + 1,
+                    start_ms: sub_start,
+                    end_ms: sub_start + len_ms,
+                    text: format!("Line {}", i + 1),
+                }
+            })
+            .collect();
+
+        let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
+            .expect("5.1 piecewise align should succeed");
+        assert!(
+            outcome.transform.segment_count() >= 2,
+            "expected >= 2 piecewise segments, got {} (transform={:?})",
+            outcome.transform.segment_count(),
+            outcome.transform
+        );
+        for (i, &(audio_start_ms, len_ms)) in speech_bursts.iter().enumerate() {
+            let (mapped_start, mapped_end) = outcome
+                .transform
+                .map_cue(cues[i].start_ms, cues[i].end_ms)
+                .expect("map_cue succeeds");
+            assert!(
+                (mapped_start as i64 - audio_start_ms as i64).abs() <= 150,
+                "cue {i} mapped_start={mapped_start}ms vs expected {audio_start_ms}ms",
+            );
+            assert!(
+                (mapped_end as i64 - (audio_start_ms + len_ms) as i64).abs() <= 150,
+                "cue {i} mapped_end={mapped_end}ms vs expected {}ms",
+                audio_start_ms + len_ms
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Real MP4 + CEA-608 bitstream closed-caption (`eia_608` / `cc_dec`) integration test:
+    /// embeds ATSC A/53 SEI captions shifted +4.2s into an H.264 stream saved under a path with
+    /// brackets, apostrophe, comma, and spaces, extracts them via `autosync_extract_cc_args_ffmpeg`,
+    /// aligns against speech bursts, and verifies rescaled `.srt` output. Skips if ffmpeg is absent.
+    #[cfg(windows)]
+    #[test]
+    fn test_real_cea608_closed_caption_mp4_extraction_and_autosync() {
+        use epilod_core::mpv_ipc::{
+            autosync_extract_args_ffmpeg_dialogue, autosync_extract_cc_args_ffmpeg,
+        };
+        use epilod_core::subtitle_sync::{
+            auto_align_subtitles, decode_subtitle_bytes_with_hint, parse_subtitles,
+            AudioEnvelopeBuilder, AutoSyncConfig, SubtitleEncodingHint,
+        };
+        use std::fs;
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("resources/mpv/ffmpeg.exe");
+        if !ffmpeg.is_file() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("epilod_cc_e2e_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let tricky_dir = dir.join("Show [1080p], S01");
+        fs::create_dir_all(&tricky_dir).expect("create temp dir");
+
+        // 1. Encode a clean 70s, 10 fps H.264 Annex-B video (700 frames, no B-frames)
+        let raw_h264 = dir.join("raw.h264");
+        let enc = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=128x72:r=10:d=70",
+                "-c:v",
+                "libx264",
+                "-bf",
+                "0",
+                "-g",
+                "25",
+                "-f",
+                "h264",
+            ])
+            .arg(&raw_h264)
+            .stdin(Stdio::null())
+            .output()
+            .expect("encode raw h264");
+        assert!(
+            enc.status.success(),
+            "{}",
+            String::from_utf8_lossy(&enc.stderr)
+        );
+
+        let raw_bytes = fs::read(&raw_h264).expect("read h264");
+        let odd_parity = |b: u8| -> u8 {
+            let v = b & 0x7F;
+            if v.count_ones().is_multiple_of(2) {
+                v | 0x80
+            } else {
+                v
+            }
+        };
+        let make_sei = |pairs: &[(u8, u8)]| -> Vec<u8> {
+            let mut payload = vec![0xB5, 0x00, 0x31, b'G', b'A', b'9', b'4', 0x03];
+            payload.push(0x40 | (pairs.len() as u8 & 0x1F));
+            payload.push(0xFF);
+            for &(c1, c2) in pairs {
+                payload.extend([0xFC, odd_parity(c1), odd_parity(c2)]);
+            }
+            payload.push(0xFF);
+            let mut sei = vec![0x04];
+            let mut rem = payload.len();
+            while rem >= 255 {
+                sei.push(255);
+                rem -= 255;
+            }
+            sei.push(rem as u8);
+            sei.extend_from_slice(&payload);
+            sei.push(0x80);
+            let mut nalu = vec![0, 0, 0, 1, 0x06];
+            let mut zeros = 0u8;
+            for b in sei {
+                if zeros >= 2 && b <= 3 {
+                    nalu.push(3);
+                    zeros = 0;
+                }
+                nalu.push(b);
+                zeros = if b == 0 { zeros + 1 } else { 0 };
+            }
+            nalu
+        };
+
+        // 10 varied dialogue bursts inside 70s audio; CEA-608 captions live +4.2s late
+        let bursts: &[(u64, u64)] = &[
+            (5_000, 1_400),
+            (9_200, 2_300),
+            (15_600, 1_100),
+            (20_100, 2_700),
+            (26_800, 1_500),
+            (31_400, 2_100),
+            (38_900, 1_300),
+            (43_200, 2_600),
+            (50_700, 1_600),
+            (56_100, 2_200),
+        ];
+        let cc_shift_ms = 4_200u64;
+        let mut cc_by_frame = std::collections::HashMap::<usize, Vec<(u8, u8)>>::new();
+        for (idx, &(s_ms, len_ms)) in bursts.iter().enumerate() {
+            let show_f = ((s_ms + cc_shift_ms) / 100) as usize;
+            let hide_f = ((s_ms + cc_shift_ms + len_ms) / 100) as usize;
+            let text = format!("SPOKEN LINE {idx}");
+            let mut pairs = vec![(0x14, 0x20), (0x14, 0x2E)];
+            for chunk in text.as_bytes().chunks(2) {
+                pairs.push((chunk[0], *chunk.get(1).unwrap_or(&0)));
+            }
+            pairs.push((0x14, 0x2F));
+            cc_by_frame.insert(show_f, pairs);
+            cc_by_frame.insert(hide_f, vec![(0x14, 0x2C)]);
+        }
+
+        let mut starts = Vec::new();
+        let mut i = 0usize;
+        while i + 3 < raw_bytes.len() {
+            if raw_bytes[i..i + 4] == [0, 0, 0, 1] {
+                starts.push((i, 4usize));
+                i += 4;
+            } else if raw_bytes[i..i + 3] == [0, 0, 1] {
+                starts.push((i, 3usize));
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        let mut cc_h264_bytes = Vec::with_capacity(raw_bytes.len() + 2048);
+        let mut frame_idx = 0usize;
+        for (idx, &(pos, sc_len)) in starts.iter().enumerate() {
+            let end = starts.get(idx + 1).map(|x| x.0).unwrap_or(raw_bytes.len());
+            let nalu = &raw_bytes[pos..end];
+            let nal_type = nalu[sc_len] & 0x1F;
+            if nal_type == 1 || nal_type == 5 {
+                if let Some(pairs) = cc_by_frame.get(&frame_idx) {
+                    cc_h264_bytes.extend_from_slice(&make_sei(pairs));
+                }
+                frame_idx += 1;
+            }
+            cc_h264_bytes.extend_from_slice(nalu);
+        }
+        let cc_h264 = dir.join("with_cc.h264");
+        fs::write(&cc_h264, cc_h264_bytes).expect("write cc h264");
+
+        // 2. Build 70s 48kHz audio with speech bursts matching `bursts`
+        let sr = 48_000usize;
+        let mut audio_samples = vec![0.0f32; sr * 70];
+        for &(s_ms, len_ms) in bursts {
+            let s_idx = (s_ms as usize * sr) / 1000;
+            let e_idx = (((s_ms + len_ms) as usize) * sr) / 1000;
+            for (k, sample) in audio_samples[s_idx..e_idx].iter_mut().enumerate() {
+                let t = k as f32 / sr as f32;
+                *sample = 0.28 * (2.0 * std::f32::consts::PI * 640.0 * t).sin();
+            }
+        }
+        let wav = dir.join("audio.wav");
+        let data_len = (audio_samples.len() * 2) as u32;
+        let mut wav_bytes = Vec::with_capacity(44 + data_len as usize);
+        wav_bytes.extend_from_slice(b"RIFF");
+        wav_bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav_bytes.extend_from_slice(b"WAVEfmt ");
+        wav_bytes.extend_from_slice(&16u32.to_le_bytes());
+        wav_bytes.extend_from_slice(&1u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&1u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&(sr as u32).to_le_bytes());
+        wav_bytes.extend_from_slice(&((sr * 2) as u32).to_le_bytes());
+        wav_bytes.extend_from_slice(&2u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&16u16.to_le_bytes());
+        wav_bytes.extend_from_slice(b"data");
+        wav_bytes.extend_from_slice(&data_len.to_le_bytes());
+        for s in audio_samples {
+            wav_bytes.extend_from_slice(&((s * i16::MAX as f32).round() as i16).to_le_bytes());
+        }
+        fs::write(&wav, wav_bytes).expect("write wav");
+
+        // Mux under a path containing apostrophe, brackets, comma, and space
+        let mp4 = tricky_dir.join("Test's Show [CC], #1.mp4");
+        let mux = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-r",
+                "10",
+                "-i",
+            ])
+            .arg(&cc_h264)
+            .arg("-i")
+            .arg(&wav)
+            .args(["-c:v", "copy", "-c:a", "aac"])
+            .arg(&mp4)
+            .stdin(Stdio::null())
+            .output()
+            .expect("mux mp4");
+        assert!(
+            mux.status.success(),
+            "{}",
+            String::from_utf8_lossy(&mux.stderr)
+        );
+
+        // 3. Extract CEA-608 closed captions using `autosync_extract_cc_args_ffmpeg`
+        let mp4_str = mp4.to_string_lossy().into_owned();
+        let cc_srt = dir.join("extracted_cc.srt");
+        let cc_args = autosync_extract_cc_args_ffmpeg(&mp4_str, &cc_srt.to_string_lossy(), None);
+        let cc_out = Command::new(&ffmpeg)
+            .args(&cc_args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("extract cc");
+        assert!(
+            cc_out.status.success(),
+            "cc extract failed: {}",
+            String::from_utf8_lossy(&cc_out.stderr)
+        );
+        let sub_text = decode_subtitle_bytes_with_hint(
+            &fs::read(&cc_srt).expect("read cc srt"),
+            SubtitleEncodingHint::Utf8,
+        )
+        .expect("decode cc");
+        let cues = parse_subtitles(&sub_text).expect("parse cc srt");
+        assert_eq!(
+            cues.len(),
+            10,
+            "expected 10 extracted CC cues, got: {sub_text}"
+        );
+
+        // 4. Extract audio and verify alignment + rescaled `.srt` output
+        let pcm = dir.join("audio.pcm");
+        let a_args =
+            autosync_extract_args_ffmpeg_dialogue(&mp4_str, &pcm.to_string_lossy(), Some(0), false);
+        let a_out = Command::new(&ffmpeg)
+            .args(&a_args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(a_out.status.success());
+
+        let mut env_builder = AudioEnvelopeBuilder::new();
+        env_builder.push_pcm_s16le_bytes(&fs::read(&pcm).unwrap());
+        let env = env_builder.finish().unwrap();
+
+        let outcome = auto_align_subtitles(&cues, &env, &AutoSyncConfig::default())
+            .expect("CEA-608 alignment should succeed");
+        assert!(
+            (outcome.offset_ms + cc_shift_ms as i64).abs() <= 150,
+            "offset_ms={} expected ~-{}",
+            outcome.offset_ms,
+            cc_shift_ms
+        );
+
+        let rescaled = write_rescaled_subtitle_file_with_transform(
+            &cc_srt,
+            &dir.join("out"),
+            &outcome.transform,
+            SubtitleEncodingHint::Utf8,
+        )
+        .expect("write rescaled cc");
+        let aligned_cues = parse_subtitles(&fs::read_to_string(&rescaled).unwrap()).unwrap();
+        assert!(
+            (aligned_cues[0].start_ms as i64 - bursts[0].0 as i64).abs() <= 150,
+            "aligned CC cue 0 start={} expected ~{}",
+            aligned_cues[0].start_ms,
+            bursts[0].0
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_arabic_cp1256_and_utf8_with_english_sdh_and_rtl_marks_autosync() {
+        use epilod_core::subtitle_sync::{
+            auto_align_subtitles, decode_subtitle_bytes_with_hint, format_srt_timestamp,
+            parse_subtitles, AudioEnvelopeBuilder, AutoSyncConfig, SubtitleEncodingHint,
+        };
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("epilod_ar_en_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        // Synthesize 70s of 16kHz PCM speech bursts matching varied dialogue cues
+        let bursts: &[(u64, u64)] = &[
+            (5_000, 1_400),
+            (9_200, 2_300),
+            (15_600, 1_100),
+            (20_100, 2_700),
+            (26_800, 1_500),
+            (31_400, 2_100),
+            (38_900, 1_300),
+            (43_200, 2_600),
+            (50_700, 1_600),
+            (56_100, 2_200),
+        ];
+        let mut builder = AudioEnvelopeBuilder::new();
+        let total_samples = 16_000 * 70;
+        let mut pcm = vec![0i16; total_samples];
+        for &(s_ms, len_ms) in bursts {
+            let s0 = s_ms as usize * 16;
+            let s1 = ((s_ms + len_ms) as usize * 16).min(total_samples);
+            for (idx, slot) in pcm[s0..s1].iter_mut().enumerate() {
+                let t = idx as f32 / 16_000.0;
+                *slot = ((0.3 * (2.0 * std::f32::consts::PI * 620.0 * t).sin()) * i16::MAX as f32) as i16;
+            }
+        }
+        let mut pcm_bytes = Vec::with_capacity(pcm.len() * 2);
+        for s in pcm {
+            pcm_bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        builder.push_pcm_s16le_bytes(&pcm_bytes);
+        let env = builder.finish().expect("envelope");
+
+        // 1. Legacy Windows-1256 Arabic SRT bytes (mixed with an English [Music] SDH cue,
+        // shifted 3.1s early) using raw CP1256 bytes for "مرحبا يا صديقي":
+        let mut cp1256_bytes = b"1\r\n00:00:00,200 --> 00:00:01,500\r\n[Music]\r\n\r\n".to_vec();
+        let shift_early_ms = 3_100u64;
+        // CP1256 bytes for "مرحبا يا صديقي": E3 D1 CD C8 C7 20 ED C7 20 D5 CF ED DE ED
+        let ar_cp1256 = [
+            0xE3u8, 0xD1, 0xCD, 0xC8, 0xC7, b' ', 0xED, 0xC7, b' ', 0xD5, 0xCF, 0xED, 0xDE,
+            0xED,
+        ];
+        for (i, &(s_ms, len_ms)) in bursts.iter().enumerate() {
+            let sub_s = s_ms - shift_early_ms;
+            let header = format!(
+                "{}\r\n{} --> {}\r\n",
+                i + 2,
+                format_srt_timestamp(sub_s),
+                format_srt_timestamp(sub_s + len_ms)
+            );
+            cp1256_bytes.extend_from_slice(header.as_bytes());
+            cp1256_bytes.extend_from_slice(&ar_cp1256);
+            cp1256_bytes.extend_from_slice(format!(" {}\r\n\r\n", i + 1).as_bytes());
+        }
+        let cp1256_path = dir.join("arabic_ansi.srt");
+        fs::write(&cp1256_path, &cp1256_bytes).unwrap();
+
+        let decoded_ar = decode_subtitle_bytes_with_hint(&cp1256_bytes, SubtitleEncodingHint::Auto)
+            .expect("auto-detect CP1256 Arabic");
+        assert!(decoded_ar.contains("مرحبا يا صديقي"));
+        let cues_ar = parse_subtitles(&decoded_ar).unwrap();
+        let outcome_ar = auto_align_subtitles(&cues_ar, &env, &AutoSyncConfig::default())
+            .expect("Arabic CP1256 auto-align succeeds");
+        assert!((outcome_ar.offset_ms - shift_early_ms as i64).abs() <= 70);
+        let synced_ar = write_rescaled_subtitle_file_with_transform(
+            &cp1256_path,
+            &dir.join("out"),
+            &outcome_ar.transform,
+            SubtitleEncodingHint::Auto,
+        )
+        .unwrap();
+        let synced_ar_txt = fs::read_to_string(&synced_ar).unwrap();
+        assert!(synced_ar_txt.contains("مرحبا يا صديقي"));
+
+        // 2. UTF-8 RTL SRT with U+200F RLM marks before cue timestamps (Arabic + English mix)
+        let mut rtl_utf8 = String::from("\u{FEFF}1\n\u{200F}00:00:00,300 --> \u{200F}00:00:01,500\n[موسيقى]\n\n");
+        for (i, &(s_ms, len_ms)) in bursts.iter().enumerate() {
+            let sub_s = s_ms - shift_early_ms;
+            rtl_utf8.push_str(&format!(
+                "{}\n\u{200F}{} --> \u{200F}{}\nأهلاً بك يا friend #{}\n\n",
+                i + 2,
+                format_srt_timestamp(sub_s),
+                format_srt_timestamp(sub_s + len_ms),
+                i + 1
+            ));
+        }
+        let rtl_cues = parse_subtitles(&rtl_utf8).expect("RTL mark SRT parses");
+        let outcome_rtl = auto_align_subtitles(&rtl_cues, &env, &AutoSyncConfig::default())
+            .expect("Arabic+English UTF-8 RTL auto-align succeeds");
+        assert!((outcome_rtl.offset_ms - shift_early_ms as i64).abs() <= 70);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_real_mkv_extracts_selected_language_via_ff_index() {
+        use epilod_core::mpv_ipc::{
+            autosync_extract_stream_args_ffmpeg, encode_observe, parse_line, MpvEvent, MpvMessage,
+        };
+        use epilod_core::subtitle_sync::{
+            decode_subtitle_bytes_with_hint, parse_subtitles, SubtitleEncodingHint,
+        };
+        use std::fs::{self, OpenOptions};
+        use std::io::{BufRead, BufReader, Write};
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mpv = manifest_dir.join("resources/mpv/mpv.exe");
+        let ffmpeg = manifest_dir.join("resources/mpv/ffmpeg.exe");
+        if !mpv.is_file() || !ffmpeg.is_file() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("epilod_ff_index_sub_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let ara_srt = dir.join("ara.srt");
+        fs::write(
+            &ara_srt,
+            "1\r\n00:00:01,000 --> 00:00:03,000\r\nمرحبا بالعالم\r\n\r\n",
+        )
+        .unwrap();
+        let eng_srt = dir.join("eng.srt");
+        fs::write(
+            &eng_srt,
+            "1\r\n00:00:01,000 --> 00:00:03,000\r\nHello English world\r\n\r\n",
+        )
+        .unwrap();
+
+        let mkv = dir.join("multi_sub.mkv");
+        let mux = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=128x72:rate=10:duration=5",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=5",
+                "-i",
+            ])
+            .arg(&ara_srt)
+            .arg("-i")
+            .arg(&eng_srt)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:s",
+                "-map",
+                "3:s",
+                "-metadata:s:s:0",
+                "language=ara",
+                "-metadata:s:s:1",
+                "language=eng",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-c:s",
+                "subrip",
+            ])
+            .arg(&mkv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("mux multi-sub mkv");
+        assert!(
+            mux.status.success(),
+            "ffmpeg mux failed: {}",
+            String::from_utf8_lossy(&mux.stderr)
+        );
+
+        let mkv_str = mkv.to_string_lossy().into_owned();
+        let pipe = format!(r"\\.\pipe\epilod-ffidx-test-{}", std::process::id());
+        let mut mpv_child = Command::new(&mpv)
+            .args([
+                "--no-config",
+                "--load-scripts=no",
+                "--ytdl=no",
+                "--vo=null",
+                "--ao=null",
+                "--pause",
+                "--keep-open=yes",
+                "--sub-create-cc-track=yes",
+                &format!("--input-ipc-server={pipe}"),
+                &mkv_str,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn mpv");
+
+        let tracks = (0..40).find_map(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut pipe_file = OpenOptions::new().read(true).write(true).open(&pipe).ok()?;
+            let observe = encode_observe(1, 1, "track-list");
+            pipe_file.write_all(observe.as_bytes()).ok()?;
+            pipe_file.flush().ok()?;
+            let mut reader = BufReader::new(pipe_file);
+            for _ in 0..24 {
+                let mut line = String::new();
+                if reader.read_line(&mut line).ok()? == 0 {
+                    break;
+                }
+                if let Ok(MpvMessage::Event(MpvEvent::TrackList(list))) = parse_line(&line) {
+                    if list.iter().any(|t| t.kind == "sub") {
+                        return Some(list);
+                    }
+                }
+            }
+            None
+        });
+        let _ = mpv_child.kill();
+        let _ = mpv_child.wait();
+
+        let tracks = tracks.expect("mpv reported track-list");
+        let eng_track = tracks
+            .iter()
+            .find(|t| t.kind == "sub" && t.lang.as_deref() == Some("eng"))
+            .expect("english sub track");
+        let eng_ff_idx = eng_track.ff_index.expect("english track has ff-index");
+        assert_ne!(
+            eng_ff_idx, 0,
+            "eng stream index should reflect container stream position"
+        );
+
+        let extracted = dir.join("extracted_eng.srt");
+        let extract_args =
+            autosync_extract_stream_args_ffmpeg(&mkv_str, &extracted.to_string_lossy(), eng_ff_idx);
+        let out = Command::new(&ffmpeg)
+            .args(&extract_args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("extract eng by ff-index");
+        assert!(
+            out.status.success(),
+            "ffmpeg extract failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let raw = fs::read(&extracted).expect("read extracted srt");
+        let text = decode_subtitle_bytes_with_hint(&raw, SubtitleEncodingHint::Auto).unwrap();
+        let cues = parse_subtitles(&text).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert!(cues[0].text.contains("Hello English world"));
+        assert!(!text.contains("مرحبا"));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1,5 +1,9 @@
 import { useEffect, useRef, type RefObject } from "react";
-import { mpvBackdropFrame, type MpvBackdropFrame } from "../lib/mpv";
+import {
+  getLastCapturedBackdropFrame,
+  mpvBackdropFrame,
+  type MpvBackdropFrame,
+} from "../lib/mpv";
 
 interface VideoGlassBackdropProps {
   active: boolean;
@@ -7,10 +11,47 @@ interface VideoGlassBackdropProps {
   playing: boolean;
   viewportRef: RefObject<HTMLDivElement | null>;
   layoutKey: string;
+  pausedRefreshKey?: string;
 }
 
 const CAPTURE_INTERVAL_MS = 75;
-const LAYOUT_TRACK_MS = 420;
+const LAYOUT_TRACK_MS = 460;
+
+function computeEffectiveZOrder(el: HTMLElement): number {
+  let z = 0;
+  let cur: HTMLElement | null = el;
+  while (cur && cur !== document.documentElement) {
+    const zStr = window.getComputedStyle(cur).zIndex;
+    if (zStr && zStr !== "auto") {
+      const parsed = Number.parseInt(zStr, 10);
+      if (Number.isFinite(parsed)) {
+        z += parsed;
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return z;
+}
+
+function computeEffectiveRegionAlpha(el: HTMLElement): number {
+  let alpha = 1;
+  let cur: HTMLElement | null = el;
+  while (cur && cur !== document.documentElement) {
+    const s = window.getComputedStyle(cur);
+    if (s.display === "none" || s.visibility === "hidden") {
+      return 0;
+    }
+    const parsedOpacity = Number.parseFloat(s.opacity);
+    if (Number.isFinite(parsedOpacity)) {
+      alpha *= Math.min(1, Math.max(0, parsedOpacity));
+      if (alpha <= 0.01) {
+        return 0;
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return alpha;
+}
 
 interface ActiveBounds {
   minU: number;
@@ -60,19 +101,19 @@ function sampleBilinear(
  * when a 16:9 or 21:9 film plays in a compact or differently proportioned window.
  */
 function detectActiveFrameBounds(rgba: Uint8ClampedArray, fw: number, fh: number): ActiveBounds {
-  const stepX = Math.max(1, Math.floor(fw / 24));
-  const stepY = Math.max(1, Math.floor(fh / 18));
+  const stepX = Math.max(1, Math.floor(fw / 40));
+  const stepY = Math.max(1, Math.floor(fh / 30));
   const rowHasPicture = (y: number): boolean => {
     for (let x = 0; x < fw; x += stepX) {
       const i = (y * fw + x) * 4;
-      if (rgba[i] + rgba[i + 1] + rgba[i + 2] > 28) return true;
+      if (rgba[i] + rgba[i + 1] + rgba[i + 2] > 14) return true;
     }
     return false;
   };
   const colHasPicture = (x: number, yStart: number, yEnd: number): boolean => {
     for (let y = yStart; y <= yEnd; y += stepY) {
       const i = (y * fw + x) * 4;
-      if (rgba[i] + rgba[i + 1] + rgba[i + 2] > 28) return true;
+      if (rgba[i] + rgba[i + 1] + rgba[i + 2] > 14) return true;
     }
     return false;
   };
@@ -87,18 +128,18 @@ function detectActiveFrameBounds(rgba: Uint8ClampedArray, fw: number, fh: number
 
   let left = 0;
   let right = fw - 1;
-  while (left < Math.floor(fw * 0.3) && !colHasPicture(left, top, bottom)) left++;
-  while (right > Math.ceil(fw * 0.7) && !colHasPicture(right, top, bottom)) right--;
+  while (left < Math.floor(fw * 0.22) && !colHasPicture(left, top, bottom)) left++;
+  while (right > Math.ceil(fw * 0.78) && !colHasPicture(right, top, bottom)) right--;
   if (right <= left + 4) {
     left = 0;
     right = fw - 1;
   }
 
   return {
-    minU: Math.min(0.42, (left + 1) / fw),
-    maxU: Math.max(0.58, (right - 1) / fw),
-    minV: Math.min(0.42, (top + 1) / fh),
-    maxV: Math.max(0.58, (bottom - 1) / fh),
+    minU: Math.min(0.22, (left + 1) / fw),
+    maxU: Math.max(0.78, (right - 1) / fw),
+    minV: Math.min(0.38, (top + 1) / fh),
+    maxV: Math.max(0.62, (bottom - 1) / fh),
   };
 }
 
@@ -113,6 +154,7 @@ export function VideoGlassBackdrop({
   playing,
   viewportRef,
   layoutKey,
+  pausedRefreshKey = "",
 }: VideoGlassBackdropProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const regionScratchRef = useRef<HTMLCanvasElement | null>(null);
@@ -126,13 +168,17 @@ export function VideoGlassBackdrop({
 
     const w = Math.max(1, Math.round(window.innerWidth));
     const h = Math.max(1, Math.round(window.innerHeight));
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+    const dpr = Math.min(2.5, Math.max(1, window.devicePixelRatio || 1));
+    const pw = Math.max(1, Math.round(w * dpr));
+    const ph = Math.max(1, Math.round(h * dpr));
+    if (canvas.width !== pw || canvas.height !== ph) {
+      canvas.width = pw;
+      canvas.height = ph;
     }
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
     const frame = latestFrameRef.current;
@@ -140,8 +186,12 @@ export function VideoGlassBackdrop({
       return;
     }
 
-    const regions = document.querySelectorAll<HTMLElement>("[data-glass-region]");
+    const regions = Array.from(document.querySelectorAll<HTMLElement>("[data-glass-region]"));
     if (regions.length === 0) return;
+
+    const sortedRegions = regions
+      .map((el, index) => ({ el, index, z: computeEffectiveZOrder(el) }))
+      .sort((a, b) => (a.z !== b.z ? a.z - b.z : a.index - b.index));
 
     const vpRect = viewportRef.current?.getBoundingClientRect();
     const dx = vpRect ? vpRect.left : 0;
@@ -159,14 +209,10 @@ export function VideoGlassBackdrop({
     const scratchCtx = scratch.getContext("2d");
     if (!scratchCtx) return;
 
-    regions.forEach((el) => {
+    sortedRegions.forEach(({ el }) => {
+      const regionAlpha = computeEffectiveRegionAlpha(el);
+      if (regionAlpha <= 0.01) return;
       const style = window.getComputedStyle(el);
-      if (style.display === "none" || style.visibility === "hidden") return;
-      const parsedOpacity = Number.parseFloat(style.opacity);
-      if (Number.isFinite(parsedOpacity) && parsedOpacity <= 0.01) return;
-      const regionAlpha = Number.isFinite(parsedOpacity)
-        ? Math.min(1, Math.max(0, parsedOpacity))
-        : 1;
       const r = el.getBoundingClientRect();
       if (r.width < 4 || r.height < 4) return;
 
@@ -235,8 +281,18 @@ export function VideoGlassBackdrop({
           const sy = r.top + ly + shiftY;
           const rawU = (sx - dx) / dw;
           const rawV = (sy - dy) / dh;
-          const u = Math.max(activeBox.minU, Math.min(activeBox.maxU, rawU));
-          const v = Math.max(activeBox.minV, Math.min(activeBox.maxV, rawV));
+          const u =
+            rawU < activeBox.minU
+              ? Math.min(activeBox.maxU, activeBox.minU + Math.min(0.06, activeBox.minU - rawU))
+              : rawU > activeBox.maxU
+                ? Math.max(activeBox.minU, activeBox.maxU - Math.min(0.06, rawU - activeBox.maxU))
+                : rawU;
+          const v =
+            rawV < activeBox.minV
+              ? Math.min(activeBox.maxV, activeBox.minV + Math.min(0.06, activeBox.minV - rawV))
+              : rawV > activeBox.maxV
+                ? Math.max(activeBox.minV, activeBox.maxV - Math.min(0.06, rawV - activeBox.maxV))
+                : rawV;
 
           const [rr, gg, bb] = sampleBilinear(frame.rgba, frame.width, frame.height, u, v);
           const idx = (py * rw + px) * 4;
@@ -248,6 +304,18 @@ export function VideoGlassBackdrop({
       }
 
       scratchCtx.putImageData(img, 0, 0);
+
+      // Punch out any lower glass region pixels inside this upper surface before drawing
+      // so stacked popovers/menus never compound double alpha or bleed through.
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(r.left, r.top, r.width, r.height, radius);
+      ctx.clip();
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.globalAlpha = regionAlpha;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(r.left - 1, r.top - 1, r.width + 2, r.height + 2);
+      ctx.restore();
 
       // Light overscan pre-blur preserves meniscus edge refraction without dark edge halos.
       const bleed = 12;
@@ -274,61 +342,163 @@ export function VideoGlassBackdrop({
     });
   };
 
+  const captureInFlightRef = useRef(false);
+  const captureQueuedRef = useRef(false);
+  const isPausedCaptureActiveRef = useRef(false);
+  const lastPausedKeyRef = useRef<string | number | undefined>(pausedRefreshKey);
+  const requestPausedCaptureRef = useRef<(forceSettledPass?: boolean) => void>(() => undefined);
+
   useEffect(() => {
+    isPausedCaptureActiveRef.current = active && visible && !playing;
+    captureQueuedRef.current = false;
+
     if (!active || !visible) {
+      requestPausedCaptureRef.current = () => undefined;
       latestFrameRef.current = null;
       paintRegionsRef.current();
       return;
     }
 
-    let cancelled = false;
-    let timerId: number | null = null;
+    if (!playing && !latestFrameRef.current) {
+      const cached = getLastCapturedBackdropFrame();
+      if (cached) {
+        latestFrameRef.current = cached;
+        paintRegionsRef.current();
+      }
+    }
 
-    const pullOnce = async () => {
-      if (cancelled || document.hidden) return;
+    let cancelled = false;
+    let loopTimer: number | null = null;
+    let retryTimer: number | null = null;
+    let settleTimer: number | null = null;
+    const PAUSED_RETRY_DELAYS = [110, 260, 480];
+
+    const pullOnce = async (): Promise<boolean> => {
+      if (cancelled || document.hidden) return false;
+      if (captureInFlightRef.current) {
+        captureQueuedRef.current = true;
+        return false;
+      }
+      captureInFlightRef.current = true;
       try {
         const frame = await mpvBackdropFrame(240, 135);
         if (!cancelled && frame) {
           latestFrameRef.current = frame;
           paintRegionsRef.current();
+          return true;
         }
+        return false;
       } catch {
-        // Ignore transient capture misses during load/close transitions.
+        return false;
+      } finally {
+        captureInFlightRef.current = false;
+        if (!cancelled && captureQueuedRef.current) {
+          captureQueuedRef.current = false;
+          void pullOnce();
+        }
       }
     };
 
+    const schedulePausedRetries = (attempt = 0) => {
+      if (cancelled || playing || attempt >= PAUSED_RETRY_DELAYS.length) return;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(async () => {
+        retryTimer = null;
+        if (cancelled || playing) return;
+        const ok = await pullOnce();
+        if (!ok && !cancelled && !playing) {
+          schedulePausedRetries(attempt + 1);
+        }
+      }, PAUSED_RETRY_DELAYS[attempt]);
+    };
+
+    const requestPausedCapture = (forceSettledPass = false) => {
+      if (cancelled || playing) return;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+        settleTimer = null;
+      }
+      void pullOnce().then((ok) => {
+        if (cancelled || playing) return;
+        if (!ok) {
+          schedulePausedRetries(0);
+        } else if (forceSettledPass) {
+          settleTimer = window.setTimeout(() => {
+            settleTimer = null;
+            if (!cancelled && !playing) {
+              void pullOnce();
+            }
+          }, 220);
+        }
+      });
+    };
+
+    requestPausedCaptureRef.current = requestPausedCapture;
+
     const scheduleLoop = () => {
       if (cancelled || !playing) return;
-      timerId = window.setTimeout(async () => {
+      loopTimer = window.setTimeout(async () => {
         await pullOnce();
         scheduleLoop();
       }, CAPTURE_INTERVAL_MS);
     };
 
-    void pullOnce().then(() => {
+    void pullOnce().then((ok) => {
       if (cancelled) return;
       if (playing) {
         scheduleLoop();
       } else {
-        timerId = window.setTimeout(() => {
-          void pullOnce();
-        }, 70);
+        if (!ok) {
+          schedulePausedRetries(0);
+        } else {
+          settleTimer = window.setTimeout(() => {
+            settleTimer = null;
+            if (!cancelled && !playing) {
+              void pullOnce();
+            }
+          }, 95);
+        }
       }
     });
 
     const handleVisibility = () => {
       if (!document.hidden && !cancelled) {
-        void pullOnce();
+        if (playing) {
+          void pullOnce();
+        } else {
+          requestPausedCapture(true);
+        }
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       cancelled = true;
-      if (timerId !== null) window.clearTimeout(timerId);
+      requestPausedCaptureRef.current = () => undefined;
+      if (loopTimer !== null) window.clearTimeout(loopTimer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (settleTimer !== null) window.clearTimeout(settleTimer);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [active, visible, playing]);
+
+  useEffect(() => {
+    if (lastPausedKeyRef.current === pausedRefreshKey) return;
+    lastPausedKeyRef.current = pausedRefreshKey;
+    if (!active || !visible || playing) return;
+    const timerId = window.setTimeout(() => {
+      if (!document.hidden) {
+        requestPausedCaptureRef.current(false);
+      }
+    }, 55);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [active, visible, playing, pausedRefreshKey]);
 
   useEffect(() => {
     if (!active || !visible) {
@@ -337,20 +507,103 @@ export function VideoGlassBackdrop({
     }
 
     let rafId = 0;
-    const start = performance.now();
+    let trackUntil = performance.now() + LAYOUT_TRACK_MS;
+
     const tick = (now: number) => {
       paintRegionsRef.current();
-      if (now - start < LAYOUT_TRACK_MS) {
+      if (now < trackUntil) {
+        rafId = window.requestAnimationFrame(tick);
+      } else {
+        rafId = 0;
+      }
+    };
+
+    const triggerTrack = () => {
+      trackUntil = Math.max(trackUntil, performance.now() + LAYOUT_TRACK_MS);
+      if (!rafId) {
         rafId = window.requestAnimationFrame(tick);
       }
     };
-    rafId = window.requestAnimationFrame(tick);
 
-    const onResize = () => paintRegionsRef.current();
+    const resizeObs =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(triggerTrack) : null;
+    const syncObservedRegions = () => {
+      if (!resizeObs) return;
+      resizeObs.disconnect();
+      document.querySelectorAll<HTMLElement>("[data-glass-region]").forEach((el) => {
+        resizeObs.observe(el);
+      });
+    };
+
+    const nodeHasGlassRegion = (node: Node): boolean => {
+      if (!(node instanceof HTMLElement)) return false;
+      return (
+        node.hasAttribute("data-glass-region") ||
+        node.querySelector("[data-glass-region]") !== null
+      );
+    };
+
+    const mutationObs =
+      typeof MutationObserver !== "undefined"
+        ? new MutationObserver((records) => {
+            let needsResync = false;
+            let needsRepaint = false;
+            for (const rec of records) {
+              if (rec.type === "attributes") {
+                needsRepaint = true;
+                if (rec.attributeName === "data-glass-region") {
+                  needsResync = true;
+                }
+              } else {
+                for (const node of rec.addedNodes) {
+                  if (nodeHasGlassRegion(node)) {
+                    needsResync = true;
+                    needsRepaint = true;
+                  }
+                }
+                for (const node of rec.removedNodes) {
+                  if (nodeHasGlassRegion(node)) {
+                    needsResync = true;
+                    needsRepaint = true;
+                  }
+                }
+              }
+            }
+            if (needsResync) syncObservedRegions();
+            if (needsRepaint) triggerTrack();
+          })
+        : null;
+
+    syncObservedRegions();
+    mutationObs?.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-glass-region", "data-open"],
+    });
+
+    triggerTrack();
+
+    let resizeCaptureTimer: number | null = null;
+    const onResize = () => {
+      triggerTrack();
+      if (!isPausedCaptureActiveRef.current) return;
+      if (resizeCaptureTimer !== null) window.clearTimeout(resizeCaptureTimer);
+      resizeCaptureTimer = window.setTimeout(() => {
+        resizeCaptureTimer = null;
+        if (isPausedCaptureActiveRef.current) {
+          requestPausedCaptureRef.current(true);
+        }
+      }, 110);
+    };
     window.addEventListener("resize", onResize);
+    window.addEventListener("ep:glass-layout", triggerTrack);
     return () => {
       if (rafId) window.cancelAnimationFrame(rafId);
+      resizeObs?.disconnect();
+      mutationObs?.disconnect();
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("ep:glass-layout", triggerTrack);
     };
   }, [active, visible, layoutKey]);
 

@@ -16,6 +16,7 @@ export const PLAYER_SHORTCUTS: ShortcutSpec[] = [
   { keys: ["J", "L"], label: "Seek ±10 seconds", category: "Playback" },
   { keys: ["↑", "↓"], label: "Volume ±5%", category: "Playback" },
   { keys: ["M"], label: "Mute / Unmute", category: "Playback" },
+  { keys: ["I"], label: "Skip detected intro", category: "Playback" },
   { keys: ["[", "]"], label: "Playback speed ±0.1× (when un-synced)", category: "Playback" },
   { keys: ["V"], label: "Toggle subtitle visibility", category: "Subtitles" },
   { keys: ["S"], label: "Cycle subtitle track", category: "Subtitles" },
@@ -23,6 +24,8 @@ export const PLAYER_SHORTCUTS: ShortcutSpec[] = [
   { keys: ["F"], label: "Toggle fullscreen", category: "Room & Window" },
   { keys: ["Esc"], label: "Exit fullscreen or close dialog", category: "Room & Window" },
   { keys: ["R"], label: "Toggle Ready state in room", category: "Room & Window" },
+  { keys: ["E"], label: "Toggle live reaction bar (in party)", category: "Room & Window" },
+  { keys: ["1–7"], label: "Send quick emoji reaction (❤️ 😂 😮 😱 😢 🔥 👏)", category: "Room & Window" },
   { keys: ["?"], label: "Open keyboard shortcuts", category: "Room & Window" },
 ];
 

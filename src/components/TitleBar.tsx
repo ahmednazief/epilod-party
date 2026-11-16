@@ -2,13 +2,25 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AppCloseIcon,
   AppDownloadIcon,
+  AppMaximizeIcon,
   AppMinimizeIcon,
   AppResetIcon,
+  AppUpdateProgressIcon,
 } from "./ui/AppIcons";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { isDesktop } from "../lib/bridge";
+import { windowDragFromMaximized } from "../lib/mpv";
 import { useAppStore } from "../store/useAppStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
+
+function isTitleBarInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest(
+      'button, a, input, select, textarea, label, summary, [role="button"], [role="link"], [role="menuitem"]',
+    ),
+  );
+}
 
 interface TitleBarProps {
   leftSlot: ReactNode;
@@ -19,6 +31,7 @@ interface TitleBarProps {
 
 export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls = false }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
 
   const openSettings = useAppStore((s) => s.openSettings);
   const updateStatus = useUpdaterStore((s) => s.status);
@@ -73,6 +86,8 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
     return () => {
       active = false;
       unlisten?.();
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
     };
   }, []);
 
@@ -97,14 +112,64 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
     await getCurrentWindow().close();
   };
 
+  const handleMaximizedTitleMouseDown = (e: ReactMouseEvent<HTMLElement>) => {
+    if (!isDesktop() || !isMaximized || e.button !== 0 || isTitleBarInteractiveTarget(e.target)) {
+      return;
+    }
+    if (e.detail === 2) {
+      e.preventDefault();
+      void handleToggleMaximize();
+      return;
+    }
+    if (e.detail !== 1) return;
+
+    e.preventDefault();
+    dragCleanupRef.current?.();
+    const startX = e.screenX;
+    const startY = e.screenY;
+
+    const cleanup = () => {
+      window.removeEventListener("mousemove", handleMove, true);
+      window.removeEventListener("mouseup", handleUp, true);
+      window.removeEventListener("blur", handleUp);
+      if (dragCleanupRef.current === cleanup) {
+        dragCleanupRef.current = null;
+      }
+    };
+
+    const handleUp = () => {
+      cleanup();
+    };
+
+    const handleMove = (moveEv: MouseEvent) => {
+      if ((moveEv.buttons & 1) === 0) {
+        cleanup();
+        return;
+      }
+      if (Math.hypot(moveEv.screenX - startX, moveEv.screenY - startY) >= 4) {
+        cleanup();
+        setIsMaximized(false);
+        void windowDragFromMaximized().catch(() => undefined);
+      }
+    };
+
+    dragCleanupRef.current = cleanup;
+    window.addEventListener("mousemove", handleMove, true);
+    window.addEventListener("mouseup", handleUp, true);
+    window.addEventListener("blur", handleUp);
+  };
+
   return (
-    <header className="h-[46px] shrink-0 flex items-center select-none px-4 pt-1">
+    <header
+      data-tauri-drag-region={isMaximized ? "false" : "deep"}
+      onMouseDown={handleMaximizedTitleMouseDown}
+      className="h-[46px] shrink-0 flex items-center select-none px-4 pt-1"
+    >
       <div className="flex items-center gap-2.5 min-w-0 pr-3 h-full">
         {leftSlot}
       </div>
 
       <div
-        data-tauri-drag-region
         className="flex-1 h-full min-w-8"
         aria-hidden="true"
       />
@@ -113,6 +178,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
         {isDownloadingUpdate ? (
           <button
             type="button"
+            data-glass-region={glassControls ? "true" : undefined}
             onClick={handleOpenUpdates}
             aria-label={
               isVerifying
@@ -122,42 +188,12 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             title={updateProgress?.message || "Downloading update in background"}
             className="ep-glass-pill ep-update-pill ep-press relative overflow-hidden h-7 pl-2 pr-1.5 rounded-full inline-flex items-center gap-2 text-xs font-medium text-white cursor-pointer"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
+            <AppUpdateProgressIcon
+              progress={progressFraction}
+              verifying={isVerifying}
+              size={16}
               className="shrink-0"
-              aria-hidden="true"
-            >
-              <circle
-                cx="8"
-                cy="8"
-                r="6"
-                stroke="rgba(255,255,255,0.14)"
-                strokeWidth="1.8"
-                fill="none"
-              />
-              <circle
-                cx="8"
-                cy="8"
-                r="6"
-                stroke="var(--color-accent-soft)"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                fill="none"
-                strokeDasharray={37.7}
-                strokeDashoffset={37.7 * (1 - (isVerifying ? 1 : progressFraction))}
-                transform="rotate(-90 8 8)"
-                className="transition-[stroke-dashoffset] duration-150 ease-out"
-              />
-              <circle
-                cx="8"
-                cy="8"
-                r="1.8"
-                fill="var(--color-accent-soft)"
-                className={isVerifying ? "animate-pulse" : ""}
-              />
-            </svg>
+            />
             <span className="text-[11.5px] font-medium text-white whitespace-nowrap">
               {isVerifying
                 ? "Verifying Update"
@@ -256,7 +292,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             aria-label="Minimize window"
             title="Minimize"
             onClick={() => void handleMinimize()}
-            className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer"
           >
             <AppMinimizeIcon size={14} />
           </button>
@@ -266,48 +302,9 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             aria-label={isMaximized ? "Restore window" : "Maximize window"}
             title={isMaximized ? "Restore" : "Maximize"}
             onClick={() => void handleToggleMaximize()}
-            className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white cursor-pointer"
           >
-            {isMaximized ? (
-              <svg
-                width="10"
-                height="10"
-                viewBox="0 0 10 10"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path
-                  d="M2.5 2.5V0.75H9.25V7.5H7.5"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                />
-                <rect
-                  x="0.75"
-                  y="2.5"
-                  width="6.75"
-                  height="6.75"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                />
-              </svg>
-            ) : (
-              <svg
-                width="10"
-                height="10"
-                viewBox="0 0 10 10"
-                fill="none"
-                aria-hidden="true"
-              >
-                <rect
-                  x="0.8"
-                  y="0.8"
-                  width="8.4"
-                  height="8.4"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                />
-              </svg>
-            )}
+            <AppMaximizeIcon restored={isMaximized} size={13} />
           </button>
 
           <button
@@ -315,7 +312,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             aria-label="Close window"
             title="Close"
             onClick={() => void handleClose()}
-            className="ep-press h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-bad/80 hover:scale-105 cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
+            className="ep-press h-7 w-7 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-bad/80 cursor-pointer"
           >
             <AppCloseIcon size={14} />
           </button>

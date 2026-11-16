@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -14,12 +16,26 @@ pub enum MpvParseError {
 #[serde(rename_all = "camelCase")]
 pub struct MpvTrack {
     pub id: u64,
+    #[serde(rename = "type")]
     pub kind: String,
     pub title: Option<String>,
     pub lang: Option<String>,
     pub codec: Option<String>,
     pub selected: bool,
     pub external: bool,
+    #[serde(default, rename = "default")]
+    pub is_default: bool,
+    #[serde(default)]
+    pub forced: bool,
+    #[serde(default, rename = "ff-index", skip_serializing_if = "Option::is_none")]
+    pub ff_index: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvChapter {
+    pub title: Option<String>,
+    pub time: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,12 +45,16 @@ pub enum MpvEvent {
     Duration(f64),
     Paused(bool),
     EofReached(bool),
+    Seek,
+    PlaybackRestart,
+    Seeking(bool),
     FileLoaded,
     EndFile {
         reason: Option<String>,
         file_error: Option<String>,
     },
     TrackList(Vec<MpvTrack>),
+    ChapterList(Vec<MpvChapter>),
     Other,
 }
 
@@ -85,16 +105,22 @@ pub fn set_pause_cmd(request_id: u64, paused: bool) -> String {
     )
 }
 
-pub fn seek_absolute_cmd(request_id: u64, seconds: f64) -> String {
+fn encode_seek_cmd(request_id: u64, seconds: f64, flags: &str) -> String {
     let clamped = if seconds.is_finite() {
         seconds.max(0.0)
     } else {
         0.0
     };
-    encode_command(
-        request_id,
-        &[json!("seek"), json!(clamped), json!("absolute+exact")],
-    )
+    encode_command(request_id, &[json!("seek"), json!(clamped), json!(flags)])
+}
+
+pub fn seek_absolute_cmd(request_id: u64, seconds: f64) -> String {
+    encode_seek_cmd(request_id, seconds, "absolute+exact")
+}
+
+/// Fast keyframe-only seek for live scrubber dragging before the final exact commit.
+pub fn seek_keyframes_cmd(request_id: u64, seconds: f64) -> String {
+    encode_seek_cmd(request_id, seconds, "absolute+keyframes")
 }
 
 pub fn stop_cmd(request_id: u64) -> String {
@@ -214,6 +240,36 @@ pub fn set_sub_style_cmds(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn set_sub_style_cmds_with_bold(
+    first_request_id: u64,
+    font: &str,
+    font_size: u32,
+    color: &str,
+    border_size: f64,
+    pos: u32,
+    visible: bool,
+    override_ass: bool,
+    bold: bool,
+) -> Vec<String> {
+    let mut cmds = set_sub_style_cmds(
+        first_request_id,
+        font,
+        font_size,
+        color,
+        border_size,
+        pos,
+        visible,
+        override_ass,
+    );
+    cmds.push(set_property_cmd(
+        first_request_id + cmds.len() as u64,
+        "sub-bold",
+        json!(bold),
+    ));
+    cmds
+}
+
 pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -228,6 +284,8 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
     if let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) {
         match event_name {
             "file-loaded" => return Ok(MpvMessage::Event(MpvEvent::FileLoaded)),
+            "seek" => return Ok(MpvMessage::Event(MpvEvent::Seek)),
+            "playback-restart" => return Ok(MpvMessage::Event(MpvEvent::PlaybackRestart)),
             "end-file" => {
                 let reason = obj
                     .get("reason")
@@ -243,6 +301,9 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
                 let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let data = obj.get("data");
                 if matches!(data, None | Some(Value::Null)) {
+                    if name == "chapter-list" {
+                        return Ok(MpvMessage::Event(MpvEvent::ChapterList(Vec::new())));
+                    }
                     return Ok(MpvMessage::Event(MpvEvent::Other));
                 }
                 match name {
@@ -266,10 +327,21 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
                             return Ok(MpvMessage::Event(MpvEvent::EofReached(eof)));
                         }
                     }
+                    "seeking" => {
+                        if let Some(seeking) = data.and_then(|v| v.as_bool()) {
+                            return Ok(MpvMessage::Event(MpvEvent::Seeking(seeking)));
+                        }
+                    }
                     "track-list" => {
                         if let Some(arr) = data.and_then(|v| v.as_array()) {
                             let tracks = parse_track_list(arr);
                             return Ok(MpvMessage::Event(MpvEvent::TrackList(tracks)));
+                        }
+                    }
+                    "chapter-list" => {
+                        if let Some(arr) = data.and_then(|v| v.as_array()) {
+                            let chapters = parse_chapter_list(arr);
+                            return Ok(MpvMessage::Event(MpvEvent::ChapterList(chapters)));
                         }
                     }
                     _ => {}
@@ -326,9 +398,36 @@ fn parse_track_list(arr: &[Value]) -> Vec<MpvTrack> {
                     .get("external")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                is_default: obj
+                    .get("default")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                forced: obj.get("forced").and_then(|v| v.as_bool()).unwrap_or(false),
+                ff_index: obj.get("ff-index").and_then(|v| v.as_u64()),
             })
         })
         .collect()
+}
+
+fn parse_chapter_list(arr: &[Value]) -> Vec<MpvChapter> {
+    let mut chapters: Vec<MpvChapter> = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let time = obj
+                .get("time")
+                .and_then(|v| v.as_f64())
+                .filter(|t| t.is_finite() && *t >= 0.0)?;
+            let title = obj
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Some(MpvChapter { title, time })
+        })
+        .collect();
+    chapters.sort_by(|a, b| a.time.total_cmp(&b.time));
+    chapters
 }
 
 pub fn launch_args(wid: u64, pipe_name: &str) -> Vec<String> {
@@ -355,6 +454,8 @@ pub fn launch_args_with_fonts(
         "--audio-channels=auto-safe".to_string(),
         "--audio-pitch-correction=yes".to_string(),
         "--embeddedfonts=yes".to_string(),
+        // Expose CEA-608/708 closed captions inside video bitstreams as selectable subtitle tracks.
+        "--sub-create-cc-track=yes".to_string(),
         "--background=color".to_string(),
         "--background-color=#060608".to_string(),
         "--no-config".to_string(),
@@ -363,6 +464,15 @@ pub fn launch_args_with_fonts(
         "--msg-level=all=warn".to_string(),
         "--demuxer-max-bytes=150MiB".to_string(),
         "--demuxer-max-back-bytes=50MiB".to_string(),
+        // Crisp libass rendering: light stem hinting preserves glyph proportions, micro-blur
+        // smooths outer outline stair-stepping without softening text fill, and a subtle
+        // translucent border + drop shadow avoids harsh sticker cutouts across bright/dark scenes.
+        "--sub-hinting=light".to_string(),
+        "--sub-blur=0.08".to_string(),
+        "--sub-outline-color=#E6000000".to_string(),
+        "--sub-shadow-offset=1.15".to_string(),
+        "--sub-back-color=#78000000".to_string(),
+        "--sub-border-size=2.5".to_string(),
     ];
     if let Some(dir) = sub_fonts_dir {
         let trimmed = dir.trim();
@@ -422,6 +532,184 @@ impl TimePosThrottle {
     }
 }
 
+/// Result of evaluating an incoming mpv `time-pos` event against any in-flight seek.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TimePosDecision {
+    /// No active seek gating is running; apply normal throttling.
+    Accept(f64),
+    /// First `time-pos` observed once all queued seeks have finished restarting playback;
+    /// reset UI throttling and emit immediately so even small (`< 1.5s`) seeks update right away.
+    AcceptAfterSeek(f64),
+    /// Pre-seek or intermediate `time-pos` while seek/restart is still settling.
+    Drop,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSeekState {
+    target: f64,
+    started_at: Instant,
+    outstanding_seeks: u32,
+    active_mpv_seeks: u32,
+    saw_seeking_true: bool,
+    saw_restart_after_seek: bool,
+    latest_req_acked: bool,
+    saw_seek_after_latest_ack: bool,
+    restarted: bool,
+    req_ids: VecDeque<u64>,
+}
+
+/// Deterministic tracker matching dispatched mpv seek commands with `"seek"`,
+/// `"playback-restart"`, and `"seeking"` events so pre-seek/intermediate frames never
+/// snap the UI clock or Watch Party snapshot backward.
+#[derive(Debug, Clone, Default)]
+pub struct PendingSeekTracker {
+    active: Option<PendingSeekState>,
+}
+
+impl PendingSeekTracker {
+    const TIMEOUT: Duration = Duration::from_millis(1200);
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.active = None;
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub fn note_dispatched_seek(&mut self, target: f64, req_id: Option<u64>, now: Instant) {
+        let safe = if target.is_finite() && target >= 0.0 {
+            target
+        } else {
+            0.0
+        };
+        if let Some(ref mut s) = self.active {
+            if now.duration_since(s.started_at) < Self::TIMEOUT {
+                s.target = safe;
+                s.started_at = now;
+                s.outstanding_seeks = s.outstanding_seeks.saturating_add(1);
+                s.saw_seeking_true = false;
+                s.saw_restart_after_seek = false;
+                s.latest_req_acked = false;
+                s.saw_seek_after_latest_ack = false;
+                s.restarted = false;
+                if let Some(id) = req_id {
+                    s.req_ids.push_back(id);
+                }
+                return;
+            }
+        }
+        let mut req_ids = VecDeque::with_capacity(4);
+        if let Some(id) = req_id {
+            req_ids.push_back(id);
+        }
+        self.active = Some(PendingSeekState {
+            target: safe,
+            started_at: now,
+            outstanding_seeks: 1,
+            active_mpv_seeks: 0,
+            saw_seeking_true: false,
+            saw_restart_after_seek: false,
+            latest_req_acked: false,
+            saw_seek_after_latest_ack: false,
+            restarted: false,
+            req_ids,
+        });
+    }
+
+    /// Records a successful mpv IPC reply for `req_id` so overlapping rapid seeks that mpv
+    /// internally coalesced settle on the restart that followed the latest accepted command.
+    pub fn on_reply_success(&mut self, req_id: u64) {
+        let Some(ref mut s) = self.active else {
+            return;
+        };
+        if s.req_ids.back().copied() == Some(req_id) {
+            s.latest_req_acked = true;
+            s.saw_seek_after_latest_ack = false;
+        }
+    }
+
+    pub fn on_reply_error(&mut self, req_id: u64) {
+        let Some(ref mut s) = self.active else {
+            return;
+        };
+        if let Some(pos) = s.req_ids.iter().position(|&id| id == req_id) {
+            s.req_ids.remove(pos);
+            s.outstanding_seeks = s.outstanding_seeks.saturating_sub(1);
+            if s.outstanding_seeks == 0 {
+                self.active = None;
+            }
+        }
+    }
+
+    pub fn on_seek_event(&mut self) {
+        if let Some(ref mut s) = self.active {
+            s.active_mpv_seeks = s.active_mpv_seeks.saturating_add(1);
+            if s.latest_req_acked {
+                s.saw_seek_after_latest_ack = true;
+            }
+            s.restarted = false;
+        }
+    }
+
+    /// Returns `true` when all queued seek cycles have completed `seek -> playback-restart`.
+    pub fn on_playback_restart(&mut self) -> bool {
+        let Some(ref mut s) = self.active else {
+            return false;
+        };
+        if s.active_mpv_seeks > 0 {
+            s.active_mpv_seeks -= 1;
+            s.saw_restart_after_seek = true;
+            let _ = s.req_ids.pop_front();
+            s.outstanding_seeks = s.outstanding_seeks.saturating_sub(1);
+            if s.outstanding_seeks == 0
+                || (s.active_mpv_seeks == 0 && s.latest_req_acked && s.saw_seek_after_latest_ack)
+            {
+                s.outstanding_seeks = 0;
+                s.restarted = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Tracks mpv's `"seeking"` property; returns `Some(target)` if seeking finished after
+    /// restart cleanly without a trailing `time-pos` (e.g. paused seek to identical frame `0.0`).
+    pub fn on_seeking_prop(&mut self, seeking: bool) -> Option<f64> {
+        let s = self.active.as_mut()?;
+        if seeking {
+            s.saw_seeking_true = true;
+            return None;
+        }
+        if s.restarted
+            || (s.outstanding_seeks == 0
+                && s.active_mpv_seeks == 0
+                && s.saw_seeking_true
+                && s.saw_restart_after_seek)
+        {
+            let target = s.target;
+            self.active = None;
+            return Some(target);
+        }
+        None
+    }
+
+    pub fn filter_time_pos(&mut self, position: f64, now: Instant) -> TimePosDecision {
+        let Some(ref s) = self.active else {
+            return TimePosDecision::Accept(position);
+        };
+        if now.duration_since(s.started_at) >= Self::TIMEOUT || s.restarted {
+            self.active = None;
+            return TimePosDecision::AcceptAfterSeek(position);
+        }
+        TimePosDecision::Drop
+    }
+}
+
 pub fn autosync_extract_args_mpv(
     video_path: &str,
     out_pcm_path: &str,
@@ -454,6 +742,17 @@ pub fn autosync_extract_args_ffmpeg(
     out_pcm_path: &str,
     audio_stream_idx: Option<usize>,
 ) -> Vec<String> {
+    autosync_extract_args_ffmpeg_dialogue(video_path, out_pcm_path, audio_stream_idx, false)
+}
+
+/// Extract mono 16kHz PCM audio via ffmpeg, optionally weighting the center dialogue channel (`FC`)
+/// over front stereo and dropping surround/LFE channels on multi-channel 5.1/7.1 tracks.
+pub fn autosync_extract_args_ffmpeg_dialogue(
+    video_path: &str,
+    out_pcm_path: &str,
+    audio_stream_idx: Option<usize>,
+    prefer_center_mix: bool,
+) -> Vec<String> {
     // NOTE: `-vn`/`-sn` are output options and must come AFTER `-i`; before it older ffmpeg builds
     // abort with "cannot be applied to input url".
     let mut args = vec![
@@ -475,9 +774,15 @@ pub fn autosync_extract_args_ffmpeg(
         args.push("-map".to_string());
         args.push("0:a:0".to_string());
     }
+    if prefer_center_mix {
+        args.extend([
+            "-af".to_string(),
+            "pan=mono|c0=0.75*FC+0.125*FL+0.125*FR".to_string(),
+        ]);
+    } else {
+        args.extend(["-ac".to_string(), "1".to_string()]);
+    }
     args.extend([
-        "-ac".to_string(),
-        "1".to_string(),
         "-ar".to_string(),
         "16000".to_string(),
         "-f".to_string(),
@@ -489,11 +794,37 @@ pub fn autosync_extract_args_ffmpeg(
     args
 }
 
-/// Fix 23: Extract an embedded text subtitle track (`sid`) to an external `.srt`/`.ass` file via `ffmpeg` or `mpv`.
-pub fn autosync_extract_sub_args_ffmpeg(
+/// Inspects `ffmpeg -i` stderr output to determine whether audio stream `0:a:{audio_stream_idx}`
+/// uses a surround/center-channel layout (5.1, 7.1, 6.1, 5.0, 3.0, 4.1) that contains `FC`.
+pub fn parse_ffmpeg_audio_stream_has_center(probe_output: &str, audio_stream_idx: usize) -> bool {
+    let audio_lines: Vec<&str> = probe_output
+        .lines()
+        .filter(|line| line.contains("Stream #") && line.contains(": Audio:"))
+        .collect();
+    let Some(target) = audio_lines.get(audio_stream_idx) else {
+        return false;
+    };
+    // Only inspect the channel-layout field (a whole comma-separated token such as `5.1(side)`),
+    // never substrings of bitrates/sample rates. Layouts without an `FC` channel (e.g. 4.1, quad)
+    // are excluded so the `FC`-weighted pan filter is never requested for them.
+    let Some((_, fields)) = target.split_once(": Audio:") else {
+        return false;
+    };
+    fields.split(',').any(|token| {
+        let layout = token
+            .trim()
+            .split(['(', ' '])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        matches!(layout.as_str(), "5.1" | "7.1" | "6.1" | "5.0" | "3.0")
+    })
+}
+
+fn autosync_extract_sub_with_map_args_ffmpeg(
     video_path: &str,
     out_sub_path: &str,
-    sub_stream_idx: usize,
+    map_spec: String,
 ) -> Vec<String> {
     vec![
         "-nostdin".to_string(),
@@ -507,8 +838,206 @@ pub fn autosync_extract_sub_args_ffmpeg(
         "-vn".to_string(),
         "-an".to_string(),
         "-map".to_string(),
-        format!("0:s:{sub_stream_idx}"),
+        map_spec,
         out_sub_path.to_string(),
+    ]
+}
+
+/// Fix 23: Extract an embedded text subtitle track (`sid`) to an external `.srt`/`.ass` file via `ffmpeg` or `mpv`.
+pub fn autosync_extract_sub_args_ffmpeg(
+    video_path: &str,
+    out_sub_path: &str,
+    sub_stream_idx: usize,
+) -> Vec<String> {
+    autosync_extract_sub_with_map_args_ffmpeg(
+        video_path,
+        out_sub_path,
+        format!("0:s:{sub_stream_idx}"),
+    )
+}
+
+/// Extract an embedded subtitle stream by its exact FFmpeg container stream index (`0:<ff_index>`),
+/// matching `mpv`'s `track-list` `ff-index` property so closed captions or unusual stream layouts never drift.
+pub fn autosync_extract_stream_args_ffmpeg(
+    video_path: &str,
+    out_sub_path: &str,
+    ff_stream_idx: u64,
+) -> Vec<String> {
+    autosync_extract_sub_with_map_args_ffmpeg(
+        video_path,
+        out_sub_path,
+        format!("0:{ff_stream_idx}"),
+    )
+}
+
+/// Escape a local filesystem path for use as an unquoted value inside FFmpeg's `lavfi` `movie=...`
+/// filtergraph description (two escaping levels: AVOption value, then AVFilterGraph parser).
+pub fn escape_ffmpeg_lavfi_movie_path(video_path: &str) -> String {
+    let stripped = if let Some(unc) = video_path.strip_prefix(r"\\?\UNC\") {
+        format!("//{unc}")
+    } else if let Some(local) = video_path.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        video_path.to_string()
+    };
+    let normalized = stripped.replace('\\', "/");
+
+    let mut level1 = String::with_capacity(normalized.len() + 8);
+    for ch in normalized.chars() {
+        if matches!(ch, '\\' | '\'' | ':' | '=') {
+            level1.push('\\');
+        }
+        level1.push(ch);
+    }
+
+    let mut level2 = String::with_capacity(level1.len() + 12);
+    for ch in level1.chars() {
+        if matches!(ch, '\\' | '\'' | '[' | ']' | ',' | ';' | '=' | ' ') {
+            level2.push('\\');
+        }
+        level2.push(ch);
+    }
+    level2
+}
+
+/// Extract embedded CEA-608/708 bitstream closed captions (`eia_608`/`cc_dec`) from the video
+/// stream into an `.srt` file via FFmpeg's `lavfi` `movie=...[out0+subcc]` filter.
+pub fn autosync_extract_cc_args_ffmpeg(
+    video_path: &str,
+    out_srt_path: &str,
+    video_stream_idx: Option<usize>,
+) -> Vec<String> {
+    let escaped = escape_ffmpeg_lavfi_movie_path(video_path);
+    let movie_expr = match video_stream_idx {
+        Some(si) => format!("movie={escaped}:si={si}:dec_threads=0[out0+subcc]"),
+        None => format!("movie={escaped}:dec_threads=0[out0+subcc]"),
+    };
+    vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-y".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        movie_expr,
+        "-map".to_string(),
+        "0:s".to_string(),
+        "-c:s".to_string(),
+        "srt".to_string(),
+        out_srt_path.to_string(),
+    ]
+}
+
+/// Extract an opening window of mono 8kHz PCM audio via ffmpeg to stdout (`pipe:1`) for intro detection.
+pub fn intro_extract_audio_args_ffmpeg(
+    video_path: &str,
+    window_secs: f64,
+    audio_stream_idx: Option<usize>,
+) -> Vec<String> {
+    let safe_dur = if window_secs.is_finite() {
+        window_secs.clamp(5.0, 960.0)
+    } else {
+        600.0
+    };
+    let mut args = vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-ss".to_string(),
+        "0".to_string(),
+        "-i".to_string(),
+        video_path.to_string(),
+        "-t".to_string(),
+        format!("{safe_dur:.3}"),
+        "-vn".to_string(),
+        "-sn".to_string(),
+        "-dn".to_string(),
+    ];
+    if let Some(idx) = audio_stream_idx {
+        args.push("-map".to_string());
+        args.push(format!("0:a:{idx}"));
+    }
+    args.extend([
+        "-ac".to_string(),
+        "1".to_string(),
+        "-ar".to_string(),
+        "8000".to_string(),
+        "-f".to_string(),
+        "s16le".to_string(),
+        "pipe:1".to_string(),
+    ]);
+    args
+}
+
+/// Fallback opening-window audio extractor using mpv when ffmpeg.exe is unavailable.
+pub fn intro_extract_audio_args_mpv(
+    video_path: &str,
+    out_pcm_path: &str,
+    window_secs: f64,
+    audio_track_id: Option<u64>,
+) -> Vec<String> {
+    let safe_dur = if window_secs.is_finite() {
+        window_secs.clamp(5.0, 960.0)
+    } else {
+        600.0
+    };
+    let mut args = vec![
+        "--no-config".to_string(),
+        "--load-scripts=no".to_string(),
+        "--ytdl=no".to_string(),
+        "--vid=no".to_string(),
+        "--sub=no".to_string(),
+        "--msg-level=all=error".to_string(),
+        "--term-status-msg=".to_string(),
+        "--start=0".to_string(),
+        format!("--length={safe_dur:.3}"),
+        "--audio-channels=mono".to_string(),
+        "--audio-samplerate=8000".to_string(),
+        "--of=s16le".to_string(),
+        "--oac=pcm_s16le".to_string(),
+        format!("--o={out_pcm_path}"),
+    ];
+    if let Some(aid) = audio_track_id {
+        args.push(format!("--aid={aid}"));
+    }
+    args.push(video_path.to_string());
+    args
+}
+
+/// Extract only the opening `window_secs` of an embedded text subtitle track as ASS to stdout (`pipe:1`).
+pub fn intro_extract_sub_args_ffmpeg(
+    video_path: &str,
+    window_secs: f64,
+    sub_stream_idx: usize,
+) -> Vec<String> {
+    let safe_dur = if window_secs.is_finite() {
+        window_secs.clamp(5.0, 960.0)
+    } else {
+        600.0
+    };
+    vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-i".to_string(),
+        video_path.to_string(),
+        "-t".to_string(),
+        format!("{safe_dur:.3}"),
+        "-vn".to_string(),
+        "-an".to_string(),
+        "-dn".to_string(),
+        "-map".to_string(),
+        format!("0:s:{sub_stream_idx}"),
+        "-f".to_string(),
+        "ass".to_string(),
+        "pipe:1".to_string(),
     ]
 }
 
@@ -620,6 +1149,13 @@ mod tests {
             "--no-config",
             "--load-scripts=no",
             "--ytdl=no",
+            "--sub-hinting=light",
+            "--sub-blur=0.08",
+            "--sub-outline-color=#E6000000",
+            "--sub-shadow-offset=1.15",
+            "--sub-back-color=#78000000",
+            "--sub-border-size=2.5",
+            "--sub-create-cc-track=yes",
         ] {
             assert!(launch.iter().any(|a| a == req));
         }
@@ -630,6 +1166,38 @@ mod tests {
         assert!(ff_ext.iter().any(|a| a == "0:a:1"));
         let sub_ext = autosync_extract_sub_args_ffmpeg("movie.mkv", "out.srt", 0);
         assert!(sub_ext.iter().any(|a| a == "0:s:0"));
+        let stream_ext = autosync_extract_stream_args_ffmpeg("movie.mkv", "out.srt", 4);
+        assert!(stream_ext.windows(2).any(|w| w == ["-map", "0:4"]));
+
+        let cc_ext = autosync_extract_cc_args_ffmpeg(
+            r"C:\Dir [1080p]\Test's Show, #1.mp4",
+            "out_cc.srt",
+            None,
+        );
+        assert!(cc_ext.windows(2).any(|w| w == ["-f", "lavfi"]));
+        assert!(cc_ext
+            .iter()
+            .any(|a| a.contains("[out0+subcc]") && a.contains(r"C\\:/") && a.contains(r"\'s\ ")));
+
+        let ff_center =
+            autosync_extract_args_ffmpeg_dialogue("movie.mkv", "out.pcm", Some(0), true);
+        assert!(ff_center
+            .iter()
+            .any(|a| a.contains("0.75*FC+0.125*FL+0.125*FR")));
+        let probe = "  Stream #0:1(jpn): Audio: aac (LC), 48000 Hz, stereo, fltp\n  Stream #0:2(eng): Audio: eac3, 48000 Hz, 5.1(side), fltp\n";
+        assert!(!parse_ffmpeg_audio_stream_has_center(probe, 0));
+        assert!(parse_ffmpeg_audio_stream_has_center(probe, 1));
+        assert!(!parse_ffmpeg_audio_stream_has_center(probe, 2));
+
+        // Layout must be matched as a whole field: bitrates/rates never count, 4.1 has no FC,
+        // and `5.1(side)` style annotations still match.
+        let tricky = "Stream #0:0: Audio: aac (LC), 48000 Hz, stereo, fltp, 135.1 kb/s\n\
+                      Stream #0:1: Audio: eac3, 48000 Hz, 5.1(side), fltp, 640 kb/s\n\
+                      Stream #0:2: Audio: ac3, 48000 Hz, 4.1, fltp, 384 kb/s\n";
+        assert!(!parse_ffmpeg_audio_stream_has_center(tricky, 0));
+        assert!(parse_ffmpeg_audio_stream_has_center(tricky, 1));
+        assert!(!parse_ffmpeg_audio_stream_has_center(tricky, 2));
+        assert!(!parse_ffmpeg_audio_stream_has_center("", 0));
 
         // Extractors must be quiet (undrained stderr pipes can deadlock) and keep output-only
         // ffmpeg flags after `-i`.
@@ -687,6 +1255,22 @@ mod tests {
         assert!(cmds_unforced
             .iter()
             .any(|c| c.contains("sub-pos") && c.contains("25")));
+
+        let cmds_bold = set_sub_style_cmds_with_bold(
+            30,
+            "Noto Sans Arabic",
+            44,
+            "#FFFFFF",
+            2.5,
+            95,
+            true,
+            false,
+            true,
+        );
+        assert_eq!(cmds_bold.len(), 8);
+        assert!(cmds_bold
+            .iter()
+            .any(|c| c.contains("sub-bold") && c.contains("true")));
     }
 
     #[test]
@@ -700,13 +1284,21 @@ mod tests {
 
     #[test]
     fn test_track_list_parsing_and_track_commands() {
-        let line = r#"{"event":"property-change","id":4,"name":"track-list","data":[{"id":1,"type":"audio","title":"JP","lang":"jpn","codec":"aac","selected":true,"external":false},{"id":2,"type":"sub","title":null,"lang":"ara","codec":"ass","selected":true,"external":true}]}"#;
+        let line = r#"{"event":"property-change","id":4,"name":"track-list","data":[{"id":1,"type":"audio","title":"JP","lang":"jpn","codec":"aac","selected":true,"external":false,"default":true,"forced":false},{"id":2,"type":"sub","title":null,"lang":"ara","codec":"ass","selected":true,"external":true,"default":false,"forced":false}]}"#;
         match parse_line(line).unwrap() {
             MpvMessage::Event(MpvEvent::TrackList(tracks)) => {
                 assert_eq!(tracks.len(), 2);
                 assert_eq!(tracks[0].kind, "audio");
+                assert!(tracks[0].is_default);
+                assert!(!tracks[0].forced);
                 assert_eq!(tracks[1].kind, "sub");
                 assert!(tracks[1].external);
+                // Ensure JSON serialized to the WebView exposes `"type"` (not `"kind"`).
+                let serialized = serde_json::to_value(&tracks).unwrap();
+                assert_eq!(serialized[0]["type"], "audio");
+                assert!(serialized[0].get("kind").is_none());
+                assert_eq!(serialized[0]["default"], true);
+                assert_eq!(serialized[1]["type"], "sub");
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -726,5 +1318,169 @@ mod tests {
         assert!(th.should_emit(0.250, t0 + std::time::Duration::from_millis(250)));
         // A jump >= 1.5s (seek) bypasses throttle immediately
         assert!(th.should_emit(12.0, t0 + std::time::Duration::from_millis(266)));
+    }
+
+    #[test]
+    fn test_chapter_list_parsing_and_intro_extract_args() {
+        let line = r#"{"event":"property-change","id":6,"name":"chapter-list","data":[{"title":"Opening","time":90.5},{"title":null,"time":0.0},{"title":"Part A","time":180}]}"#;
+        match parse_line(line).unwrap() {
+            MpvMessage::Event(MpvEvent::ChapterList(chaps)) => {
+                assert_eq!(chaps.len(), 3);
+                assert_eq!(
+                    chaps[0],
+                    MpvChapter {
+                        title: None,
+                        time: 0.0
+                    }
+                );
+                assert_eq!(
+                    chaps[1],
+                    MpvChapter {
+                        title: Some("Opening".to_string()),
+                        time: 90.5
+                    }
+                );
+                assert_eq!(
+                    chaps[2],
+                    MpvChapter {
+                        title: Some("Part A".to_string()),
+                        time: 180.0
+                    }
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Null chapter-list clears chapters cleanly
+        assert_eq!(
+            parse_line(r#"{"event":"property-change","id":6,"name":"chapter-list","data":null}"#)
+                .unwrap(),
+            MpvMessage::Event(MpvEvent::ChapterList(Vec::new()))
+        );
+
+        let ff_audio = intro_extract_audio_args_ffmpeg("ep01.mkv", 540.0, Some(1));
+        assert!(ff_audio.contains(&"-t".to_string()));
+        assert!(ff_audio.contains(&"0:a:1".to_string()));
+        assert!(ff_audio.contains(&"pipe:1".to_string()));
+
+        let mpv_audio = intro_extract_audio_args_mpv("ep01.mkv", "out.pcm", 540.0, Some(2));
+        assert!(mpv_audio.iter().any(|a| a == "--length=540.000"));
+        assert!(mpv_audio.iter().any(|a| a == "--aid=2"));
+
+        let ff_sub = intro_extract_sub_args_ffmpeg("ep01.mkv", 600.0, 0);
+        assert!(ff_sub.contains(&"0:s:0".to_string()));
+        assert!(ff_sub.contains(&"ass".to_string()));
+    }
+
+    #[test]
+    fn test_seek_events_keyframes_cmd_and_pending_seek_tracker() {
+        let exact = seek_absolute_cmd(10, 42.5);
+        let preview = seek_keyframes_cmd(11, 42.5);
+        assert!(exact.contains("absolute+exact"));
+        assert!(preview.contains("absolute+keyframes"));
+
+        assert_eq!(
+            parse_line(r#"{"event":"seek"}"#).unwrap(),
+            MpvMessage::Event(MpvEvent::Seek)
+        );
+        assert_eq!(
+            parse_line(r#"{"event":"playback-restart"}"#).unwrap(),
+            MpvMessage::Event(MpvEvent::PlaybackRestart)
+        );
+        assert_eq!(
+            parse_line(r#"{"event":"property-change","id":7,"name":"seeking","data":true}"#)
+                .unwrap(),
+            MpvMessage::Event(MpvEvent::Seeking(true))
+        );
+
+        let mut tracker = PendingSeekTracker::new();
+        let t0 = Instant::now();
+
+        // Small (< 1.0s) seek must still suppress stale pre-seek time-pos before seek/restart
+        tracker.note_dispatched_seek(100.5, Some(10), t0);
+        assert_eq!(
+            tracker.filter_time_pos(100.0, t0 + Duration::from_millis(5)),
+            TimePosDecision::Drop
+        );
+        // Unpaired initial playback-restart before `"seek"` must NOT complete pending seek
+        assert!(!tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(100.04, t0 + Duration::from_millis(8)),
+            TimePosDecision::Drop
+        );
+
+        // Actual seek -> playback-restart settles cleanly and returns AcceptAfterSeek
+        tracker.on_seek_event();
+        assert!(tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(100.52, t0 + Duration::from_millis(20)),
+            TimePosDecision::AcceptAfterSeek(100.52)
+        );
+        assert!(!tracker.is_active());
+
+        // Two rapid queued seeks: intermediate 8.5 must be ignored until second restart completes
+        tracker.note_dispatched_seek(8.5, Some(20), t0 + Duration::from_millis(100));
+        tracker.note_dispatched_seek(14.2, Some(21), t0 + Duration::from_millis(102));
+        tracker.on_seek_event();
+        assert!(!tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(8.5, t0 + Duration::from_millis(110)),
+            TimePosDecision::Drop
+        );
+        tracker.on_seek_event();
+        assert!(tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(14.21, t0 + Duration::from_millis(120)),
+            TimePosDecision::AcceptAfterSeek(14.21)
+        );
+
+        // Paused no-op seek without trailing time-pos settles when seeking turns false
+        tracker.note_dispatched_seek(0.0, Some(30), t0 + Duration::from_millis(200));
+        tracker.on_seek_event();
+        let _ = tracker.on_seeking_prop(true);
+        assert!(tracker.on_playback_restart());
+        assert_eq!(tracker.on_seeking_prop(false), Some(0.0));
+        assert!(!tracker.is_active());
+
+        // Timeout fallback prevents wedging on malformed streams
+        tracker.note_dispatched_seek(50.0, Some(40), t0);
+        assert_eq!(
+            tracker.filter_time_pos(50.1, t0 + Duration::from_millis(1300)),
+            TimePosDecision::AcceptAfterSeek(50.1)
+        );
+
+        // New seek dispatched after seek #1 saw seeking=true & restart must NOT prematurely settle on seek #1's seeking=false
+        tracker.clear();
+        let t1 = t0 + Duration::from_secs(2);
+        tracker.note_dispatched_seek(300.0, Some(50), t1);
+        tracker.on_seek_event();
+        assert_eq!(tracker.on_seeking_prop(true), None);
+        tracker.note_dispatched_seek(900.0, Some(51), t1 + Duration::from_millis(10));
+        assert!(!tracker.on_playback_restart());
+        assert_eq!(tracker.on_seeking_prop(false), None);
+        assert_eq!(
+            tracker.filter_time_pos(300.2, t1 + Duration::from_millis(25)),
+            TimePosDecision::Drop
+        );
+        tracker.on_seek_event();
+        assert!(tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(900.05, t1 + Duration::from_millis(45)),
+            TimePosDecision::AcceptAfterSeek(900.05)
+        );
+
+        // Two rapid seeks coalesced internally by mpv after replying to both commands settle on the restart following latest ack
+        tracker.clear();
+        let t2 = t0 + Duration::from_secs(4);
+        tracker.note_dispatched_seek(200.0, Some(60), t2);
+        tracker.note_dispatched_seek(720.0, Some(61), t2 + Duration::from_millis(8));
+        tracker.on_reply_success(60);
+        tracker.on_reply_success(61);
+        tracker.on_seek_event();
+        assert!(tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(720.02, t2 + Duration::from_millis(30)),
+            TimePosDecision::AcceptAfterSeek(720.02)
+        );
     }
 }

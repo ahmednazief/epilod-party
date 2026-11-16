@@ -1663,7 +1663,9 @@ fn friendly_file_label(relative_path: &str) -> &str {
         .unwrap_or(relative_path);
     match short_name {
         "NotoSansArabic-Regular.ttf" => "Arabic UI font",
+        "NotoSansArabic-Bold.ttf" => "Arabic Bold font",
         "Inter-Regular.ttf" => "Inter UI font",
+        "Inter-Bold.ttf" => "Inter Bold font",
         "GPL-3.0.txt" => "GPL-3.0 notice",
         "SOURCE_OFFER.txt" => "source notice",
         other => other,

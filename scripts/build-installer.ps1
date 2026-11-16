@@ -27,7 +27,9 @@ try {
         "src-tauri\resources\mpv\mpv.exe",
         "src-tauri\resources\mpv\ffmpeg.exe",
         "src-tauri\resources\fonts\Inter-Regular.ttf",
+        "src-tauri\resources\fonts\Inter-Bold.ttf",
         "src-tauri\resources\fonts\NotoSansArabic-Regular.ttf",
+        "src-tauri\resources\fonts\NotoSansArabic-Bold.ttf",
         "src-tauri\resources\licenses\GPL-3.0.txt",
         "src-tauri\resources\licenses\SOURCE_OFFER.txt"
     )

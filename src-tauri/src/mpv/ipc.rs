@@ -1,11 +1,12 @@
 #![cfg(windows)]
 
+use super::DeferredLoadState;
 use epilod_core::mpv_ipc::{
     encode_observe, parse_line, seek_absolute_cmd, set_pause_cmd, MpvEvent, MpvMessage,
-    TimePosThrottle,
+    PendingSeekTracker, TimePosDecision, TimePosThrottle,
 };
 use epilod_core::syncplay::PlayerSnapshot;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -21,9 +22,9 @@ pub async fn connect_and_run_ipc<F>(
     mut cmd_rx: mpsc::Receiver<String>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
     loading_media: Arc<AtomicBool>,
-    pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
-    deferred_seek: Arc<Mutex<Option<f64>>>,
-    deferred_pause: Arc<Mutex<Option<bool>>>,
+    deferred_load: Arc<Mutex<DeferredLoadState>>,
+    pending_seek: Arc<Mutex<PendingSeekTracker>>,
+    client_seek_seq: Arc<AtomicU64>,
     check_child_exited: F,
 ) -> String
 where
@@ -59,6 +60,8 @@ where
         encode_observe(3, 3, "pause"),
         encode_observe(4, 4, "track-list"),
         encode_observe(5, 5, "eof-reached"),
+        encode_observe(6, 6, "chapter-list"),
+        encode_observe(7, 7, "seeking"),
     ];
     for c in init_cmds {
         if writer_half.write_all(c.as_bytes()).await.is_err() {
@@ -75,6 +78,7 @@ where
     });
 
     let mut ui_time_throttle = TimePosThrottle::ui_default();
+    let mut eof_emitted = false;
     let mut lines = BufReader::new(reader_half).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         match parse_line(&line) {
@@ -83,33 +87,82 @@ where
                     if loading_media.load(Ordering::SeqCst) {
                         continue;
                     }
-                    let skip_stale_seek = {
+                    let decision = {
                         let mut ps = pending_seek.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some((target, at)) = *ps {
-                            if at.elapsed() < Duration::from_millis(900)
-                                && (position - target).abs() > 1.0
-                            {
-                                true
+                        ps.filter_time_pos(position, Instant::now())
+                    };
+                    let emit_pos = match decision {
+                        TimePosDecision::Drop => continue,
+                        TimePosDecision::AcceptAfterSeek(pos) => {
+                            ui_time_throttle.reset();
+                            let _ = ui_time_throttle.should_emit(pos, Instant::now());
+                            snapshot.lock().unwrap_or_else(|e| e.into_inner()).position = pos;
+                            Some(pos)
+                        }
+                        TimePosDecision::Accept(pos) => {
+                            snapshot.lock().unwrap_or_else(|e| e.into_inner()).position = pos;
+                            if ui_time_throttle.should_emit(pos, Instant::now()) {
+                                Some(pos)
                             } else {
-                                *ps = None;
-                                false
+                                None
                             }
-                        } else {
-                            false
                         }
                     };
-                    if skip_stale_seek {
-                        continue;
+                    if let Some(pos) = emit_pos {
+                        let _ = app.emit(
+                            "mpv://time",
+                            serde_json::json!({
+                                "position": pos,
+                                "clientSeekSeq": client_seek_seq.load(Ordering::SeqCst),
+                            }),
+                        );
                     }
-                    {
-                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                        snap.position = position;
+                }
+                MpvEvent::Seek => {
+                    if !loading_media.load(Ordering::SeqCst) {
+                        pending_seek
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .on_seek_event();
                     }
-                    if ui_time_throttle.should_emit(position, Instant::now()) {
-                        let _ = app.emit("mpv://time", serde_json::json!({ "position": position }));
+                }
+                MpvEvent::PlaybackRestart => {
+                    if !loading_media.load(Ordering::SeqCst) {
+                        let all_restarted = pending_seek
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .on_playback_restart();
+                        if all_restarted {
+                            ui_time_throttle.reset();
+                            let _ = app.emit("mpv://seek-settled", ());
+                        }
+                    }
+                }
+                MpvEvent::Seeking(seeking) => {
+                    if !loading_media.load(Ordering::SeqCst) {
+                        let settled = pending_seek
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .on_seeking_prop(seeking);
+                        if let Some(pos) = settled {
+                            ui_time_throttle.reset();
+                            let _ = ui_time_throttle.should_emit(pos, Instant::now());
+                            snapshot.lock().unwrap_or_else(|e| e.into_inner()).position = pos;
+                            let _ = app.emit(
+                                "mpv://time",
+                                serde_json::json!({
+                                    "position": pos,
+                                    "clientSeekSeq": client_seek_seq.load(Ordering::SeqCst),
+                                }),
+                            );
+                            let _ = app.emit("mpv://seek-settled", ());
+                        }
                     }
                 }
                 MpvEvent::Duration(duration) => {
+                    if loading_media.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let _ = app.emit(
                         "mpv://duration",
                         serde_json::json!({ "duration": duration }),
@@ -126,7 +179,10 @@ where
                     let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
                 }
                 MpvEvent::EofReached(eof) => {
-                    if eof && !loading_media.load(Ordering::SeqCst) {
+                    if !eof {
+                        eof_emitted = false;
+                    } else if !loading_media.load(Ordering::SeqCst) && !eof_emitted {
+                        eof_emitted = true;
                         let _ = app.emit(
                             "mpv://ended",
                             serde_json::json!({ "reason": "eof", "error": serde_json::Value::Null }),
@@ -134,50 +190,94 @@ where
                     }
                 }
                 MpvEvent::FileLoaded => {
-                    loading_media.store(false, Ordering::SeqCst);
-                    *pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    let (deferred_seek, deferred_pause) = {
+                        let mut def = deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+                        def.loading = false;
+                        loading_media.store(false, Ordering::SeqCst);
+                        (def.seek_secs.take(), def.pause.take())
+                    };
+                    eof_emitted = false;
+                    pending_seek
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
                     ui_time_throttle.reset();
                     let _ = app.emit("mpv://file-loaded", ());
-                    if let Some(paused) = deferred_pause.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    if let Some(target) = deferred_seek {
+                        pending_seek
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .note_dispatched_seek(target, Some(900_002), Instant::now());
+                        snapshot.lock().unwrap_or_else(|e| e.into_inner()).position = target;
+                        let _ = cmd_tx.try_send(seek_absolute_cmd(900_002, target));
+                    }
+                    if let Some(paused) = deferred_pause {
                         snapshot.lock().unwrap_or_else(|e| e.into_inner()).paused = paused;
                         let _ = cmd_tx.try_send(set_pause_cmd(900_001, paused));
                         let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
                     }
-                    if let Some(target) = deferred_seek.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                        *pending_seek.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some((target, Instant::now()));
-                        let _ = cmd_tx.try_send(seek_absolute_cmd(900_002, target));
-                    }
                 }
                 MpvEvent::EndFile { reason, file_error } => {
-                    if reason.as_deref() != Some("replace") && reason.as_deref() != Some("redirect")
-                    {
-                        loading_media.store(false, Ordering::SeqCst);
-                    }
-                    let error = if reason.as_deref() == Some("error") {
-                        Some(
-                            file_error
+                    // Note: `loadfile <next> replace` emits `end-file` with `reason: "stop"` on the
+                    // outgoing entry before `file-loaded` of the replacement fires. Never clear
+                    // `loading_media` on `"stop"` / `"replace"` / `"redirect"`, or delayed EOF/pause
+                    // events from the outgoing episode will leak into the incoming episode.
+                    match reason.as_deref() {
+                        Some("error") => {
+                            {
+                                let mut def =
+                                    deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+                                *def = DeferredLoadState::default();
+                                loading_media.store(false, Ordering::SeqCst);
+                            }
+                            let error = file_error
                                 .map(|e| format!("Media playback failed: {e}"))
-                                .unwrap_or_else(|| "Media playback failed.".to_string()),
-                        )
-                    } else {
-                        None
-                    };
-                    let _ = app.emit(
-                        "mpv://ended",
-                        serde_json::json!({ "reason": reason, "error": error }),
-                    );
+                                .unwrap_or_else(|| "Media playback failed.".to_string());
+                            let _ = app.emit(
+                                "mpv://ended",
+                                serde_json::json!({ "reason": reason, "error": Some(error) }),
+                            );
+                        }
+                        Some("eof") => {
+                            if !loading_media.load(Ordering::SeqCst) && !eof_emitted {
+                                eof_emitted = true;
+                                pending_seek
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clear();
+                                let _ = app.emit(
+                                    "mpv://ended",
+                                    serde_json::json!({ "reason": "eof", "error": serde_json::Value::Null }),
+                                );
+                            }
+                        }
+                        _ => {
+                            let _ = app.emit(
+                                "mpv://ended",
+                                serde_json::json!({ "reason": reason, "error": serde_json::Value::Null }),
+                            );
+                        }
+                    }
                 }
                 MpvEvent::TrackList(tracks) => {
                     let _ = app.emit("mpv://tracks", tracks);
                 }
+                MpvEvent::ChapterList(chapters) => {
+                    let _ = app.emit("mpv://chapters", chapters);
+                }
                 MpvEvent::Other => {}
             },
             Ok(MpvMessage::Reply(rep)) => {
-                if rep.error != "success"
-                    && !rep.error.is_empty()
-                    && rep.error != "property unavailable"
-                {
+                if rep.error == "success" || rep.error.is_empty() {
+                    pending_seek
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .on_reply_success(rep.request_id);
+                } else if rep.error != "property unavailable" {
+                    pending_seek
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .on_reply_error(rep.request_id);
                     let _ = app.emit(
                         "mpv://command-warning",
                         serde_json::json!({ "message": format!("mpv command warning: {}", rep.error) }),

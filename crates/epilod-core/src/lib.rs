@@ -1,12 +1,16 @@
 pub mod ed25519;
+pub mod intro_detect;
 pub mod logging;
 pub mod matching;
+pub mod media_align;
 pub mod models;
 pub mod mpv_ipc;
 pub mod opensubtitles;
+pub mod p2p;
 pub mod playlist;
 pub mod rate_limit;
 pub mod room_code;
+pub mod room_control;
 pub mod subtitle_sync;
 pub mod syncplay;
 pub mod updater;

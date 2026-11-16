@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AspectMode, MpvTrack } from "../lib/mpv";
+import type { AspectMode, MpvBackdropFrame, MpvTrack } from "../lib/mpv";
 
 export interface FeedbackBadge {
   id: number;
@@ -17,6 +17,7 @@ interface PlayerState {
   aspectMode: AspectMode;
   loaded: boolean;
   engineSurfaceVisible: boolean;
+  frozenFrame: MpvBackdropFrame | null;
   endedAtEof: boolean;
   isFullscreen: boolean;
   playerError: string | null;
@@ -32,6 +33,7 @@ interface PlayerState {
   setAspectMode: (aspect: AspectMode) => void;
   setLoaded: (loaded: boolean) => void;
   setEngineSurfaceVisible: (visible: boolean) => void;
+  setFrozenFrame: (frame: MpvBackdropFrame | null) => void;
   setEndedAtEof: (ended: boolean) => void;
   setIsFullscreen: (fs: boolean) => void;
   setPlayerError: (err: string | null) => void;
@@ -56,6 +58,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   aspectMode: "auto",
   loaded: false,
   engineSurfaceVisible: false,
+  frozenFrame: null,
   endedAtEof: false,
   isFullscreen: false,
   playerError: null,
@@ -76,6 +79,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   setAspectMode: (aspectMode) => set({ aspectMode }),
   setLoaded: (loaded) => set({ loaded }),
   setEngineSurfaceVisible: (engineSurfaceVisible) => set({ engineSurfaceVisible }),
+  setFrozenFrame: (frozenFrame) => set({ frozenFrame }),
   setEndedAtEof: (endedAtEof) => set({ endedAtEof }),
   setIsFullscreen: (isFullscreen) => set({ isFullscreen }),
   setPlayerError: (playerError) => set({ playerError }),
@@ -111,6 +115,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       aspectMode: "auto",
       loaded: false,
       engineSurfaceVisible: false,
+      frozenFrame: null,
       endedAtEof: false,
       playerError: null,
       tracks: [],
@@ -126,6 +131,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       aspectMode: "auto",
       loaded: false,
       engineSurfaceVisible: false,
+      frozenFrame: null,
       endedAtEof: false,
       isFullscreen: false,
       playerError: null,

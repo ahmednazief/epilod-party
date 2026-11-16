@@ -13,20 +13,25 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
 
   return (
     <div
-      className={`ep-modal-backdrop ${
-        exiting ? "anim-backdrop-out pointer-events-none" : "anim-backdrop-in"
-      } fixed inset-0 z-50 flex items-center justify-center p-4`}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard Shortcuts"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
     >
+      {/* Sibling backdrop scrim keeps .ep-glass-sheet outside parent backdrop-filter root. */}
+      <div
+        aria-hidden="true"
+        onClick={() => {
+          if (!exiting) onClose();
+        }}
+        className={`ep-modal-backdrop ${
+          exiting ? "anim-backdrop-out pointer-events-none" : "anim-backdrop-in"
+        } fixed inset-0`}
+      />
       <div
         className={`ep-glass-sheet ${
           exiting ? "anim-modal-out" : "anim-modal-in"
-        } w-full max-w-lg rounded-[26px] overflow-hidden`}
+        } relative z-10 w-full max-w-lg rounded-[26px] overflow-hidden`}
       >
         <div className="flex items-center justify-between px-6 py-4">
           <h2 className="text-sm font-semibold tracking-tight text-white">
@@ -42,7 +47,7 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
           </button>
         </div>
 
-        <div className="px-6 py-4 max-h-[70vh] overflow-y-auto space-y-4">
+        <div className="ep-menu-scroll px-6 py-3 my-1 max-h-[70vh] overflow-y-auto overflow-x-hidden space-y-4">
           {SHORTCUT_CATEGORIES.map((category) => {
             const rows = PLAYER_SHORTCUTS.filter((s) => s.category === category);
             return (
@@ -54,14 +59,14 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
                   {rows.map((row) => (
                     <div
                       key={row.label}
-                      className="ep-menu-row flex items-center justify-between gap-3 px-2.5 py-2 text-xs"
+                      className="flex items-center justify-between gap-3 px-2.5 py-2 text-xs rounded-xl hover:bg-white/[0.04] transition-colors"
                     >
                       <span className="text-secondary">{row.label}</span>
                       <div className="flex items-center gap-1.5 shrink-0">
                         {row.keys.map((key) => (
                           <kbd
                             key={key}
-                            className="ep-glass-input px-2 py-0.5 text-[11px] font-medium text-white rounded-md"
+                            className="ep-glass-tray px-2 py-0.5 text-[11px] font-medium text-white rounded-md"
                           >
                             {key}
                           </kbd>

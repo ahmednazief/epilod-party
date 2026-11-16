@@ -1,26 +1,15 @@
-import {
-  AlertTriangle,
-  Captions,
-  Folder,
-  Layers,
-  Lock,
-  Minus,
-  PlaySquare,
-  RefreshCw,
-  RotateCcw,
-  ShieldCheck,
-  SlidersHorizontal,
-  Trash2,
-  Users,
-  X,
-} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "./components/BrandMark";
-import { EcosystemTraces } from "./components/EcosystemTraces";
-import { ModuleTile } from "./components/ModuleTile";
-import { SmoothStatusText } from "./components/SmoothStatusText";
-import { StepRow } from "./components/StepRow";
-import { ToggleOption } from "./components/ToggleOption";
+import { CustomizePanel } from "./components/CustomizePanel";
+import { GlassSwitchTrack } from "./components/GlassSwitch";
+import {
+  InstallerArrowIcon,
+  InstallerCheckIcon,
+  InstallerLaunchIcon,
+  InstallerSlidersIcon,
+} from "./components/InstallerIcons";
+import { ProgressView } from "./components/ProgressView";
+import { WindowChrome } from "./components/WindowChrome";
 import {
   browseInstallDirectory,
   closeInstallerWindow,
@@ -31,11 +20,9 @@ import {
   isTauriEnv,
   launchInstalledApp,
   makeReadyTelemetry,
-  minimizeInstallerWindow,
   preflightInstallDir,
   runInstallation,
   runUninstallation,
-  verifyExistingInstall,
   type RunningInstallHandle,
 } from "./lib/installerBridge";
 import type {
@@ -45,52 +32,13 @@ import type {
   InstallOptions,
   InstallTelemetry,
   InstallerDefaults,
-  InstallerTab,
   PreflightResult,
   RunningProcessDto,
-  TileId,
   UninstallSummary,
 } from "./lib/types";
 
-const RAIL_TABS: { id: InstallerTab; label: string }[] = [
-  { id: "location", label: "Install location" },
-  { id: "install", label: "Setup progress" },
-  { id: "options", label: "Install options" },
-];
-
-function getRunningPhaseLabel(phase: InstallTelemetry["phase"], isUninstall: boolean): string {
-  if (isUninstall) {
-    switch (phase) {
-      case "preflight":
-        return "Closing active processes...";
-      case "removingFiles":
-        return "Removing verified app files...";
-      case "cleaningRegistry":
-        return "Cleaning shortcuts & registry...";
-      default:
-        return "Uninstalling Epilod Party...";
-    }
-  }
-  switch (phase) {
-    case "preflight":
-      return "Preparing workspace...";
-    case "verifyingExisting":
-      return "Verifying existing SHA-256 files...";
-    case "backingUp":
-      return "Creating rollback snapshot...";
-    case "rollingBack":
-      return "Rolling back safely...";
-    case "configuringSyncplay":
-    case "integratingWindows":
-    case "finalizing":
-      return "Finalizing setup...";
-    default:
-      return "Installing components...";
-  }
-}
-
 export function App() {
-  const [activeTab, setActiveTab] = useState<InstallerTab>("install");
+  const [showCustomize, setShowCustomize] = useState(false);
   const [defaults, setDefaults] = useState<InstallerDefaults | null>(null);
   const [defaultsError, setDefaultsError] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
@@ -114,6 +62,7 @@ export function App() {
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [isClosingProcesses, setIsClosingProcesses] = useState(false);
+  const [runMode, setRunMode] = useState<InstallMode>("install");
 
   const installHandleRef = useRef<RunningInstallHandle | null>(null);
   const targetPercentRef = useRef(0);
@@ -132,15 +81,21 @@ export function App() {
   }, [tauriMode]);
 
   const startInstallWith = useCallback(
-    async (installOpts: InstallOptions, defaultsInfo: InstallerDefaults | null = defaults) => {
+    async (
+      installOpts: InstallOptions,
+      defaultsInfo: InstallerDefaults | null = defaults,
+      modeOverride?: InstallMode,
+    ) => {
       setLaunchError(null);
       autoLaunchedRef.current = false;
-      setActiveTab("install");
+      setShowCustomize(false);
 
       const currentMode: InstallMode =
-        defaultsInfo?.launchMode === "update"
+        modeOverride ??
+        (defaultsInfo?.launchMode === "update"
           ? "update"
-          : defaultsInfo?.launchMode ?? "install";
+          : defaultsInfo?.launchMode ?? "install");
+      setRunMode(currentMode);
       const base = makeReadyTelemetry(
         installOpts.installDir,
         defaultsInfo?.payloadFiles ?? 8,
@@ -163,7 +118,13 @@ export function App() {
         setTelemetry((prev) => ({
           ...prev,
           phase: isCancelled ? "cancelled" : "failed",
-          headline: isCancelled ? "Installation cancelled" : "Installation interrupted",
+          headline: isCancelled
+            ? currentMode === "update"
+              ? "Update cancelled"
+              : "Setup cancelled"
+            : currentMode === "update"
+              ? "Update paused"
+              : "Something got in the way",
           liveStatus: msg,
           cancelled: isCancelled,
           error: isCancelled ? null : msg,
@@ -214,6 +175,8 @@ export function App() {
         savedDesktopShortcut: info.savedDesktopShortcut,
         savedStartMenuShortcut: info.savedStartMenuShortcut,
         savedFileAssociations: info.savedFileAssociations,
+        otherInstallDir: info.otherInstallDir ?? null,
+        otherInstallVersion: info.otherInstallVersion ?? null,
       });
 
       const peakNeeded = info.peakRequiredBytes ?? info.requiredBytes + 40_000_000;
@@ -228,7 +191,11 @@ export function App() {
         !autoStartedRef.current
       ) {
         autoStartedRef.current = true;
-        void startInstallWith(hydratedOptions, info);
+        const autoMode: InstallMode =
+          info.launchMode === "update" || info.existingReport?.disposition === "updateAvailable"
+            ? "update"
+            : info.launchMode;
+        void startInstallWith(hydratedOptions, info, autoMode);
       }
     } catch (err) {
       if (!mountedRef.current) return;
@@ -237,7 +204,7 @@ export function App() {
       setTelemetry((prev) => ({
         ...prev,
         phase: "failed",
-        headline: "Setup initialization failed",
+        headline: "Couldn’t start setup",
         liveStatus: msg,
         error: msg,
       }));
@@ -246,7 +213,7 @@ export function App() {
         setIsInitializing(false);
       }
     }
-  }, [startInstallWith]);
+  }, [startInstallWith, tauriMode]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -261,7 +228,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Smooth rAF interpolation for progress bar & tabular readout
+  // Smooth rAF interpolation for liquid progress track & percentage readout
   useEffect(() => {
     targetPercentRef.current = telemetry.overallPercent;
     if (telemetry.overallPercent === 0 && telemetry.phase === "ready") {
@@ -290,7 +257,7 @@ export function App() {
     return () => cancelAnimationFrame(rafId);
   }, [telemetry.overallPercent, telemetry.phase]);
 
-  // Refresh destination verification & running-process state after a cancelled or failed install
+  // Refresh destination & process lock state if an install gets cancelled or fails
   useEffect(() => {
     if (isUninstallMode || defaultsError !== null) return;
     if (telemetry.phase === "failed" || telemetry.phase === "cancelled") {
@@ -312,7 +279,7 @@ export function App() {
     autoLaunchedRef.current = true;
     const timer = setTimeout(() => {
       void handleLaunch();
-    }, 700);
+    }, 650);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isUninstallMode, telemetry.finished, options.autoLaunch]);
@@ -348,14 +315,6 @@ export function App() {
     Boolean(telemetry.error?.includes("[LOCKED_PROCESSES]")) ||
     runningProcesses.length > 0;
 
-  const activeTabIndex = RAIL_TABS.findIndex((t) => t.id === activeTab);
-
-  const getTileStatus = (tile: TileId): "idle" | "active" | "done" => {
-    if (isComplete || telemetry.completedTiles.includes(tile)) return "done";
-    if (telemetry.activeTile === tile) return "active";
-    return "idle";
-  };
-
   const applyInspectionResult = (res: DestinationInspection, updateDirInput = false) => {
     setInspection(res);
     setFreeDiskBytes(res.freeDiskBytes);
@@ -388,6 +347,8 @@ export function App() {
       savedStartMenuShortcut:
         prev?.savedStartMenuShortcut ?? defaults?.savedStartMenuShortcut ?? null,
       savedFileAssociations: prev?.savedFileAssociations ?? defaults?.savedFileAssociations ?? null,
+      otherInstallDir: res.otherInstallDir ?? null,
+      otherInstallVersion: res.otherInstallVersion ?? null,
     }));
   };
 
@@ -410,25 +371,6 @@ export function App() {
       const res = await inspectInstallDir(rawPath);
       if (seq !== dirInspectSeqRef.current) return;
       applyInspectionResult(res, updateDirInput);
-    } catch (err) {
-      if (seq !== dirInspectSeqRef.current) return;
-      setPathError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (seq === dirInspectSeqRef.current) {
-        setIsVerifying(false);
-      }
-    }
-  };
-
-  const handleVerifyNow = async () => {
-    if (isRunning || isVerifying) return;
-    setIsVerifying(true);
-    setLaunchError(null);
-    const seq = ++dirInspectSeqRef.current;
-    try {
-      const res = await verifyExistingInstall(options.installDir);
-      if (seq !== dirInspectSeqRef.current) return;
-      applyInspectionResult(res, false);
     } catch (err) {
       if (seq !== dirInspectSeqRef.current) return;
       setPathError(err instanceof Error ? err.message : String(err));
@@ -466,17 +408,22 @@ export function App() {
 
   const handleStartInstall = async () => {
     if (isRunning || installBlocked) return;
-    await startInstallWith({
-      ...options,
-      forceReunpack: existingReport?.disposition === "upToDateVerified",
-      allowDowngrade: existingReport?.disposition === "downgradeWarning",
-    });
+    await startInstallWith(
+      {
+        ...options,
+        forceReunpack: existingReport?.disposition === "upToDateVerified",
+        allowDowngrade: existingReport?.disposition === "downgradeWarning",
+      },
+      defaults,
+      activeMode,
+    );
   };
 
   const handleStartUninstall = async () => {
     if (isRunning) return;
     setLaunchError(null);
     setUninstallSummary(null);
+    setRunMode("uninstall");
 
     const base = makeReadyTelemetry(
       options.installDir,
@@ -506,7 +453,7 @@ export function App() {
       setTelemetry((prev) => ({
         ...prev,
         phase: "failed",
-        headline: "Uninstall interrupted",
+        headline: "Uninstall paused",
         liveStatus: msg,
         error: msg,
       }));
@@ -550,6 +497,20 @@ export function App() {
     }, 220);
   };
 
+  const handleResetToReady = () => {
+    setLaunchError(null);
+    setTelemetry(
+      makeReadyTelemetry(
+        options.installDir,
+        defaults?.payloadFiles ?? 8,
+        defaults?.requiredBytes ?? 94_800_000,
+        activeMode,
+      ),
+    );
+    displayPercentRef.current = 0;
+    setDisplayPercent(0);
+  };
+
   const handleLaunch = async () => {
     setLaunchError(null);
     try {
@@ -558,49 +519,6 @@ export function App() {
       setLaunchError(err instanceof Error ? err.message : String(err));
     }
   };
-
-  const headerSubtitle = useMemo(() => {
-    if (defaultsError) return "Initialization Error";
-    if (isUninstallMode) {
-      if (isComplete) return "Removed · Clean Uninstall";
-      if (isRunning) return telemetry.headline;
-      return "Uninstall · Scoped Removal";
-    }
-    if (isComplete) return "Installed · Ready to Watch";
-    if (isRunning) return telemetry.headline;
-    if (existingReport?.disposition === "repairNeeded") {
-      return "Watch Together · Repair Ready";
-    }
-    if (existingReport?.disposition === "updateAvailable") {
-      return "Watch Together · Update Ready";
-    }
-    if (existingReport?.disposition === "upToDateVerified") {
-      return "Watch Together · Verified";
-    }
-    if (existingReport?.disposition === "downgradeWarning") {
-      return "Watch Together · Newer Version Installed";
-    }
-    return "Watch Together · Windows";
-  }, [defaultsError, existingReport?.disposition, isComplete, isRunning, isUninstallMode, telemetry.headline]);
-
-  const installCtaLabel = useMemo(() => {
-    if (isInitializing && !defaults) {
-      return "Inspecting destination...";
-    }
-    if (existingReport?.disposition === "repairNeeded") {
-      return "Repair Epilod Party";
-    }
-    if (existingReport?.disposition === "updateAvailable") {
-      return "Update Epilod Party";
-    }
-    if (existingReport?.disposition === "upToDateVerified") {
-      return "Reinstall / Verify Epilod Party";
-    }
-    if (existingReport?.disposition === "downgradeWarning") {
-      return `Reinstall older v${defaults?.packageVersion ?? "0.1.0"}`;
-    }
-    return options.autoLaunch ? "Install & Launch" : "Install Epilod Party";
-  }, [defaults, existingReport?.disposition, isInitializing, options.autoLaunch]);
 
   const cleanLiveError = (defaultsError ?? launchError ?? telemetry.liveStatus).replace(
     "[LOCKED_PROCESSES] ",
@@ -611,7 +529,10 @@ export function App() {
     inspection?.peakRequiredBytes ??
     preflightPeakBytes ??
     defaults?.peakRequiredBytes ??
-    Math.max((existingReport?.bytesToWrite ?? defaults?.requiredBytes ?? 94_800_000) + 40_000_000, 40_000_000);
+    Math.max(
+      (existingReport?.bytesToWrite ?? defaults?.requiredBytes ?? 94_800_000) + 40_000_000,
+      40_000_000,
+    );
   const insufficientDiskSpace =
     !isUninstallMode && freeDiskBytes !== null && freeDiskBytes < peakRequiredBytes;
 
@@ -625,782 +546,456 @@ export function App() {
     payloadMissing ||
     (runningProcesses.length > 0 && !defaults?.autoStart);
 
-  const pctRounded = Math.round(displayPercent);
-  const progressFraction = Math.min(1, Math.max(0, displayPercent / 100));
+  const installCtaLabel = useMemo(() => {
+    if (isInitializing && !defaults) return "Preparing…";
+    if (existingReport?.disposition === "repairNeeded") return "Repair";
+    if (existingReport?.disposition === "updateAvailable") return "Update";
+    if (existingReport?.disposition === "upToDateVerified") return "Reinstall";
+    if (existingReport?.disposition === "downgradeWarning") return "Reinstall Older";
+    return options.autoLaunch ? "Install & Launch" : "Install";
+  }, [defaults, existingReport?.disposition, isInitializing, options.autoLaunch]);
+
+  const effectiveMode: InstallMode =
+    isRunning || isComplete || isErrorOrCancelled ? runMode : activeMode;
+
+  const otherInstallDir = inspection?.otherInstallDir ?? defaults?.otherInstallDir ?? null;
+  const otherInstallVersion =
+    inspection?.otherInstallVersion ?? defaults?.otherInstallVersion ?? null;
+
+  const readySubtitle = useMemo(() => {
+    if (isInitializing && !defaults) return "Getting things ready…";
+    if (existingReport?.disposition === "updateAvailable") {
+      return existingReport.installedVersion
+        ? `Update v${existingReport.installedVersion} → v${defaults?.packageVersion ?? "0.1.0"}`
+        : `Ready to update to v${defaults?.packageVersion ?? "0.1.0"}.`;
+    }
+    if (existingReport?.disposition === "repairNeeded") {
+      return "Ready to repair your installation.";
+    }
+    if (existingReport?.disposition === "downgradeWarning") {
+      return `v${existingReport.installedVersion ?? "newer"} is already installed.`;
+    }
+    if (existingReport?.disposition === "upToDateVerified") {
+      return `v${existingReport.installedVersion ?? defaults?.packageVersion ?? "0.1.0"} is installed and ready.`;
+    }
+    return "Watch together, effortlessly.";
+  }, [defaults, existingReport, isInitializing]);
+
+  const topLeftSlot = (() => {
+    if (isRunning) {
+      const label =
+        isUninstallMode || effectiveMode === "uninstall"
+          ? "Uninstall"
+          : effectiveMode === "update"
+            ? "Updating"
+            : effectiveMode === "repair"
+              ? "Repairing"
+              : "Installing";
+      return <span className="px-1 text-xs font-medium text-white/45">{label}</span>;
+    }
+    if (isComplete) {
+      const label =
+        isUninstallMode || effectiveMode === "uninstall"
+          ? "Removed"
+          : effectiveMode === "update"
+            ? "Updated"
+            : effectiveMode === "repair"
+              ? "Repaired"
+              : "Installed";
+      return <span className="px-1 text-xs font-medium text-[#4ADE80]/85">{label}</span>;
+    }
+    if (isErrorOrCancelled) {
+      const label =
+        telemetry.phase === "cancelled"
+          ? effectiveMode === "update"
+            ? "Update cancelled"
+            : "Cancelled"
+          : effectiveMode === "update"
+            ? "Update paused"
+            : "Paused";
+      return <span className="px-1 text-xs font-medium text-white/45">{label}</span>;
+    }
+    if (isUninstallMode) {
+      return <span className="px-1 text-xs font-medium text-white/45">Uninstall</span>;
+    }
+    if (showCustomize) {
+      return (
+        <button
+          type="button"
+          onClick={() => setShowCustomize(false)}
+          className="ep-glass-pill inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-white/80 hover:text-white"
+        >
+          <InstallerArrowIcon direction="left" size={13} />
+          <span>Back</span>
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        onClick={() => setShowCustomize(true)}
+        className="ep-glass-pill inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-white/75 hover:text-white"
+      >
+        <InstallerSlidersIcon size={12} />
+        <span>Customize</span>
+      </button>
+    );
+  })();
+
+  const versionLabel = `v${defaults?.packageVersion ?? defaults?.version ?? "0.1.0"}`;
 
   return (
     <div className="flex h-full w-full items-center justify-center">
-      {/* Main Architectural Stage — 900x740 matching approved design */}
       <div
         data-tauri-drag-region
-        className="anim-stage-in relative h-[740px] w-[900px] overflow-hidden rounded-[36px] bg-[#101015] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.055),0_28px_72px_rgba(0,0,0,0.65)]"
+        className="ep-installer-window ep-stage-in flex flex-col justify-between"
       >
-        {/* Discreet Window Chrome Controls */}
-        <div className="absolute right-7 top-6 z-20 flex items-center gap-1.5">
-          <button
-            type="button"
-            aria-label="Minimize installer"
-            onClick={() => void minimizeInstallerWindow()}
-            className="flex h-7 w-7 items-center justify-center rounded-full text-[#6B6B7E] transition-colors duration-150 hover:bg-[#1B1B24] hover:text-[#E4E4EE] cursor-pointer"
-          >
-            <Minus className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            aria-label="Close installer"
-            onClick={() => void closeInstallerWindow()}
-            className="flex h-7 w-7 items-center justify-center rounded-full text-[#6B6B7E] transition-colors duration-150 hover:bg-[#2A1922] hover:text-[#F47292] cursor-pointer"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+        {/* Subtle luminous orbs refracting behind frosted glass */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+          <div
+            className={`ep-ambient-orb-purple absolute -left-8 top-10 h-56 w-56 rounded-full ${
+              isRunning ? "ep-orb-active" : ""
+            }`}
+          />
+          <div className="ep-ambient-orb-silver absolute -right-10 bottom-2 h-52 w-52 rounded-full" />
         </div>
 
-        {/* Architectural Hairline Traces */}
-        <EcosystemTraces
-          activeTile={telemetry.activeTile}
-          completedTiles={telemetry.completedTiles}
-          isRunning={isRunning}
-          isComplete={isComplete}
-        />
+        <WindowChrome leftSlot={topLeftSlot} />
 
-        {/* Top Brand Capsule */}
-        <div
-          data-tauri-drag-region
-          className="absolute left-[255px] top-[96px] z-10 flex h-[72px] w-[390px] items-center gap-3.5 rounded-full bg-[#17171E] pl-3.5 pr-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_12px_32px_rgba(0,0,0,0.42)]"
+        <main
+          className={`relative z-10 flex flex-1 min-h-0 flex-col items-center px-8 ${
+            showCustomize ? "justify-center overflow-y-auto pb-4" : "justify-center pb-6"
+          }`}
         >
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center">
-            <BrandMark size={44} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-[15.5px] font-medium tracking-[-0.015em] text-[#F4F4F6]">
-              Epilod Party
-            </div>
-            <div
-              key={headerSubtitle}
-              className="anim-text-swap mt-0.5 truncate text-[12px] text-[#7C7C8E]"
-            >
-              {headerSubtitle}
-            </div>
-          </div>
-          <div className="mono text-[12px] text-[#A78BFA]">
-            v{defaults?.packageVersion ?? defaults?.version ?? "0.1.0"}
-          </div>
-        </div>
-
-        {/* Four Flanking Component Tiles */}
-        <ModuleTile
-          label="mpv"
-          accent="rose"
-          status={getTileStatus("mpv")}
-          positionClass="left-[78px] top-[304px]"
-          icon={<PlaySquare className="h-6 w-6 stroke-[1.75]" />}
-        />
-
-        <ModuleTile
-          label="Auto-Sync"
-          accent="purple"
-          status={getTileStatus("autoSync")}
-          positionClass="left-[78px] top-[432px]"
-          icon={<Captions className="h-6 w-6 stroke-[1.75]" />}
-        />
-
-        <ModuleTile
-          label="Syncplay"
-          accent="purple"
-          status={getTileStatus("syncplay")}
-          positionClass="left-[746px] top-[304px]"
-          icon={<Users className="h-6 w-6 stroke-[1.75]" />}
-        />
-
-        <ModuleTile
-          label="STARTTLS"
-          accent="neutral"
-          status={getTileStatus("startTls")}
-          positionClass="left-[746px] top-[432px]"
-          icon={<Lock className="h-6 w-6 stroke-[1.75]" />}
-        />
-
-        {/* Central Layered Installer / Uninstaller Window */}
-        <div className="absolute left-[212px] top-[236px] z-10 flex h-[348px] w-[476px] gap-2 rounded-[24px] bg-[#14141A] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_28px_64px_rgba(0,0,0,0.62)]">
-          {/* Left 3-Tab Sidebar Rail (Install / Update / Repair Modes) */}
-          {!isUninstallMode && (
-            <nav
-              aria-label="Installer sections"
-              className="relative flex w-14 flex-col items-center justify-center"
-            >
-              <div className="relative flex flex-col items-center gap-3">
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute left-0 top-0 h-[44px] w-10 rounded-[14px] bg-[#221D33] transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]"
-                  style={{
-                    transform: `translateY(${activeTabIndex * 56}px)`,
-                  }}
-                />
-
+          {isRunning ? (
+            <ProgressView
+              mode={effectiveMode}
+              isUninstall={isUninstallMode}
+              percent={displayPercent}
+              onCancel={() => void handleCancelInstall()}
+            />
+          ) : isComplete ? (
+            isUninstallMode ? (
+              <div key="uninstall-complete" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
+                <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-white">
+                  All cleaned up
+                </h1>
+                <p className="mt-1.5 text-xs text-white/60">
+                  Epilod Party has been removed from this PC.
+                </p>
+                {uninstallSummary && uninstallSummary.warnings && uninstallSummary.warnings.length > 0 && (
+                  <p
+                    className="mt-2 max-w-[320px] truncate text-[11.5px] text-[#FCA5A5]"
+                    title={uninstallSummary.warnings.join(" | ")}
+                  >
+                    {uninstallSummary.warnings[0]}
+                  </p>
+                )}
                 <button
                   type="button"
-                  aria-label="Install location"
-                  title="Install location"
-                  onClick={() => setActiveTab("location")}
-                  className={`relative z-10 flex h-[44px] w-10 items-center justify-center rounded-[14px] transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#8B5CF6] ${
-                    activeTab === "location"
-                      ? "text-[#C4B5FD]"
-                      : "text-[#5E5E70] hover:text-[#A1A1B5]"
-                  }`}
+                  onClick={() => void closeInstallerWindow()}
+                  className="ep-glass-pill mt-6 h-10 cursor-pointer rounded-full px-7 text-xs font-medium text-white"
                 >
-                  <Folder className="h-[18px] w-[18px] stroke-[1.75]" />
-                </button>
-
-                <button
-                  type="button"
-                  aria-label="Setup progress"
-                  title="Setup progress"
-                  onClick={() => setActiveTab("install")}
-                  className={`relative z-10 flex h-[44px] w-10 items-center justify-center rounded-[14px] transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#8B5CF6] ${
-                    activeTab === "install"
-                      ? "text-[#C4B5FD]"
-                      : "text-[#5E5E70] hover:text-[#A1A1B5]"
-                  }`}
-                >
-                  <Layers className="h-[18px] w-[18px] stroke-[1.75]" />
-                </button>
-
-                <button
-                  type="button"
-                  aria-label="Install options"
-                  title="Install options"
-                  onClick={() => setActiveTab("options")}
-                  className={`relative z-10 flex h-[44px] w-10 items-center justify-center rounded-[14px] transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#8B5CF6] ${
-                    activeTab === "options"
-                      ? "text-[#C4B5FD]"
-                      : "text-[#5E5E70] hover:text-[#A1A1B5]"
-                  }`}
-                >
-                  <SlidersHorizontal className="h-[18px] w-[18px] stroke-[1.75]" />
+                  Close
                 </button>
               </div>
-            </nav>
-          )}
-
-          {/* Elevated Main Panel */}
-          <div className="flex min-w-0 flex-1 flex-col justify-between rounded-[18px] bg-[#1B1B22] px-6 pb-5 pt-[20px] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
-            {isUninstallMode ? (
-              <div
-                key="tab-uninstall"
-                className="anim-tab-enter flex h-full flex-col justify-between"
-              >
-                {/* Header & Progress Track */}
-                <div className="flex flex-col gap-2.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <SmoothStatusText
-                      headline={telemetry.headline}
-                      liveStatus={
-                        uninstallSummary
-                          ? `Removed ${uninstallSummary.removedFiles} files · Cleared ${uninstallSummary.removedShortcuts} shortcuts · Preserved ${uninstallSummary.skippedUnrelatedFiles} non-app file(s)`
-                          : cleanLiveError
-                      }
-                      isError={Boolean(launchError) || isErrorOrCancelled}
-                    />
-                    <div
-                      className={`mono shrink-0 pt-0.5 text-[12px] transition-colors duration-300 ${
-                        isComplete
-                          ? "text-[#4ADE80]"
-                          : isErrorOrCancelled
-                            ? "text-[#F87171]"
-                            : "text-[#A78BFA]"
-                      }`}
-                    >
-                      {pctRounded}%
-                    </div>
-                  </div>
-
-                  <div className="h-[3px] w-full overflow-hidden rounded-full bg-[#282834]">
-                    <div
-                      className={`h-full w-full origin-left rounded-full transition-colors duration-300 ${
-                        isComplete
-                          ? "bg-[#22C55E]"
-                          : isErrorOrCancelled
-                            ? "bg-[#F87171]"
-                            : "bg-[#E11D48]"
-                      }`}
-                      style={{
-                        transform: `scaleX(${progressFraction})`,
-                      }}
-                    />
-                  </div>
+            ) : (
+              <div key="install-complete" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
+                <div className="relative mb-4">
+                  <BrandMark size={66} className="ep-icon-rest" />
+                  <span
+                    aria-hidden="true"
+                    className="absolute -bottom-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full bg-[#22C55E] text-[#052E16] shadow-lg ring-2 ring-[#0A0A0F]"
+                  >
+                    <InstallerCheckIcon size={13} />
+                  </span>
                 </div>
-
-                {/* Middle: Ready Options vs Running/Completed Steps */}
-                {telemetry.phase === "ready" ? (
-                  <div className="flex flex-col gap-3 py-1">
-                    <div className="rounded-[12px] bg-[#14141A] px-3.5 py-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-medium text-[#A1A1B5]">
-                          Target installation folder
-                        </span>
-                        {existingReport && existingReport.unrelatedFileCount > 0 && (
-                          <span className="text-[10.5px] font-medium text-[#A78BFA]">
-                            {existingReport.unrelatedFileCount}
-                            {existingReport.unrelatedCountCapped ? "+" : ""} user file(s) preserved
-                          </span>
-                        )}
-                      </div>
-                      <div className="mono mt-1 truncate text-[11.5px] text-[#EDEDF2]">
-                        {options.installDir}
-                      </div>
-                    </div>
-
-                    <ToggleOption
-                      label="Also remove local logs & update cache"
-                      description="Clear %LocalAppData%\EpilodParty diagnostic logs and cached updates"
-                      checked={removeUserData}
-                      disabled={isRunning}
-                      onChange={setRemoveUserData}
-                    />
-
-                    {runningProcesses.length > 0 && (
-                      <div className="flex items-center gap-2 rounded-[10px] bg-[#221D33] px-3 py-1.5 text-[11px] text-[#F47292]">
-                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                        <span className="truncate">
-                          Active ({runningProcesses.map((p) => p.name).join(", ")}) will close automatically
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-4 py-1">
-                    {telemetry.steps.map((step) => (
-                      <StepRow key={step.id} step={step} />
-                    ))}
-                    {uninstallSummary?.warnings && uninstallSummary.warnings.length > 0 && (
-                      <div
-                        className="flex items-center gap-2 rounded-[10px] bg-[#221D33] px-3 py-1.5 text-[11px] text-[#F47292]"
-                        title={uninstallSummary.warnings.join(" | ")}
-                      >
-                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                        <span className="truncate">{uninstallSummary.warnings[0]}</span>
-                      </div>
-                    )}
-                  </div>
+                <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-white">
+                  {effectiveMode === "update"
+                    ? "Epilod Party updated"
+                    : effectiveMode === "repair"
+                      ? "Repair complete"
+                      : "You’re all set"}
+                </h1>
+                <p className="mt-1 text-xs text-white/60">
+                  {effectiveMode === "update"
+                    ? `${versionLabel} is ready for showtime.`
+                    : effectiveMode === "repair"
+                      ? "Epilod Party is verified and ready."
+                      : "Epilod Party is ready for showtime."}
+                </p>
+                {launchError && (
+                  <p className="mt-2 max-w-[320px] truncate text-[11.5px] text-[#FCA5A5]" title={launchError}>
+                    {launchError}
+                  </p>
                 )}
+                <div className="mt-6 flex items-center justify-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void closeInstallerWindow()}
+                    className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleLaunch()}
+                    className="ep-glass-primary-pill inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-full px-6 text-[13px] font-medium text-white"
+                  >
+                    <InstallerLaunchIcon size={13} />
+                    <span>Launch Epilod Party</span>
+                  </button>
+                </div>
+              </div>
+            )
+          ) : isErrorOrCancelled ? (
+            <div key="error-view" className="ep-view-enter flex w-full max-w-[340px] flex-col items-center text-center">
+              <BrandMark size={58} className="ep-icon-rest mb-3.5 opacity-90" />
+              <h1 className="text-[19px] font-semibold tracking-[-0.02em] text-white">
+                {telemetry.phase === "cancelled"
+                  ? effectiveMode === "update"
+                    ? "Update cancelled"
+                    : "Setup cancelled"
+                  : defaultsError
+                    ? "Couldn’t start setup"
+                    : isUninstallMode
+                      ? "Uninstall paused"
+                      : effectiveMode === "update"
+                        ? "Update paused"
+                        : "Something got in the way"}
+              </h1>
+              <p
+                className={`mt-1.5 line-clamp-2 text-xs leading-relaxed ${
+                  telemetry.phase === "cancelled" ? "text-white/60" : "text-[#FCA5A5]"
+                }`}
+                title={cleanLiveError}
+              >
+                {cleanLiveError}
+              </p>
 
-                {/* Uninstall Footer Actions */}
-                <div className="flex flex-col gap-2.5">
-                  <div className="h-px bg-white/[0.06]" />
-                  {telemetry.phase === "ready" && (
-                    <div className="flex items-center gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => void closeInstallerWindow()}
-                        className="flex h-10 px-4 items-center justify-center rounded-[12px] bg-[#24242E] text-[12.5px] font-medium text-[#A1A1B5] transition-colors duration-150 hover:bg-[#2C2C38] hover:text-white cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleStartUninstall()}
-                        className="flex h-10 flex-1 items-center justify-center gap-2 rounded-[12px] bg-[#E11D48] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#F43F5E] active:scale-[0.985] cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#F47292]"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Uninstall Epilod Party
-                      </button>
-                    </div>
-                  )}
-
-                  {isRunning && (
-                    <div className="flex h-10 w-full items-center justify-center gap-2 rounded-[12px] bg-[#221D33] text-[12.5px] font-medium text-[#C4B5FD]">
-                      <span
-                        aria-hidden="true"
-                        className="h-1.5 w-1.5 rounded-full bg-[#F47292] animate-pulse"
-                      />
-                      <span>{getRunningPhaseLabel(telemetry.phase, true)}</span>
-                    </div>
-                  )}
-
-                  {isComplete && (
-                    <div className="flex items-center gap-2.5">
-                      {!tauriMode && (
-                        <button
-                          type="button"
-                          aria-label="Replay uninstall preview"
-                          title="Replay uninstall preview"
-                          onClick={() => void handleStartUninstall()}
-                          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-[#24242E] text-[#A1A1B5] transition-colors duration-150 hover:bg-[#2E2E3B] hover:text-white cursor-pointer"
-                        >
-                          <RotateCcw className="h-4 w-4" />
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => void closeInstallerWindow()}
-                        className="flex h-10 flex-1 items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] cursor-pointer"
-                      >
-                        Finish
-                      </button>
-                    </div>
-                  )}
-
-                  {isErrorOrCancelled && (
+              <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
+                {hasLockedProcessError && runningProcesses.length > 0 && !isUninstallMode ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleResetToReady}
+                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isClosingProcesses}
+                      onClick={() => void handleCloseProcesses()}
+                      className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white disabled:opacity-45"
+                    >
+                      {isClosingProcesses ? "Closing…" : "Close & Retry"}
+                    </button>
+                  </>
+                ) : defaultsError !== null ? (
+                  <button
+                    type="button"
+                    onClick={() => void loadDefaults()}
+                    className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-7 text-[13px] font-medium text-white"
+                  >
+                    Try Again
+                  </button>
+                ) : defaults?.launchMode === "update" && existingReport?.existingExeFound ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleLaunch()}
+                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-4 text-xs font-medium text-white/80 hover:text-white"
+                    >
+                      Relaunch previous version
+                    </button>
+                    <button
+                      type="button"
+                      disabled={installBlocked}
+                      onClick={() => void handleStartInstall()}
+                      className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-5 text-[13px] font-medium text-white disabled:opacity-45"
+                    >
+                      Retry update
+                    </button>
+                  </>
+                ) : isUninstallMode ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void closeInstallerWindow()}
+                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                    >
+                      Close
+                    </button>
                     <button
                       type="button"
                       onClick={() => void handleStartUninstall()}
-                      className="flex h-10 w-full items-center justify-center rounded-[12px] bg-[#E11D48] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#F43F5E] active:scale-[0.985] cursor-pointer"
+                      className="ep-glass-danger-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white"
                     >
                       Retry uninstall
                     </button>
-                  )}
-                </div>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleResetToReady}
+                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      disabled={installBlocked}
+                      onClick={() => void handleStartInstall()}
+                      className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white disabled:opacity-45"
+                    >
+                      Try Again
+                    </button>
+                  </>
+                )}
               </div>
-            ) : (
-              <>
-                {activeTab === "install" && (
-                  <div
-                    key="tab-install"
-                    className="anim-tab-enter flex h-full flex-col justify-between"
+            </div>
+          ) : isUninstallMode ? (
+            <div key="uninstall-ready" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
+              <BrandMark size={62} className="ep-icon-rest mb-3.5 opacity-85" />
+              <h1 className="text-[19px] font-semibold tracking-[-0.02em] text-white">
+                Remove Epilod Party?
+              </h1>
+              <p className="mt-1 text-xs text-white/60">
+                Your personal files stay untouched.
+              </p>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={removeUserData}
+                onClick={() => setRemoveUserData((v) => !v)}
+                className="ep-glass-well mt-4 flex w-full cursor-pointer items-center justify-between gap-3 rounded-2xl px-3.5 py-2 text-left text-xs text-white/80 hover:text-white"
+              >
+                <span className="truncate">Also clear local logs &amp; cache</span>
+                <GlassSwitchTrack checked={removeUserData} />
+              </button>
+
+              <div className="mt-4 flex items-center justify-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => void closeInstallerWindow()}
+                  className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                >
+                  Keep App
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartUninstall()}
+                  className="ep-glass-danger-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white"
+                >
+                  Uninstall
+                </button>
+              </div>
+            </div>
+          ) : showCustomize ? (
+            <CustomizePanel
+              options={options}
+              defaultInstallDir={defaults?.defaultInstallDir ?? null}
+              tauriMode={tauriMode}
+              disabled={isRunning || isComplete}
+              pathError={pathError}
+              insufficientDiskSpace={insufficientDiskSpace}
+              peakRequiredBytes={peakRequiredBytes}
+              freeDiskBytes={freeDiskBytes}
+              otherInstallDir={otherInstallDir}
+              otherInstallVersion={otherInstallVersion}
+              ctaLabel={installCtaLabel}
+              installBlocked={installBlocked}
+              onDirChange={handleDirInputChange}
+              onDirBlurOrEnter={() => {
+                if (dirDebounceRef.current) {
+                  clearTimeout(dirDebounceRef.current);
+                }
+                if (options.installDir.trim()) {
+                  void runDirectoryInspection(options.installDir, false);
+                }
+              }}
+              onResetDir={() => {
+                if (!defaults?.defaultInstallDir) return;
+                if (dirDebounceRef.current) {
+                  clearTimeout(dirDebounceRef.current);
+                }
+                setOptions((prev) => ({
+                  ...prev,
+                  installDir: defaults.defaultInstallDir,
+                }));
+                void runDirectoryInspection(defaults.defaultInstallDir, true);
+              }}
+              onBrowseDir={() => void handleBrowseFolder()}
+              onUpdateOptions={setOptions}
+              onSaveAndInstall={() => void handleStartInstall()}
+            />
+          ) : (
+            <div key="install-ready" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
+              <BrandMark size={68} className="ep-icon-rest mb-4" />
+              <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-white">
+                Epilod Party
+              </h1>
+              <p className="mt-1 text-xs text-white/60">{readySubtitle}</p>
+
+              {runningProcesses.length > 0 && !defaults?.autoStart ? (
+                <div className="ep-glass-well mt-3.5 flex items-center gap-2.5 rounded-full px-3.5 py-1.5 text-xs">
+                  <span className="truncate text-white/75">Epilod Party is running</span>
+                  <button
+                    type="button"
+                    disabled={isClosingProcesses}
+                    onClick={() => void handleCloseProcesses()}
+                    className="shrink-0 cursor-pointer font-medium text-[#C4B5FD] hover:text-white disabled:opacity-45"
                   >
-                    {/* Header & GPU Progress Track */}
-                    <div className="flex flex-col gap-2.5">
-                      <div className="flex items-start justify-between gap-3">
-                        <SmoothStatusText
-                          headline={telemetry.headline}
-                          liveStatus={cleanLiveError}
-                          isError={Boolean(launchError) || isErrorOrCancelled}
-                        />
-                        <div
-                          className={`mono shrink-0 text-[12px] pt-0.5 transition-colors duration-300 ${
-                            isComplete
-                              ? "text-[#4ADE80]"
-                              : isErrorOrCancelled
-                                ? "text-[#F87171]"
-                                : "text-[#A78BFA]"
-                          }`}
-                        >
-                          {pctRounded}%
-                        </div>
-                      </div>
+                    {isClosingProcesses ? "Closing…" : "Close & Continue"}
+                  </button>
+                </div>
+              ) : payloadMissing ? (
+                <p className="mt-3 text-xs text-[#FCA5A5]">
+                  Installer payload is missing.
+                </p>
+              ) : pathError ? (
+                <button
+                  type="button"
+                  onClick={() => setShowCustomize(true)}
+                  className="mt-3 max-w-[320px] cursor-pointer truncate text-xs text-[#FCA5A5] hover:underline"
+                  title={pathError}
+                >
+                  {pathError}
+                </button>
+              ) : insufficientDiskSpace && freeDiskBytes !== null ? (
+                <p className="mt-3 text-xs text-[#FCA5A5]">
+                  Needs {formatBytes(peakRequiredBytes)} free ({formatBytes(freeDiskBytes)} left).
+                </p>
+              ) : otherInstallDir ? (
+                <p
+                  className="mt-3 max-w-[320px] truncate text-xs text-[#C4B5FD]"
+                  title={otherInstallDir}
+                >
+                  Replaces existing{otherInstallVersion ? ` v${otherInstallVersion}` : ""} copy on this PC
+                </p>
+              ) : null}
 
-                      <div className="h-[3px] w-full overflow-hidden rounded-full bg-[#282834]">
-                        <div
-                          className={`h-full w-full origin-left rounded-full transition-colors duration-300 ${
-                            isComplete
-                              ? "bg-[#22C55E]"
-                              : isErrorOrCancelled
-                                ? "bg-[#F87171]"
-                                : "bg-[#8B5CF6]"
-                          }`}
-                          style={{
-                            transform: `scaleX(${progressFraction})`,
-                          }}
-                        />
-                      </div>
+              <div className="mt-6 flex items-center justify-center">
+                <button
+                  type="button"
+                  disabled={installBlocked}
+                  onClick={() => void handleStartInstall()}
+                  className="ep-glass-primary-pill inline-flex h-10 cursor-pointer items-center gap-2 rounded-full px-8 text-[13px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <span>{installCtaLabel}</span>
+                  <InstallerArrowIcon direction="right" size={14} />
+                </button>
+              </div>
 
-                      {/* Pre-install SHA-256 verification status pill */}
-                      {telemetry.phase === "ready" && existingReport && (
-                        <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px]">
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            {existingReport.disposition === "repairNeeded" ||
-                            existingReport.disposition === "downgradeWarning" ? (
-                              <AlertTriangle className="h-3 w-3 shrink-0 text-[#F47292]" />
-                            ) : (
-                              <ShieldCheck className="h-3 w-3 shrink-0 text-[#A78BFA]" />
-                            )}
-                            <span
-                              className={`truncate ${
-                                existingReport.disposition === "downgradeWarning"
-                                  ? "text-[#F47292]"
-                                  : "text-[#9292A6]"
-                              }`}
-                            >
-                              {isVerifying
-                                ? "Verifying existing files via SHA-256..."
-                                : existingReport.summaryText}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            disabled={isRunning || isVerifying}
-                            onClick={() => void handleVerifyNow()}
-                            className="inline-flex shrink-0 items-center gap-1 text-[10.5px] font-medium text-[#A78BFA] hover:text-[#C4B5FD] disabled:opacity-45 cursor-pointer"
-                          >
-                            <RefreshCw
-                              className={`h-2.5 w-2.5 ${isVerifying ? "animate-spin" : ""}`}
-                            />
-                            Re-verify
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Borderless 3-Step Checklist */}
-                    <div className="flex flex-col gap-3.5 py-0.5">
-                      {telemetry.steps.map((step) => (
-                        <StepRow key={step.id} step={step} />
-                      ))}
-                    </div>
-
-                    {/* Footer: Running process lock prompt / Path + Primary Purple Action */}
-                    <div className="flex flex-col gap-2.5">
-                      <div className="h-px bg-white/[0.06]" />
-
-                      {hasLockedProcessError && !isRunning && !isComplete && (
-                        <div className="flex items-center justify-between gap-2 rounded-[10px] bg-[#221D33] px-3 py-1.5 text-[11px]">
-                          <span className="truncate text-[#F47292]">
-                            {runningProcesses.length > 0
-                              ? `Running: ${runningProcesses.map((p) => p.name).join(", ")}`
-                              : "App files in use by a running process"}
-                          </span>
-                          <button
-                            type="button"
-                            disabled={isClosingProcesses}
-                            onClick={() => void handleCloseProcesses()}
-                            className="shrink-0 rounded-[7px] bg-[#7C3AED] px-2.5 py-1 text-[10.5px] font-medium text-white hover:bg-[#8B5CF6] disabled:opacity-50 cursor-pointer"
-                          >
-                            {isClosingProcesses ? "Closing..." : "Close & Retry"}
-                          </button>
-                        </div>
-                      )}
-
-                      {payloadMissing && (
-                        <div className="truncate text-[11px] text-[#F87171]">
-                          Missing installer payload (epilod-payload.epkg). Run build-installer.ps1.
-                        </div>
-                      )}
-
-                      {pathError && (
-                        <div className="truncate text-[11px] text-[#F87171]" title={pathError}>
-                          {pathError}
-                        </div>
-                      )}
-
-                      {insufficientDiskSpace && freeDiskBytes !== null && (
-                        <div className="truncate text-[11px] text-[#F87171]">
-                          Not enough free disk space ({formatBytes(peakRequiredBytes)} required, {formatBytes(freeDiskBytes)} available).
-                        </div>
-                      )}
-
-                      <div className="flex items-center justify-between gap-3 text-[11px] text-[#6B6B7D]">
-                        <span className="mono truncate">{options.installDir}</span>
-                        <span className="shrink-0">
-                          {isRunning
-                            ? `${telemetry.filesDone}/${telemetry.filesTotal} files`
-                            : existingReport && existingReport.unrelatedFileCount > 0
-                              ? `${existingReport.unrelatedFileCount}${existingReport.unrelatedCountCapped ? "+" : ""} non-app file(s) kept`
-                              : "x64 · Current User"}
-                        </span>
-                      </div>
-
-                      {!isRunning && !isComplete && !isErrorOrCancelled && (
-                        <button
-                          type="button"
-                          disabled={installBlocked}
-                          onClick={() => void handleStartInstall()}
-                          className="flex h-10 w-full items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#A78BFA]"
-                        >
-                          {installCtaLabel}
-                        </button>
-                      )}
-
-                      {isRunning && (
-                        <div className="flex items-center gap-2.5">
-                          <button
-                            type="button"
-                            onClick={() => void handleCancelInstall()}
-                            className="flex h-10 px-4 items-center justify-center rounded-[12px] bg-[#24242E] text-[12.5px] font-medium text-[#A1A1B5] transition-colors duration-150 hover:bg-[#2C2C38] hover:text-white cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                          <div className="flex h-10 flex-1 items-center justify-center gap-2 rounded-[12px] bg-[#221D33] text-[12.5px] font-medium text-[#C4B5FD]">
-                            <span
-                              aria-hidden="true"
-                              className="h-1.5 w-1.5 rounded-full bg-[#A78BFA] animate-pulse"
-                            />
-                            <span>{getRunningPhaseLabel(telemetry.phase, false)}</span>
-                          </div>
-                        </div>
-                      )}
-
-                      {isComplete && (
-                        <div className="flex items-center gap-2.5">
-                          {!tauriMode && (
-                            <button
-                              type="button"
-                              aria-label="Replay preview"
-                              title="Replay installation preview"
-                              onClick={() => void handleStartInstall()}
-                              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] bg-[#24242E] text-[#A1A1B5] transition-colors duration-150 hover:bg-[#2E2E3B] hover:text-white cursor-pointer"
-                            >
-                              <RotateCcw className="h-4 w-4" />
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => void handleLaunch()}
-                            className="flex h-10 flex-1 items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#A78BFA]"
-                          >
-                            Launch Epilod Party
-                          </button>
-                        </div>
-                      )}
-
-                      {isErrorOrCancelled && (
-                        defaultsError !== null ? (
-                          <button
-                            type="button"
-                            onClick={() => void loadDefaults()}
-                            className="flex h-10 w-full items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] cursor-pointer"
-                          >
-                            Retry initialization
-                          </button>
-                        ) : defaults?.launchMode === "update" && existingReport?.existingExeFound ? (
-                          <div className="flex items-center gap-2.5">
-                            <button
-                              type="button"
-                              onClick={() => void handleLaunch()}
-                              className="flex h-10 px-3.5 items-center justify-center rounded-[12px] bg-[#24242E] text-[12px] font-medium text-[#D4D4DF] transition-colors duration-150 hover:bg-[#2E2E3B] hover:text-white cursor-pointer"
-                            >
-                              Relaunch previous version
-                            </button>
-                            <button
-                              type="button"
-                              disabled={installBlocked}
-                              onClick={() => void handleStartInstall()}
-                              className="flex h-10 flex-1 items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] disabled:opacity-45 cursor-pointer"
-                            >
-                              Retry update
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={installBlocked}
-                            onClick={() => void handleStartInstall()}
-                            className="flex h-10 w-full items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium tracking-[-0.01em] text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] disabled:opacity-45 cursor-pointer"
-                          >
-                            Retry installation
-                          </button>
-                        )
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === "location" && (
-                  <div
-                    key="tab-location"
-                    className="anim-tab-enter flex h-full flex-col justify-between"
-                  >
-                    <div className="flex flex-col gap-3">
-                      <div>
-                        <div className="text-[15px] font-medium tracking-[-0.015em] text-[#F4F4F6]">
-                          Destination folder
-                        </div>
-                        <div className="mt-0.5 text-[11.5px] text-[#848498]">
-                          Per-user setup requires no administrator elevation
-                        </div>
-                      </div>
-                      <div className="h-px bg-white/[0.06]" />
-                    </div>
-
-                    <div className="flex flex-col gap-2.5">
-                      <div className="flex flex-col gap-1.5">
-                        <div className="flex items-center justify-between">
-                          <label htmlFor="ep-install-dir" className="text-[11.5px] text-[#848498]">
-                            Install directory
-                          </label>
-                          {defaults?.defaultInstallDir &&
-                            options.installDir !== defaults.defaultInstallDir &&
-                            !isRunning &&
-                            !isComplete && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (dirDebounceRef.current) {
-                                    clearTimeout(dirDebounceRef.current);
-                                  }
-                                  setOptions((prev) => ({
-                                    ...prev,
-                                    installDir: defaults.defaultInstallDir,
-                                  }));
-                                  void runDirectoryInspection(defaults.defaultInstallDir, true);
-                                }}
-                                className="text-[11px] font-medium text-[#A78BFA] hover:text-[#C4B5FD] cursor-pointer"
-                              >
-                                Reset default
-                              </button>
-                            )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            id="ep-install-dir"
-                            type="text"
-                            value={options.installDir}
-                            disabled={isRunning || isComplete}
-                            onChange={(e) => handleDirInputChange(e.target.value)}
-                            onBlur={() => {
-                              if (dirDebounceRef.current) {
-                                clearTimeout(dirDebounceRef.current);
-                              }
-                              if (options.installDir.trim()) {
-                                void runDirectoryInspection(options.installDir, false);
-                              }
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                if (dirDebounceRef.current) {
-                                  clearTimeout(dirDebounceRef.current);
-                                }
-                                if (options.installDir.trim()) {
-                                  void runDirectoryInspection(options.installDir, false);
-                                }
-                              }
-                            }}
-                            className="mono h-9 min-w-0 flex-1 rounded-[10px] bg-[#14141A] px-3 text-[12px] text-[#F4F4F6] outline-none focus-visible:ring-2 focus-visible:ring-[#8B5CF6] disabled:opacity-50"
-                          />
-                          {tauriMode && (
-                            <button
-                              type="button"
-                              disabled={isRunning || isComplete}
-                              onClick={() => void handleBrowseFolder()}
-                              className="h-9 shrink-0 rounded-[10px] bg-[#24242E] px-3 text-[12px] font-medium text-[#D4D4DF] transition-colors duration-150 hover:bg-[#2D2D3A] disabled:opacity-45 cursor-pointer"
-                            >
-                              Browse
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {pathError && (
-                        <div className="anim-text-swap text-[11px] text-[#F87171]">
-                          {pathError}
-                        </div>
-                      )}
-
-                      {insufficientDiskSpace && freeDiskBytes !== null && (
-                        <div className="anim-text-swap text-[11px] text-[#F87171]">
-                          Not enough free space ({formatBytes(peakRequiredBytes)} needed, {formatBytes(freeDiskBytes)} available).
-                        </div>
-                      )}
-
-                      {existingReport && (
-                        <div className="flex items-center justify-between gap-2 rounded-[10px] bg-[#14141A] px-3 py-2 text-[11px]">
-                          <span className="truncate text-[#A1A1B5]">
-                            {isVerifying ? "Checking folder & SHA-256..." : existingReport.summaryText}
-                          </span>
-                          <button
-                            type="button"
-                            disabled={isRunning || isVerifying}
-                            onClick={() => void handleVerifyNow()}
-                            className="shrink-0 font-medium text-[#A78BFA] hover:text-[#C4B5FD] disabled:opacity-45 cursor-pointer"
-                          >
-                            Verify
-                          </button>
-                        </div>
-                      )}
-
-                      <div className="flex items-center justify-between pt-0.5 text-[11.5px] text-[#7C7C90]">
-                        <span>Space required</span>
-                        <span className="mono text-[#D4D4DF]">
-                          {formatBytes(peakRequiredBytes)}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center justify-between text-[11.5px] text-[#7C7C90]">
-                        <span>Available disk space</span>
-                        <span
-                          className={`mono ${
-                            insufficientDiskSpace ? "text-[#F87171]" : "text-[#4ADE80]"
-                          }`}
-                        >
-                          {freeDiskBytes !== null ? formatBytes(freeDiskBytes) : "Verified"}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col gap-2.5">
-                      <div className="h-px bg-white/[0.06]" />
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab("install")}
-                        className="flex h-10 w-full items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] cursor-pointer"
-                      >
-                        Back to setup
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === "options" && (
-                  <div
-                    key="tab-options"
-                    className="anim-tab-enter flex h-full flex-col justify-between"
-                  >
-                    <div className="flex flex-col gap-2.5">
-                      <div>
-                        <div className="text-[15px] font-medium tracking-[-0.015em] text-[#F4F4F6]">
-                          Installation options
-                        </div>
-                        <div className="mt-0.5 text-[11.5px] text-[#848498]">
-                          Shortcuts, Open With &amp; launch preferences
-                        </div>
-                      </div>
-                      <div className="h-px bg-white/[0.06]" />
-                    </div>
-
-                    <div className="flex flex-col gap-1.5">
-                      <ToggleOption
-                        label="Desktop shortcut"
-                        description="Add Epilod Party icon to your desktop"
-                        checked={options.createDesktopShortcut}
-                        disabled={isRunning || isComplete}
-                        onChange={(v) =>
-                          setOptions((prev) => ({ ...prev, createDesktopShortcut: v }))
-                        }
-                      />
-                      <ToggleOption
-                        label="Start Menu entry"
-                        description="Pin inside Windows Start Menu search"
-                        checked={options.createStartMenuShortcut}
-                        disabled={isRunning || isComplete}
-                        onChange={(v) =>
-                          setOptions((prev) => ({ ...prev, createStartMenuShortcut: v }))
-                        }
-                      />
-                      <ToggleOption
-                        label='Windows "Open with" menu'
-                        description="Offer Epilod Party for video & subtitle files"
-                        checked={options.registerFileAssociations}
-                        disabled={isRunning || isComplete}
-                        onChange={(v) =>
-                          setOptions((prev) => ({ ...prev, registerFileAssociations: v }))
-                        }
-                      />
-                      <ToggleOption
-                        label="Auto-launch when finished"
-                        description="Open Epilod Party automatically after verify"
-                        checked={options.autoLaunch}
-                        disabled={isRunning || isComplete}
-                        onChange={(v) =>
-                          setOptions((prev) => ({ ...prev, autoLaunch: v }))
-                        }
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-2.5">
-                      <div className="h-px bg-white/[0.06]" />
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab("install")}
-                        className="flex h-10 w-full items-center justify-center rounded-[12px] bg-[#7C3AED] text-[13px] font-medium text-white transition-[background-color,transform] duration-150 hover:bg-[#8B5CF6] active:scale-[0.985] cursor-pointer"
-                      >
-                        Save &amp; continue
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
+              <span className="num mt-3.5 text-xs text-white/35">
+                {versionLabel} · Windows
+              </span>
+            </div>
+          )}
+        </main>
       </div>
     </div>
   );

@@ -5,7 +5,7 @@ interface BrandMarkProps {
   className?: string;
 }
 
-export function BrandMark({ size = 44, className = "" }: BrandMarkProps) {
+export function BrandMark({ size = 64, className = "" }: BrandMarkProps) {
   return (
     <img
       src={appIcon}
@@ -13,7 +13,7 @@ export function BrandMark({ size = 44, className = "" }: BrandMarkProps) {
       height={size}
       alt="Epilod Party"
       draggable={false}
-      className={`block shrink-0 select-none object-contain ${className}`}
+      className={`block shrink-0 select-none rounded-2xl object-contain ${className}`}
     />
   );
 }

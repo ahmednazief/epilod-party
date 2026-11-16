@@ -6,6 +6,37 @@ import { logFrontendEvent } from "./lib/logger";
 import "./styles/globals.css";
 
 if (typeof window !== "undefined") {
+  const rootEl = document.documentElement;
+  rootEl.dataset.focusMode = "pointer";
+  window.addEventListener(
+    "pointerdown",
+    () => {
+      rootEl.dataset.focusMode = "pointer";
+    },
+    true,
+  );
+  window.addEventListener(
+    "mousedown",
+    () => {
+      rootEl.dataset.focusMode = "pointer";
+    },
+    true,
+  );
+  window.addEventListener(
+    "keydown",
+    (ev) => {
+      if (
+        ev.key === "Tab" ||
+        ev.key === "ArrowUp" ||
+        ev.key === "ArrowDown" ||
+        ev.key === "ArrowLeft" ||
+        ev.key === "ArrowRight"
+      ) {
+        rootEl.dataset.focusMode = "keyboard";
+      }
+    },
+    true,
+  );
   window.addEventListener("error", (ev) => {
     void logFrontendEvent(
       "error",

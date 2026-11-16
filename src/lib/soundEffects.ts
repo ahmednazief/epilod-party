@@ -8,7 +8,8 @@ export type SoundCue =
   | "peerLeft"
   | "peerReady"
   | "allReady"
-  | "codeCopied";
+  | "codeCopied"
+  | "reactionPop";
 
 export interface PlaySoundOptions {
   /** Quiets and softens cues automatically when video is actively playing. */
@@ -120,6 +121,20 @@ const CUE_RECIPES: Record<SoundCue, CueRecipe> = {
       { freqHz: 587.33, delayMs: 28, durationMs: 95, gain: 0.036 },
     ],
   },
+  // Delicate liquid-glass droplet pop (A4 + soft E5 shimmer) for live reactions
+  reactionPop: {
+    cutoffHz: 1180,
+    notes: [
+      {
+        freqHz: 440.0,
+        harmonicFreqHz: 659.25,
+        harmonicRatio: 0.12,
+        delayMs: 0,
+        durationMs: 70,
+        gain: 0.026,
+      },
+    ],
+  },
 };
 
 const PEER_REJOIN_FLAP_MS = 4000;
@@ -201,6 +216,127 @@ export function playSoundCue(cue: SoundCue, options: PlaySoundOptions = {}): voi
       const now = ctx.currentTime + 0.008;
       for (const note of recipe.notes) {
         scheduleNote(ctx, filter, now, note, gainScale);
+      }
+    } catch {
+      // Ignore Web Audio graph failures on suspended/restricted environments
+    }
+  };
+
+  if (ctx.state === "suspended") {
+    void ctx.resume().then(fire).catch(() => undefined);
+  } else {
+    fire();
+  }
+}
+
+export interface PlayReactionSoundOptions {
+  moviePlaying?: boolean;
+  repeat?: boolean;
+}
+
+const REACTION_PENTATONIC_HZ = [
+  369.99, // F#4
+  440.0, // A4
+  493.88, // B4
+  587.33, // D5
+  659.25, // E5
+] as const;
+
+const PRESET_REACTION_BASE_HZ: Record<string, number> = {
+  "❤️": 440.0, // Warm A4
+  "😂": 587.33, // Playful D5
+  "😮": 493.88, // Bright B4
+  "😱": 369.99, // Tense F#4 drop
+  "😢": 329.63, // Mellow E4
+  "🔥": 659.25, // Crisp E5 spark
+  "👏": 523.25, // Lively pop
+};
+
+let lastReactionTapAtMs = 0;
+let lastReactionRepeatAtMs = 0;
+
+function pickReactionBaseHz(emoji: string): number {
+  const mapped = PRESET_REACTION_BASE_HZ[emoji];
+  if (mapped) return mapped;
+  let hash = 0;
+  for (let i = 0; i < emoji.length; i += 1) {
+    hash = (hash * 31 + emoji.charCodeAt(i)) | 0;
+  }
+  return REACTION_PENTATONIC_HZ[Math.abs(hash) % REACTION_PENTATONIC_HZ.length];
+}
+
+/**
+ * Synthesizes a subtle Liquid-Glass droplet pop when clicking/tapping a reaction,
+ * automatically ducking during active playback and throttling hold-stream repeats.
+ */
+export function playReactionSoundCue(
+  emoji: string,
+  options: PlayReactionSoundOptions = {},
+): void {
+  if (!useAppStore.getState().soundEffectsEnabled) {
+    return;
+  }
+
+  const nowMs = Date.now();
+  if (options.repeat) {
+    if (nowMs - lastReactionRepeatAtMs < 145) return;
+    lastReactionRepeatAtMs = nowMs;
+  } else {
+    if (nowMs - lastReactionTapAtMs < 28) return;
+    lastReactionTapAtMs = nowMs;
+    lastReactionRepeatAtMs = nowMs;
+  }
+
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  const moviePlaying = Boolean(options.moviePlaying);
+  const gainScale = (moviePlaying ? 0.55 : 1.0) * (options.repeat ? 0.42 : 1.0);
+  const cutoffHz = moviePlaying ? 860 : 1150;
+  const baseHz = pickReactionBaseHz(emoji);
+  const organicJitter = 0.975 + Math.random() * 0.05;
+  const repeatLift = options.repeat ? 1.06 : 1.0;
+  const startHz = baseHz * 0.84 * organicJitter * repeatLift;
+  const endHz = baseHz * 1.18 * organicJitter * repeatLift;
+
+  const fire = () => {
+    try {
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(cutoffHz, ctx.currentTime);
+      filter.Q.setValueAtTime(1.1, ctx.currentTime);
+      filter.connect(ctx.destination);
+
+      const start = ctx.currentTime + 0.004;
+      const peak = Math.max(0.002, 0.026 * gainScale);
+      const dur = options.repeat ? 0.055 : 0.072;
+
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0.0001, start);
+      env.gain.exponentialRampToValueAtTime(peak, start + 0.007);
+      env.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      env.connect(filter);
+
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(startHz, start);
+      osc.frequency.exponentialRampToValueAtTime(endHz, start + dur * 0.72);
+      osc.connect(env);
+      osc.start(start);
+      osc.stop(start + dur + 0.015);
+
+      // Whisper-quiet crystal shimmer harmonic on primary clicks
+      if (!options.repeat) {
+        const overtoneGain = ctx.createGain();
+        overtoneGain.gain.setValueAtTime(0.11, start);
+        overtoneGain.connect(env);
+
+        const overtone = ctx.createOscillator();
+        overtone.type = "triangle";
+        overtone.frequency.setValueAtTime(endHz * 1.5, start);
+        overtone.connect(overtoneGain);
+        overtone.start(start);
+        overtone.stop(start + dur * 0.65);
       }
     } catch {
       // Ignore Web Audio graph failures on suspended/restricted environments

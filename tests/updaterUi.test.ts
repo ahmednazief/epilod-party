@@ -39,6 +39,9 @@ test("useAppStore supports Updates tab navigation, auto-check, and automatic-dow
   assert.equal(useAppStore.getState().settingsOpen, true);
   assert.equal(useAppStore.getState().settingsTab, "updates");
 
+  useAppStore.getState().openSettings("prefs");
+  assert.equal(useAppStore.getState().settingsTab, "profile");
+
   useAppStore.getState().openSettings();
   assert.equal(useAppStore.getState().settingsTab, "server");
 

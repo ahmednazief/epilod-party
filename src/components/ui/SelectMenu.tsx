@@ -1,11 +1,13 @@
 import { AppCheckIcon, AppChevronIcon } from "./AppIcons";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { MenuInterfaceIcon } from "./MenuIcons";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { usePresencePayload } from "../../lib/useAnimatedPresence";
 
 export interface SelectMenuOption<T extends string = string> {
   value: T;
   label: string;
+  icon?: ReactNode;
 }
 
 interface SelectMenuProps<T extends string = string> {
@@ -13,6 +15,7 @@ interface SelectMenuProps<T extends string = string> {
   options: readonly SelectMenuOption<T>[];
   onChange: (value: T) => void;
   ariaLabel: string;
+  triggerIcon?: ReactNode;
   disabled?: boolean;
   placeholder?: string;
   placement?: "bottom" | "top";
@@ -24,6 +27,7 @@ export function SelectMenu<T extends string = string>({
   options,
   onChange,
   ariaLabel,
+  triggerIcon,
   disabled = false,
   placeholder = "Select…",
   placement = "bottom",
@@ -56,29 +60,47 @@ export function SelectMenu<T extends string = string>({
       const vh = typeof window !== "undefined" ? window.innerHeight : 720;
       const width = Math.min(Math.max(r.width, 160), vw - 24);
       const left = Math.max(12, Math.min(r.left, vw - width - 12));
-      if (placement === "top") {
+      const spaceAbove = Math.max(0, r.top - 16);
+      const spaceBelow = Math.max(0, vh - r.bottom - 16);
+      const resolvedPlacement =
+        placement === "top"
+          ? spaceAbove < 120 && spaceBelow > spaceAbove
+            ? "bottom"
+            : "top"
+          : spaceBelow < 120 && spaceAbove > spaceBelow
+            ? "top"
+            : "bottom";
+
+      if (resolvedPlacement === "top") {
         setMenuStyle({
           left,
           width,
-          maxHeight: Math.min(224, Math.max(110, r.top - 18)),
+          maxHeight: Math.max(48, Math.min(224, spaceAbove)),
           bottom: Math.max(12, vh - r.top + 6),
         });
       } else {
         setMenuStyle({
           left,
           width,
-          maxHeight: Math.min(224, Math.max(110, vh - r.bottom - 18)),
+          maxHeight: Math.max(48, Math.min(224, spaceBelow)),
           top: Math.min(vh - 12, r.bottom + 6),
         });
       }
     };
 
+    const onScroll = (e: Event) => {
+      if (listRef.current && e.target instanceof Node && listRef.current.contains(e.target)) {
+        return;
+      }
+      setOpen(false);
+    };
+
     updatePosition();
     window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [open, placement]);
 
@@ -127,30 +149,39 @@ export function SelectMenu<T extends string = string>({
         }}
         className={`${
           listMenu.exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
-        } ep-glass-sheet fixed z-50 overflow-y-auto rounded-2xl p-1.5 flex flex-col gap-0.5`}
+        } ep-glass-submenu fixed z-50 overflow-hidden rounded-2xl py-2 flex flex-col`}
       >
-        {options.map((opt) => {
-          const active = opt.value === value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              role="option"
-              aria-selected={active}
-              data-active={active}
-              onClick={() => {
-                onChange(opt.value);
-                setOpen(false);
-              }}
-              className={`ep-menu-row ep-press w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs cursor-pointer ${
-                active ? "text-white font-medium" : "text-secondary hover:text-primary"
-              }`}
-            >
-              <span className="truncate">{opt.label}</span>
-              {active && <AppCheckIcon size={14} className="text-accent-soft shrink-0" />}
-            </button>
-          );
-        })}
+        <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1.5 flex flex-col gap-0.5">
+          {options.map((opt) => {
+            const active = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="option"
+                aria-selected={active}
+                data-active={active}
+                onClick={() => {
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={`ep-menu-row ep-press w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs cursor-pointer ${
+                  active ? "text-white font-medium" : "text-secondary hover:text-primary"
+                }`}
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  {opt.icon && (
+                    <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-secondary">
+                      {opt.icon}
+                    </span>
+                  )}
+                  <span className="truncate">{opt.label}</span>
+                </span>
+                {active && <AppCheckIcon size={14} className="text-accent-soft shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
       </div>
     ) : null;
 
@@ -164,9 +195,14 @@ export function SelectMenu<T extends string = string>({
         aria-haspopup="listbox"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        className="ep-glass-input ep-press w-full h-9.5 px-3.5 flex items-center justify-between gap-2 text-left text-xs text-primary rounded-xl focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-45 disabled:pointer-events-none cursor-pointer"
+        className="ep-glass-select ep-press w-full h-9.5 px-3.5 flex items-center justify-between gap-2 text-left text-xs text-primary rounded-xl disabled:opacity-45 disabled:pointer-events-none cursor-pointer"
       >
-        <span className="truncate">{selectedOption ? selectedOption.label : placeholder}</span>
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-accent-soft/85">
+            {selectedOption?.icon ?? triggerIcon ?? <MenuInterfaceIcon size={13} />}
+          </span>
+          <span className="truncate">{selectedOption ? selectedOption.label : placeholder}</span>
+        </span>
         <AppChevronIcon
           direction="down"
           size={14}

@@ -1,3 +1,4 @@
+import { isIdentityTransform, localToRoomSecs, type TimelineSegment } from "./sourceAlignment";
 import type { Participant, SyncStatusPayload } from "./syncplay";
 
 export interface RoomSyncHealth {
@@ -15,8 +16,20 @@ export function computeRoomSyncHealth(params: {
   localUsername: string;
   localLoaded: boolean;
   localPositionSecs: number;
+  timelineOffsetSecs?: number;
+  timelineScale?: number;
+  timelineSegments?: readonly TimelineSegment[];
 }): RoomSyncHealth {
-  const { syncStatus, participants, localUsername, localLoaded, localPositionSecs } = params;
+  const {
+    syncStatus,
+    participants,
+    localUsername,
+    localLoaded,
+    localPositionSecs,
+    timelineOffsetSecs = 0,
+    timelineScale = 1,
+    timelineSegments,
+  } = params;
   const peerCount = participants.length;
 
   if (syncStatus.state === "error") {
@@ -55,6 +68,18 @@ export function computeRoomSyncHealth(params: {
     };
   }
 
+  const localRoomPos = localToRoomSecs(
+    localPositionSecs,
+    timelineOffsetSecs,
+    timelineScale,
+    timelineSegments,
+  );
+  const hasAlignment =
+    !isIdentityTransform({
+      offsetSecs: timelineOffsetSecs,
+      scale: timelineScale,
+    }) || (timelineSegments?.length ?? 0) > 1;
+
   const localKey = localUsername.trim().toLowerCase();
   let maxDriftSecs = 0;
 
@@ -65,7 +90,14 @@ export function computeRoomSyncHealth(params: {
     if (!peer.fileName || peer.fileMatch === "noFile") {
       continue;
     }
-    if (peer.fileMatch !== "matched" && peer.fileMatch !== "sameLengthDifferentEncode") {
+    const compatibleSource =
+      peer.fileMatch === "matched" ||
+      peer.fileMatch === "sameLengthDifferentEncode" ||
+      (peer.fileMatch === "durationMismatch" &&
+        (hasAlignment ||
+          peer.sourceRelation === "differentCut" ||
+          peer.sourceRelation === "fpsMismatch"));
+    if (!compatibleSource) {
       continue;
     }
     // Syncplay's user list reports position 0 for peers (real position travels only in playstate
@@ -73,7 +105,7 @@ export function computeRoomSyncHealth(params: {
     if (!Number.isFinite(peer.position) || peer.position <= 0) {
       continue;
     }
-    const drift = Math.abs(localPositionSecs - peer.position);
+    const drift = Math.abs(localRoomPos - peer.position);
     if (drift > maxDriftSecs) {
       maxDriftSecs = drift;
     }

@@ -1,30 +1,39 @@
 import {
+  AppAppearanceCategoryIcon,
+  AppCheckIcon,
   AppChevronIcon,
   AppCloseIcon,
   AppDownloadIcon,
   AppLogsIcon,
+  AppPartyPrivacyCategoryIcon,
+  AppPlaybackCategoryIcon,
+  AppProfileCategoryIcon,
   AppResetIcon,
   AppShieldIcon,
   AppSlidersIcon,
-  AppSparkleIcon,
   AppWrenchIcon,
 } from "./ui/AppIcons";
 import { PlayerPauseIcon } from "./ui/PlayerIcons";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
-import { setAllowNetworkShares } from "../lib/mpv";
+import { mpvSetSubStyle, safeMpvCall, setAllowNetworkShares } from "../lib/mpv";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
 import { playSoundCue } from "../lib/soundEffects";
+import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { formatBytesCompact, formatTransferSpeed } from "../lib/updater";
 import { validateServerEndpointInput } from "../lib/webviewHardening";
-import { useAppStore, type SettingsTab } from "../store/useAppStore";
+import { useAppStore, type SettingsTab, type SkipIntroMode } from "../store/useAppStore";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { useNotificationStore } from "../store/useNotificationStore";
+import { usePlayerStore } from "../store/usePlayerStore";
+import { buildSubStyleParams, useSubtitleStore } from "../store/useSubtitleStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { Button } from "./ui/Button";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
+import { Scrubber } from "./ui/Scrubber";
+import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { TextField } from "./ui/TextField";
 
 interface SettingsModalProps {
@@ -34,7 +43,10 @@ interface SettingsModalProps {
 }
 
 const PRIMARY_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
-  { value: "prefs", label: "Comfort & Privacy" },
+  { value: "profile", label: "Profile" },
+  { value: "appearance", label: "Appearance" },
+  { value: "playback", label: "Playback" },
+  { value: "party", label: "Party & Privacy" },
   { value: "updates", label: "Updates" },
 ];
 
@@ -42,6 +54,35 @@ const ADVANCED_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
   { value: "server", label: "Connection & Server" },
   { value: "logs", label: "Diagnostics" },
 ];
+
+const NAV_HEADINGS: Record<SettingsTab, string> = {
+  profile: "Profile & Avatar",
+  appearance: "Appearance & Motion",
+  playback: "Playback & Subtitles",
+  party: "Watch Party & Privacy",
+  updates: "App Updates",
+  server: "Connection & Shared Folders",
+  logs: "Session Diagnostics",
+};
+
+function renderCategoryIcon(tabValue: SettingsTab, active: boolean) {
+  switch (tabValue) {
+    case "profile":
+      return <AppProfileCategoryIcon size={16} active={active} className="shrink-0" />;
+    case "appearance":
+      return <AppAppearanceCategoryIcon size={16} active={active} className="shrink-0" />;
+    case "playback":
+      return <AppPlaybackCategoryIcon size={16} active={active} className="shrink-0" />;
+    case "party":
+      return <AppPartyPrivacyCategoryIcon size={16} active={active} className="shrink-0" />;
+    case "updates":
+      return <AppDownloadIcon size={16} active={active} className="shrink-0" />;
+    case "server":
+      return <AppSlidersIcon size={16} active={active} className="shrink-0" />;
+    case "logs":
+      return <AppLogsIcon size={16} active={active} className="shrink-0" />;
+  }
+}
 
 function ComfortSwitchRow({
   title,
@@ -72,7 +113,8 @@ function ComfortSwitchRow({
 }
 
 export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsModalProps) {
-  const tab = useAppStore((s) => s.settingsTab);
+  const rawTab = useAppStore((s) => s.settingsTab);
+  const tab: SettingsTab = (rawTab as string) === "prefs" ? "profile" : rawTab;
   const setTab = useAppStore((s) => s.setSettingsTab);
 
   const username = useAppStore((s) => s.username);
@@ -85,6 +127,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const soundEffectsEnabled = useAppStore((s) => s.soundEffectsEnabled);
+  const skipIntroMode = useAppStore((s) => s.skipIntroMode);
+  const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
+  const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const autoDownloadUpdates = useAppStore((s) => s.autoDownloadUpdates);
 
@@ -98,8 +143,30 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setReducedMotion = useAppStore((s) => s.setReducedMotion);
   const setLowPowerMode = useAppStore((s) => s.setLowPowerMode);
   const setSoundEffectsEnabled = useAppStore((s) => s.setSoundEffectsEnabled);
+  const setSkipIntroMode = useAppStore((s) => s.setSkipIntroMode);
+  const setReactionsEnabled = useAppStore((s) => s.setReactionsEnabled);
+  const setFullWidthPlayBar = useAppStore((s) => s.setFullWidthPlayBar);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
   const setAutoDownloadUpdates = useAppStore((s) => s.setAutoDownloadUpdates);
+  const boldSubtitles = useSubtitleStore((s) => s.bold);
+  const setBoldSubtitles = useSubtitleStore((s) => s.setBold);
+  const overrideAssStyle = useSubtitleStore((s) => s.overrideAssStyle);
+  const setOverrideAssStyle = useSubtitleStore((s) => s.setOverrideAssStyle);
+  const subPos = useSubtitleStore((s) => s.pos);
+  const setSubPos = useSubtitleStore((s) => s.setPos);
+  const throttledApplySubStyle = useMemo(
+    () =>
+      createLeadingTrailingThrottle(() => {
+        if (usePlayerStore.getState().loaded) {
+          safeMpvCall(
+            mpvSetSubStyle(buildSubStyleParams(useSubtitleStore.getState())),
+            "settings:mpvSetSubStyle",
+          );
+        }
+      }, 60),
+    [],
+  );
+  useEffect(() => () => throttledApplySubStyle.cancel(), [throttledApplySubStyle]);
   const pushNote = useNotificationStore((s) => s.push);
 
   const updateStatus = useUpdaterStore((s) => s.status);
@@ -122,7 +189,59 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsPath, setLogsPath] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const navTrackRef = useRef<HTMLDivElement | null>(null);
+  const navButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const prevNavTabRef = useRef<SettingsTab>(tab);
+  const [navIndicator, setNavIndicator] = useState<{ top: number; height: number; visible: boolean }>({
+    top: 0,
+    height: 0,
+    visible: false,
+  });
+  const [navMorphing, setNavMorphing] = useState(false);
   const { mounted, exiting } = useAnimatedPresence(open, 200);
+
+  useLayoutEffect(() => {
+    const wrap = navTrackRef.current;
+    if (!wrap || !mounted) return;
+    const isCollapsedTab = !advancedOpen && (tab === "server" || tab === "logs");
+    const measure = () => {
+      if (isCollapsedTab) {
+        setNavIndicator((prev) => ({ ...prev, visible: false }));
+        return;
+      }
+      const btn = navButtonRefs.current[tab];
+      if (!btn || !wrap) return;
+      const wRect = wrap.getBoundingClientRect();
+      const bRect = btn.getBoundingClientRect();
+      if (bRect.height < 8) {
+        setNavIndicator((prev) => ({ ...prev, visible: false }));
+        return;
+      }
+      setNavIndicator({
+        top: Math.round(bRect.top - wRect.top + wrap.scrollTop),
+        height: Math.round(bRect.height),
+        visible: true,
+      });
+    };
+
+    measure();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(wrap);
+    const timer = window.setTimeout(measure, 260);
+    return () => {
+      ro?.disconnect();
+      window.clearTimeout(timer);
+    };
+  }, [tab, advancedOpen, mounted]);
+
+  useEffect(() => {
+    if (prevNavTabRef.current !== tab) {
+      setNavMorphing(true);
+      const timer = window.setTimeout(() => setNavMorphing(false), 210);
+      prevNavTabRef.current = tab;
+      return () => window.clearTimeout(timer);
+    }
+  }, [tab]);
 
   useEffect(() => {
     if (open) {
@@ -181,107 +300,143 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   return (
     <div
-      className={`ep-modal-backdrop ${
-        exiting ? "anim-backdrop-out pointer-events-none" : "anim-backdrop-in"
-      } fixed inset-0 z-50 flex items-center justify-center p-4`}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Preferences"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
     >
+      {/* Sibling backdrop scrim so Blink/WebView2 composites .ep-glass-sheet backdrop-filter without nesting into a parent backdrop root. */}
       <div
-        className={`ep-glass-sheet ${
+        aria-hidden="true"
+        onClick={() => {
+          if (!exiting) onClose();
+        }}
+        className={`ep-modal-backdrop ${
+          exiting ? "anim-backdrop-out pointer-events-none" : "anim-backdrop-in"
+        } fixed inset-0`}
+      />
+      <div
+        className={`ep-glass-sheet ep-settings-sheet ${
           exiting ? "anim-modal-out" : "anim-modal-in"
-        } w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[26px] overflow-hidden grid grid-cols-12`}
+        } relative z-10 w-full max-w-[660px] h-[480px] max-h-[85vh] rounded-[28px] overflow-hidden grid grid-cols-12`}
       >
-        {/* Left Navigation Rail (subtle airy tint separation) */}
-        <aside className="col-span-4 bg-white/[0.03] p-3.5 flex flex-col justify-between min-h-0">
-          <div className="space-y-4">
-            <div className="px-2.5 pt-1 flex items-center justify-between">
-              <h2 className="text-sm font-semibold tracking-tight text-white">Preferences</h2>
+        {/* Left Navigation Rail — clean smoked-obsidian frosted glass pane */}
+        <aside className="col-span-4 ep-settings-sidebar flex flex-col min-h-0 min-w-0 overflow-hidden">
+          <div
+            ref={navTrackRef}
+            onTransitionEnd={(e) => {
+              if (e.target === e.currentTarget) return;
+              const btn = navButtonRefs.current[tab];
+              const wrap = navTrackRef.current;
+              const isCollapsedTab = !advancedOpen && (tab === "server" || tab === "logs");
+              if (!btn || !wrap || isCollapsedTab) return;
+              const bRect = btn.getBoundingClientRect();
+              const wRect = wrap.getBoundingClientRect();
+              if (bRect.height >= 8) {
+                setNavIndicator({
+                  top: Math.round(bRect.top - wRect.top + wrap.scrollTop),
+                  height: Math.round(bRect.height),
+                  visible: true,
+                });
+              }
+            }}
+            className="ep-settings-scroll relative z-10 flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 py-3 my-1 flex flex-col justify-between gap-3"
+          >
+            {navIndicator.height > 0 && (
+              <span
+                aria-hidden="true"
+                data-morphing={navMorphing ? "true" : undefined}
+                className={`ep-droplet-indicator ep-droplet-nav pointer-events-none absolute left-4 right-4 top-0 rounded-[13px] ${
+                  navIndicator.visible ? "opacity-100" : "opacity-0"
+                }`}
+                style={{
+                  height: `${navIndicator.height}px`,
+                  transform: `translateY(${navIndicator.top}px)${
+                    navMorphing ? " scaleY(1.06) scaleX(0.97)" : ""
+                  }`,
+                }}
+              />
+            )}
+            <div className="relative z-10 space-y-3">
+              <div className="px-3 pt-1 flex items-center justify-between">
+                <h2 className="text-sm font-semibold tracking-tight text-white">Preferences</h2>
+              </div>
+
+              <nav className="space-y-1" aria-label="Preference sections">
+                {PRIMARY_NAV.map((item) => {
+                  const active = tab === item.value;
+                  return (
+                    <button
+                      key={item.value}
+                      ref={(el) => {
+                        navButtonRefs.current[item.value] = el;
+                      }}
+                      type="button"
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => setTab(item.value)}
+                      className={`ep-menu-row ep-press relative z-10 w-full px-3 py-2 flex items-center gap-2.5 text-left text-xs cursor-pointer ${
+                        active ? "text-white font-semibold" : "text-secondary hover:text-white"
+                      }`}
+                    >
+                      {renderCategoryIcon(item.value, active)}
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </nav>
             </div>
 
-            <nav className="space-y-1" aria-label="Preference sections">
-              {PRIMARY_NAV.map((item) => {
-                const active = tab === item.value;
-                return (
-                  <button
-                    key={item.value}
-                    type="button"
-                    data-active={active}
-                    onClick={() => setTab(item.value)}
-                    className={`ep-menu-row ep-press w-full px-3 py-2 flex items-center gap-2.5 text-left text-xs cursor-pointer ${
-                      active ? "text-white font-medium" : "text-secondary hover:text-white"
-                    }`}
-                  >
-                    {item.value === "prefs" ? (
-                      <AppSparkleIcon size={14} className="text-accent-soft shrink-0" />
-                    ) : (
-                      <AppDownloadIcon size={14} className="text-accent-soft shrink-0" />
-                    )}
-                    <span className="truncate">{item.label}</span>
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
+            {/* Tucked-away Advanced section */}
+            <div className="relative z-10 space-y-1">
+              <button
+                type="button"
+                onClick={() => setAdvancedOpen((o) => !o)}
+                className="ep-press w-full px-2.5 py-1.5 flex items-center justify-between text-[11px] font-medium text-muted hover:text-secondary cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <AppWrenchIcon size={13} active={advancedOpen} />
+                  Advanced
+                </span>
+                <AppChevronIcon
+                  direction="down"
+                  size={12}
+                  className={`transition-transform duration-200 ${
+                    advancedOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
 
-          {/* Tucked-away Discord-style Advanced section */}
-          <div className="space-y-1">
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((o) => !o)}
-              className="ep-press w-full px-2.5 py-1.5 flex items-center justify-between text-[11px] font-medium text-muted hover:text-secondary cursor-pointer"
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <AppWrenchIcon size={12} />
-                Advanced
-              </span>
-              <AppChevronIcon
-                direction="down"
-                size={12}
-                className={`transition-transform duration-200 ${
-                  advancedOpen ? "rotate-180" : ""
-                }`}
-              />
-            </button>
-
-            <AnimatedCollapse open={advancedOpen} innerClassName="space-y-1 pt-0.5">
-              {ADVANCED_NAV.map((item) => {
-                const active = tab === item.value;
-                return (
-                  <button
-                    key={item.value}
-                    type="button"
-                    data-active={active}
-                    onClick={() => setTab(item.value)}
-                    className={`ep-menu-row ep-press w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs cursor-pointer ${
-                      active ? "text-white font-medium" : "text-muted hover:text-white"
-                    }`}
-                  >
-                    {item.value === "server" ? (
-                      <AppSlidersIcon size={14} className="shrink-0" />
-                    ) : (
-                      <AppLogsIcon size={14} className="shrink-0" />
-                    )}
-                    <span className="truncate">{item.label}</span>
-                  </button>
-                );
-              })}
-            </AnimatedCollapse>
+              <AnimatedCollapse open={advancedOpen} innerClassName="space-y-1 pt-1">
+                {ADVANCED_NAV.map((item) => {
+                  const active = tab === item.value;
+                  return (
+                    <button
+                      key={item.value}
+                      ref={(el) => {
+                        navButtonRefs.current[item.value] = el;
+                      }}
+                      type="button"
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => setTab(item.value)}
+                      className={`ep-menu-row ep-press relative z-10 w-full px-3 py-2 flex items-center gap-2.5 text-left text-xs cursor-pointer ${
+                        active ? "text-white font-semibold" : "text-muted hover:text-white"
+                      }`}
+                    >
+                      {renderCategoryIcon(item.value, active)}
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </AnimatedCollapse>
+            </div>
           </div>
         </aside>
 
         {/* Right Content Pane — Zero boxed cards per row and zero partial lines */}
-        <div className="col-span-8 flex flex-col min-h-0">
+        <div className="col-span-8 ep-settings-content flex flex-col min-h-0 min-w-0">
           <div className="px-6 pt-4 pb-2 flex items-center justify-between">
             <span className="text-xs font-medium text-muted">
-              {tab === "prefs" && "Comfort & Privacy"}
-              {tab === "updates" && "App Updates"}
-              {tab === "server" && "Connection & Shared Folders"}
-              {tab === "logs" && "Session Diagnostics"}
+              {NAV_HEADINGS[tab] ?? "Preferences"}
             </span>
             <button
               type="button"
@@ -293,10 +448,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-6 py-3">
-            {tab === "prefs" && (
+          <div className="ep-settings-scroll flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden pl-6 pr-[18px] mr-1.5 my-1 py-3">
+            {tab === "profile" && (
               <div className="anim-tab-in space-y-4">
-                <div className="ep-menu-row rounded-2xl p-3 space-y-3">
+                <div className="ep-glass-well rounded-[20px] p-3.5 space-y-3">
                   <div className="flex items-center gap-3">
                     <ProfileAvatar
                       avatarId={avatarId}
@@ -320,48 +475,161 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     compact
                   />
                 </div>
+              </div>
+            )}
 
-                <div className="space-y-0.5">
-                  <ComfortSwitchRow
-                    title="Streamer Mode (Hide Profile Icons)"
-                    description="Hide friend names and profile avatars while streaming or sharing your screen."
-                    checked={hideParticipants}
-                    onChange={setHideParticipants}
-                  />
-
-                  <ComfortSwitchRow
-                    title="Private File Titles"
-                    description="Keep your local movie filename private from party servers."
-                    checked={hashFilenames}
-                    onChange={setHashFilenames}
-                  />
-
-                  <ComfortSwitchRow
-                    title="Calm Motion"
-                    description="Replace bouncy spring transitions with gentle fades."
-                    checked={reducedMotion}
-                    onChange={setReducedMotion}
-                  />
-
-                  <ComfortSwitchRow
-                    title="Quiet Background Sync"
-                    description="Keep subtitle alignment gentle on fans and battery during long movies."
-                    checked={lowPowerMode}
-                    onChange={setLowPowerMode}
-                  />
-
-                  <ComfortSwitchRow
-                    title="Subtle Party Sound Cues"
-                    description="Play soft acoustic glass tones when friends join, leave, or ready up (automatically quieter during playback)."
-                    checked={soundEffectsEnabled}
-                    onChange={(enabled) => {
-                      setSoundEffectsEnabled(enabled);
-                      if (enabled) {
-                        playSoundCue("peerJoined", { forcePreview: true });
-                      }
-                    }}
+            {tab === "appearance" && (
+              <div className="anim-tab-in space-y-1">
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="space-y-0.5">
+                    <div className="text-xs font-medium text-white">
+                      Full-Width Bottom Play Bar
+                    </div>
+                    <p className="text-[11px] text-secondary leading-relaxed">
+                      Switch between the floating glass capsule or a full-width bottom bar that auto-hides during playback and fullscreen until the mouse moves.
+                    </p>
+                  </div>
+                  <SegmentedTabs
+                    ariaLabel="Full-Width Bottom Play Bar style"
+                    size="sm"
+                    fullWidth
+                    value={fullWidthPlayBar ? "full-width" : "floating"}
+                    items={[
+                      { value: "floating", label: "Floating Capsule" },
+                      { value: "full-width", label: "Full-Width Bar" },
+                    ]}
+                    onChange={(mode) => setFullWidthPlayBar(mode === "full-width")}
                   />
                 </div>
+
+                <ComfortSwitchRow
+                  title="Calm Motion"
+                  description="Replace bouncy spring transitions with gentle fades."
+                  checked={reducedMotion}
+                  onChange={setReducedMotion}
+                />
+
+                <ComfortSwitchRow
+                  title="Quiet Background Sync"
+                  description="Keep subtitle alignment gentle on fans and battery during long movies."
+                  checked={lowPowerMode}
+                  onChange={setLowPowerMode}
+                />
+              </div>
+            )}
+
+            {tab === "playback" && (
+              <div className="anim-tab-in space-y-1">
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">Skip Intro</div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Detect opening credits and choose whether to show the Skip Intro button or skip automatically.
+                    </div>
+                  </div>
+                  <SegmentedTabs<SkipIntroMode>
+                    ariaLabel="Skip Intro mode"
+                    size="sm"
+                    fullWidth
+                    value={skipIntroMode}
+                    onChange={setSkipIntroMode}
+                    items={[
+                      { value: "off", label: "Off" },
+                      { value: "manual", label: "Manual" },
+                      { value: "auto", label: "Auto-Skip" },
+                    ]}
+                  />
+                </div>
+
+                <ComfortSwitchRow
+                  title="Bold Subtitle Font"
+                  description="Use a bolder caption weight for both Arabic and Latin subtitles."
+                  checked={boldSubtitles}
+                  onChange={(enabled) => {
+                    setBoldSubtitles(enabled);
+                    if (usePlayerStore.getState().loaded) {
+                      safeMpvCall(
+                        mpvSetSubStyle(
+                          buildSubStyleParams(useSubtitleStore.getState(), { bold: enabled }),
+                        ),
+                        "settings:mpvSetSubStyle",
+                      );
+                    }
+                  }}
+                />
+
+                <ComfortSwitchRow
+                  title="Override Styled Fansubs"
+                  description="Apply Epilod's font, size, and color over custom ASS/SSA anime subtitle styles."
+                  checked={overrideAssStyle}
+                  onChange={(enabled) => {
+                    setOverrideAssStyle(enabled);
+                    if (usePlayerStore.getState().loaded) {
+                      safeMpvCall(
+                        mpvSetSubStyle(
+                          buildSubStyleParams(useSubtitleStore.getState(), { overrideAss: enabled }),
+                        ),
+                        "settings:mpvSetSubStyle",
+                      );
+                    }
+                  }}
+                />
+
+                <div className="px-3 py-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[13px] font-medium text-white">Subtitle Vertical Position</div>
+                    <span className="text-xs num text-secondary">{subPos}%</span>
+                  </div>
+                  <Scrubber
+                    ariaLabel="Subtitle Vertical Position"
+                    value={subPos}
+                    min={20}
+                    max={100}
+                    step={1}
+                    onChange={(val) => {
+                      setSubPos(val);
+                      throttledApplySubStyle.call();
+                    }}
+                    onCommit={() => throttledApplySubStyle.flush()}
+                  />
+                </div>
+              </div>
+            )}
+
+            {tab === "party" && (
+              <div className="anim-tab-in space-y-1">
+                <ComfortSwitchRow
+                  title="Floating Party Reactions"
+                  description="Show live floating emoji reactions from Watch Party friends over the video (keys 1–7 or E)."
+                  checked={reactionsEnabled}
+                  onChange={setReactionsEnabled}
+                />
+
+                <ComfortSwitchRow
+                  title="Subtle Party Sound Cues"
+                  description="Play soft acoustic glass tones when friends join, leave, or ready up (automatically quieter during playback)."
+                  checked={soundEffectsEnabled}
+                  onChange={(enabled) => {
+                    setSoundEffectsEnabled(enabled);
+                    if (enabled) {
+                      playSoundCue("peerJoined", { forcePreview: true });
+                    }
+                  }}
+                />
+
+                <ComfortSwitchRow
+                  title="Streamer Mode (Hide Profile Icons)"
+                  description="Hide friend names and profile avatars while streaming or sharing your screen."
+                  checked={hideParticipants}
+                  onChange={setHideParticipants}
+                />
+
+                <ComfortSwitchRow
+                  title="Private File Titles"
+                  description="Keep your local movie filename private from party servers."
+                  checked={hashFilenames}
+                  onChange={setHashFilenames}
+                />
               </div>
             )}
 
@@ -566,9 +834,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       setEndpointError(null);
                     }}
                   >
+                    <AppResetIcon size={13} />
                     Reset Default
                   </Button>
                   <Button variant="primary" size="sm" onClick={handleSaveServer}>
+                    <AppCheckIcon size={13} />
                     Save Connection
                   </Button>
                 </div>
@@ -599,28 +869,30 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </Button>
                 </div>
 
-                <div className="ep-glass-input h-64 overflow-y-auto rounded-2xl p-3 ep-mono-log text-[11px] space-y-1">
-                  {logs.length === 0 ? (
-                    <p className="text-muted p-2">No diagnostic events recorded yet.</p>
-                  ) : (
-                    logs.map((entry, idx) => (
-                      <div key={`${entry.tsMs}-${idx}`} className="flex items-start gap-2 leading-snug">
-                        <span
-                          className={`uppercase shrink-0 w-10 ${
-                            entry.level === "error"
-                              ? "text-bad"
-                              : entry.level === "warn"
-                                ? "text-warn"
-                                : "text-muted"
-                          }`}
-                        >
-                          {entry.level}
-                        </span>
-                        <span className="text-secondary shrink-0">[{entry.target}]</span>
-                        <span className="text-primary break-all">{entry.message}</span>
-                      </div>
-                    ))
-                  )}
+                <div className="ep-glass-tray h-64 overflow-hidden rounded-2xl py-2 flex flex-col">
+                  <div className="ep-settings-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 py-1 ep-mono-log text-[11px] space-y-1">
+                    {logs.length === 0 ? (
+                      <p className="text-muted p-2">No diagnostic events recorded yet.</p>
+                    ) : (
+                      logs.map((entry, idx) => (
+                        <div key={`${entry.tsMs}-${idx}`} className="flex items-start gap-2 leading-snug">
+                          <span
+                            className={`uppercase shrink-0 w-10 ${
+                              entry.level === "error"
+                                ? "text-bad"
+                                : entry.level === "warn"
+                                  ? "text-warn"
+                                  : "text-muted"
+                            }`}
+                          >
+                            {entry.level}
+                          </span>
+                          <span className="text-secondary shrink-0">[{entry.target}]</span>
+                          <span className="text-primary break-words min-w-0">{entry.message}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
             )}

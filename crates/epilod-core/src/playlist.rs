@@ -1,14 +1,12 @@
-use crate::validation::{
-    validate_local_path_syntax_with_options, LocalPathOptions,
-};
+use crate::validation::{validate_local_path_syntax_with_options, LocalPathOptions};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "mov", "m4v",
-    "mpg", "mpeg", "vob",
+    "mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "mov", "m4v", "mpg",
+    "mpeg", "vob",
 ];
 
 pub const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub", "idx"];
@@ -60,11 +58,27 @@ pub fn is_subtitle_path(path: &Path) -> bool {
         .any(|candidate| *candidate == ext)
 }
 
-fn strip_ext(file_name: &str) -> &str {
-    match file_name.rfind('.') {
-        Some(idx) if idx > 0 => &file_name[..idx],
-        _ => file_name,
+pub fn strip_known_media_ext(file_name: &str) -> &str {
+    let trimmed = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_name)
+        .trim();
+    if let Some(idx) = trimmed.rfind('.') {
+        if idx > 0 {
+            let ext = trimmed[idx + 1..].to_ascii_lowercase();
+            if VIDEO_EXTENSIONS.contains(&ext.as_str())
+                || SUBTITLE_EXTENSIONS.contains(&ext.as_str())
+            {
+                return &trimmed[..idx];
+            }
+        }
     }
+    trimmed
+}
+
+fn strip_ext(file_name: &str) -> &str {
+    strip_known_media_ext(file_name)
 }
 
 fn is_token_boundary(b: u8) -> bool {
@@ -191,20 +205,12 @@ pub fn parse_episode_code(file_name: &str) -> Option<EpisodeCode> {
 
     // 4. Anime naming: " - 02 " / " - 02[" / "[02]" / "(02)"
     for i in 0..bytes.len() {
-        if i + 3 < bytes.len() && bytes[i] == b' ' && bytes[i + 1] == b'-' && bytes[i + 2] == b' '
-        {
+        if i + 3 < bytes.len() && bytes[i] == b' ' && bytes[i + 1] == b'-' && bytes[i + 2] == b' ' {
             if let Some((episode, after)) = parse_u32_run(bytes, i + 3, 3) {
                 let before_str = &lower[..i];
                 let after_ok = after == bytes.len()
-                    || matches!(
-                        bytes[after],
-                        b' ' | b'[' | b'(' | b'.' | b'_' | b'v' | b'V'
-                    );
-                if episode > 0
-                    && episode <= 400
-                    && !before_str.trim().is_empty()
-                    && after_ok
-                {
+                    || matches!(bytes[after], b' ' | b'[' | b'(' | b'.' | b'_' | b'v' | b'V');
+                if episode > 0 && episode <= 400 && !before_str.trim().is_empty() && after_ok {
                     return Some(EpisodeCode {
                         season: parsed_season,
                         episode,
@@ -340,7 +346,11 @@ fn collect_dir_entries(
     }
 }
 
-fn score_subtitle_for_video(video_name: &str, video_code: Option<EpisodeCode>, sub_path: &Path) -> i32 {
+fn score_subtitle_for_video(
+    video_name: &str,
+    video_code: Option<EpisodeCode>,
+    sub_path: &Path,
+) -> i32 {
     let sub_name = sub_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -358,7 +368,9 @@ fn score_subtitle_for_video(video_name: &str, video_code: Option<EpisodeCode>, s
         return 60;
     }
     if let (Some(vc), Some(sc)) = (video_code, parse_episode_code(sub_name)) {
-        if vc.episode == sc.episode && (vc.season.is_none() || sc.season.is_none() || vc.season == sc.season) {
+        if vc.episode == sc.episode
+            && (vc.season.is_none() || sc.season.is_none() || vc.season == sc.season)
+        {
             return 50;
         }
     }
@@ -375,8 +387,8 @@ pub fn scan_media_paths(
 
     let mut validated: Vec<PathBuf> = Vec::with_capacity(raw_paths.len());
     for raw in raw_paths {
-        let clean = validate_local_path_syntax_with_options(raw, opts)
-            .map_err(|e| e.to_string())?;
+        let clean =
+            validate_local_path_syntax_with_options(raw, opts).map_err(|e| e.to_string())?;
         validated.push(PathBuf::from(clean));
     }
 
@@ -464,7 +476,14 @@ pub fn scan_media_paths(
             let mut dummy_videos = Vec::new();
             let mut sib_subs = Vec::new();
             let mut sub_seen = HashSet::new();
-            collect_dir_entries(parent, 1, 200, &mut dummy_videos, &mut sib_subs, &mut sub_seen);
+            collect_dir_entries(
+                parent,
+                1,
+                200,
+                &mut dummy_videos,
+                &mut sib_subs,
+                &mut sub_seen,
+            );
             subtitles.extend(sib_subs);
             if folder_name.is_none() {
                 folder_name = parent
@@ -532,24 +551,25 @@ pub fn scan_media_paths(
         .unwrap_or(0);
 
     // If user dropped 1 video + 1 explicit subtitle file with an unrelated filename, still pair it cleanly
-    let loose_subtitle_path = if items.len() == 1 && validated.iter().any(|p| p.is_file() && is_subtitle_path(p)) {
-        let explicit_sub = validated
-            .iter()
-            .find(|p| p.is_file() && is_subtitle_path(p))
-            .map(|p| p.to_string_lossy().into_owned());
-        if let Some(ref es) = explicit_sub {
-            if items[0].subtitle_path.is_none() {
-                items[0].subtitle_path = Some(es.clone());
+    let loose_subtitle_path =
+        if items.len() == 1 && validated.iter().any(|p| p.is_file() && is_subtitle_path(p)) {
+            let explicit_sub = validated
+                .iter()
+                .find(|p| p.is_file() && is_subtitle_path(p))
+                .map(|p| p.to_string_lossy().into_owned());
+            if let Some(ref es) = explicit_sub {
+                if items[0].subtitle_path.is_none() {
+                    items[0].subtitle_path = Some(es.clone());
+                }
             }
-        }
-        explicit_sub
-    } else if items.is_empty() {
-        subtitles.first().map(|p| p.to_string_lossy().into_owned())
-    } else {
-        items
-            .get(active_index)
-            .and_then(|item| item.subtitle_path.clone())
-    };
+            explicit_sub
+        } else if items.is_empty() {
+            subtitles.first().map(|p| p.to_string_lossy().into_owned())
+        } else {
+            items
+                .get(active_index)
+                .and_then(|item| item.subtitle_path.clone())
+        };
 
     Ok(MediaScanResultDto {
         items,
@@ -588,14 +608,8 @@ mod tests {
                 episode: 12
             })
         );
-        assert_eq!(
-            parse_episode_code("Documentary.1920x1080.x265.mkv"),
-            None
-        );
-        assert_eq!(
-            parse_episode_code("Movie.2024.3840x2160.HDR.mp4"),
-            None
-        );
+        assert_eq!(parse_episode_code("Documentary.1920x1080.x265.mkv"), None);
+        assert_eq!(parse_episode_code("Movie.2024.3840x2160.HDR.mp4"), None);
     }
 
     #[test]
@@ -633,9 +647,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(folder_scan.items.len(), 3);
-        assert_eq!(folder_scan.items[0].episode_badge.as_deref(), Some("S01E01"));
-        assert_eq!(folder_scan.items[1].episode_badge.as_deref(), Some("S01E02"));
-        assert_eq!(folder_scan.items[2].episode_badge.as_deref(), Some("S01E10"));
+        assert_eq!(
+            folder_scan.items[0].episode_badge.as_deref(),
+            Some("S01E01")
+        );
+        assert_eq!(
+            folder_scan.items[1].episode_badge.as_deref(),
+            Some("S01E02")
+        );
+        assert_eq!(
+            folder_scan.items[2].episode_badge.as_deref(),
+            Some("S01E10")
+        );
         assert_eq!(
             folder_scan.items[0].subtitle_path.as_deref(),
             Some(sub1.to_string_lossy().as_ref())
@@ -644,7 +667,10 @@ mod tests {
             folder_scan.items[1].subtitle_path.as_deref(),
             Some(sub2.to_string_lossy().as_ref())
         );
-        assert_eq!(folder_scan.folder_name.as_deref(), Some("Severance Season 1"));
+        assert_eq!(
+            folder_scan.folder_name.as_deref(),
+            Some("Severance Season 1")
+        );
 
         // Opening only Ep2 directly still auto-discovers the whole season & selects Ep2 (index 1)
         let ep2_scan = scan_media_paths(

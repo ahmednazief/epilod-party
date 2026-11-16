@@ -94,6 +94,7 @@ pub enum SetUpdate {
     Ready {
         username: String,
         is_ready: bool,
+        manually_initiated: Option<bool>,
     },
     File {
         username: String,
@@ -127,6 +128,10 @@ pub enum ServerMessage {
     Set(Vec<SetUpdate>),
     List(Vec<RoomParticipantUpdate>),
     State(ServerState),
+    Chat {
+        username: String,
+        message: String,
+    },
     Error(String),
 }
 
@@ -263,7 +268,7 @@ pub fn encode_hello(username: &str, room_name: &str, password: Option<&str>) -> 
         "features".into(),
         json!({
             "sharedPlaylists": false,
-            "chat": false,
+            "chat": true,
             "featureList": true,
             "readiness": true,
             "managedRooms": true
@@ -367,6 +372,10 @@ pub fn encode_state(
     format!("{}\r\n", json!({ "State": Value::Object(state) }))
 }
 
+pub fn encode_chat(message: &str) -> String {
+    format!("{}\r\n", json!({ "Chat": message }))
+}
+
 fn clean_wire_string(raw: &str, max_chars: usize) -> String {
     strip_unsafe_unicode(raw).chars().take(max_chars).collect()
 }
@@ -416,6 +425,20 @@ pub fn parse_server_line(line: &str) -> Result<ServerMessage, SyncplayParseError
             room,
             version,
         });
+    }
+
+    if let Some(chat_obj) = obj.get("Chat").and_then(|v| v.as_object()) {
+        let username = chat_obj
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(|s| clean_wire_string(s, 64))
+            .unwrap_or_default();
+        let message = chat_obj
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| clean_wire_string(s, 512))
+            .unwrap_or_default();
+        return Ok(ServerMessage::Chat { username, message });
     }
 
     if let Some(err) = obj.get("Error").and_then(|v| v.as_object()) {
@@ -553,9 +576,12 @@ pub fn parse_server_line(line: &str) -> Result<ServerMessage, SyncplayParseError
                     }
                 }
                 if let Some(ready_val) = uinfo.get("isReady").and_then(|v| v.as_bool()) {
+                    let manually_initiated =
+                        uinfo.get("manuallyInitiated").and_then(|v| v.as_bool());
                     updates.push(SetUpdate::Ready {
                         username: username.clone(),
                         is_ready: ready_val,
+                        manually_initiated,
                     });
                 }
                 if let Some(ctrl_val) = uinfo.get("controller").and_then(|v| v.as_bool()) {
@@ -571,9 +597,12 @@ pub fn parse_server_line(line: &str) -> Result<ServerMessage, SyncplayParseError
                 ready_obj.get("username").and_then(|v| v.as_str()),
                 ready_obj.get("isReady").and_then(|v| v.as_bool()),
             ) {
+                let manually_initiated =
+                    ready_obj.get("manuallyInitiated").and_then(|v| v.as_bool());
                 updates.push(SetUpdate::Ready {
                     username: clean_wire_string(username, 64),
                     is_ready,
+                    manually_initiated,
                 });
             }
         }
@@ -640,10 +669,182 @@ pub const SOFT_DRIFT_ENGAGE_SECS: f64 = 0.6;
 pub const SOFT_DRIFT_CLEAR_SECS: f64 = 0.25;
 pub const IGNORING_CLIENT_TIMEOUT_SECS: f64 = 2.5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineTransform {
+    /// Local offset in seconds: `T_local = scale * T_room + offset_secs`.
+    pub offset_secs: f64,
+    /// Playback speed scale of local file relative to room time (e.g. `23.976 / 25.0`).
+    pub scale: f64,
+}
+
+impl Default for TimelineTransform {
+    fn default() -> Self {
+        Self {
+            offset_secs: 0.0,
+            scale: 1.0,
+        }
+    }
+}
+
+impl TimelineTransform {
+    pub fn sanitized(self) -> Self {
+        Self {
+            offset_secs: if self.offset_secs.is_finite() {
+                self.offset_secs.clamp(-3600.0, 3600.0)
+            } else {
+                0.0
+            },
+            scale: if self.scale.is_finite() && self.scale > 0.0 {
+                self.scale.clamp(0.5, 2.0)
+            } else {
+                1.0
+            },
+        }
+    }
+
+    pub fn is_identity(self) -> bool {
+        self.offset_secs.abs() < 1e-4 && (self.scale - 1.0).abs() < 1e-5
+    }
+
+    pub fn room_to_local_raw(self, room_secs: f64) -> f64 {
+        let safe_room = if room_secs.is_finite() && room_secs >= 0.0 {
+            room_secs
+        } else {
+            0.0
+        };
+        safe_room * self.scale + self.offset_secs
+    }
+
+    pub fn room_to_local(self, room_secs: f64, local_duration: Option<f64>) -> f64 {
+        let raw = self.room_to_local_raw(room_secs).max(0.0);
+        match local_duration {
+            Some(dur) if dur.is_finite() && dur > 0.25 => raw.min((dur - 0.05).max(0.0)),
+            _ => raw,
+        }
+    }
+
+    pub fn local_to_room(self, local_secs: f64) -> f64 {
+        let safe_local = if local_secs.is_finite() && local_secs >= 0.0 {
+            local_secs
+        } else {
+            0.0
+        };
+        ((safe_local - self.offset_secs) / self.scale).max(0.0)
+    }
+
+    pub fn effective_speed(self, soft_speed: f64) -> f64 {
+        (self.scale * soft_speed).clamp(0.25, 4.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSegment {
+    pub room_start_secs: f64,
+    pub offset_secs: f64,
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_room_until_secs: Option<f64>,
+}
+
+impl TimelineSegment {
+    pub fn sanitized(self) -> Self {
+        let room_start_secs = if self.room_start_secs.is_finite() && self.room_start_secs >= 0.0 {
+            self.room_start_secs
+        } else {
+            0.0
+        };
+        let tx = TimelineTransform {
+            offset_secs: self.offset_secs,
+            scale: self.scale,
+        }
+        .sanitized();
+        let hold_room_until_secs = self
+            .hold_room_until_secs
+            .filter(|h| h.is_finite() && *h > room_start_secs + 0.25);
+        Self {
+            room_start_secs,
+            offset_secs: tx.offset_secs,
+            scale: tx.scale,
+            hold_room_until_secs,
+        }
+    }
+
+    pub fn to_transform(self) -> TimelineTransform {
+        TimelineTransform {
+            offset_secs: self.offset_secs,
+            scale: self.scale,
+        }
+        .sanitized()
+    }
+}
+
+/// Snaps a measured two-point slope to an exact standard cinema/PAL/NTSC ratio when within tolerance,
+/// preventing small manual-click timing errors from introducing unintended playback speedup/slowdown.
+pub fn fit_two_point_timeline_transform(
+    room_a: f64,
+    local_a: f64,
+    room_b: f64,
+    local_b: f64,
+) -> Option<TimelineTransform> {
+    if ![room_a, local_a, room_b, local_b]
+        .iter()
+        .all(|v| v.is_finite() && *v >= 0.0)
+    {
+        return None;
+    }
+    let (r1, l1, r2, l2) = if room_a <= room_b {
+        (room_a, local_a, room_b, local_b)
+    } else {
+        (room_b, local_b, room_a, local_a)
+    };
+    let dr = r2 - r1;
+    let dl = l2 - l1;
+    if dr < 30.0 || dl <= 0.0 {
+        return None;
+    }
+    let raw_scale = dl / dr;
+    if !(0.90..=1.12).contains(&raw_scale) {
+        return None;
+    }
+
+    let ntsc_film = 24_000.0 / 1001.0;
+    let candidates = [
+        (1.0, 0.0012),
+        (ntsc_film / 25.0, 0.002),
+        (25.0 / ntsc_film, 0.002),
+        (24.0 / 25.0, 0.002),
+        (25.0 / 24.0, 0.002),
+        (ntsc_film / 24.0, 0.0004),
+        (24.0 / ntsc_film, 0.0004),
+    ];
+
+    let mut snapped_scale = 1.0;
+    let mut best_dist = f64::INFINITY;
+    for (cand, tol) in candidates {
+        let dist = (raw_scale - cand).abs();
+        if dist <= tol && dist < best_dist {
+            best_dist = dist;
+            snapped_scale = cand;
+        }
+    }
+
+    let offset_secs = ((l1 - snapped_scale * r1) + (l2 - snapped_scale * r2)) * 0.5;
+    Some(
+        TimelineTransform {
+            offset_secs,
+            scale: snapped_scale,
+        }
+        .sanitized(),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncStateMachine {
     pub local_username: Option<String>,
     pub local_pos: f64,
+    pub last_local_mpv_pos: f64,
     pub local_paused: bool,
     pub ignoring_client: u64,
     pub ignoring_client_since: Option<f64>,
@@ -654,6 +855,13 @@ pub struct SyncStateMachine {
     pub last_server_state_at: Option<f64>,
     pub rtt_secs: f64,
     pub soft_speed: f64,
+    pub transform: TimelineTransform,
+    pub segments: Vec<TimelineSegment>,
+    pub local_duration_secs: Option<f64>,
+    pub align_mode: bool,
+    pub waiting_preroll: bool,
+    pub waiting_postroll: bool,
+    pub waiting_cut_hold: bool,
 }
 
 impl Default for SyncStateMachine {
@@ -668,13 +876,15 @@ impl SyncStateMachine {
     }
 
     pub fn with_initial_state(snapshot: PlayerSnapshot) -> Self {
+        let initial_pos = if snapshot.position.is_finite() && snapshot.position >= 0.0 {
+            snapshot.position
+        } else {
+            0.0
+        };
         Self {
             local_username: None,
-            local_pos: if snapshot.position.is_finite() && snapshot.position >= 0.0 {
-                snapshot.position
-            } else {
-                0.0
-            },
+            local_pos: initial_pos,
+            last_local_mpv_pos: initial_pos,
             local_paused: snapshot.paused,
             ignoring_client: 0,
             ignoring_client_since: None,
@@ -685,25 +895,186 @@ impl SyncStateMachine {
             last_server_state_at: None,
             rtt_secs: 0.0,
             soft_speed: 1.0,
+            transform: TimelineTransform::default(),
+            segments: Vec::new(),
+            local_duration_secs: None,
+            align_mode: false,
+            waiting_preroll: false,
+            waiting_postroll: false,
+            waiting_cut_hold: false,
         }
     }
 
     pub fn reset_for_new_file(&mut self) {
         self.local_pos = 0.0;
+        self.last_local_mpv_pos = 0.0;
         self.local_paused = true;
         self.ignoring_client = 0;
         self.ignoring_client_since = None;
         self.pending_do_seek = false;
+        self.last_server_playstate = None;
+        self.last_server_state_at = None;
         self.soft_speed = 1.0;
+        self.transform = TimelineTransform::default();
+        self.segments.clear();
+        self.local_duration_secs = None;
+        self.align_mode = false;
+        self.waiting_preroll = false;
+        self.waiting_postroll = false;
+        self.waiting_cut_hold = false;
     }
 
     pub fn set_local_username(&mut self, username: String) {
         self.local_username = Some(username);
     }
 
+    pub fn set_local_duration(&mut self, duration_secs: Option<f64>) {
+        self.local_duration_secs = duration_secs.filter(|d| d.is_finite() && *d > 0.0);
+    }
+
+    fn active_segment_at(&self, room_secs: f64) -> TimelineSegment {
+        if self.segments.is_empty() {
+            return TimelineSegment {
+                room_start_secs: 0.0,
+                offset_secs: self.transform.offset_secs,
+                scale: self.transform.scale,
+                hold_room_until_secs: None,
+            };
+        }
+        let idx = self
+            .segments
+            .partition_point(|seg| seg.room_start_secs <= room_secs)
+            .saturating_sub(1);
+        self.segments[idx]
+    }
+
+    pub fn active_transform_at(&self, room_secs: f64) -> TimelineTransform {
+        self.active_segment_at(room_secs).to_transform()
+    }
+
+    pub fn map_local_to_room(&self, local_secs: f64) -> f64 {
+        if self.segments.len() <= 1 {
+            return self.transform.local_to_room(local_secs);
+        }
+        let mut best_room: Option<(f64, f64)> = None;
+        for (i, seg) in self.segments.iter().enumerate() {
+            if seg.hold_room_until_secs.is_some() {
+                continue;
+            }
+            let r_lo = seg.room_start_secs;
+            let r_hi = self
+                .segments
+                .get(i + 1)
+                .map(|n| n.room_start_secs)
+                .unwrap_or(f64::INFINITY);
+            let mapped = seg.to_transform().local_to_room(local_secs);
+            if mapped >= r_lo - 0.75 && mapped <= r_hi + 0.75 {
+                let dist = (mapped - self.local_pos).abs();
+                if best_room.is_none_or(|(_, best_d)| dist < best_d) {
+                    best_room = Some((mapped.max(0.0), dist));
+                }
+            }
+        }
+        best_room.map(|(r, _)| r).unwrap_or_else(|| {
+            self.active_transform_at(self.local_pos)
+                .local_to_room(local_secs)
+        })
+    }
+
+    pub fn estimated_room_position(&self, now_secs: f64) -> f64 {
+        if let Some(ref ps) = self.last_server_playstate {
+            let elapsed = if !ps.paused {
+                self.last_server_state_at
+                    .map(|t| (now_secs - t).clamp(0.0, 5.0))
+                    .unwrap_or(0.0)
+                    + self.rtt_secs / 2.0
+            } else {
+                0.0
+            };
+            (ps.position + elapsed).max(0.0)
+        } else {
+            self.local_pos.max(0.0)
+        }
+    }
+
+    pub fn set_transform(
+        &mut self,
+        transform: TimelineTransform,
+        now_secs: f64,
+    ) -> Vec<SyncAction> {
+        self.segments.clear();
+        self.transform = transform.sanitized();
+        if self.align_mode {
+            return Vec::new();
+        }
+        self.force_resync(now_secs)
+    }
+
+    pub fn set_piecewise_timeline(
+        &mut self,
+        segments: Vec<TimelineSegment>,
+        now_secs: f64,
+    ) -> Vec<SyncAction> {
+        let mut clean: Vec<TimelineSegment> = segments
+            .into_iter()
+            .map(TimelineSegment::sanitized)
+            .collect();
+        clean.sort_by(|a, b| a.room_start_secs.total_cmp(&b.room_start_secs));
+        if clean.len() <= 1 {
+            let tx = clean.first().map(|s| s.to_transform()).unwrap_or_default();
+            return self.set_transform(tx, now_secs);
+        }
+        self.transform = clean[0].to_transform();
+        self.segments = clean;
+        if self.align_mode {
+            return Vec::new();
+        }
+        self.force_resync(now_secs)
+    }
+
+    pub fn set_align_mode(&mut self, align_mode: bool, now_secs: f64) -> Vec<SyncAction> {
+        self.align_mode = align_mode;
+        if align_mode {
+            self.waiting_preroll = false;
+            self.waiting_postroll = false;
+            self.waiting_cut_hold = false;
+            Vec::new()
+        } else {
+            self.force_resync(now_secs)
+        }
+    }
+
+    pub fn align_scene_here(
+        &mut self,
+        mpv_pos_secs: f64,
+        now_secs: f64,
+    ) -> (TimelineTransform, Vec<SyncAction>) {
+        let room_pos = self.estimated_room_position(now_secs);
+        let safe_local = if mpv_pos_secs.is_finite() && mpv_pos_secs >= 0.0 {
+            mpv_pos_secs
+        } else {
+            0.0
+        };
+        let active_scale = self.active_transform_at(room_pos).scale;
+        self.segments.clear();
+        self.transform = TimelineTransform {
+            offset_secs: safe_local - active_scale * room_pos,
+            scale: active_scale,
+        }
+        .sanitized();
+        self.align_mode = false;
+        let actions = self.force_resync(now_secs);
+        (self.transform, actions)
+    }
+
     pub fn update_local_player(&mut self, position: f64, paused: bool) {
+        if self.align_mode || self.waiting_preroll || self.waiting_postroll || self.waiting_cut_hold
+        {
+            return;
+        }
         if position.is_finite() && position >= 0.0 && self.ignoring_client == 0 {
-            self.local_pos = position;
+            self.last_local_mpv_pos = position;
+            self.local_pos = self.map_local_to_room(position);
         }
         if self.ignoring_client == 0 && self.last_server_playstate.is_none() {
             self.local_paused = paused;
@@ -711,30 +1082,71 @@ impl SyncStateMachine {
     }
 
     pub fn on_user_play(&mut self, position: f64) {
+        self.waiting_preroll = false;
+        self.waiting_postroll = false;
+        self.waiting_cut_hold = false;
         self.ignoring_client = self.ignoring_client.saturating_add(1);
         self.ignoring_client_since = None;
         if position.is_finite() && position >= 0.0 {
-            self.local_pos = position;
+            self.last_local_mpv_pos = position;
+            self.local_pos = self.map_local_to_room(position);
         }
         self.local_paused = false;
     }
 
     pub fn on_user_pause(&mut self, position: f64) {
+        self.waiting_preroll = false;
+        self.waiting_postroll = false;
+        self.waiting_cut_hold = false;
         self.ignoring_client = self.ignoring_client.saturating_add(1);
         self.ignoring_client_since = None;
         if position.is_finite() && position >= 0.0 {
-            self.local_pos = position;
+            self.last_local_mpv_pos = position;
+            self.local_pos = self.map_local_to_room(position);
         }
         self.local_paused = true;
     }
 
+    /// Preserves a local paused state when an external server update must not unpause playback.
+    pub fn keep_local_paused(&mut self) {
+        self.local_paused = true;
+        self.soft_speed = 1.0;
+    }
+
     pub fn on_user_seek(&mut self, position: f64) {
+        self.waiting_preroll = false;
+        self.waiting_postroll = false;
+        self.waiting_cut_hold = false;
         self.ignoring_client = self.ignoring_client.saturating_add(1);
         self.ignoring_client_since = None;
         if position.is_finite() && position >= 0.0 {
-            self.local_pos = position;
+            self.last_local_mpv_pos = position;
+            self.local_pos = self.map_local_to_room(position);
         }
         self.pending_do_seek = true;
+    }
+
+    /// Restores both room timeline coordinates and local mpv coordinates cleanly when pushing back
+    /// an unauthorized guest state update without double-transforming timeline offsets.
+    pub fn restore_authoritative_room_playstate(
+        &mut self,
+        room_pos: f64,
+        paused: bool,
+        local_pos: f64,
+    ) {
+        self.waiting_preroll = false;
+        self.waiting_postroll = false;
+        self.waiting_cut_hold = false;
+        self.ignoring_client = self.ignoring_client.saturating_add(1);
+        self.ignoring_client_since = None;
+        self.pending_do_seek = true;
+        self.local_paused = paused;
+        if room_pos.is_finite() && room_pos >= 0.0 {
+            self.local_pos = room_pos;
+        }
+        if local_pos.is_finite() && local_pos >= 0.0 {
+            self.last_local_mpv_pos = local_pos;
+        }
     }
 
     /// Force an immediate hard snap to the most recently observed room state.
@@ -744,20 +1156,56 @@ impl SyncStateMachine {
         self.ignoring_client_since = None;
         self.pending_do_seek = false;
         self.soft_speed = 1.0;
-        actions.push(SyncAction::SetSpeed(1.0));
 
         if let Some(ref ps) = self.last_server_playstate {
             let elapsed = self
                 .last_server_state_at
                 .map(|t| (now_secs - t).clamp(0.0, 5.0))
                 .unwrap_or(0.0);
-            let target_pos =
-                (ps.position + if !ps.paused { elapsed + self.rtt_secs / 2.0 } else { 0.0 })
-                    .max(0.0);
+            let target_room = (ps.position
+                + if !ps.paused {
+                    elapsed + self.rtt_secs / 2.0
+                } else {
+                    0.0
+                })
+            .max(0.0);
+            let seg = self.active_segment_at(target_room);
+            let tx = seg.to_transform();
+            let base_speed = tx.effective_speed(1.0);
+            actions.push(SyncAction::SetSpeed(base_speed));
+
+            let cut_hold = !ps.paused && seg.hold_room_until_secs.is_some_and(|u| target_room < u);
+            let raw_local = if cut_hold {
+                seg.offset_secs.max(0.0)
+            } else {
+                tx.room_to_local_raw(target_room)
+            };
+            let preroll = !ps.paused && !cut_hold && raw_local < -0.05;
+            let postroll = !ps.paused
+                && !cut_hold
+                && self
+                    .local_duration_secs
+                    .is_some_and(|d| d > 5.0 && raw_local >= d - 0.05);
+            self.waiting_preroll = preroll;
+            self.waiting_postroll = postroll;
+            self.waiting_cut_hold = cut_hold;
             self.local_paused = ps.paused;
-            self.local_pos = target_pos;
-            actions.push(SyncAction::SetPaused(ps.paused));
-            actions.push(SyncAction::Seek(target_pos));
+            self.local_pos = target_room;
+            let target_local = if cut_hold {
+                raw_local
+            } else {
+                tx.room_to_local(target_room, self.local_duration_secs)
+            };
+            self.last_local_mpv_pos = target_local;
+            actions.push(SyncAction::SetPaused(
+                ps.paused || preroll || postroll || cut_hold,
+            ));
+            actions.push(SyncAction::Seek(target_local));
+        } else {
+            actions.push(SyncAction::SetSpeed(self.transform.effective_speed(1.0)));
+            self.waiting_preroll = false;
+            self.waiting_postroll = false;
+            self.waiting_cut_hold = false;
         }
 
         actions
@@ -798,22 +1246,25 @@ impl SyncStateMachine {
             self.last_server_playstate = Some(ps.clone());
             self.last_server_state_at = Some(now_secs);
 
-            // Detect authoritative server override (e.g., managed/controller-locked room)
-            // when the server explicitly pushes another user's or server's state with `ignoringOnTheFly.server`
-            // or a differing `setBy` while our local command wasn't accepted.
             let from_other_or_server = match (&ps.set_by, &self.local_username) {
-                (Some(sb), Some(me)) => sb != me,
+                (Some(sb), Some(me)) => !sb.eq_ignore_ascii_case(me),
                 (Some(_), None) => true,
                 _ => false,
             };
+            let server_ignored = state
+                .ignoring_on_the_fly
+                .as_ref()
+                .and_then(|i| i.server)
+                .is_some();
+            let has_client_ack_token = state
+                .ignoring_on_the_fly
+                .as_ref()
+                .and_then(|i| i.client)
+                .is_some();
             if self.ignoring_client > 0
                 && !acknowledged_client
-                && state
-                    .ignoring_on_the_fly
-                    .as_ref()
-                    .and_then(|i| i.server)
-                    .is_some()
-                && (from_other_or_server || ps.set_by.is_none())
+                && server_ignored
+                && (from_other_or_server || (ps.set_by.is_none() && !has_client_ack_token))
             {
                 server_override = true;
                 self.ignoring_client = 0;
@@ -841,7 +1292,14 @@ impl SyncStateMachine {
                 self.ignoring_client_since = None;
             }
 
-            let target_pos = ps.position + if !ps.paused { self.rtt_secs / 2.0 } else { 0.0 };
+            let target_room =
+                (ps.position + if !ps.paused { self.rtt_secs / 2.0 } else { 0.0 }).max(0.0);
+
+            if self.align_mode {
+                self.local_paused = ps.paused;
+                self.local_pos = target_room;
+                return actions;
+            }
 
             if server_override {
                 actions.push(SyncAction::ServerOverride {
@@ -849,20 +1307,78 @@ impl SyncStateMachine {
                 });
             }
 
-            if ps.paused != self.local_paused {
+            let seg = self.active_segment_at(target_room);
+            let tx = seg.to_transform();
+            let next_cut_hold =
+                !ps.paused && seg.hold_room_until_secs.is_some_and(|u| target_room < u);
+            let raw_local = if next_cut_hold {
+                seg.offset_secs.max(0.0)
+            } else {
+                tx.room_to_local_raw(target_room)
+            };
+            let next_preroll = !ps.paused && !next_cut_hold && raw_local < -0.05;
+            let next_postroll = !ps.paused
+                && !next_cut_hold
+                && self
+                    .local_duration_secs
+                    .is_some_and(|d| d > 5.0 && raw_local >= d - 0.05);
+            let was_hold = self.waiting_preroll || self.waiting_postroll || self.waiting_cut_hold;
+            let is_hold = next_preroll || next_postroll || next_cut_hold;
+
+            let external_do_seek = ps.do_seek
+                && (!acknowledged_client
+                    || from_other_or_server
+                    || server_override
+                    || (server_ignored && ps.set_by.is_none()));
+
+            if is_hold {
+                self.waiting_preroll = next_preroll;
+                self.waiting_postroll = next_postroll;
+                self.waiting_cut_hold = next_cut_hold;
+                self.local_paused = false;
+                self.local_pos = target_room;
+                if !was_hold || external_do_seek || server_override {
+                    if (self.soft_speed - 1.0).abs() > 1e-3 {
+                        self.soft_speed = 1.0;
+                        actions.push(SyncAction::SetSpeed(tx.effective_speed(1.0)));
+                    }
+                    let target_local = if next_cut_hold {
+                        raw_local
+                    } else {
+                        tx.room_to_local(target_room, self.local_duration_secs)
+                    };
+                    self.last_local_mpv_pos = target_local;
+                    actions.push(SyncAction::SetPaused(true));
+                    actions.push(SyncAction::Seek(target_local));
+                }
+                return actions;
+            }
+
+            self.waiting_preroll = false;
+            self.waiting_postroll = false;
+            self.waiting_cut_hold = false;
+
+            if ps.paused != self.local_paused || was_hold {
                 self.local_paused = ps.paused;
                 actions.push(SyncAction::SetPaused(ps.paused));
             }
 
-            let signed_drift = self.local_pos - target_pos;
+            let target_local = tx.room_to_local(target_room, self.local_duration_secs);
+            let signed_drift = if self.segments.len() > 1 {
+                (self.last_local_mpv_pos - target_local) / tx.scale.max(0.25)
+            } else {
+                self.local_pos - target_room
+            };
             let drift = signed_drift.abs();
-            if ps.do_seek || server_override || drift > DRIFT_SEEK_THRESHOLD_SECS {
-                if (self.soft_speed - 1.0).abs() > 1e-3 {
+            if was_hold || external_do_seek || server_override || drift > DRIFT_SEEK_THRESHOLD_SECS
+            {
+                if (self.soft_speed - 1.0).abs() > 1e-3 || was_hold {
                     self.soft_speed = 1.0;
-                    actions.push(SyncAction::SetSpeed(1.0));
+                    actions.push(SyncAction::SetSpeed(tx.effective_speed(1.0)));
                 }
-                self.local_pos = target_pos.max(0.0);
-                actions.push(SyncAction::Seek(self.local_pos));
+                self.local_pos = target_room;
+                self.last_local_mpv_pos = target_local;
+                actions.push(SyncAction::Seek(target_local));
             } else if !ps.paused {
                 let desired_speed = if signed_drift > SOFT_DRIFT_ENGAGE_SECS {
                     0.95
@@ -875,11 +1391,11 @@ impl SyncStateMachine {
                 };
                 if (desired_speed - self.soft_speed).abs() > 1e-3 {
                     self.soft_speed = desired_speed;
-                    actions.push(SyncAction::SetSpeed(desired_speed));
+                    actions.push(SyncAction::SetSpeed(tx.effective_speed(desired_speed)));
                 }
             } else if (self.soft_speed - 1.0).abs() > 1e-3 {
                 self.soft_speed = 1.0;
-                actions.push(SyncAction::SetSpeed(1.0));
+                actions.push(SyncAction::SetSpeed(tx.effective_speed(1.0)));
             }
         }
 
@@ -1119,6 +1635,94 @@ mod tests {
         let actions = sm.handle_server_state(&ack, 101.0);
         assert!(actions.is_empty());
         assert_eq!(sm.ignoring_client, 0);
+    }
+
+    #[test]
+    fn test_self_seek_ack_with_do_seek_echo_does_not_reseek_originator() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 100.0,
+            paused: false,
+        });
+        sm.set_local_username("Alice".into());
+        sm.rtt_secs = 0.30;
+
+        sm.on_user_seek(300.0);
+        let _ = sm.on_heartbeat_tick(10.0);
+
+        // Server echoes Alice's own seek back with doSeek=true, setBy="Alice", AND server ignoring token:
+        // Alice must NOT seek a second time to 300.05 + rtt/2.
+        let self_ack = ServerState {
+            playstate: Some(Playstate {
+                position: 300.05,
+                paused: false,
+                do_seek: true,
+                set_by: Some("Alice".into()),
+            }),
+            ignoring_on_the_fly: Some(IgnoringOnTheFly {
+                server: Some(4),
+                client: Some(1),
+            }),
+            ..Default::default()
+        };
+        let self_actions = sm.handle_server_state(&self_ack, 10.15);
+        assert!(
+            !self_actions
+                .iter()
+                .any(|a| matches!(a, SyncAction::Seek(_))),
+            "self-seek ACK must not trigger duplicate Seek action: {self_actions:?}"
+        );
+
+        // Rapid double-seek must ignore stale first-seek echo without jumping backward to 300.0
+        sm.on_user_seek(300.0);
+        let _ = sm.on_heartbeat_tick(11.0);
+        sm.on_user_seek(720.0);
+        let _ = sm.on_heartbeat_tick(11.05);
+        let stale_first_echo = ServerState {
+            playstate: Some(Playstate {
+                position: 300.0,
+                paused: false,
+                do_seek: true,
+                set_by: None,
+            }),
+            ignoring_on_the_fly: Some(IgnoringOnTheFly {
+                server: Some(5),
+                client: Some(1),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            sm.handle_server_state(&stale_first_echo, 11.1).is_empty(),
+            "stale first-seek echo must not override newer pending seek"
+        );
+        assert_eq!(sm.ignoring_client, 2);
+        let final_ack = ServerState {
+            playstate: Some(Playstate {
+                position: 720.0,
+                paused: false,
+                do_seek: true,
+                set_by: Some("Alice".into()),
+            }),
+            ignoring_on_the_fly: Some(IgnoringOnTheFly {
+                server: Some(6),
+                client: Some(2),
+            }),
+            ..Default::default()
+        };
+        assert!(sm.handle_server_state(&final_ack, 11.2).is_empty());
+        assert_eq!(sm.ignoring_client, 0);
+
+        // Whereas a seek originated by peer Bob MUST trigger Seek cleanly.
+        let peer_seek = ServerState {
+            playstate: Some(Playstate {
+                position: 450.0,
+                paused: false,
+                do_seek: true,
+                set_by: Some("Bob".into()),
+            }),
+            ..Default::default()
+        };
+        let peer_actions = sm.handle_server_state(&peer_seek, 12.0);
+        assert_eq!(peer_actions, vec![SyncAction::Seek(450.15)]);
     }
 
     #[test]
@@ -1409,7 +2013,7 @@ mod tests {
             vec![SyncAction::SetPaused(true), SyncAction::SetSpeed(1.0)]
         );
 
-        // reset_for_new_file clears position, paused, pending_do_seek, ignoring_client, and soft_speed
+        // reset_for_new_file clears position, paused, pending_do_seek, stale server playstate, ignoring_client, and soft_speed
         sm.on_user_seek(250.0);
         sm.soft_speed = 1.05;
         sm.reset_for_new_file();
@@ -1417,6 +2021,8 @@ mod tests {
         assert!(sm.local_paused);
         assert_eq!(sm.ignoring_client, 0);
         assert!(!sm.pending_do_seek);
+        assert!(sm.last_server_playstate.is_none());
+        assert!(sm.last_server_state_at.is_none());
         assert_eq!(sm.soft_speed, 1.0);
     }
 
@@ -1509,5 +2115,365 @@ mod tests {
         sm.update_local_player(0.0, true);
         assert!(!sm.local_paused);
         assert_eq!(sm.local_pos, 25.0);
+    }
+
+    #[test]
+    fn test_parse_set_ready_with_manually_initiated() {
+        let manual_false = parse_server_line(
+            r#"{"Set":{"ready":{"username":"Bob","isReady":false,"manuallyInitiated":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manual_false,
+            ServerMessage::Set(vec![SetUpdate::Ready {
+                username: "Bob".into(),
+                is_ready: false,
+                manually_initiated: Some(true),
+            }])
+        );
+
+        let user_ready =
+            parse_server_line(r#"{"Set":{"user":{"Alice":{"isReady":false}}}}"#).unwrap();
+        assert_eq!(
+            user_ready,
+            ServerMessage::Set(vec![SetUpdate::Ready {
+                username: "Alice".into(),
+                is_ready: false,
+                manually_initiated: None,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_keep_local_paused_prevents_heartbeat_from_advertising_unpaused() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 40.0,
+            paused: true,
+        });
+        let unpaused_srv = ServerState {
+            playstate: Some(Playstate {
+                position: 40.0,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let actions = sm.handle_server_state(&unpaused_srv, 10.0);
+        assert_eq!(actions, vec![SyncAction::SetPaused(false)]);
+        sm.keep_local_paused();
+        let hb = sm.on_heartbeat_tick(10.1);
+        let parsed: Value = serde_json::from_str(hb.trim()).unwrap();
+        assert_eq!(parsed["State"]["playstate"]["paused"], true);
+    }
+
+    #[test]
+    fn test_timeline_transform_maps_room_and_local_with_fps_scale_and_offset() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 0.0,
+            paused: true,
+        });
+        let pal_scale = (24_000.0 / 1001.0) / 25.0;
+        let actions = sm.set_transform(
+            TimelineTransform {
+                offset_secs: 6.5,
+                scale: pal_scale,
+            },
+            1.0,
+        );
+        assert_eq!(actions, vec![SyncAction::SetSpeed(pal_scale)]);
+
+        // Server says room is at 1000.0s playing -> local mpv must seek to 1000*scale + 6.5
+        let srv = ServerState {
+            playstate: Some(Playstate {
+                position: 1000.0,
+                paused: false,
+                do_seek: true,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let s_actions = sm.handle_server_state(&srv, 2.0);
+        let expected_local = 1000.0 * pal_scale + 6.5;
+        assert_eq!(
+            s_actions,
+            vec![
+                SyncAction::SetPaused(false),
+                SyncAction::Seek(expected_local)
+            ]
+        );
+
+        // Local mpv advancing to expected_local maps back to room time 1000.0 in heartbeats
+        sm.update_local_player(expected_local, false);
+        let hb: Value = serde_json::from_str(sm.on_heartbeat_tick(2.5).trim()).unwrap();
+        let reported_pos = hb["State"]["playstate"]["position"].as_f64().unwrap();
+        assert!((reported_pos - 1000.0).abs() < 1e-4);
+
+        // Small local drift (+1.0s room equivalent) triggers scaled soft drift speed (0.95 * pal_scale)
+        sm.update_local_player((1001.0 * pal_scale) + 6.5, false);
+        let drift_srv = ServerState {
+            playstate: Some(Playstate {
+                position: 1000.0,
+                paused: false,
+                do_seek: false,
+                set_by: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            sm.handle_server_state(&drift_srv, 3.0),
+            vec![SyncAction::SetSpeed(pal_scale * 0.95)]
+        );
+    }
+
+    #[test]
+    fn test_preroll_hold_waits_locally_without_pausing_room_then_starts_on_cue() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 0.0,
+            paused: true,
+        });
+        // Peer has a 10s intro bumper that local file does NOT have (offset = -10.0s)
+        sm.set_transform(
+            TimelineTransform {
+                offset_secs: -10.0,
+                scale: 1.0,
+            },
+            1.0,
+        );
+
+        // Room plays at T_room = 3.0 -> raw local = -7.0 -> hold mpv paused at 0.0
+        let early = ServerState {
+            playstate: Some(Playstate {
+                position: 3.0,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let acts_early = sm.handle_server_state(&early, 2.0);
+        assert_eq!(
+            acts_early,
+            vec![SyncAction::SetPaused(true), SyncAction::Seek(0.0)]
+        );
+        assert!(sm.waiting_preroll);
+        // Local player parked at 0.0 must not overwrite room position or pause room in heartbeat
+        sm.update_local_player(0.0, true);
+        let hb: Value = serde_json::from_str(sm.on_heartbeat_tick(2.5).trim()).unwrap();
+        assert_eq!(hb["State"]["playstate"]["paused"], false);
+        assert_eq!(hb["State"]["playstate"]["position"], 3.0);
+
+        // Once room crosses 10.0s (T_room = 10.5 -> local = 0.5), unpause and seek to 0.5
+        let ready_to_start = ServerState {
+            playstate: Some(Playstate {
+                position: 10.5,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let acts_start = sm.handle_server_state(&ready_to_start, 9.5);
+        assert!(!sm.waiting_preroll);
+        assert_eq!(
+            acts_start,
+            vec![
+                SyncAction::SetPaused(false),
+                SyncAction::SetSpeed(1.0),
+                SyncAction::Seek(0.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_align_mode_and_scene_anchor_compute_offset_and_resume_cleanly() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 120.0,
+            paused: true,
+        });
+        let initial = ServerState {
+            playstate: Some(Playstate {
+                position: 120.0,
+                paused: true,
+                do_seek: false,
+                set_by: Some("Host".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(sm.handle_server_state(&initial, 10.0).is_empty());
+
+        // Enter align_mode: local scrubbing and server playstate must not fight each other
+        assert!(sm.set_align_mode(true, 11.0).is_empty());
+        let peer_scrub = ServerState {
+            playstate: Some(Playstate {
+                position: 125.0,
+                paused: true,
+                do_seek: true,
+                set_by: Some("Host".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(sm.handle_server_state(&peer_scrub, 12.0).is_empty());
+        sm.update_local_player(400.0, false);
+        let hb: Value = serde_json::from_str(sm.on_heartbeat_tick(12.5).trim()).unwrap();
+        assert_eq!(hb["State"]["playstate"]["position"], 125.0);
+        assert_eq!(hb["State"]["playstate"]["paused"], true);
+
+        // User finds the matching frame in their BluRay at 133.5s -> offset = 133.5 - 125.0 = +8.5s
+        let (tx, acts) = sm.align_scene_here(133.5, 13.0);
+        assert!((tx.offset_secs - 8.5).abs() < 1e-6);
+        assert!(!sm.align_mode);
+        assert_eq!(
+            acts,
+            vec![
+                SyncAction::SetSpeed(1.0),
+                SyncAction::SetPaused(true),
+                SyncAction::Seek(133.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_two_point_timeline_fit_snaps_noisy_clicks_to_exact_fps_ratio() {
+        let true_scale = (24_000.0 / 1001.0) / 25.0;
+        let fitted = fit_two_point_timeline_transform(
+            60.0,
+            60.0 * true_scale + 5.0,
+            1860.0,
+            1860.0 * true_scale + 5.2,
+        )
+        .expect("fit");
+        assert!((fitted.scale - true_scale).abs() < 1e-9);
+        assert!((fitted.offset_secs - 5.1).abs() < 0.05);
+
+        let same_fps = fit_two_point_timeline_transform(60.0, 68.0, 1860.0, 1868.2).expect("fit");
+        assert!((same_fps.scale - 1.0).abs() < 1e-9);
+        assert!((same_fps.offset_secs - 8.1).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_encode_and_parse_chat_message() {
+        let encoded = encode_chat("~EP2:abc123");
+        assert_eq!(encoded, "{\"Chat\":\"~EP2:abc123\"}\r\n");
+
+        let parsed = parse_server_line(r#"{"Chat":{"username":"Alice","message":"~EP2:abc123"}}"#)
+            .expect("parse chat");
+        assert_eq!(
+            parsed,
+            ServerMessage::Chat {
+                username: "Alice".into(),
+                message: "~EP2:abc123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_piecewise_timeline_skips_extra_local_scene_and_holds_across_missing_scene() {
+        let mut sm = SyncStateMachine::with_initial_state(PlayerSnapshot {
+            position: 0.0,
+            paused: false,
+        });
+        sm.set_local_duration(Some(5000.0));
+
+        // Segment 0: offset +5s; Segment 1 at room 1000s: extra 60s scene in local -> +65s;
+        // Segment 2: room 2000..2090 extra scene in room (missing locally) -> hold at local 2065, resume at 2090 with offset -25s
+        let segments = vec![
+            TimelineSegment {
+                room_start_secs: 0.0,
+                offset_secs: 5.0,
+                scale: 1.0,
+                hold_room_until_secs: None,
+            },
+            TimelineSegment {
+                room_start_secs: 1000.0,
+                offset_secs: 65.0,
+                scale: 1.0,
+                hold_room_until_secs: None,
+            },
+            TimelineSegment {
+                room_start_secs: 2000.0,
+                offset_secs: 2065.0,
+                scale: 1.0,
+                hold_room_until_secs: Some(2090.0),
+            },
+            TimelineSegment {
+                room_start_secs: 2090.0,
+                offset_secs: -25.0,
+                scale: 1.0,
+                hold_room_until_secs: None,
+            },
+        ];
+
+        let init_acts = sm.set_piecewise_timeline(segments, 1.0);
+        assert!(
+            matches!(init_acts.first(), Some(SyncAction::SetSpeed(s)) if (*s - 1.0).abs() < 1e-6)
+        );
+
+        // Playing at room=999.0 -> local=1004.0 cleanly
+        let s0 = ServerState {
+            playstate: Some(Playstate {
+                position: 999.0,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let a0 = sm.handle_server_state(&s0, 2.0);
+        assert!(a0.contains(&SyncAction::Seek(1004.0)));
+
+        // Advance locally just past 1005.2 as room crosses 1000.2 -> automatically seeks over extra 60s scene to 1065.2
+        sm.update_local_player(1005.2, false);
+        let s1 = ServerState {
+            playstate: Some(Playstate {
+                position: 1000.2,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let a1 = sm.handle_server_state(&s1, 3.2);
+        assert_eq!(a1, vec![SyncAction::Seek(1065.2)]);
+
+        // Entering missing-scene hold window [2000..2090) pauses locally at 2065 without reporting paused=true
+        let s2 = ServerState {
+            playstate: Some(Playstate {
+                position: 2010.0,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let a2 = sm.handle_server_state(&s2, 4.0);
+        assert!(sm.waiting_cut_hold);
+        assert_eq!(
+            a2,
+            vec![SyncAction::SetPaused(true), SyncAction::Seek(2065.0)]
+        );
+        let hb: Value = serde_json::from_str(sm.on_heartbeat_tick(4.1).trim()).unwrap();
+        assert_eq!(hb["State"]["playstate"]["paused"], false);
+
+        // Exiting missing-scene hold window at room=2090.5 resumes smoothly at 2065.5
+        let s3 = ServerState {
+            playstate: Some(Playstate {
+                position: 2090.5,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Peer".into()),
+            }),
+            ..Default::default()
+        };
+        let a3 = sm.handle_server_state(&s3, 5.0);
+        assert!(!sm.waiting_cut_hold);
+        assert_eq!(
+            a3,
+            vec![
+                SyncAction::SetPaused(false),
+                SyncAction::SetSpeed(1.0),
+                SyncAction::Seek(2065.5),
+            ]
+        );
     }
 }

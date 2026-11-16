@@ -333,7 +333,8 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   );
   assert.equal(episodesSrc.includes("grid-cols-2"), false, "EpisodesPanel must be a vertical list, not a horizontal grid");
   assert.match(episodesSrc, /ep-episode-active/);
-  assert.match(episodesSrc, /Now Playing/);
+  assert.doesNotMatch(episodesSrc, /Now Playing/);
+  assert.match(episodesSrc, /aria-current=\{active \? "true" : undefined\}/);
 
   // Full-bleed video backdrop: play bar & title bar float over the video with zero black-bar flex squeezing
   assert.match(watchRoomSrc, /ref=\{viewportRef\}\s*className=\{`absolute inset-0 z-0/);
@@ -361,10 +362,36 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   assert.match(transportSrc, /\{\/\* Center: Hero Transport Cluster \*\/\}\s*<div className="flex items-center gap-1\.5 shrink-0 justify-self-center">/);
   assert.match(transportSrc, /ep-bar-pill/);
   assert.match(transportSrc, /ep-bar-icon-btn/);
+  assert.equal(transportSrc.includes("max-w-[1140px]"), true);
+  assert.equal(transportSrc.includes("hidden xl:inline"), true);
   assert.match(watchRoomSrc, /<TitleBar\s+leftSlot/);
   assert.doesNotMatch(watchRoomSrc, /ep-glass-pill h-8 pl-1\.5 pr-3 rounded-full/);
+  const placeholderSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ViewportPlaceholder.tsx"),
+    "utf8",
+  );
+  assert.match(placeholderSrc, /if \(isLoading && !playerError && !isDragActive\) return null;/);
+  assert.equal(watchRoomSrc.includes("isLoading={"), true);
   assert.match(watchRoomSrc, /<ContextMenu/);
   assert.match(watchRoomSrc, /Keyboard Shortcuts/);
+  assert.match(watchRoomSrc, /Full-Width Play Bar/);
+  assert.match(watchRoomSrc, /MenuPlayBarLayoutIcon/);
+  assert.match(transportSrc, /ep-glass-bottom-bar/);
+  assert.match(transportSrc, /data-bar-style=\{fullWidthPlayBar \? "full-width" : "floating"\}/);
+  assert.equal(transportSrc.includes("MenuPlayBarLayoutIcon"), false, "Play bar layout toggle belongs in right-click ContextMenu and Settings, not TransportBar");
+  assert.equal(transportSrc.includes("PlayerEyeIcon"), false, "Hide profile icons toggle belongs in RoomPanel and Settings, not TransportBar");
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  assert.match(settingsSrc, /Floating Capsule/);
+  assert.match(settingsSrc, /Full-Width Bar/);
+  const appStoreSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/store/useAppStore.ts"),
+    "utf8",
+  );
+  assert.match(appStoreSrc, /fullWidthPlayBar/);
+  assert.match(appStoreSrc, /setFullWidthPlayBar/);
   assert.equal(transportSrc.includes("openShortcuts"), false, "Shortcuts button belongs in right-click ContextMenu, not TransportBar");
-  assert.match(globalsCss, /\.ep-orb-play[\s\S]*backdrop-filter:/);
+  assert.match(globalsCss, /\.ep-orb-play\s*\{[\s\S]*background-clip:\s*padding-box/);
 });

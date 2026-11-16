@@ -466,12 +466,23 @@ test("Responsiveness invariants: lazy mpvStart, throttled playback/subtitle tick
   const transportBody = transportSrc.slice(transportSrc.indexOf("export const TransportBar = memo("));
   assert.match(transportSrc, /export const TransportBar = memo\(/);
   assert.doesNotMatch(transportBody, /const positionSecs = usePlayerStore\(\(s\) => s\.positionSecs\)/);
-  assert.match(transportBody, /usePlayerStore\.getState\(\)\.positionSecs/);
+  assert.match(transportBody, /seekPlaybackRelative\(/);
+  const playerActionsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/playerActions.ts"), "utf8");
+  assert.match(playerActionsSrc, /const player = usePlayerStore\.getState\(\);\s*if \(!player\.loaded\) return;/);
 
   const subtitleSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"), "utf8");
   assert.match(subtitleSrc, /export const SubtitlePanel = memo\(/);
-  assert.match(subtitleSrc, /createLeadingTrailingThrottle\(applyStyleNow, 60\)/);
+  assert.match(subtitleSrc, /createLeadingTrailingThrottle/);
   assert.match(subtitleSrc, /throttledApplyStyle\.flush\(\)/);
+  assert.match(subtitleSrc, /Advanced Options/);
+  assert.match(subtitleSrc, /Exact Size/);
+  assert.match(subtitleSrc, /Vertical Position/);
+  assert.match(subtitleSrc, /Outline Weight/);
+  assert.match(subtitleSrc, /Font Family/);
+
+  const settingsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/SettingsModal.tsx"), "utf8");
+  assert.match(settingsSrc, /createLeadingTrailingThrottle/);
+  assert.match(settingsSrc, /throttledApplySubStyle\.flush\(\)/);
 
   const viewportHookSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/useViewportRect.ts"), "utf8");
   assert.match(viewportHookSrc, /scheduleMeasure/);
@@ -499,7 +510,9 @@ test("Installer packaging bundles everything the app needs and embeds both front
     "resources\\mpv\\mpv.exe",
     "resources\\mpv\\ffmpeg.exe",
     "Inter-Regular.ttf",
+    "Inter-Bold.ttf",
     "NotoSansArabic-Regular.ttf",
+    "NotoSansArabic-Bold.ttf",
     "GPL-3.0.txt",
     "SOURCE_OFFER.txt",
   ]) {
@@ -564,7 +577,7 @@ test("Transparent backdrop invariant: engineSurfaceVisible and mpv lifecycle gua
   const watchRoomSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
   assert.match(
     watchRoomSrc,
-    /const showVideoBackdrop =\s*loaded &&\s*!playerError &&\s*!settingsOpen &&\s*!shortcutsOpen &&\s*\(!desktopRuntime \|\| engineSurfaceVisible\);/,
+    /const showVideoBackdrop =\s*loaded &&\s*!playerError &&\s*!modalBlockingVideo &&\s*\(!desktopRuntime \|\| engineSurfaceVisible\);/,
   );
   assert.match(watchRoomSrc, /onMpvSurfaceState\(/);
   assert.match(watchRoomSrc, /mpvGetSurfaceState\(/);
@@ -574,4 +587,417 @@ test("Transparent backdrop invariant: engineSurfaceVisible and mpv lifecycle gua
     watchRoomSrc,
     /enqueueSyncLifecycle\(async \(\) => \{[^}]*mpvStop\(\)/,
   );
+});
+
+test("Embedded caption track normalization, closed-caption detection, and cross-file auto-enable", async () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "epilod-sub-test-"));
+  const outFile = path.join(outDir, "bundle.mjs");
+  try {
+    buildSync({
+      stdin: {
+        contents: `
+          export { normalizeMpvTracks, subtitleTwoAnchorSync } from "./src/lib/mpv.ts";
+          export { buildAudioTrackOptions, buildSubTrackOptions, formatCompactClockSecs, isClosedCaptionTrack, parseFlexibleTimestampSecs } from "./src/lib/tracks.ts";
+          export { autoEnableEmbeddedSubtitle, resetAutoSubtitleState } from "./src/lib/playerActions.ts";
+          export { useAppStore } from "./src/store/useAppStore.ts";
+          export { useSubtitleStore } from "./src/store/useSubtitleStore.ts";
+        `,
+        resolveDir: REPO_ROOT,
+        loader: "ts",
+      },
+      outfile: outFile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node22",
+    });
+    const mod = await import(pathToFileURL(outFile).href);
+
+    // 1. Normalize both legacy `kind` payloads and canonical `type` payloads
+    const normalized = mod.normalizeMpvTracks([
+      { id: 1, kind: "audio", lang: "jpn", codec: "aac", selected: true, external: false },
+      { id: 2, kind: "sub", codec: "subrip", lang: "eng", selected: false, external: false },
+      { id: 3, type: "sub", codec: "eia_608", title: "CC1", selected: false, external: false },
+    ]);
+    assert.equal(mod.buildAudioTrackOptions(normalized).length, 2);
+    assert.equal(mod.buildSubTrackOptions(normalized).length, 3);
+    assert.equal(mod.isClosedCaptionTrack(normalized[2]), true);
+    assert.equal(mod.isClosedCaptionTrack(normalized[1]), false);
+    assert.equal(mod.parseFlexibleTimestampSecs("12.5"), 12.5);
+    assert.equal(mod.parseFlexibleTimestampSecs("1:30"), 90);
+    assert.equal(mod.parseFlexibleTimestampSecs("1:02:03.5"), 3723.5);
+    assert.equal(mod.parseFlexibleTimestampSecs("1:75"), null);
+    assert.equal(mod.parseFlexibleTimestampSecs("bad"), null);
+    assert.equal(mod.formatCompactClockSecs(90), "1:30");
+    assert.equal(mod.formatCompactClockSecs(3723.5), "1:02:03.5");
+
+    // 2. Test autoEnableEmbeddedSubtitle across episode changes and manual Off
+    const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+    const prevWindow = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).window = {
+      __TAURI_INTERNALS__: {
+        invoke: async (cmd: string, args: Record<string, unknown>) => {
+          calls.push({ cmd, args });
+          return undefined;
+        },
+      },
+    };
+    try {
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Ep01.mkv", "Ep01.mkv");
+      mod.useSubtitleStore.getState().setVisible(false);
+
+      // Should prefer non-forced default text track (id: 2) over forced/bitmap track (id: 1)
+      const ep1Tracks = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "subrip", forced: true, selected: false, external: false },
+        { id: 2, type: "sub", codec: "subrip", default: true, forced: false, selected: false, external: false },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(ep1Tracks);
+      assert.equal(mod.useSubtitleStore.getState().visible, true);
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_track" && c.args.sid === 2));
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_style" && c.args.visible === true));
+
+      // Turning subs off on the same file must NOT be overridden by subsequent track-list updates
+      calls.length = 0;
+      mod.useSubtitleStore.getState().setVisible(false);
+      mod.autoEnableEmbeddedSubtitle(ep1Tracks);
+      assert.equal(mod.useSubtitleStore.getState().visible, false);
+      assert.equal(calls.length, 0);
+
+      // Opening Episode 2 with identical track IDs (`1:i|2:i`) must re-enable subtitles cleanly
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Ep02.mkv", "Ep02.mkv");
+      mod.autoEnableEmbeddedSubtitle(ep1Tracks);
+      assert.equal(mod.useSubtitleStore.getState().visible, true);
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_track" && c.args.sid === 2));
+
+      // Opening Episode 3 where mpv auto-selected a bitmap ENG track should switch to a
+      // same-language text track when present, while leaving foreign-only text tracks untouched.
+      calls.length = 0;
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Ep03.mkv", "Ep03.mkv");
+      const bitmapPlusText = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "dvd_subtitle", lang: "eng", selected: true, external: false },
+        { id: 2, type: "sub", codec: "subrip", lang: "eng", selected: false, external: false },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(bitmapPlusText);
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_track" && c.args.sid === 2));
+
+      calls.length = 0;
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Ep04.mkv", "Ep04.mkv");
+      const bitmapPlusForeignText = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "dvd_subtitle", lang: "eng", selected: true, external: false },
+        { id: 2, type: "sub", codec: "subrip", lang: "fra", selected: false, external: false },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(bitmapPlusForeignText);
+      assert.ok(!calls.some((c) => c.cmd === "mpv_set_sub_track"));
+
+      // 3. Two-point manual anchor sync passes embedded track fallback when no external file exists
+      calls.length = 0;
+      await mod.subtitleTwoAnchorSync({
+        subtitlePath: null,
+        videoPath: "D:\\Shows\\Ep02.mkv",
+        embeddedSubIdx: 1,
+        embeddedSubCodec: "ass",
+        srcASecs: 10,
+        dstASecs: 12,
+        srcBSecs: 600,
+        dstBSecs: 602,
+        encodingHint: "auto",
+      });
+      const twoAnchorCall = calls.find((c) => c.cmd === "subtitle_two_anchor_sync");
+      assert.ok(twoAnchorCall);
+      assert.equal(twoAnchorCall.args.subtitlePath, null);
+      assert.equal(twoAnchorCall.args.videoPath, "D:\\Shows\\Ep02.mkv");
+      assert.equal(twoAnchorCall.args.embeddedSubIdx, 1);
+      assert.equal(twoAnchorCall.args.embeddedSubCodec, "ass");
+
+      const subtitlePanelSrc = fs.readFileSync(
+        path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+        "utf8",
+      );
+      assert.equal(subtitlePanelSrc.includes("2-Point Manual Sync"), false);
+      assert.equal(subtitlePanelSrc.includes("Open 2-Point Manual Sync"), false);
+      assert.match(subtitlePanelSrc, /embeddedSubIdx:\s*\n\s*!originalFilePath && !loadedFilePath/);
+      assert.doesNotMatch(subtitlePanelSrc, /cannot be auto-synced;\s*nudge/i);
+      assert.match(subtitlePanelSrc, /subIsClosedCaption\s*\?\s*0/);
+    } finally {
+      if (prevWindow === undefined) {
+        delete (globalThis as Record<string, unknown>).window;
+      } else {
+        (globalThis as Record<string, unknown>).window = prevWindow;
+      }
+    }
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("Bold subtitle option preserves original defaults and propagates sub-bold cleanly", async () => {
+  const subMod = await loadModules<typeof import("../src/store/useSubtitleStore")>(
+    "src/store/useSubtitleStore.ts",
+  );
+  const store = subMod.useSubtitleStore;
+  store.getState().resetDefaults();
+  const initial = store.getState();
+  assert.equal(initial.font, "Noto Sans Arabic");
+  assert.equal(initial.fontSize, 44);
+  assert.equal(initial.borderSize, 2.5);
+  assert.equal(initial.bold, false);
+  assert.equal(subMod.buildSubStyleParams(initial).bold, false);
+
+  store.getState().setBold(true);
+  assert.equal(store.getState().bold, true);
+  assert.equal(subMod.buildSubStyleParams(store.getState()).bold, true);
+
+  store.getState().resetDefaults();
+  assert.equal(store.getState().bold, false);
+
+  const settingsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/SettingsModal.tsx"), "utf8");
+  const subtitleSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"), "utf8");
+  assert.match(settingsSrc, /Bold Subtitle Font/);
+  assert.match(settingsSrc, /Override Styled Fansubs/);
+  assert.match(settingsSrc, /Subtitle Vertical Position/);
+  assert.match(subtitleSrc, /Advanced Options/);
+  assert.match(subtitleSrc, /Bold font/);
+  assert.match(subtitleSrc, /Override styled fansubs/);
+
+  const tracksSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/tracks.ts"), "utf8");
+  assert.match(tracksSrc, /parseFlexibleTimestampSecs/);
+
+  const mpvIpcSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "crates/epilod-core/src/mpv_ipc.rs"),
+    "utf8",
+  );
+  for (const flag of [
+    "--sub-hinting=light",
+    "--sub-blur=0.08",
+    "--sub-outline-color=#E6000000",
+    "--sub-shadow-offset=1.15",
+    "--sub-back-color=#78000000",
+  ]) {
+    assert.ok(mpvIpcSrc.includes(flag), `mpv_ipc.rs must include subtitle quality flag ${flag}`);
+  }
+});
+
+test("Sudden seek coalescing: monotonic clientSeekSeq rejects stale mpv://time and avoids scrubber double-seek", async () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "epilod-seek-test-"));
+  const outFile = path.join(outDir, "bundle.mjs");
+  try {
+    buildSync({
+      stdin: {
+        contents: `
+          export * from "./src/lib/seekCoalesce.ts";
+          export * from "./src/lib/playerActions.ts";
+          export { usePlayerStore } from "./src/store/usePlayerStore.ts";
+        `,
+        resolveDir: REPO_ROOT,
+        loader: "ts",
+      },
+      outfile: outFile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node22",
+    });
+    const mod = (await import(pathToFileURL(outFile).href)) as typeof import("../src/lib/seekCoalesce") &
+      typeof import("../src/lib/playerActions") & {
+        usePlayerStore: typeof import("../src/store/usePlayerStore")["usePlayerStore"];
+      };
+
+    mod.resetSharedRelativeSeek();
+    const s1 = mod.nextClientSeekSeq();
+    const s2 = mod.nextClientSeekSeq();
+    assert.ok(s2 > s1);
+    assert.equal(mod.shouldAcceptMpvTimeEvent(s1, s2), false);
+    assert.equal(mod.shouldAcceptMpvTimeEvent(s2, s2), true);
+    assert.equal(mod.shouldAcceptMpvTimeEvent(undefined, s2), true);
+
+    // Mock Tauri IPC bridge cleanly to inspect dispatched mpv_seek invocations
+    const ipcCalls: Array<{ cmd: string; args?: Record<string, unknown> }> = [];
+    const prevWindow = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).window = {
+      __TAURI_INTERNALS__: {
+        invoke: async (cmd: string, args?: Record<string, unknown>) => {
+          ipcCalls.push({ cmd, args });
+          return null;
+        },
+      },
+    };
+    try {
+      mod.usePlayerStore.getState().setLoaded(true);
+      mod.usePlayerStore.getState().setDurationSecs(1200);
+      mod.usePlayerStore.getState().setPositionSecs(100);
+      mod.resetSharedRelativeSeek();
+
+      mod.seekPlaybackRelative(10);
+      mod.seekPlaybackRelative(10);
+      await Promise.resolve();
+
+      const seekCalls = ipcCalls.filter((c) => c.cmd === "mpv_seek");
+      assert.equal(seekCalls.length, 2);
+      assert.equal(seekCalls[0].args?.seconds, 110);
+      assert.equal(seekCalls[1].args?.seconds, 120);
+      assert.equal(seekCalls[0].args?.preview, false);
+      assert.ok(
+        Number(seekCalls[1].args?.clientSeekSeq) > Number(seekCalls[0].args?.clientSeekSeq),
+        "Sequential seeks must bump clientSeekSeq monotonically",
+      );
+    } finally {
+      mod.resetSharedRelativeSeek();
+      if (prevWindow === undefined) {
+        delete (globalThis as Record<string, unknown>).window;
+      } else {
+        (globalThis as Record<string, unknown>).window = prevWindow;
+      }
+    }
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+
+  const scrubberSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"), "utf8");
+  const transportSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TransportBar.tsx"), "utf8");
+  assert.match(scrubberSrc, /onPointerCancel=\{finishPointerDrag\}/);
+  assert.match(scrubberSrc, /phase:\s*dragMovedRef\.current\s*\?\s*"move"\s*:\s*"start"/);
+  assert.match(transportSrc, /meta\?\.phase\s*===\s*"commit"\s*\|\|\s*meta\?\.phase\s*===\s*"key"/);
+  assert.match(transportSrc, /mpvSeek\(secs,\s*\{\s*preview:\s*true/);
+  assert.match(transportSrc, /mpvSeek\(val,\s*\{\s*preview:\s*false/);
+});
+
+test("Magic Sync embedded track resolution never crosses languages and uses exact ff-index", async () => {
+  const tr = await loadModules<typeof import("../src/lib/tracks")>("src/lib/tracks.ts");
+  const mpvMod = await loadModules<typeof import("../src/lib/mpv")>("src/lib/mpv.ts");
+
+  // 1. Language code normalization (ISO 639-1, 639-2, BCP-47, full name, undetermined)
+  assert.equal(tr.languagesMatch("en", "eng"), true);
+  assert.equal(tr.languagesMatch("en-US", "English"), true);
+  assert.equal(tr.languagesMatch("ara", "ar"), true);
+  assert.equal(tr.languagesMatch("und", "und"), false);
+  assert.equal(tr.languagesMatch("eng", "ara"), false);
+
+  // 2. Embedded English bitmap sub with ONLY a foreign (Arabic) text track must NOT fall back to Arabic
+  const bitmapOnlyForeign = tr.resolveEmbeddedSyncTarget([
+    { id: 1, type: "sub", lang: "ara", codec: "subrip", selected: false, external: false, "ff-index": 2 },
+    { id: 2, type: "sub", lang: "eng", codec: "hdmv_pgs_subtitle", selected: true, external: false, "ff-index": 3 },
+  ]);
+  assert.equal(bitmapOnlyForeign.subIsBitmap, true);
+  assert.equal(bitmapOnlyForeign.fallbackEmbeddedSub, null);
+  assert.equal(bitmapOnlyForeign.syncTargetEmbedded, null);
+  assert.equal(bitmapOnlyForeign.embeddedSubIdx, null);
+  assert.equal(bitmapOnlyForeign.ffIndex, null);
+  assert.equal(bitmapOnlyForeign.crossLangBlocked, true);
+
+  // 3. Embedded English bitmap sub falls back ONLY to a same-language English text track
+  const bitmapWithEnMatch = tr.resolveEmbeddedSyncTarget([
+    { id: 1, type: "sub", lang: "ara", codec: "subrip", selected: false, external: false, "ff-index": 2 },
+    { id: 2, type: "sub", lang: "eng", codec: "hdmv_pgs_subtitle", selected: true, external: false, "ff-index": 3 },
+    { id: 3, type: "sub", lang: "en-US", codec: "ass", selected: false, external: false, "ff-index": 4 },
+  ]);
+  assert.equal(bitmapWithEnMatch.fallbackEmbeddedSub?.id, 3);
+  assert.equal(bitmapWithEnMatch.syncTargetEmbedded?.id, 3);
+  assert.equal(bitmapWithEnMatch.ffIndex, 4);
+  assert.equal(bitmapWithEnMatch.embeddedSubIdx, 2);
+  assert.equal(bitmapWithEnMatch.crossLangBlocked, false);
+
+  // 4. Container stream + virtual CC track + non-contiguous ff-index preserves exact FFmpeg target
+  const mixedCcAndContainer = tr.resolveEmbeddedSyncTarget([
+    { id: 1, type: "sub", lang: "spa", codec: "eia_608", selected: false, external: false }, // virtual CC (no ff-index)
+    { id: 2, type: "sub", lang: "ara", codec: "eia_608", selected: false, external: false, "ff-index": 2 }, // container CC
+    { id: 3, type: "sub", lang: "eng", codec: "subrip", selected: true, external: false, "ff-index": 5 },
+  ]);
+  assert.equal(mixedCcAndContainer.syncTargetEmbedded?.id, 3);
+  assert.equal(mixedCcAndContainer.ffIndex, 5);
+  assert.equal(mixedCcAndContainer.embeddedSubIdx, 1);
+
+  // 5. selectSubTrack clears stale external track state if tracks list is empty/stale
+  let clearedOnStale = false;
+  await tr.selectSubTrack(7, [], {
+    mpvSetSubTrack: async () => {},
+    mpvSetSubDelay: async () => {},
+    setDelaySecs: () => {},
+    clearExternalTrackState: () => {
+      clearedOnStale = true;
+    },
+  });
+  assert.equal(clearedOnStale, true);
+
+  // 6. selectSubTrack does NOT clear external track state when selecting a known external track
+  let clearedOnExternal = false;
+  await tr.selectSubTrack(
+    9,
+    [{ id: 9, type: "sub", external: true, codec: "subrip" }],
+    {
+      mpvSetSubTrack: async () => {},
+      mpvSetSubDelay: async () => {},
+      setDelaySecs: () => {},
+      clearExternalTrackState: () => {
+        clearedOnExternal = true;
+      },
+    },
+  );
+  assert.equal(clearedOnExternal, false);
+
+  // 7. subtitleAutoSync forwards embeddedSubFfIdx to Tauri IPC
+  const ipcCalls: Array<{ cmd: string; args?: Record<string, unknown> }> = [];
+  const prevWindow = (globalThis as Record<string, unknown>).window;
+  (globalThis as Record<string, unknown>).window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        ipcCalls.push({ cmd, args });
+        return {
+          offsetSecs: 0,
+          scale: 1,
+          confidenceZ: 8,
+          correlation: 0.9,
+          driftApplied: false,
+          segmentsApplied: 1,
+          syncedSubtitlePath: "C:\\tmp\\synced.srt",
+          sourceSubtitlePath: "C:\\tmp\\source.srt",
+          audioDurationSecs: 100,
+          elapsedMs: 120,
+        };
+      },
+    },
+  };
+  try {
+    await mpvMod.subtitleAutoSync({
+      videoPath: "C:\\video.mkv",
+      subtitlePath: null,
+      audioTrackId: 1,
+      embeddedSubIdx: 1,
+      embeddedSubFfIdx: 5,
+      embeddedSubCodec: "subrip",
+    });
+    const call = ipcCalls.find((c) => c.cmd === "subtitle_auto_sync");
+    assert.ok(call);
+    assert.equal(call.args?.embeddedSubIdx, 1);
+    assert.equal(call.args?.embeddedSubFfIdx, 5);
+  } finally {
+    if (prevWindow === undefined) {
+      delete (globalThis as Record<string, unknown>).window;
+    } else {
+      (globalThis as Record<string, unknown>).window = prevWindow;
+    }
+  }
+});
+
+test("Scrubber pointer handling guards secondary clicks, fast taps via draggingRef, click release drift, and zero-coord pointercancel", () => {
+  const scrubberSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"), "utf8");
+  const transportSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TransportBar.tsx"), "utf8");
+  const syncplayRs = fs.readFileSync(path.join(REPO_ROOT, "crates/epilod-core/src/syncplay.rs"), "utf8");
+  const syncplayModRs = fs.readFileSync(path.join(REPO_ROOT, "src-tauri/src/syncplay/mod.rs"), "utf8");
+
+  assert.match(scrubberSrc, /draggingRef\.current/);
+  assert.match(scrubberSrc, /e\.button !== 0/);
+  assert.match(scrubberSrc, /pointerDownValRef\.current/);
+  assert.match(scrubberSrc, /lastValRef\.current/);
+  assert.match(scrubberSrc, /e\.type === "pointercancel"\s*\|\|\s*e\.type === "lostpointercapture"/);
+  assert.match(scrubberSrc, />=\s*6/);
+  assert.match(scrubberSrc, /onLostPointerCapture=\{finishPointerDrag\}/);
+
+  assert.match(transportSrc, /scrubbingRef\.current = false;[\s\S]*void syncUserSeek\(val\);/);
+  assert.doesNotMatch(syncplayRs, /\|\|\s*server_ignored\s*\);/);
+  assert.match(syncplayRs, /server_ignored && ps\.set_by\.is_none\(\)/);
+  assert.match(syncplayModRs, /SyncCommand::UserSeek\(pos\)[\s\S]{0,360}is_scrubbing = false;/);
 });

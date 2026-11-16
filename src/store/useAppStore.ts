@@ -4,14 +4,22 @@ import {
   isValidAvatarId,
   type AvatarId,
 } from "../components/ui/ProfileAvatar";
+import {
+  LOCAL_DISCONNECT_TAG,
+  NOT_READY_TAG_PREFIX,
+  PEER_LEFT_TAG_PREFIX,
+} from "../lib/syncReady";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
 import {
   sanitizeCustomServerEndpoint,
   sanitizeRoomCodeInput,
   sanitizeUsername,
 } from "../lib/webviewHardening";
+import { useNotificationStore } from "./useNotificationStore";
+import { useIntroStore } from "./useIntroStore";
 import { usePlayerStore } from "./usePlayerStore";
 import { usePlaylistStore } from "./usePlaylistStore";
+import { clearReactions } from "./useReactionStore";
 import { useSubtitleStore } from "./useSubtitleStore";
 import { useSyncStore } from "./useSyncStore";
 
@@ -43,7 +51,15 @@ function applyReducedMotionAttribute(enabled: boolean): void {
 }
 
 export type AppScreen = "home" | "room";
-export type SettingsTab = "server" | "prefs" | "updates" | "logs";
+export type SettingsTab =
+  | "profile"
+  | "appearance"
+  | "playback"
+  | "party"
+  | "updates"
+  | "server"
+  | "logs";
+export type SkipIntroMode = "off" | "manual" | "auto";
 
 interface AppState {
   screen: AppScreen;
@@ -51,6 +67,7 @@ interface AppState {
   avatarId: AvatarId;
   roomCode: string;
   literalRoom: boolean;
+  hostOnlyRoom: boolean;
   serverEndpoint: string;
   // Fix 05: kept strictly in RAM for the current session (never persisted to localStorage)
   serverPassword: string;
@@ -60,6 +77,10 @@ interface AppState {
   reducedMotion: boolean;
   lowPowerMode: boolean;
   soundEffectsEnabled: boolean;
+  skipIntroMode: SkipIntroMode;
+  reactionsEnabled: boolean;
+  recentEmojis: string[];
+  fullWidthPlayBar: boolean;
   autoCheckUpdates: boolean;
   autoDownloadUpdates: boolean;
   settingsOpen: boolean;
@@ -71,6 +92,7 @@ interface AppState {
   setAvatarId: (avatarId: AvatarId) => void;
   setRoomCode: (code: string) => void;
   setLiteralRoom: (literal: boolean) => void;
+  setHostOnlyRoom: (hostOnly: boolean) => void;
   setServerEndpoint: (endpoint: string) => void;
   setServerPassword: (password: string) => void;
   setAllowNetworkShares: (allow: boolean) => void;
@@ -79,14 +101,18 @@ interface AppState {
   setReducedMotion: (reduced: boolean) => void;
   setLowPowerMode: (lowPower: boolean) => void;
   setSoundEffectsEnabled: (enabled: boolean) => void;
+  setSkipIntroMode: (mode: SkipIntroMode) => void;
+  setReactionsEnabled: (enabled: boolean) => void;
+  pushRecentEmoji: (emoji: string) => void;
+  setFullWidthPlayBar: (fullWidth: boolean) => void;
   setAutoCheckUpdates: (autoCheck: boolean) => void;
   setAutoDownloadUpdates: (autoDownload: boolean) => void;
-  openSettings: (tab?: SettingsTab) => void;
-  setSettingsTab: (tab: SettingsTab) => void;
+  openSettings: (tab?: SettingsTab | "prefs") => void;
+  setSettingsTab: (tab: SettingsTab | "prefs") => void;
   closeSettings: () => void;
   openShortcuts: () => void;
   closeShortcuts: () => void;
-  enterRoom: (code: string, literalRoom?: boolean) => void;
+  enterRoom: (code: string, literalRoom?: boolean, hostOnlyRoom?: boolean) => void;
   leaveRoom: () => void;
   setSelectedFile: (path: string | null, name: string | null) => void;
 }
@@ -100,7 +126,37 @@ const initialHashFilenames = readStorage("ep.hashFilenames", "false") === "true"
 const initialReducedMotion = readStorage("ep.reducedMotion", "false") === "true";
 const initialLowPowerMode = readStorage("ep.lowPowerMode", "false") === "true";
 const initialAllowShares = readStorage("ep.allowNetworkShares", "false") === "true";
+function readInitialSkipIntroMode(): SkipIntroMode {
+  const saved = readStorage("ep.skipIntroMode", "");
+  if (saved === "off" || saved === "manual" || saved === "auto") {
+    return saved;
+  }
+  if (readStorage("ep.smartIntro", "true") === "false") {
+    return "off";
+  }
+  if (readStorage("ep.autoSkipIntro", "false") === "true") {
+    return "auto";
+  }
+  return "manual";
+}
+
 const initialSoundEffectsEnabled = readStorage("ep.soundEffects", "true") !== "false";
+const initialSkipIntroMode = readInitialSkipIntroMode();
+const initialReactionsEnabled = readStorage("ep.reactionsEnabled", "true") !== "false";
+const initialRecentEmojis: string[] = (() => {
+  try {
+    const parsed = JSON.parse(readStorage("ep.recentEmojis", "[]"));
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((x): x is string => typeof x === "string" && x.trim().length > 0 && x.length <= 24)
+        .slice(0, 12);
+    }
+  } catch {
+    // Ignore malformed stored recent emojis
+  }
+  return [];
+})();
+const initialFullWidthPlayBar = readStorage("ep.fullWidthPlayBar", "false") === "true";
 const initialAutoCheckUpdates = readStorage("ep.autoCheckUpdates", "true") !== "false";
 const initialAutoDownloadUpdates = readStorage("ep.autoDownloadUpdates", "true") !== "false";
 
@@ -112,6 +168,7 @@ export const useAppStore = create<AppState>((set) => ({
   avatarId: initialAvatarId,
   roomCode: "",
   literalRoom: false,
+  hostOnlyRoom: false,
   serverEndpoint: initialServer,
   serverPassword: "",
   allowNetworkShares: initialAllowShares,
@@ -120,6 +177,10 @@ export const useAppStore = create<AppState>((set) => ({
   reducedMotion: initialReducedMotion,
   lowPowerMode: initialLowPowerMode,
   soundEffectsEnabled: initialSoundEffectsEnabled,
+  skipIntroMode: initialSkipIntroMode,
+  reactionsEnabled: initialReactionsEnabled,
+  recentEmojis: initialRecentEmojis,
+  fullWidthPlayBar: initialFullWidthPlayBar,
   autoCheckUpdates: initialAutoCheckUpdates,
   autoDownloadUpdates: initialAutoDownloadUpdates,
   settingsOpen: false,
@@ -145,6 +206,8 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   setLiteralRoom: (literalRoom) => set({ literalRoom }),
+
+  setHostOnlyRoom: (hostOnlyRoom) => set({ hostOnlyRoom }),
 
   setServerEndpoint: (endpoint) => {
     const clean = sanitizeCustomServerEndpoint(endpoint) || DEFAULT_ENDPOINT;
@@ -184,6 +247,29 @@ export const useAppStore = create<AppState>((set) => ({
     writeStorage("ep.soundEffects", soundEffectsEnabled ? "true" : "false");
     set({ soundEffectsEnabled });
   },
+  setSkipIntroMode: (skipIntroMode) => {
+    writeStorage("ep.skipIntroMode", skipIntroMode);
+    set({ skipIntroMode });
+  },
+
+  setReactionsEnabled: (reactionsEnabled) => {
+    writeStorage("ep.reactionsEnabled", reactionsEnabled ? "true" : "false");
+    set({ reactionsEnabled });
+  },
+
+  pushRecentEmoji: (emoji) =>
+    set((s) => {
+      const clean = emoji.trim();
+      if (!clean || clean.length > 24) return s;
+      const next = [clean, ...s.recentEmojis.filter((e) => e !== clean)].slice(0, 12);
+      writeStorage("ep.recentEmojis", JSON.stringify(next));
+      return { recentEmojis: next };
+    }),
+
+  setFullWidthPlayBar: (fullWidthPlayBar) => {
+    writeStorage("ep.fullWidthPlayBar", fullWidthPlayBar ? "true" : "false");
+    set({ fullWidthPlayBar });
+  },
 
   setAutoCheckUpdates: (autoCheckUpdates) => {
     writeStorage("ep.autoCheckUpdates", autoCheckUpdates ? "true" : "false");
@@ -204,33 +290,46 @@ export const useAppStore = create<AppState>((set) => ({
     set({
       settingsOpen: true,
       shortcutsOpen: false,
-      settingsTab: typeof tab === "string" ? tab : "server",
+      settingsTab:
+        tab === "prefs"
+          ? "profile"
+          : typeof tab === "string"
+            ? tab
+            : "server",
     }),
-  setSettingsTab: (settingsTab) => set({ settingsTab }),
+  setSettingsTab: (tab) => set({ settingsTab: tab === "prefs" ? "profile" : tab }),
   closeSettings: () => set({ settingsOpen: false }),
   openShortcuts: () => set({ shortcutsOpen: true, settingsOpen: false }),
   closeShortcuts: () => set({ shortcutsOpen: false }),
 
-  enterRoom: (code, literalRoom) =>
+  enterRoom: (code, literalRoom, hostOnlyRoom) =>
     set((s) => {
       const lit = literalRoom ?? s.literalRoom;
       return {
         screen: "room",
         roomCode: sanitizeRoomCodeInput(code, lit),
         literalRoom: lit,
+        hostOnlyRoom: hostOnlyRoom ?? false,
         settingsOpen: false,
         shortcutsOpen: false,
       };
     }),
 
   leaveRoom: () => {
+    clearReactions();
     usePlayerStore.getState().reset();
+    useIntroStore.getState().resetForVideo(null);
     useSyncStore.getState().reset();
+    const noteStore = useNotificationStore.getState();
+    noteStore.dismissByTagPrefix(NOT_READY_TAG_PREFIX);
+    noteStore.dismissByTagPrefix(PEER_LEFT_TAG_PREFIX);
+    noteStore.dismissByTag(LOCAL_DISCONNECT_TAG);
     useSubtitleStore.getState().clearLoadedTrack();
     usePlaylistStore.getState().clearPlaylist();
     set({
       screen: "home",
       roomCode: "",
+      hostOnlyRoom: false,
       selectedFilePath: null,
       selectedFileName: null,
       settingsOpen: false,
@@ -240,7 +339,9 @@ export const useAppStore = create<AppState>((set) => ({
 
   setSelectedFile: (path, name) => {
     usePlayerStore.getState().resetForNewFile();
+    useIntroStore.getState().resetForVideo(path);
     useSyncStore.getState().setLocalReady(false);
+    useSyncStore.getState().resetTimelineAlignment();
     useSubtitleStore.getState().clearLoadedTrack();
     set({
       selectedFilePath: path,

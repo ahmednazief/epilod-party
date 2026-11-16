@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createSerialQueue } from "./asyncGuard";
 import { isDesktop, safeInvoke } from "./bridge";
+import { nextClientSeekSeq } from "./seekCoalesce";
 
 export const enqueueMpvLifecycle = createSerialQueue();
 
@@ -55,9 +56,42 @@ export interface MpvTrack {
   lang?: string | null;
   codec?: string | null;
   external?: boolean;
+  default?: boolean;
+  forced?: boolean;
   "ff-index"?: number;
   "demux-index"?: number;
   selected?: boolean;
+}
+
+export type RawMpvTrack = Omit<MpvTrack, "type"> & {
+  type?: MpvTrack["type"];
+  kind?: MpvTrack["type"];
+};
+
+export function normalizeMpvTrack(raw: RawMpvTrack): MpvTrack {
+  const normalizedType =
+    typeof raw.type === "string" && raw.type
+      ? raw.type
+      : typeof raw.kind === "string"
+        ? raw.kind
+        : "";
+  return {
+    id: raw.id,
+    type: normalizedType,
+    title: raw.title ?? null,
+    lang: raw.lang ?? null,
+    codec: raw.codec ?? null,
+    external: Boolean(raw.external),
+    default: Boolean(raw.default),
+    forced: Boolean(raw.forced),
+    ...(raw["ff-index"] !== undefined ? { "ff-index": raw["ff-index"] } : {}),
+    ...(raw["demux-index"] !== undefined ? { "demux-index": raw["demux-index"] } : {}),
+    selected: Boolean(raw.selected),
+  };
+}
+
+export function normalizeMpvTracks(rawTracks: readonly RawMpvTrack[]): MpvTrack[] {
+  return Array.isArray(rawTracks) ? rawTracks.map(normalizeMpvTrack) : [];
 }
 
 export type AspectMode = "auto" | "16:9" | "4:3" | "21:9" | "fill";
@@ -69,6 +103,7 @@ export interface AutoSyncResult {
   confidenceZ: number;
   correlation: number;
   driftApplied: boolean;
+  segmentsApplied?: number;
   syncedSubtitlePath: string;
   sourceSubtitlePath: string;
   audioDurationSecs: number;
@@ -105,6 +140,16 @@ export interface MpvBackdropFrame {
   rgba: Uint8ClampedArray;
 }
 
+let lastCapturedBackdropFrame: MpvBackdropFrame | null = null;
+
+export function getLastCapturedBackdropFrame(): MpvBackdropFrame | null {
+  return lastCapturedBackdropFrame;
+}
+
+export function clearLastCapturedBackdropFrame(): void {
+  lastCapturedBackdropFrame = null;
+}
+
 export async function mpvBackdropFrame(
   maxWidth = 240,
   maxHeight = 135,
@@ -131,14 +176,61 @@ export async function mpvBackdropFrame(
   if (width <= 0 || height <= 0 || bytes.byteLength < expected) {
     return null;
   }
-  return {
+  const frame: MpvBackdropFrame = {
     width,
     height,
     rgba: new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 4, width * height * 4),
   };
+  lastCapturedBackdropFrame = frame;
+  return frame;
+}
+
+export async function captureFrozenBackdropFrame(): Promise<MpvBackdropFrame | null> {
+  if (!isDesktop()) return lastCapturedBackdropFrame;
+  try {
+    const snap = await mpvBackdropFrame(480, 270);
+    if (snap) return snap;
+  } catch {
+    // Fall back to latest cached frame if capture fails.
+  }
+  return lastCapturedBackdropFrame;
+}
+
+export async function withHiddenMpvForDialog<T>(
+  mpvActive: boolean,
+  options: {
+    onFreezeFrame?: (frame: MpvBackdropFrame) => void;
+    shouldRestoreVisible: () => boolean;
+  },
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (mpvActive) {
+    if (options.onFreezeFrame) {
+      if (lastCapturedBackdropFrame) {
+        options.onFreezeFrame(lastCapturedBackdropFrame);
+      }
+      const snap = await captureFrozenBackdropFrame();
+      if (snap) {
+        options.onFreezeFrame(snap);
+      }
+    }
+    try {
+      await mpvSetVisible(false);
+    } catch {
+      // Engine may not be alive if runtime exited.
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (mpvActive) {
+      safeMpvCall(mpvSetVisible(options.shouldRestoreVisible()), "mpvSetVisible");
+    }
+  }
 }
 
 export async function mpvLoad(path: string): Promise<void> {
+  lastCapturedBackdropFrame = null;
   await safeInvoke("mpv_load", { path });
 }
 
@@ -146,11 +238,22 @@ export async function mpvSetPause(paused: boolean): Promise<void> {
   await safeInvoke("mpv_set_pause", { paused });
 }
 
-export async function mpvSeek(seconds: number): Promise<void> {
-  await safeInvoke("mpv_seek", { seconds });
+export interface MpvSeekOptions {
+  preview?: boolean;
+  clientSeekSeq?: number;
+}
+
+export async function mpvSeek(seconds: number, options?: MpvSeekOptions): Promise<void> {
+  const clientSeekSeq = options?.clientSeekSeq ?? nextClientSeekSeq();
+  await safeInvoke("mpv_seek", {
+    seconds,
+    preview: options?.preview ?? false,
+    clientSeekSeq,
+  });
 }
 
 export async function mpvStop(): Promise<void> {
+  lastCapturedBackdropFrame = null;
   await safeInvoke("mpv_stop");
 }
 
@@ -187,6 +290,7 @@ export async function mpvRemoveSubtitle(sid: number): Promise<void> {
 
 export interface SubStyleParams {
   font: string;
+  bold?: boolean;
   fontSize: number;
   color: string;
   borderSize: number;
@@ -216,6 +320,7 @@ export interface SubtitleAutoSyncParams {
   subtitlePath?: string | null;
   audioTrackId?: number | null;
   embeddedSubIdx?: number | null;
+  embeddedSubFfIdx?: number | null;
   embeddedSubCodec?: string | null;
   encodingHint?: SubtitleEncodingHint;
   lowPower?: boolean;
@@ -227,6 +332,7 @@ export async function subtitleAutoSync(params: SubtitleAutoSyncParams): Promise<
     subtitlePath: params.subtitlePath ?? null,
     audioTrackId: params.audioTrackId ?? null,
     embeddedSubIdx: params.embeddedSubIdx ?? null,
+    embeddedSubFfIdx: params.embeddedSubFfIdx ?? null,
     embeddedSubCodec: params.embeddedSubCodec ?? null,
     encodingHint: params.encodingHint ?? "auto",
     lowPower: params.lowPower ?? false,
@@ -234,7 +340,11 @@ export async function subtitleAutoSync(params: SubtitleAutoSyncParams): Promise<
 }
 
 export interface SubtitleTwoAnchorParams {
-  subtitlePath: string;
+  subtitlePath?: string | null;
+  videoPath?: string | null;
+  embeddedSubIdx?: number | null;
+  embeddedSubFfIdx?: number | null;
+  embeddedSubCodec?: string | null;
   srcASecs: number;
   dstASecs: number;
   srcBSecs: number;
@@ -246,7 +356,11 @@ export async function subtitleTwoAnchorSync(
   params: SubtitleTwoAnchorParams,
 ): Promise<AutoSyncResult> {
   return safeInvoke<AutoSyncResult>("subtitle_two_anchor_sync", {
-    subtitlePath: params.subtitlePath,
+    subtitlePath: params.subtitlePath ?? null,
+    videoPath: params.videoPath ?? null,
+    embeddedSubIdx: params.embeddedSubIdx ?? null,
+    embeddedSubFfIdx: params.embeddedSubFfIdx ?? null,
+    embeddedSubCodec: params.embeddedSubCodec ?? null,
     srcASecs: params.srcASecs,
     dstASecs: params.dstASecs,
     srcBSecs: params.srcBSecs,
@@ -270,6 +384,13 @@ export async function windowIsFullscreen(): Promise<boolean> {
   return safeInvoke<boolean>("window_is_fullscreen");
 }
 
+export async function windowDragFromMaximized(): Promise<void> {
+  if (!isDesktop()) {
+    return;
+  }
+  await safeInvoke("window_drag_from_maximized");
+}
+
 export async function setAllowNetworkShares(allow: boolean): Promise<void> {
   if (!isDesktop()) {
     return;
@@ -281,9 +402,18 @@ function noopUnlisten(): UnlistenFn {
   return () => undefined;
 }
 
-export async function onMpvTime(cb: (position: number) => void): Promise<UnlistenFn> {
+export async function onMpvTime(
+  cb: (position: number, clientSeekSeq?: number) => void,
+): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
-  return listen<{ position: number }>("mpv://time", (e) => cb(e.payload.position));
+  return listen<{ position: number; clientSeekSeq?: number }>("mpv://time", (e) =>
+    cb(e.payload.position, e.payload.clientSeekSeq),
+  );
+}
+
+export async function onMpvSeekSettled(cb: () => void): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen("mpv://seek-settled", () => cb());
 }
 
 export async function onMpvDuration(cb: (duration: number) => void): Promise<UnlistenFn> {
@@ -310,7 +440,7 @@ export async function onMpvEnded(
 
 export async function onMpvTracks(cb: (tracks: MpvTrack[]) => void): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
-  return listen<MpvTrack[]>("mpv://tracks", (e) => cb(e.payload));
+  return listen<RawMpvTrack[]>("mpv://tracks", (e) => cb(normalizeMpvTracks(e.payload)));
 }
 
 export async function onMpvError(cb: (message: string) => void): Promise<UnlistenFn> {
@@ -346,4 +476,94 @@ export async function onWindowFullscreen(cb: (fullscreen: boolean) => void): Pro
 export async function onWindowRestored(cb: () => void): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen("window://restored", () => cb());
+}
+
+export interface MpvChapter {
+  title: string | null;
+  time: number;
+}
+
+export type IntroSegmentKind = "intro" | "recap";
+export type IntroSource =
+  | "chapter"
+  | "audioMatch"
+  | "subtitleCue"
+  | "chapterStructure"
+  | "manual";
+export type IntroConfidence = "high" | "medium";
+
+export interface DetectedIntro {
+  startSecs: number;
+  endSecs: number;
+  skipTargetSecs: number;
+  kind: IntroSegmentKind;
+  source: IntroSource;
+  confidence: IntroConfidence;
+  label: string;
+  similarity: number | null;
+  matchedEpisodes: number;
+}
+
+export interface IntroDetectionOutcome {
+  segments: DetectedIntro[];
+  primaryIntro: DetectedIntro | null;
+}
+
+export interface DetectVideoIntroParams {
+  videoPath: string;
+  durationSecs: number;
+  chapters: MpvChapter[];
+  siblingPaths: string[];
+  subtitlePath?: string | null;
+  embeddedSubIdx?: number | null;
+  embeddedSubCodec?: string | null;
+  audioStreamIdx?: number | null;
+  lowPower?: boolean;
+}
+
+export async function detectVideoIntro(
+  params: DetectVideoIntroParams
+): Promise<IntroDetectionOutcome> {
+  if (!isDesktop()) {
+    return { segments: [], primaryIntro: null };
+  }
+  return safeInvoke<IntroDetectionOutcome>("detect_video_intro", {
+    videoPath: params.videoPath,
+    durationSecs: params.durationSecs,
+    chapters: params.chapters,
+    siblingPaths: params.siblingPaths,
+    subtitlePath: params.subtitlePath ?? null,
+    embeddedSubIdx: params.embeddedSubIdx ?? null,
+    embeddedSubCodec: params.embeddedSubCodec ?? null,
+    audioStreamIdx: params.audioStreamIdx ?? null,
+    lowPower: params.lowPower ?? false,
+  });
+}
+
+export async function introCancelDetect(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    await safeInvoke<void>("intro_cancel_detect");
+  } catch {
+    // non-fatal cancellation failure
+  }
+}
+
+export async function onMpvChapters(
+  cb: (chapters: MpvChapter[]) => void
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<MpvChapter[]>("mpv://chapters", (e) => {
+    const raw = Array.isArray(e.payload) ? e.payload : [];
+    cb(
+      raw.filter(
+        (c): c is MpvChapter =>
+          typeof c === "object" &&
+          c !== null &&
+          typeof c.time === "number" &&
+          Number.isFinite(c.time) &&
+          c.time >= 0
+      )
+    );
+  });
 }

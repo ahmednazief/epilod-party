@@ -56,11 +56,13 @@ pub fn resolve_payload_path_from_exe_and_resources(
 mod windows_app {
     use crate::resolve_payload_path_from_exe_and_resources;
     use crate::windows_install::{
-        attach_parent_console, check_directory_acl_writable, close_running_processes_in_dir,
-        detect_running_processes_in_dir, installed_exe_path, is_protected_windows_dir,
-        query_free_disk_bytes, read_hkcu_install_location, run_silent_install_flow,
-        run_silent_uninstall_flow, show_error_dialog, show_webview2_missing_dialog,
-        test_directory_writable, SingleInstanceGuard, WindowsIntegrator,
+        attach_parent_console, check_directory_acl_writable, close_running_processes_for_install,
+        detect_running_processes_for_install, find_other_existing_install,
+        find_primary_existing_install_dir, installed_exe_path, is_protected_windows_dir,
+        query_free_disk_bytes, read_hkcu_install_location, read_installed_version_for_dir,
+        run_silent_install_flow, run_silent_uninstall_flow, show_error_dialog,
+        show_webview2_missing_dialog, test_directory_writable, SingleInstanceGuard,
+        WindowsIntegrator,
     };
     use epilod_installer_core::archive::{estimate_uninstaller_copy_bytes, read_manifest};
     use epilod_installer_core::engine::{run_install_pipeline, run_uninstall_pipeline};
@@ -74,7 +76,9 @@ mod windows_app {
         inspect_existing_install, preflight_existing_install, read_receipt, ExistingInstallReport,
         InstallDisposition,
     };
+    use epilod_installer_core::semver::compare_versions;
     use serde::Serialize;
+    use std::cmp::Ordering as CmpOrdering;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,6 +106,8 @@ mod windows_app {
         pub saved_desktop_shortcut: Option<bool>,
         pub saved_start_menu_shortcut: Option<bool>,
         pub saved_file_associations: Option<bool>,
+        pub other_install_dir: Option<String>,
+        pub other_install_version: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -114,6 +120,8 @@ mod windows_app {
         pub protected_dir: bool,
         pub report: ExistingInstallReport,
         pub peak_required_bytes: u64,
+        pub other_install_dir: Option<String>,
+        pub other_install_version: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -140,6 +148,8 @@ mod windows_app {
         pub saved_desktop_shortcut: Option<bool>,
         pub saved_start_menu_shortcut: Option<bool>,
         pub saved_file_associations: Option<bool>,
+        pub other_install_dir: Option<String>,
+        pub other_install_version: Option<String>,
         pub ready_telemetry: InstallTelemetry,
     }
 
@@ -189,6 +199,31 @@ mod windows_app {
         resolve_payload_path_from_exe_and_resources(exe_path.as_deref(), res_dir.as_deref())
     }
 
+    fn enrich_legacy_report(dir_path: &Path, report: &mut ExistingInstallReport) {
+        if report.receipt_present || !report.existing_exe_found {
+            return;
+        }
+        let (Some(iv), Some(pv)) = (
+            read_installed_version_for_dir(dir_path),
+            report.package_version.as_deref(),
+        ) else {
+            return;
+        };
+        report.installed_version = Some(iv.clone());
+        match compare_versions(&iv, pv) {
+            Some(CmpOrdering::Less) => {
+                report.disposition = InstallDisposition::UpdateAvailable;
+                report.summary_text = format!("Upgrade v{iv} -> v{pv}");
+            }
+            Some(CmpOrdering::Greater) => {
+                report.disposition = InstallDisposition::DowngradeWarning;
+                report.summary_text =
+                    format!("Newer v{iv} is already installed (package is v{pv})");
+            }
+            _ => {}
+        }
+    }
+
     fn inspect_dir_internal(
         payload_path: Option<&Path>,
         raw_dir: &str,
@@ -201,11 +236,12 @@ mod windows_app {
             Err(e) => (false, Some(e)),
         };
 
-        let report = inspect_existing_install(payload_path, &resolved)?;
+        let mut report = inspect_existing_install(payload_path, &resolved)?;
+        enrich_legacy_report(dir_path, &mut report);
         let peak_required_bytes =
             compute_peak_required_bytes(planned_write_bytes_for_report(&report));
         let prev_receipt = read_receipt(dir_path);
-        let running_processes = detect_running_processes_in_dir(dir_path)
+        let running_processes = detect_running_processes_for_install(dir_path)
             .into_iter()
             .map(|p| RunningProcessDto {
                 pid: p.pid,
@@ -213,6 +249,11 @@ mod windows_app {
                 executable_path: p.executable_path,
             })
             .collect();
+        let (other_install_dir, other_install_version) = match find_other_existing_install(dir_path)
+        {
+            Some((dir, ver)) => (Some(dir), ver),
+            None => (None, None),
+        };
 
         Ok(DestinationInspection {
             resolved_dir: resolved,
@@ -225,6 +266,8 @@ mod windows_app {
             saved_desktop_shortcut: prev_receipt.as_ref().map(|r| r.desktop_shortcut),
             saved_start_menu_shortcut: prev_receipt.as_ref().map(|r| r.start_menu_shortcut),
             saved_file_associations: prev_receipt.as_ref().map(|r| r.file_associations),
+            other_install_dir,
+            other_install_version,
         })
     }
 
@@ -328,6 +371,8 @@ mod windows_app {
                 saved_desktop_shortcut: inspection.saved_desktop_shortcut,
                 saved_start_menu_shortcut: inspection.saved_start_menu_shortcut,
                 saved_file_associations: inspection.saved_file_associations,
+                other_install_dir: inspection.other_install_dir,
+                other_install_version: inspection.other_install_version,
                 ready_telemetry,
             })
         })
@@ -358,9 +403,15 @@ mod windows_app {
                 Ok(()) => (true, None),
                 Err(e) => (false, Some(e)),
             };
-            let report = preflight_existing_install(payload.as_deref(), &resolved)?;
+            let mut report = preflight_existing_install(payload.as_deref(), &resolved)?;
+            enrich_legacy_report(dir_path, &mut report);
             let peak_required_bytes =
                 compute_peak_required_bytes(planned_write_bytes_for_report(&report));
+            let (other_install_dir, other_install_version) =
+                match find_other_existing_install(dir_path) {
+                    Some((dir, ver)) => (Some(dir), ver),
+                    None => (None, None),
+                };
             Ok(PreflightResult {
                 resolved_dir: resolved,
                 free_disk_bytes,
@@ -369,6 +420,8 @@ mod windows_app {
                 protected_dir,
                 report,
                 peak_required_bytes,
+                other_install_dir,
+                other_install_version,
             })
         })
         .await
@@ -397,9 +450,11 @@ mod windows_app {
     #[tauri::command]
     async fn close_running_epilod_processes(install_dir: String) -> Result<usize, String> {
         let resolved = resolve_install_dir(&install_dir).map_err(|e| e.to_string())?;
-        tokio::task::spawn_blocking(move || close_running_processes_in_dir(Path::new(&resolved)))
-            .await
-            .map_err(|e| format!("Process cleanup task failed: {e}"))?
+        tokio::task::spawn_blocking(move || {
+            close_running_processes_for_install(Path::new(&resolved))
+        })
+        .await
+        .map_err(|e| format!("Process cleanup task failed: {e}"))?
     }
 
     #[tauri::command]
@@ -627,6 +682,7 @@ mod windows_app {
                     None
                 }
             })
+            .or_else(find_primary_existing_install_dir)
             .unwrap_or_else(default_install_dir_string);
 
         let launch_ctx = LaunchContext {

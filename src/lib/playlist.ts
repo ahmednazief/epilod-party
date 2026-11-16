@@ -338,6 +338,33 @@ export function matchPeerEpisodeInPlaylist(
     if (exactSeasonIdx !== -1) return exactSeasonIdx;
   }
 
+  // 5. Normalized release title match (e.g. "Dune.Part.Two.2024.WEBRip.mp4" vs "Dune Part Two (2024) BluRay.mkv")
+  const peerMatch = normalizeTitleForMatch(getFileDisplayName(raw));
+  if (peerMatch.full.length >= 3) {
+    const exactTitleIdx = items.findIndex(
+      (it) => normalizeTitleForMatch(it.fileName).full === peerMatch.full,
+    );
+    if (exactTitleIdx !== -1) return exactTitleIdx;
+
+    if (peerMatch.base.length >= 3) {
+      const compatMatches: number[] = [];
+      items.forEach((it, idx) => {
+        const itemMatch = normalizeTitleForMatch(it.fileName);
+        if (
+          itemMatch.base === peerMatch.base &&
+          (itemMatch.year === null ||
+            peerMatch.year === null ||
+            itemMatch.year === peerMatch.year)
+        ) {
+          compatMatches.push(idx);
+        }
+      });
+      if (compatMatches.length === 1) {
+        return compatMatches[0];
+      }
+    }
+  }
+
   return -1;
 }
 
@@ -352,6 +379,27 @@ function stripKnownMediaExt(name: string): string {
     /\.(?:mkv|mp4|ts|m2ts|avi|webm|flv|wmv|ogv|3gp|mov|m4v|mpg|mpeg|vob|srt|ass|ssa|vtt)$/i,
     "",
   );
+}
+
+function normalizeTitleForMatch(raw: string): {
+  full: string;
+  base: string;
+  year: string | null;
+} {
+  const unwrapped = stripKnownMediaExt(raw.trim()).replace(
+    /[\[(]\s*(19[2-9]\d|20[0-3]\d)\s*[\])]/g,
+    " $1 ",
+  );
+  const full = normalizeReleaseText(unwrapped)
+    .replace(/[-:,.'’"!?/&+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  const yearMatch = full.match(/^(.*?)\s+(19[2-9]\d|20[0-3]\d)$/);
+  if (yearMatch && yearMatch[1].trim().length >= 3) {
+    return { full, base: yearMatch[1].trim(), year: yearMatch[2] };
+  }
+  return { full, base: full, year: null };
 }
 
 function normalizeReleaseText(raw: string): string {

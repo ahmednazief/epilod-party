@@ -2,14 +2,20 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AppArrowIcon,
+  AppChevronIcon,
   AppDownloadIcon,
   AppEditIcon,
   AppKeyboardIcon,
   AppKeyIcon,
+  AppLogsIcon,
   AppResetIcon,
+  AppSlidersIcon,
+  AppSparkleIcon,
 } from "./ui/AppIcons";
+import { MenuMediaDiscIcon } from "./ui/MenuIcons";
 import {
   PartyCopyIcon,
+  PartyHostIcon,
   PartyPasteIcon,
   PlayerEpisodesIcon,
   PlayerPlayIcon,
@@ -82,6 +88,7 @@ export function HomeScreen() {
   const [joinInput, setJoinInput] = useState("");
   const [verifyingJoin, setVerifyingJoin] = useState(false);
   const [standardRoomName, setStandardRoomName] = useState(literalRoomStored);
+  const [hostOnlyCreate, setHostOnlyCreate] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -256,7 +263,7 @@ export function HomeScreen() {
         usePlaylistStore.getState().clearPlaylist();
         setSelectedFile(picked[0], getFileDisplayName(picked[0]));
       }
-      enterRoom("", false);
+      enterRoom("", false, false);
     } catch (err) {
       setError(formatUserError(err, "Could not open media file."));
     } finally {
@@ -289,7 +296,7 @@ export function HomeScreen() {
     verifyTimerRef.current = window.setTimeout(() => {
       verifyTimerRef.current = null;
       setVerifyingJoin(false);
-      enterRoom(cleaned, false);
+      enterRoom(cleaned, false, false);
     }, 220);
   };
 
@@ -324,7 +331,7 @@ export function HomeScreen() {
     } catch {
       // ignore
     }
-    enterRoom(draftRoomCode, false);
+    enterRoom(draftRoomCode, false, hostOnlyCreate);
   };
 
   const handleJoinRoom = (e: FormEvent) => {
@@ -339,7 +346,7 @@ export function HomeScreen() {
       );
       return;
     }
-    enterRoom(cleaned, standardRoomName);
+    enterRoom(cleaned, standardRoomName, false);
   };
 
   const handleOpenFolderSolo = async () => {
@@ -363,7 +370,7 @@ export function HomeScreen() {
         usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
         const target = scan.items[idx];
         setSelectedFile(target.path, target.fileName);
-        enterRoom("", false);
+        enterRoom("", false, false);
       } else {
         setError("No playable video files found inside the selected folder.");
       }
@@ -377,6 +384,12 @@ export function HomeScreen() {
   const hasJoinCode = joinInput.trim().length > 0;
 
   const lobbyContextEntries: ContextMenuEntry[] = [
+    {
+      type: "label",
+      id: "lobby-lbl-watch",
+      text: "Watch & Open",
+      icon: <MenuMediaDiscIcon size={12} />,
+    },
     {
       id: "open-media",
       label: "Open Media File(s)…",
@@ -398,29 +411,56 @@ export function HomeScreen() {
     },
     { type: "divider", id: "lobby-div" },
     {
+      type: "label",
+      id: "lobby-lbl-app",
+      text: "Profile & App",
+      icon: <PlayerSettingsIcon size={12} />,
+    },
+    {
       id: "edit-profile",
       label: "Edit Profile & Avatar",
       icon: <AppEditIcon size={14} />,
       onSelect: () => setEditingName(true),
     },
     {
-      id: "check-updates",
-      label: "Check for Updates…",
-      icon: <AppDownloadIcon size={14} />,
-      onSelect: () => openSettings("updates"),
-    },
-    {
-      id: "shortcuts",
-      label: "Keyboard Shortcuts…",
-      shortcut: "?",
-      icon: <AppKeyboardIcon size={14} />,
-      onSelect: openShortcuts,
-    },
-    {
-      id: "preferences",
-      label: "Preferences…",
+      type: "submenu",
+      id: "lobby-sub-prefs",
+      label: "Preferences & Help",
       icon: <PlayerSettingsIcon size={14} />,
-      onSelect: () => openSettings("prefs"),
+      children: [
+        {
+          id: "preferences",
+          label: "Preferences…",
+          icon: <AppSparkleIcon size={14} className="text-accent-soft" />,
+          onSelect: () => openSettings("prefs"),
+        },
+        {
+          id: "check-updates",
+          label: "Check for Updates…",
+          icon: <AppDownloadIcon size={14} />,
+          onSelect: () => openSettings("updates"),
+        },
+        {
+          id: "shortcuts",
+          label: "Keyboard Shortcuts…",
+          shortcut: "?",
+          icon: <AppKeyboardIcon size={14} />,
+          onSelect: openShortcuts,
+        },
+        { type: "divider", id: "lobby-prefs-div" },
+        {
+          id: "server-settings",
+          label: "Connection & Server…",
+          icon: <AppSlidersIcon size={14} />,
+          onSelect: () => openSettings("server"),
+        },
+        {
+          id: "diagnostics",
+          label: "Session Diagnostics…",
+          icon: <AppLogsIcon size={14} />,
+          onSelect: () => openSettings("logs"),
+        },
+      ],
     },
   ];
 
@@ -450,7 +490,7 @@ export function HomeScreen() {
               onClick={() => setEditingName((v) => !v)}
               title="Edit your display name and profile avatar"
               aria-expanded={editingName}
-              className={`ep-glass-pill ep-press inline-flex items-center gap-2.5 pl-1.5 pr-3 py-1 rounded-full cursor-pointer ${
+              className={`ep-glass-pill ep-press inline-flex items-center gap-2.5 p-1 pr-3 rounded-full cursor-pointer ${
                 editingName ? "ring-1 ring-accent/65" : ""
               }`}
             >
@@ -480,59 +520,61 @@ export function HomeScreen() {
             aria-label="Edit profile and avatar"
             className={`ep-glass-sheet ${
               profilePopover.exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
-            } absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] rounded-[24px] p-4 space-y-3.5`}
+            } absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-4rem)] overflow-hidden rounded-[24px] py-4 flex flex-col`}
           >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <ProfileAvatar
-                  avatarId={avatarId}
-                  size={38}
-                  className="ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
-                />
-                <div className="min-w-0">
-                  <div className="text-xs font-semibold text-white truncate">
-                    {username || "Viewer"}
-                  </div>
-                  <div className="text-[11px] text-secondary">
-                    Customize how friends see you
+            <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 space-y-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <ProfileAvatar
+                    avatarId={avatarId}
+                    size={38}
+                    className="ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-white truncate">
+                      {username || "Viewer"}
+                    </div>
+                    <div className="text-[11px] text-secondary">
+                      Customize how friends see you
+                    </div>
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingName(false)}
+                  className="ep-glass-pill-active ep-press h-7 px-3 rounded-full text-[11px] font-semibold text-white cursor-pointer"
+                >
+                  Done
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setEditingName(false)}
-                className="ep-press h-7 px-3 rounded-full text-[11px] font-semibold bg-accent/18 hover:bg-accent/28 text-accent-soft hover:text-white cursor-pointer"
-              >
-                Done
-              </button>
+
+              <label className="block space-y-1.5">
+                <span className="text-[11px] font-medium text-secondary">
+                  Display Name
+                </span>
+                <input
+                  type="text"
+                  autoFocus
+                  value={username}
+                  maxLength={32}
+                  placeholder="Enter your name..."
+                  aria-label="Your display name"
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    if (error) setError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === "Escape") {
+                      e.preventDefault();
+                      setEditingName(false);
+                    }
+                  }}
+                  className="ep-glass-input w-full h-9 px-3 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
+                />
+              </label>
+
+              <AvatarPicker value={avatarId} onChange={setAvatarId} compact />
             </div>
-
-            <label className="block space-y-1.5">
-              <span className="text-[11px] font-medium text-secondary">
-                Display Name
-              </span>
-              <input
-                type="text"
-                autoFocus
-                value={username}
-                maxLength={32}
-                placeholder="Enter your name..."
-                aria-label="Your display name"
-                onChange={(e) => {
-                  setUsername(e.target.value);
-                  if (error) setError(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === "Escape") {
-                    e.preventDefault();
-                    setEditingName(false);
-                  }
-                }}
-                className="ep-glass-input w-full h-9 px-3 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
-              />
-            </label>
-
-            <AvatarPicker value={avatarId} onChange={setAvatarId} compact />
           </div>
         )}
       </div>
@@ -562,9 +604,9 @@ export function HomeScreen() {
                   setError(null);
                   setLobbyView("party");
                 }}
-                className="group ep-glass-btn-party ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
+                className="ep-glass-btn-party ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-white cursor-pointer"
               >
-                <WatchPartyIcon size={24} className="shrink-0 transition-transform duration-200 group-hover:scale-105" />
+                <WatchPartyIcon size={24} className="shrink-0" />
                 <span>Watch Party</span>
               </button>
 
@@ -572,9 +614,9 @@ export function HomeScreen() {
                 type="button"
                 disabled={openingMedia}
                 onClick={() => void handleOpenMediaSolo()}
-                className="group ep-glass-btn-media ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
+                className="ep-glass-btn-media ep-press h-11 pl-3 pr-5 rounded-full inline-flex items-center gap-2.5 text-[13px] font-medium text-primary hover:text-white cursor-pointer disabled:opacity-60"
               >
-                <OpenMediaIcon size={24} className="shrink-0 transition-transform duration-200 group-hover:scale-105" />
+                <OpenMediaIcon size={24} className="shrink-0" />
                 <span>{openingMedia ? "Opening..." : "Open Media"}</span>
               </button>
             </div>
@@ -605,18 +647,18 @@ export function HomeScreen() {
               </div>
             </div>
 
-            <div className="ep-glass-sheet w-full rounded-[28px] p-3.5 space-y-3">
-              {/* Instant Host Room Pass well */}
-              <div className="ep-glass-well rounded-[20px] p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
+            <div className="ep-glass-sheet w-full rounded-[24px] p-5 space-y-6">
+              {/* Instant Host Room Pass */}
+              <section aria-label="Host a New Room" className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-xs font-medium text-white">Host a New Room</div>
+                    <div className="text-[13px] font-medium text-white">Host a New Room</div>
                     <div className="text-[11px] text-secondary">
                       6-digit invite pass ready to share
                     </div>
                   </div>
-                  <div className="inline-flex items-center gap-1 rounded-full bg-white/[0.06] pl-3 pr-1 py-1 shrink-0">
-                    <span className="num text-xs font-semibold text-accent-soft tracking-[0.16em]">
+                  <div className="inline-flex items-center gap-0.5 shrink-0">
+                    <span className="num text-[13px] font-semibold text-accent-soft tracking-[0.16em] pr-1.5 select-all">
                       {formatRoomCodeDisplay(draftRoomCode)}
                     </span>
                     <button
@@ -624,16 +666,16 @@ export function HomeScreen() {
                       onClick={() => setDraftRoomCode(generateRoomCode())}
                       aria-label="Shuffle room code"
                       title="Generate new 6-digit code"
-                      className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
+                      className="ep-press h-7 w-7 rounded-lg flex items-center justify-center text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer"
                     >
-                      <AppResetIcon clockwise size={12} />
+                      <AppResetIcon clockwise size={13} />
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleCopyDraft()}
                       aria-label="Copy room code"
                       title="Copy 6-digit code"
-                      className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-secondary hover:text-white hover:bg-white/10 cursor-pointer"
+                      className="ep-press h-7 w-7 rounded-lg flex items-center justify-center text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer"
                     >
                       <PartyCopyIcon copied={copiedDraft} size={13} />
                     </button>
@@ -642,19 +684,43 @@ export function HomeScreen() {
 
                 <button
                   type="button"
+                  role="switch"
+                  aria-checked={hostOnlyCreate}
+                  onClick={() => setHostOnlyCreate((prev) => !prev)}
+                  className="ep-menu-row ep-press -mx-2.5 w-[calc(100%+1.25rem)] flex items-center justify-between gap-3 px-2.5 py-2 text-left cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <PartyHostIcon size={14} className="shrink-0 text-secondary" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-white">
+                        Only host can control
+                      </div>
+                      <div className="text-[11px] text-secondary leading-snug">
+                        You control playback unless you make someone admin
+                      </div>
+                    </div>
+                  </div>
+                  <GlassSwitchTrack checked={hostOnlyCreate} size="sm" />
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleCreateRoom}
-                  className="ep-glass-primary-pill ep-press w-full h-10 rounded-2xl text-xs font-medium text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+                  className="ep-glass-primary-pill ep-press w-full h-10 rounded-full text-xs font-medium text-white inline-flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <span>Create Room &amp; Copy Invite</span>
                   <AppArrowIcon direction="right" size={14} />
                 </button>
-              </div>
+              </section>
 
-              {/* Join Friend's Room well */}
-              <div className="ep-glass-well rounded-[20px] p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <div className="text-xs font-medium text-white">
+              {/* Join Friend's Room */}
+              <section
+                aria-label={standardRoomName ? "Join Syncplay Room" : "Join with 6-Digit Code"}
+                className="space-y-3"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">
                       {standardRoomName ? "Join Syncplay Room" : "Join with 6-Digit Code"}
                     </div>
                     <div className={`text-[11px] ${verifyingJoin ? "text-ok font-medium" : "text-secondary"}`}>
@@ -668,7 +734,7 @@ export function HomeScreen() {
                   <button
                     type="button"
                     onClick={() => void handlePasteJoin()}
-                    className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.07] hover:bg-white/[0.12] text-[11px] font-medium text-secondary hover:text-white cursor-pointer shrink-0"
+                    className="ep-press -mr-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0"
                   >
                     <PartyPasteIcon size={13} />
                     <span>Paste Code</span>
@@ -711,37 +777,38 @@ export function HomeScreen() {
                     onComplete={handleAutoVerifyOtp}
                   />
                 )}
-              </div>
-            </div>
+              </section>
 
-            {error && (
-              <p role="alert" className="anim-pop-in text-xs text-bad text-center">
-                {error}
-              </p>
-            )}
-
-            <div className="w-full flex flex-col items-center gap-3">
-              <button
-                type="button"
-                aria-expanded={showOptions}
-                onClick={() => setShowOptions((o) => !o)}
-                className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs text-muted hover:text-secondary hover:bg-white/[0.06] cursor-pointer"
-              >
-                <AppKeyIcon size={12} />
-                <span>{showOptions ? "Hide room options" : "Room password & options"}</span>
-              </button>
-
-              <AnimatedCollapse open={showOptions} className="w-full" innerClassName="pt-0.5">
-                <div className="ep-glass-sheet w-full rounded-[22px] p-3.5 space-y-2.5">
-                  <input
-                    type="password"
-                    value={serverPassword}
-                    maxLength={128}
-                    placeholder="Optional room password (kept only this session)"
-                    aria-label="Room password"
-                    onChange={(e) => setServerPassword(e.target.value)}
-                    className="ep-glass-input w-full h-9.5 px-3.5 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
+              <div>
+                <button
+                  type="button"
+                  aria-expanded={showOptions}
+                  onClick={() => setShowOptions((o) => !o)}
+                  className="ep-menu-row ep-press -mx-2.5 w-[calc(100%+1.25rem)] flex items-center justify-between gap-2 px-2.5 py-1.5 text-xs text-muted hover:text-secondary cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <AppKeyIcon size={12} />
+                    <span>{showOptions ? "Hide room options" : "Room password & options"}</span>
+                  </span>
+                  <AppChevronIcon
+                    direction="right"
+                    size={12}
+                    className={`transition-transform duration-150 ${showOptions ? "rotate-90 text-secondary" : ""}`}
                   />
+                </button>
+
+                <AnimatedCollapse open={showOptions} className="-mx-2.5" innerClassName="pt-2.5 pb-0.5 space-y-2">
+                  <div className="px-2.5">
+                    <input
+                      type="password"
+                      value={serverPassword}
+                      maxLength={128}
+                      placeholder="Optional room password (kept only this session)"
+                      aria-label="Room password"
+                      onChange={(e) => setServerPassword(e.target.value)}
+                      className="ep-glass-input w-full h-9.5 px-3.5 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
+                    />
+                  </div>
                   <button
                     type="button"
                     role="switch"
@@ -761,9 +828,15 @@ export function HomeScreen() {
                     <span>Use exact Syncplay room name</span>
                     <GlassSwitchTrack checked={standardRoomName} size="sm" />
                   </button>
-                </div>
-              </AnimatedCollapse>
+                </AnimatedCollapse>
+              </div>
             </div>
+
+            {error && (
+              <p role="alert" className="anim-pop-in text-xs text-bad text-center">
+                {error}
+              </p>
+            )}
           </div>
         )}
       </main>

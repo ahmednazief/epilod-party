@@ -40,3 +40,40 @@ export class SeekAccumulator {
     this.lastDeltaAtMs = 0;
   }
 }
+
+let clientSeekSeq = 0;
+
+export function nextClientSeekSeq(): number {
+  clientSeekSeq += 1;
+  return clientSeekSeq;
+}
+
+export function getCurrentClientSeekSeq(): number {
+  return clientSeekSeq;
+}
+
+/** Rejects stale in-flight `mpv://time` events emitted before Rust observed our latest seek. */
+export function shouldAcceptMpvTimeEvent(
+  eventSeekSeq: number | undefined,
+  latestSeekSeq = clientSeekSeq,
+): boolean {
+  if (typeof eventSeekSeq !== "number" || !Number.isFinite(eventSeekSeq)) {
+    return true;
+  }
+  return eventSeekSeq >= latestSeekSeq;
+}
+
+const sharedRelativeSeekAcc = new SeekAccumulator(450);
+
+export function stepSharedRelativeSeek(
+  deltaSecs: number,
+  reportedPosSecs: number,
+  durationSecs: number,
+  nowMs = Date.now(),
+): number {
+  return sharedRelativeSeekAcc.step(deltaSecs, reportedPosSecs, durationSecs, nowMs);
+}
+
+export function resetSharedRelativeSeek(): void {
+  sharedRelativeSeekAcc.clear();
+}

@@ -43,10 +43,9 @@ test("ViewportPlaceholder and WatchRoom uphold child HWND empty-surface and over
   assert.equal(placeholder.includes("if (loaded && !playerError) return null;"), true);
 
   const watchRoom = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
-  assert.equal(
-    watchRoom.includes("mpvSetVisible(!settingsOpen && !shortcutsOpen && !playerError)"),
-    true,
-  );
+  assert.equal(watchRoom.includes("modalBlockingVideo"), true);
+  assert.equal(watchRoom.includes("mpvSetVisible(shouldShow)"), true);
+  assert.equal(watchRoom.includes("<FrozenVideoFrame"), true);
   assert.equal(watchRoom.includes("useShallow"), true);
   assert.equal(watchRoom.includes("<PlaybackPanel />"), true);
   assert.equal(watchRoom.includes("<SubtitlePanel />"), true);
@@ -85,6 +84,98 @@ test("Animation and compositor performance invariants hold in UI primitives and 
     "utf8",
   );
   assert.equal(tabs.includes("transition-[transform,width]"), true);
+  assert.equal(tabs.includes("ep-droplet-core"), true);
+  assert.equal(tabs.includes("ep-tray-option"), true);
+
+  const ctxMenu = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/ContextMenu.tsx"),
+    "utf8",
+  );
+  assert.equal(ctxMenu.includes("offsetWidth"), true);
+  assert.equal(ctxMenu.includes("scrollHeight"), true);
+  assert.equal(ctxMenu.includes("minTop"), true);
+
+  const selectMenu = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/SelectMenu.tsx"),
+    "utf8",
+  );
+  assert.equal(selectMenu.includes("Math.max(110"), false);
+  assert.equal(selectMenu.includes("resolvedPlacement"), true);
+
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  const shortcutsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ShortcutsModal.tsx"),
+    "utf8",
+  );
+  assert.equal(settingsSrc.includes('<div className="ep-menu-row'), false);
+  assert.equal(shortcutsSrc.includes("ep-menu-row"), false);
+  assert.equal(shortcutsSrc.includes("ep-glass-input"), false);
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.equal(globalsCss.includes(".ep-glass-input:focus-within"), false);
+  assert.equal(globalsCss.includes(".ep-glass-tray"), true);
+
+  const selectMenuSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/SelectMenu.tsx"),
+    "utf8",
+  );
+  assert.equal(selectMenuSrc.includes("ep-glass-submenu"), true);
+  assert.equal(selectMenuSrc.includes("ep-glass-select"), true);
+  assert.equal(selectMenuSrc.includes('data-glass-region="true"'), true);
+
+  assert.equal(ctxMenu.includes("ep-glass-submenu"), true);
+
+  const scrubberSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"),
+    "utf8",
+  );
+  assert.equal(scrubberSrc.includes("-ml-[7px]"), true);
+  assert.equal(scrubberSrc.includes("left-[7px] right-[7px]"), true);
+  assert.equal(scrubberSrc.includes("tooltipPlacement"), true);
+  assert.equal(scrubberSrc.includes("tooltipVariant"), true);
+  assert.equal(scrubberSrc.includes('data-glass-region="true"'), true);
+  const transportBarSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(transportBarSrc, /ariaLabel="Volume"[\s\S]*?tooltipPlacement="bottom"/);
+  assert.match(transportBarSrc, /ariaLabel="Volume"[\s\S]*?tooltipPlacement="top"[\s\S]*?tooltipVariant="plain"/);
+
+  const subPanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+    "utf8",
+  );
+  assert.equal(subPanelSrc.includes("ring-2 ring-accent-soft"), true);
+  assert.equal(subPanelSrc.includes("ring-offset-chrome"), false);
+  assert.equal(subPanelSrc.includes('flex items-start gap-1.5 text-warn'), true);
+  assert.equal(subPanelSrc.includes("ep-glass-well"), false);
+  assert.equal(subPanelSrc.includes("<SegmentedTabs"), true);
+  assert.match(subPanelSrc, /space-y-2\.5[\s\S]*Appearance/);
+
+  const playbackSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/PlaybackPanel.tsx"),
+    "utf8",
+  );
+  assert.equal(playbackSrc.includes("ep-glass-well"), false);
+  assert.equal(playbackSrc.includes("<SegmentedTabs"), true);
+
+  const backdropSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"),
+    "utf8",
+  );
+  assert.equal(backdropSrc.includes("ResizeObserver"), true);
+  assert.equal(backdropSrc.includes("MutationObserver"), true);
+
+  const homeSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/HomeScreen.tsx"),
+    "utf8",
+  );
+  assert.equal(homeSrc.includes("max-h-[calc(100vh-4rem)] overflow-hidden"), true);
+  assert.equal(homeSrc.includes("ep-menu-scroll flex-1 min-h-0 overflow-y-auto"), true);
+  assert.equal(settingsSrc.includes("overflow-y-auto gap-3") || settingsSrc.includes("min-h-0 overflow-y-auto"), true);
+  assert.equal(settingsSrc.includes("break-all"), false);
 });
 
 test("Built dist bundle emits strictly 3 WOFF2 fonts and includes reliability symbols", () => {
@@ -112,20 +203,35 @@ test("Built dist bundle emits strictly 3 WOFF2 fonts and includes reliability sy
 
 test("Fix 22: compact static TTF fonts exist for mpv under 350 KB installer budget", () => {
   const fontsDir = path.join(REPO_ROOT, "src-tauri/resources/fonts");
-  const expected = ["Inter-Regular.ttf", "NotoSansArabic-Regular.ttf"];
+  const regularExpected = ["Inter-Regular.ttf", "NotoSansArabic-Regular.ttf"];
+  const boldExpected = ["Inter-Bold.ttf", "NotoSansArabic-Bold.ttf"];
+  let regularBytes = 0;
   let totalBytes = 0;
 
-  for (const file of expected) {
+  for (const file of regularExpected) {
     const full = path.join(fontsDir, file);
     assert.equal(fs.existsSync(full), true, `Missing bundled mpv font: ${file}`);
     const size = fs.statSync(full).size;
     assert.ok(size > 10_000, `Font ${file} unexpectedly empty (${size} bytes)`);
+    regularBytes += size;
+    totalBytes += size;
+  }
+
+  for (const file of boldExpected) {
+    const full = path.join(fontsDir, file);
+    assert.equal(fs.existsSync(full), true, `Missing bundled mpv bold font: ${file}`);
+    const size = fs.statSync(full).size;
+    assert.ok(size > 10_000, `Bold font ${file} unexpectedly empty (${size} bytes)`);
     totalBytes += size;
   }
 
   assert.ok(
-    totalBytes < 350 * 1024,
-    `Bundled TTF fonts (${totalBytes} bytes) exceeded 350 KB size budget`,
+    regularBytes < 350 * 1024,
+    `Bundled regular TTF fonts (${regularBytes} bytes) exceeded 350 KB size budget`,
+  );
+  assert.ok(
+    totalBytes < 550 * 1024,
+    `Bundled Regular + Bold TTF fonts (${totalBytes} bytes) exceeded 550 KB size budget`,
   );
 });
 
@@ -176,10 +282,13 @@ test("Custom frameless TitleBar and consumer Smoked-Amethyst UX invariants hold 
     path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
     "utf8",
   );
-  assert.equal(settingsSrc.includes('{ value: "prefs", label: "Comfort & Privacy" }'), true);
-  assert.equal(settingsSrc.includes('{ value: "updates", label: "Updates" }'), true);
-  assert.equal(settingsSrc.includes('{ value: "server", label: "Connection & Server" }'), true);
-  assert.equal(settingsSrc.includes('{ value: "logs", label: "Diagnostics" }'), true);
+  assert.match(settingsSrc, /value:\s*"profile",\s*label:\s*"Profile"/);
+  assert.match(settingsSrc, /value:\s*"appearance",\s*label:\s*"Appearance"/);
+  assert.match(settingsSrc, /value:\s*"playback",\s*label:\s*"Playback"/);
+  assert.match(settingsSrc, /value:\s*"party",\s*label:\s*"Party & Privacy"/);
+  assert.match(settingsSrc, /value:\s*"updates",\s*label:\s*"Updates"/);
+  assert.match(settingsSrc, /value:\s*"server",\s*label:\s*"Connection & Server"/);
+  assert.match(settingsSrc, /value:\s*"logs",\s*label:\s*"Diagnostics"/);
 });
 
 test("Transparent WebView2 punch-through reveals underlying mpv child HWND during playback", () => {
@@ -226,6 +335,16 @@ test("Real-time liquid-glass backdrop sampling and convex bezel lens invariants 
   );
   assert.equal(backdropSrc.includes("sampleBilinear"), true);
   assert.equal(backdropSrc.includes("bezelThickness"), true);
+  assert.equal(backdropSrc.includes("devicePixelRatio"), true);
+  assert.equal(backdropSrc.includes("pausedRefreshKey"), true);
+  assert.equal(backdropSrc.includes("computeEffectiveZOrder"), true);
+
+  const notifSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/NotificationStrip.tsx"),
+    "utf8",
+  );
+  assert.equal(notifSrc.includes('data-glass-region="true"'), true);
+  assert.equal(watchSrc.includes("glassControls={showVideoBackdrop}"), true);
 
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
   assert.equal(globalsCss.includes("epilod-liquid-lens"), false);
@@ -256,24 +375,39 @@ test("Hero play/pause button uses custom faceted crystal icons and purplish smok
   assert.equal(pauseSection.includes("<clipPath"), true);
   assert.equal(pauseSection.includes("#7C3AED"), true);
 
+  const skipSection = iconsSrc.slice(
+    iconsSrc.indexOf("export function PlayerSkipEpisodeIcon"),
+    iconsSrc.indexOf("export function PlayerVolumeIcon"),
+  );
+  assert.equal(skipSection.includes("<clipPath"), true);
+  assert.equal(skipSection.includes("#7C3AED"), true);
+
   const transportSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
     "utf8",
   );
   assert.match(transportSrc, /ep-orb-play[\s\S]*<PlayerPlayIcon[\s\S]*<PlayerPauseIcon/);
+  assert.equal(transportSrc.includes("ep-bar-icon-btn ep-transport-btn"), true);
+  assert.equal(transportSrc.includes("relative z-10 anim-icon-pop"), true);
 
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
   assert.match(globalsCss, /\.ep-orb-play\s*\{[\s\S]*rgba\(124,\s*58,\s*237/);
+  assert.match(globalsCss, /\.ep-orb-play\s*\{[\s\S]*backdrop-filter:\s*blur\(/);
   assert.match(globalsCss, /\.ep-orb-play:hover:not\(:disabled\)[\s\S]*rgba\(139,\s*92,\s*246/);
+  assert.equal(globalsCss.includes(".ep-bar-icon-btn.ep-transport-btn"), true);
+  assert.equal(globalsCss.includes(".ep-orb-play svg"), true);
+  assert.equal(globalsCss.includes(".ep-orb-play::before"), true);
+  assert.equal(globalsCss.includes(".ep-orb-play::after"), true);
 });
 
 test("Auto-hiding and re-showing play bar, top bar, and video backdrop glide smoothly together", () => {
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
-  assert.match(globalsCss, /\.ep-chrome-transition\s*\{[\s\S]*opacity[\s\S]*transform/);
+  assert.match(globalsCss, /\.ep-chrome-transition\s*\{[\s\S]*opacity[\s\S]*transform[\s\S]*translate[\s\S]*scale/);
   assert.match(
     globalsCss,
-    /\.ep-chrome-transition\[aria-hidden="true"\]\s*\{[\s\S]*cubic-bezier\(0\.32,\s*0\.72,\s*0,\s*1\)/,
+    /\.ep-chrome-transition\[aria-hidden="true"\]\s*\{[\s\S]*translate[\s\S]*scale[\s\S]*cubic-bezier\(0\.32,\s*0\.72,\s*0,\s*1\)|\.ep-chrome-transition\[aria-hidden="true"\]\s*\{[\s\S]*cubic-bezier\(0\.32,\s*0\.72,\s*0,\s*1\)[\s\S]*translate[\s\S]*scale/,
   );
+  assert.match(globalsCss, /\.ep-switch-slide\s*\{[\s\S]*transform[\s\S]*translate/);
 
   const transportSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
@@ -293,6 +427,8 @@ test("Auto-hiding and re-showing play bar, top bar, and video backdrop glide smo
     "utf8",
   );
   assert.match(backdropSrc, /globalAlpha\s*=\s*0\.92\s*\*\s*regionAlpha/);
+  assert.equal(backdropSrc.includes("computeEffectiveRegionAlpha"), true);
+  assert.equal(backdropSrc.includes("cur.parentElement"), true);
 });
 
 test("Menus, popovers, tabs, modals, notifications, switches, and collapsible panels animate enter/exit cleanly", () => {
@@ -368,6 +504,434 @@ test("Menus, popovers, tabs, modals, notifications, switches, and collapsible pa
   }
 });
 
+test("Modal glass sheets keep unnested sibling backdrops and emit unprefixed backdrop-filter", () => {
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const prefixedMatches = [...globalsCss.matchAll(/-webkit-backdrop-filter:\s*([^;]+);/g)];
+  assert.ok(prefixedMatches.length >= 6);
+  for (const m of prefixedMatches) {
+    const start = m.index ?? 0;
+    const after = globalsCss.slice(start + m[0].length, start + m[0].length + 120);
+    assert.match(
+      after,
+      /^\s*backdrop-filter:\s*[^;]+;/,
+      "Unprefixed backdrop-filter must follow -webkit-backdrop-filter so LightningCSS retains it",
+    );
+  }
 
+  for (const rel of ["src/components/SettingsModal.tsx", "src/components/ShortcutsModal.tsx"]) {
+    const src = fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+    const backdropMatch = /className=\{`ep-modal-backdrop\b/.exec(src);
+    const sheetMatch = /className=\{`ep-glass-sheet\b/.exec(src);
+    assert.ok(backdropMatch && sheetMatch && sheetMatch.index > backdropMatch.index, `${rel} must render backdrop before sheet`);
+    // Ensure .ep-modal-backdrop closes before .ep-glass-sheet opens (sibling, never ancestor).
+    const between = src.slice(backdropMatch.index, sheetMatch.index);
+    assert.equal(between.includes("/>"), true, `${rel} backdrop scrim must be a sibling of .ep-glass-sheet`);
+  }
 
+  const assetsDir = path.join(REPO_ROOT, "dist/assets");
+  const cssFile = fs.readdirSync(assetsDir).find((f) => f.endsWith(".css"));
+  assert.ok(cssFile, "Expected compiled CSS asset in dist/assets");
+  const builtCss = fs.readFileSync(path.join(assetsDir, cssFile), "utf8");
+  assert.match(builtCss, /\.ep-modal-backdrop\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-glass-sheet\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-glass-submenu\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-glass-select\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-glass-well\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-hairline-divider\{[^}]*height:1px/);
+  // Component layer classes must emit before Tailwind utilities so utility overrides win cleanly
+  assert.ok(builtCss.indexOf(".ep-glass-pill") < builtCss.indexOf(".ring-1{"));
+  assert.ok(builtCss.indexOf(".ep-glass-sheet") < builtCss.indexOf(".border-accent\\/55"));
+  assert.match(builtCss, /\.ep-otp-box\.ep-otp-box-verifying:focus/);
+  const reducedMotionSection =
+    builtCss.slice(builtCss.indexOf("prefers-reduced-motion:reduce"));
+  assert.match(reducedMotionSection, /\.animate-ping/);
+  assert.match(reducedMotionSection, /\.animate-pulse/);
+  assert.match(reducedMotionSection, /\.animate-spin/);
+  assert.match(builtCss, /\.ep-glass-bottom-bar\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-settings-sidebar\{/);
+  assert.match(builtCss, /\.ep-settings-sidebar:{1,2}before\{/);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/SegmentedTabs.tsx"), "utf8"),
+    /focus-visible:outline-accent/,
+  );
+  const mainSrc = fs.readFileSync(path.join(REPO_ROOT, "src/main.tsx"), "utf8");
+  assert.match(mainSrc, /dataset\.focusMode/);
+  assert.match(globalsCss, /:root\[data-focus-mode="keyboard"\]/);
+  const episodesSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/EpisodesPanel.tsx"),
+    "utf8",
+  );
+  assert.match(episodesSrc, /text-white\/85/);
+  assert.doesNotMatch(episodesSrc, /active \? "text-accent-soft" : "text-muted/);
+  const roomPanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/RoomPanel.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(roomPanelSrc, /bg-accent\/25/);
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  assert.match(settingsSrc, /ep-settings-sidebar/);
+  assert.match(settingsSrc, /Full-Width Bottom Play Bar/);
+
+  // Play bar and menus use dark Smoked-Amethyst Liquid Glass without harsh white top lines or bright top washes
+  assert.match(globalsCss, /\.ep-glass-capsule\s*\{[^}]*brightness\(0\.92\)/);
+  assert.doesNotMatch(globalsCss, /\.ep-glass-capsule\s*\{[^}]*inset 0 12px 24px -16px rgba\(255,\s*255,\s*255,\s*0\.08\)/);
+  assert.match(globalsCss, /\.ep-glass-bottom-bar\s*\{[^}]*border-top:\s*1px solid rgba\(255,\s*255,\s*255,\s*0\.06\)[^}]*brightness\(0\.92\)/);
+  assert.match(globalsCss, /\.ep-glass-submenu\s*\{[^}]*rgba\(16,\s*16,\s*22,\s*0\.16\)[^}]*brightness\(0\.90\)/);
+  assert.match(globalsCss, /\.ep-menu-row\[data-active="true"\]\s*\{[^}]*rgba\(124,\s*58,\s*237,\s*0\.16\)/);
+  assert.match(globalsCss, /\.ep-droplet-indicator\s*\{[^}]*rgba\(124,\s*58,\s*237,\s*0\.14\)[^}]*rgba\(255,\s*255,\s*255,\s*0\.24\)/);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"), "utf8"),
+    /brightness\(0\.84\)|#08080c/,
+  );
+  assert.match(
+    fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/ContextMenu.tsx"), "utf8"),
+    /text-white\/70/,
+  );
+
+  // Expanded CC/Audio popover cushions + iOS Liquid Glass elastic sliding navigation + harmonious full-width rails
+  assert.match(
+    fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8"),
+    /rounded-\[22px\] p-3\.5/,
+  );
+  const segmentedTabsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/SegmentedTabs.tsx"),
+    "utf8",
+  );
+  const playbackPanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/PlaybackPanel.tsx"),
+    "utf8",
+  );
+  const subtitlePanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+    "utf8",
+  );
+  assert.match(playbackPanelSrc, /flex flex-col gap-4/);
+  assert.match(playbackPanelSrc, /space-y-1\.5/);
+  assert.match(playbackPanelSrc, /text-white\/45/);
+  assert.match(subtitlePanelSrc, /flex flex-col gap-4/);
+  assert.match(subtitlePanelSrc, /space-y-1\.5/);
+  assert.match(subtitlePanelSrc, /text-white\/45/);
+  assert.match(segmentedTabsSrc, /gap-1/);
+  assert.match(segmentedTabsSrc, /h-8 px-2\.5/);
+  assert.doesNotMatch(playbackPanelSrc, /mx-1\.5/);
+  assert.doesNotMatch(subtitlePanelSrc, /ep-hairline-divider my-1\.5 mx-1\.5/);
+  assert.match(settingsSrc, /ep-droplet-nav/);
+  assert.match(globalsCss, /\.ep-droplet-core\[data-morphing="true"\]/);
+});
+
+test("Play menu and glass button hover states stay crisp without text-zooming scale transforms", () => {
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const hoverSelectors = [
+    "button\\.ep-glass-pill:hover:not\\(:disabled\\)",
+    "\\.ep-glass-btn-party:hover:not\\(:disabled\\)",
+    "\\.ep-glass-btn-media:hover:not\\(:disabled\\)",
+    "\\.ep-glass-primary-pill:hover:not\\(:disabled\\)",
+    "\\.ep-glass-liquid-pill:hover:not\\(:disabled\\)",
+    "\\.ep-orb-play:hover:not\\(:disabled\\)",
+    "\\.ep-bar-pill:hover:not\\(:disabled\\)",
+    "\\.ep-bar-icon-btn:hover:not\\(:disabled\\)",
+    "\\.ep-bar-icon-btn\\.ep-transport-btn:hover:not\\(:disabled\\)",
+    "\\.ep-warning-action:hover:not\\(:disabled\\)",
+    "\\.ep-menu-row:hover:not\\(:disabled\\):not\\(\\[aria-disabled=\"true\"\\]\\)",
+  ];
+
+  for (const sel of hoverSelectors) {
+    const match = new RegExp(`${sel}\\s*\\{([^}]*)\\}`).exec(globalsCss);
+    assert.ok(match, `Expected hover rule for ${sel}`);
+    assert.doesNotMatch(
+      match[1],
+      /\btransform\s*:|scale\(|translateY\(/,
+      `${sel} must not zoom or shift text on hover`,
+    );
+  }
+
+  for (const baseClass of [".ep-bar-icon-btn", ".ep-bar-pill", ".ep-menu-row", ".ep-press"]) {
+    const escaped = baseClass.replace(".", "\\.");
+    const match = new RegExp(
+      `(?:^|\\n)[ \\t]*${escaped}(?:,[\\s\\S]*?[^,{])?\\s*\\{([^}]*)\\}`,
+    ).exec(globalsCss);
+    assert.ok(match, `Expected base rule for ${baseClass}`);
+    assert.doesNotMatch(
+      match[1],
+      /var\(--spring-fluid\)/,
+      `${baseClass} should use crisp non-overshooting easing instead of --spring-fluid`,
+    );
+  }
+
+  const titleBarSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TitleBar.tsx"), "utf8");
+  assert.equal(titleBarSrc.includes("hover:scale-105"), false);
+
+  const homeSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/HomeScreen.tsx"), "utf8");
+  assert.equal(homeSrc.includes("group-hover:scale-105"), false);
+});
+
+test("Non-context menus omit unnecessary separating strokes while right-click ContextMenu keeps dividers", () => {
+  for (const rel of [
+    "src/components/PlaybackPanel.tsx",
+    "src/components/SubtitlePanel.tsx",
+    "src/components/RoomPanel.tsx",
+    "src/components/EpisodesPanel.tsx",
+    "src/components/ReactionPopover.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/ShortcutsModal.tsx",
+    "src/components/ui/SelectMenu.tsx",
+  ]) {
+    const src = fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+    assert.equal(
+      src.includes("ep-hairline-divider"),
+      false,
+      `${rel} must not render unnecessary ep-hairline-divider strokes`,
+    );
+    assert.equal(
+      src.includes('role="separator"'),
+      false,
+      `${rel} must not render role="separator" strokes`,
+    );
+    assert.doesNotMatch(
+      src,
+      /\bborder-[trbl]\s+border-white/,
+      `${rel} must not render separating directional borders`,
+    );
+    assert.doesNotMatch(
+      src,
+      /\b[hw]-px\s+bg-white/,
+      `${rel} must not render 1px separating lines`,
+    );
+  }
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const sidebarRule = /\.ep-settings-sidebar\s*\{([^}]*)\}/.exec(globalsCss);
+  assert.ok(sidebarRule, "Expected .ep-settings-sidebar rule in globals.css");
+  assert.doesNotMatch(
+    sidebarRule[1],
+    /border-right\s*:/,
+    ".ep-settings-sidebar separates by glass tint without a vertical dividing stroke",
+  );
+
+  const contextMenuSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/ContextMenu.tsx"),
+    "utf8",
+  );
+  assert.equal(
+    contextMenuSrc.includes("ep-hairline-divider"),
+    true,
+    "Right-click ContextMenu must keep its section dividers",
+  );
+  assert.match(
+    contextMenuSrc,
+    /ep-hairline-divider\s+-mx-1\.5/,
+    "ContextMenu dividers should extend the full menu width cleanly",
+  );
+  assert.match(
+    contextMenuSrc,
+    /flex flex-col gap-1/,
+    "ContextMenu submenus should space items comfortably apart",
+  );
+  const hairlineRule = /\.ep-hairline-divider\s*\{([^}]*)\}/.exec(globalsCss);
+  assert.ok(hairlineRule, "Expected .ep-hairline-divider rule in globals.css");
+  assert.doesNotMatch(
+    hairlineRule[1],
+    /linear-gradient/,
+    ".ep-hairline-divider must be a clean solid translucent stroke rather than faded at the ends",
+  );
+});
+
+test("TransportBar play bar options retain an active liquid-glass pill and morph fluidly between options", () => {
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.match(transportSrc, /rightDockRef/);
+  assert.match(transportSrc, /ep-droplet-indicator ep-droplet-core/);
+  assert.match(transportSrc, /data-visible=\{dockIndicator\.visible \? "true" : "false"\}/);
+  assert.match(transportSrc, /data-morphing=\{dockMorphing \? "true" : undefined\}/);
+  assert.match(transportSrc, /aria-pressed=\{activeTab === "subtitles"\}/);
+  assert.match(transportSrc, /aria-pressed=\{activeTab === "playback"\}/);
+  assert.match(transportSrc, /aria-pressed=\{activeTab === "room"\}/);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.match(globalsCss, /\.ep-droplet-core\[data-visible="false"\]/);
+});
+
+test("Watch Party lobby uses a single unboxed glass sheet without nested container boxes or separating strokes", () => {
+  const homeSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/HomeScreen.tsx"), "utf8");
+  assert.equal(homeSrc.includes("ep-glass-well"), false);
+  assert.equal(homeSrc.includes("ep-hairline-divider"), false);
+  assert.equal(homeSrc.includes("bg-white/[0.04]"), false);
+  assert.equal(homeSrc.includes("bg-white/[0.06] rounded-full"), false);
+  assert.equal(homeSrc.includes("rounded-[22px]"), false);
+
+  const partyStart = homeSrc.indexOf('key="party"');
+  assert.ok(partyStart !== -1, 'Expected key="party" view in HomeScreen.tsx');
+  const partySlice = homeSrc.slice(partyStart, homeSrc.indexOf("{dragBanner.mounted", partyStart));
+  const partySheets = partySlice.match(/\bep-glass-sheet\b/g) ?? [];
+  assert.equal(partySheets.length, 1, "Watch Party lobby should use exactly one outer glass sheet");
+  assert.doesNotMatch(partySlice, /text-\[10\.5px\] text-secondary truncate/);
+});
+
+test("Auto-Next uses a smooth ep-toggle-pill without icon remount flicker and custom crystal orbital artwork", () => {
+  const episodesSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/EpisodesPanel.tsx"),
+    "utf8",
+  );
+  assert.equal(episodesSrc.includes("ep-toggle-pill"), true);
+  assert.equal(episodesSrc.includes("aria-pressed={autoPlayNext}"), true);
+  assert.equal(episodesSrc.includes('key={autoPlayNext ? "autonext-on"'), false);
+  assert.equal(episodesSrc.includes('key={followPartyEpisode ? "follow-on"'), false);
+  assert.equal(episodesSrc.includes("anim-icon-pop"), false);
+
+  const playerIconsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/PlayerIcons.tsx"),
+    "utf8",
+  );
+  const autoNextFnStart = playerIconsSrc.indexOf("export function PlayerAutoNextIcon");
+  const autoNextFnEnd = playerIconsSrc.indexOf("export function PlayerFollowIcon", autoNextFnStart);
+  const autoNextSlice = playerIconsSrc.slice(autoNextFnStart, autoNextFnEnd);
+  assert.equal(autoNextSlice.includes("#10B981"), false);
+  assert.equal(autoNextSlice.includes('viewBox="0 0 24 24"'), true);
+  assert.match(autoNextSlice, /#8B5CF6/);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const toggleHoverMatch = /\.ep-toggle-pill:hover:not\(:disabled\)\s*\{([^}]*)\}/.exec(globalsCss);
+  assert.ok(toggleHoverMatch, "Expected .ep-toggle-pill:hover rule in globals.css");
+  assert.doesNotMatch(toggleHoverMatch[1], /\btransform\s*:|scale\(|translateY\(/);
+});
+
+test("TransportBar right options stay unboxed without ep-bar-dock, VideoGlassBackdrop refreshes on resize/retry, and Episodes active row stays clean liquid glass", () => {
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  const rightDockStart = transportSrc.indexOf("ref={rightDockRef}");
+  assert.notEqual(rightDockStart, -1);
+  const rightDockSlice = transportSrc.slice(rightDockStart, rightDockStart + 3200);
+  assert.equal(rightDockSlice.includes("ep-bar-dock"), false);
+  assert.equal(rightDockSlice.includes("ep-droplet-indicator ep-droplet-core"), true);
+  assert.equal(rightDockSlice.includes("ep-bar-icon-btn text-secondary hover:text-white"), true);
+
+  const backdropSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"),
+    "utf8",
+  );
+  assert.equal(backdropSrc.includes("getLastCapturedBackdropFrame"), true);
+  assert.equal(backdropSrc.includes("schedulePausedRetries"), true);
+  assert.equal(backdropSrc.includes("requestPausedCaptureRef.current(true)"), true);
+  assert.equal(backdropSrc.includes("Math.max(0.78,"), true);
+  assert.equal(backdropSrc.includes("Math.min(0.06, rawU - activeBox.maxU)"), true);
+
+  const episodesSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/EpisodesPanel.tsx"),
+    "utf8",
+  );
+  assert.equal(episodesSrc.includes("Now Playing"), false);
+  assert.equal(episodesSrc.includes("ep-episode-active"), true);
+  assert.equal(episodesSrc.includes("ep-episode-droplet"), true);
+  assert.equal(episodesSrc.includes("ep-episode-index-active"), true);
+  assert.equal(episodesSrc.includes("bg-white/90"), true);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const activeEpisodeMatch = /\.ep-episode-active\s*\{([^}]*)\}/.exec(globalsCss);
+  assert.ok(activeEpisodeMatch, "Expected .ep-episode-active rule in globals.css");
+  assert.doesNotMatch(activeEpisodeMatch[1], /linear-gradient|139,\s*92,\s*246|196,\s*181,\s*253/);
+});
+
+test("TransportBar and Scrubber ergonomics: remaining time toggle, hour-safe labels, widened volume, and dragging thumb", () => {
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.equal(transportSrc.includes("ep-bar-dock"), false);
+  assert.match(transportSrc, /showRemaining/);
+  assert.match(transportSrc, /Click to show remaining time/);
+  assert.match(transportSrc, /min-w-12/);
+  assert.match(transportSrc, /w-14 lg:w-16 xl:w-20/);
+
+  const scrubberSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"),
+    "utf8",
+  );
+  assert.match(scrubberSrc, /dragging\s*\?\s*"opacity-100 scale-100"/);
+
+  const subPanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+    "utf8",
+  );
+  assert.match(subPanelSrc, /Advanced Options/);
+  assert.match(subPanelSrc, /Outline Weight/);
+  assert.match(subPanelSrc, /Vertical Position/);
+  assert.match(subPanelSrc, /Override styled fansubs/);
+});
+
+test("SettingsModal uses smooth neutral Liquid Glass styling without horizontal overflow from Scrubber", () => {
+  const scrubberSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"),
+    "utf8",
+  );
+  assert.match(scrubberSrc, /overflow-x-clip/);
+  assert.match(scrubberSrc, /translateX\(/);
+
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  assert.match(settingsSrc, /ep-settings-scroll[^"]*overflow-y-auto overflow-x-hidden/);
+  assert.match(settingsSrc, /col-span-8 ep-settings-content flex flex-col min-h-0 min-w-0/);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const sidebarBlock = /\.ep-settings-sidebar\s*\{([^}]*)\}/.exec(globalsCss);
+  const sidebarBefore = /\.ep-settings-sidebar::before\s*\{([^}]*)\}/.exec(globalsCss);
+  assert.ok(sidebarBlock && sidebarBefore, "Expected settings sidebar CSS rules");
+  assert.doesNotMatch(sidebarBlock[1], /196,\s*181,\s*253|167,\s*139,\s*250|124,\s*58,\s*237/);
+  assert.doesNotMatch(sidebarBefore[1], /radial-gradient|167,\s*139,\s*250|filter:\s*blur/);
+  assert.match(globalsCss, /\.ep-settings-sheet::after\s*\{/);
+  assert.match(globalsCss, /\.ep-glass-tray \.ep-droplet-indicator\.ep-droplet-core::before\s*\{/);
+  assert.match(globalsCss, /\*::-webkit-scrollbar-corner\s*\{[^}]*background:\s*transparent/);
+
+  const appIconsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/AppIcons.tsx"),
+    "utf8",
+  );
+  for (const iconName of [
+    "AppProfileCategoryIcon",
+    "AppAppearanceCategoryIcon",
+    "AppPlaybackCategoryIcon",
+    "AppPartyPrivacyCategoryIcon",
+    "AppDownloadIcon",
+    "AppWrenchIcon",
+    "AppSlidersIcon",
+    "AppLogsIcon",
+  ]) {
+    assert.equal(appIconsSrc.includes(`export function ${iconName}`), true, `Missing ${iconName}`);
+    const fnStart = appIconsSrc.indexOf(`export function ${iconName}`);
+    const nextFn = appIconsSrc.indexOf("\nexport function ", fnStart + 10);
+    const fnBody = appIconsSrc.slice(fnStart, nextFn === -1 ? appIconsSrc.length : nextFn);
+    assert.match(fnBody, /linearGradient/, `${iconName} should use custom sculpted SVG gradients`);
+  }
+});
+
+test("TransportBar party avatar dock aligns concentrically, reaction button renders pill-free laughing emoji, and volume icon morphs without key remount", () => {
+  const transportSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TransportBar.tsx"), "utf8");
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  const iconsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/PlayerIcons.tsx"), "utf8");
+
+  // Single viewer pill stays concentrically circular below xl without asymmetric trailing padding
+  assert.match(transportSrc, /visiblePeers\.length === 1\s*\?\s*"sm:w-7\.5 sm:p-0 xl:w-auto xl:pl-1 xl:pr-2\.5 xl:gap-1\.5"/);
+  assert.equal(transportSrc.includes("ep-reaction-icon-btn"), true);
+  assert.equal(transportSrc.includes("ep-orb-reaction"), false);
+
+  // Volume icon keeps a stable SVG mount cleanly transitioning via data-muted
+  const volBtnStart = transportSrc.indexOf('aria-label={muted ? "Unmute" : "Mute"}');
+  assert.notEqual(volBtnStart, -1);
+  const volSlice = transportSrc.slice(volBtnStart, volBtnStart + 420);
+  assert.equal(volSlice.includes("ep-vol-btn"), true);
+  assert.equal(volSlice.includes('key={muted'), false);
+  assert.equal(volSlice.includes("anim-icon-pop"), false);
+
+  assert.match(iconsSrc, /export function PlayerVolumeIcon[\s\S]*data-muted=\{muted \? "true" : "false"\}/);
+  assert.match(globalsCss, /\.ep-vol-icon\[data-muted="false"\] \.ep-vol-wave-2/);
+  assert.match(globalsCss, /\.ep-vol-icon\[data-muted="true"\] \.ep-vol-slash-2/);
+});
 

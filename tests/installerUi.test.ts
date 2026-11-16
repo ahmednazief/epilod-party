@@ -36,18 +36,18 @@ async function loadInstallerBridge() {
   return (await import(pathToFileURL(outFile).href)) as typeof import("../installer/src/lib/installerBridge");
 }
 
-test("Custom installer UI enforces minimal vector design invariants (no gradients, orange accents, or alerts)", () => {
+test("Custom installer UI enforces Liquid Glass design invariants, compact stage, and rotating status titles", () => {
   const files = walkTsx(path.join(REPO_ROOT, "installer/src"));
   assert.ok(files.length >= 8);
 
   for (const file of files) {
     const src = fs.readFileSync(file, "utf8");
     assert.equal(src.includes("<select"), false, `Forbidden <select> in ${file}`);
-    assert.equal(src.includes("backdrop-blur"), false, `Forbidden backdrop-blur in ${file}`);
+    assert.equal(src.includes("backdrop-blur"), false, `Forbidden inline backdrop-blur in ${file}`);
     assert.equal(
       /linear-gradient|radial-gradient/.test(src),
       false,
-      `Forbidden gradient in ${file}`,
+      `Forbidden inline gradient in ${file}`,
     );
     assert.equal(/\balert\s*\(/.test(src), false, `Forbidden alert() in ${file}`);
     assert.equal(
@@ -56,6 +56,70 @@ test("Custom installer UI enforces minimal vector design invariants (no gradient
       `Forbidden orange/amber styling token in installer ${file}`,
     );
   }
+
+  for (const legacy of ["EcosystemTraces.tsx", "ModuleTile.tsx", "StepRow.tsx"]) {
+    assert.equal(
+      fs.existsSync(path.join(REPO_ROOT, "installer/src/components", legacy)),
+      false,
+      `Legacy cluttered component should be removed: ${legacy}`,
+    );
+  }
+
+  const installerCss = fs.readFileSync(path.join(REPO_ROOT, "installer/src/styles.css"), "utf8");
+  const prefixedMatches = [...installerCss.matchAll(/-webkit-backdrop-filter:\s*([^;]+);/g)];
+  assert.ok(prefixedMatches.length >= 4);
+  for (const m of prefixedMatches) {
+    const start = m.index ?? 0;
+    const after = installerCss.slice(start + m[0].length, start + m[0].length + 120);
+    assert.match(
+      after,
+      /^\s*backdrop-filter:\s*[^;]+;/,
+      "Unprefixed backdrop-filter must follow -webkit-backdrop-filter so LightningCSS retains it",
+    );
+  }
+
+  const progressSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "installer/src/components/ProgressView.tsx"),
+    "utf8",
+  );
+  assert.equal(progressSrc.includes("Unfolding the magic"), true);
+  assert.equal(progressSrc.includes("Setting up everything"), true);
+  assert.equal(progressSrc.includes("Updating Epilod Party"), true);
+  assert.equal(progressSrc.includes("Setting up the update"), true);
+  assert.equal(progressSrc.includes("ep-scrubber-fill"), true);
+  assert.equal(progressSrc.includes("scaleX("), false);
+  const customizeSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "installer/src/components/CustomizePanel.tsx"),
+    "utf8",
+  );
+  assert.equal(customizeSrc.includes("space-y-2"), true);
+  assert.doesNotMatch(
+    installerCss,
+    /\.ep-installer-window\s*\{[^}]*backdrop-filter:/,
+  );
+
+  const appSrc = fs.readFileSync(path.join(REPO_ROOT, "installer/src/App.tsx"), "utf8");
+  assert.equal(appSrc.includes('"Updating"'), true);
+  assert.equal(appSrc.includes('"Updated"'), true);
+  assert.equal(appSrc.includes('"Epilod Party updated"'), true);
+  assert.equal(appSrc.includes("Replaces existing"), true);
+
+  const setupLib = fs.readFileSync(path.join(REPO_ROOT, "src-installer/src/lib.rs"), "utf8");
+  assert.equal(setupLib.includes("find_primary_existing_install_dir"), true);
+  assert.equal(setupLib.includes("detect_running_processes_for_install"), true);
+
+  const winInstall = fs.readFileSync(
+    path.join(REPO_ROOT, "src-installer/src/windows_install.rs"),
+    "utf8",
+  );
+  assert.equal(winInstall.includes("cleanup_duplicate_installs_after_commit"), true);
+  assert.equal(winInstall.includes("retire_superseded_install_dir"), true);
+
+  const tauriConf = JSON.parse(
+    fs.readFileSync(path.join(REPO_ROOT, "src-installer/tauri.conf.json"), "utf8"),
+  ) as { app: { windows: Array<{ width?: number; height?: number }> } };
+  assert.equal(tauriConf.app.windows[0]?.width, 460);
+  assert.equal(tauriConf.app.windows[0]?.height, 344);
 });
 
 test("Custom installer bridge formats bytes, splits live metrics cleanly, and initializes ready state", async () => {
@@ -219,7 +283,11 @@ test("Built installer frontend dist exists after npm run build", () => {
   assert.equal(fs.existsSync(path.join(installerDist, "index.html")), true);
   const assets = fs.readdirSync(path.join(installerDist, "assets"));
   assert.ok(assets.some((f) => f.endsWith(".js")));
-  assert.ok(assets.some((f) => f.endsWith(".css")));
+  const cssFile = assets.find((f) => f.endsWith(".css"));
+  assert.ok(cssFile, "Expected compiled CSS asset in installer/dist/assets");
+  const builtCss = fs.readFileSync(path.join(installerDist, "assets", cssFile), "utf8");
+  assert.match(builtCss, /\.ep-glass-well\{[^}]*backdrop-filter:blur\(/);
+  assert.match(builtCss, /\.ep-glass-pill\{[^}]*backdrop-filter:blur\(/);
   assert.equal(fs.existsSync(path.join(installerDist, "app-icon.png")), true);
 });
 

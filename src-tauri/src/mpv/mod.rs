@@ -4,6 +4,7 @@ pub mod hwnd;
 pub mod ipc;
 pub mod process;
 
+use epilod_core::mpv_ipc::{seek_absolute_cmd, seek_keyframes_cmd, PendingSeekTracker};
 use epilod_core::syncplay::PlayerSnapshot;
 use hwnd::{
     capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd, is_child_window_alive,
@@ -39,13 +40,20 @@ pub struct MpvRuntime {
     pub last_rect: Option<PhysicalRect>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DeferredLoadState {
+    pub loading: bool,
+    pub seek_secs: Option<f64>,
+    pub pause: Option<bool>,
+}
+
 pub struct MpvController {
     runtime: Arc<Mutex<Option<MpvRuntime>>>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
     loading_media: Arc<AtomicBool>,
-    pending_seek: Arc<Mutex<Option<(f64, Instant)>>>,
-    deferred_seek: Arc<Mutex<Option<f64>>>,
-    deferred_pause: Arc<Mutex<Option<bool>>>,
+    deferred_load: Arc<Mutex<DeferredLoadState>>,
+    pending_seek: Arc<Mutex<PendingSeekTracker>>,
+    client_seek_seq: Arc<AtomicU64>,
     pending_resize: Arc<PendingResize>,
     lifecycle_lock: AsyncMutex<()>,
     next_req_id: AtomicU64,
@@ -69,9 +77,9 @@ impl MpvController {
             runtime: Arc::new(Mutex::new(None)),
             snapshot: Arc::new(Mutex::new(PlayerSnapshot::default())),
             loading_media: Arc::new(AtomicBool::new(false)),
-            pending_seek: Arc::new(Mutex::new(None)),
-            deferred_seek: Arc::new(Mutex::new(None)),
-            deferred_pause: Arc::new(Mutex::new(None)),
+            deferred_load: Arc::new(Mutex::new(DeferredLoadState::default())),
+            pending_seek: Arc::new(Mutex::new(PendingSeekTracker::new())),
+            client_seek_seq: Arc::new(AtomicU64::new(0)),
             pending_resize: Arc::new(PendingResize::default()),
             lifecycle_lock: AsyncMutex::new(()),
             next_req_id: AtomicU64::new(100),
@@ -131,10 +139,19 @@ impl MpvController {
     }
 
     pub fn prepare_for_load(&self) {
-        self.loading_media.store(true, Ordering::SeqCst);
-        *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        {
+            let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+            *def = DeferredLoadState {
+                loading: true,
+                seek_secs: None,
+                pause: None,
+            };
+            self.loading_media.store(true, Ordering::SeqCst);
+        }
+        self.pending_seek
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = PlayerSnapshot {
             position: 0.0,
             paused: true,
@@ -142,33 +159,109 @@ impl MpvController {
     }
 
     pub fn clear_loading_flag(&self) {
+        let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+        *def = DeferredLoadState::default();
         self.loading_media.store(false, Ordering::SeqCst);
     }
 
-    pub fn note_seek_target(&self, target_secs: f64) {
+    /// Records the target seek position and returns `true` when deferred until `file-loaded`.
+    pub fn note_seek_target(&self, target_secs: f64) -> bool {
         let safe = if target_secs.is_finite() && target_secs >= 0.0 {
             target_secs
         } else {
             0.0
         };
-        if self.loading_media.load(Ordering::SeqCst) {
-            *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = Some(safe);
+        let deferred = {
+            let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+            if def.loading {
+                def.seek_secs = Some(safe);
+                true
+            } else {
+                false
+            }
+        };
+        if !deferred {
+            self.pending_seek
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_dispatched_seek(safe, None, Instant::now());
         }
-        *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = Some((safe, Instant::now()));
         self.snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .position = safe;
+        deferred
     }
 
-    pub fn note_paused(&self, paused: bool) {
-        if self.loading_media.load(Ordering::SeqCst) {
-            *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = Some(paused);
+    /// Dispatches a tracked seek command (deferring exact seeks cleanly if media is still loading)
+    /// and rolls back pending seek state if command submission fails.
+    pub fn dispatch_seek(
+        &self,
+        target_secs: f64,
+        preview: bool,
+        client_seek_seq: Option<u64>,
+    ) -> Result<(), String> {
+        if let Some(seq) = client_seek_seq {
+            self.client_seek_seq.fetch_max(seq, Ordering::SeqCst);
         }
+        let safe = if target_secs.is_finite() && target_secs >= 0.0 {
+            target_secs
+        } else {
+            0.0
+        };
+        {
+            let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+            if def.loading {
+                if !preview {
+                    def.seek_secs = Some(safe);
+                    self.snapshot
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .position = safe;
+                }
+                return Ok(());
+            }
+        }
+        let req = self.next_request_id();
+        self.pending_seek
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .note_dispatched_seek(safe, Some(req), Instant::now());
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .position = safe;
+        let cmd = if preview {
+            seek_keyframes_cmd(req, safe)
+        } else {
+            seek_absolute_cmd(req, safe)
+        };
+        if let Err(err) = self.send_command(cmd) {
+            self.pending_seek
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .on_reply_error(req);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Records desired pause state and returns `true` when deferred until `file-loaded`.
+    pub fn note_paused(&self, paused: bool) -> bool {
+        let deferred = {
+            let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
+            if def.loading {
+                def.pause = Some(paused);
+                true
+            } else {
+                false
+            }
+        };
         self.snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .paused = paused;
+        deferred
     }
 
     pub async fn start(
@@ -207,7 +300,7 @@ impl MpvController {
             let _ = tokio::time::timeout(Duration::from_millis(250), stale.child.wait()).await;
             destroy_child_hwnd(&stale.app, stale.hwnd);
             self.has_media.store(false, Ordering::SeqCst);
-            self.loading_media.store(false, Ordering::SeqCst);
+            self.clear_loading_flag();
         }
 
         {
@@ -221,12 +314,13 @@ impl MpvController {
         }
 
         self.shutting_down.store(false, Ordering::SeqCst);
-        self.loading_media.store(false, Ordering::SeqCst);
+        self.clear_loading_flag();
         self.has_media.store(false, Ordering::SeqCst);
         self.pending_resize.cancel();
-        *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.pending_seek
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         let app_for_paths = app.clone();
         let (mpv_exe, fonts_dir) = tokio::task::spawn_blocking(move || {
@@ -287,9 +381,9 @@ impl MpvController {
         let runtime_for_probe = Arc::clone(&self.runtime);
         let snap_clone = Arc::clone(&self.snapshot);
         let loading_clone = Arc::clone(&self.loading_media);
+        let deferred_load_clone = Arc::clone(&self.deferred_load);
         let pending_seek_clone = Arc::clone(&self.pending_seek);
-        let deferred_seek_clone = Arc::clone(&self.deferred_seek);
-        let deferred_pause_clone = Arc::clone(&self.deferred_pause);
+        let client_seek_seq_clone = Arc::clone(&self.client_seek_seq);
         let pending_resize_clone = Arc::clone(&self.pending_resize);
         let shutdown_flag = Arc::clone(&self.shutting_down);
         let has_media_clone = Arc::clone(&self.has_media);
@@ -302,9 +396,9 @@ impl MpvController {
                 rx,
                 Arc::clone(&snap_clone),
                 Arc::clone(&loading_clone),
+                Arc::clone(&deferred_load_clone),
                 Arc::clone(&pending_seek_clone),
-                Arc::clone(&deferred_seek_clone),
-                Arc::clone(&deferred_pause_clone),
+                Arc::clone(&client_seek_seq_clone),
                 move || {
                     if let Ok(mut guard) = runtime_for_probe.try_lock() {
                         if let Some(rt) = guard.as_mut() {
@@ -346,7 +440,10 @@ impl MpvController {
                     destroy_child_hwnd(&rt.app, rt.hwnd);
                     has_media_clone.store(false, Ordering::SeqCst);
                     loading_clone.store(false, Ordering::SeqCst);
-                    *pending_seek_clone.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    pending_seek_clone
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
                     *snap_clone.lock().unwrap_or_else(|e| e.into_inner()) =
                         PlayerSnapshot::default();
                     let _ = app_clone.emit(
@@ -367,10 +464,8 @@ impl MpvController {
                     if let Some(stderr_info) = stderr_tail.summary() {
                         full_msg = format!("{full_msg} — {stderr_info}");
                     }
-                    let _ = app_clone.emit(
-                        "mpv://error",
-                        serde_json::json!({ "message": full_msg }),
-                    );
+                    let _ =
+                        app_clone.emit("mpv://error", serde_json::json!({ "message": full_msg }));
                 }
             }
         });
@@ -481,12 +576,13 @@ impl MpvController {
     pub async fn stop_and_clear(&self) {
         let _lifecycle = self.lifecycle_lock.lock().await;
         self.shutting_down.store(true, Ordering::SeqCst);
-        self.loading_media.store(false, Ordering::SeqCst);
+        self.clear_loading_flag();
         self.has_media.store(false, Ordering::SeqCst);
         self.pending_resize.cancel();
-        *self.pending_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deferred_seek.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.deferred_pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.pending_seek
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let taken = self
             .runtime
             .lock()
@@ -579,5 +675,31 @@ mod tests {
             .expect_err("send_command must fail when mpv runtime is absent");
         assert!(err.contains("not running"));
         assert!(!ctrl.surface_state().surface_visible);
+    }
+
+    #[test]
+    fn deferred_load_defers_pause_and_seek_until_cleared_or_file_loaded() {
+        let ctrl = MpvController::new();
+        ctrl.prepare_for_load();
+        assert!(ctrl.loading_media.load(Ordering::SeqCst));
+        assert!(ctrl.note_seek_target(12.5));
+        assert!(ctrl.note_paused(false));
+
+        {
+            let def = ctrl.deferred_load.lock().unwrap();
+            assert!(def.loading);
+            assert_eq!(def.seek_secs, Some(12.5));
+            assert_eq!(def.pause, Some(false));
+        }
+
+        ctrl.clear_loading_flag();
+        assert!(!ctrl.loading_media.load(Ordering::SeqCst));
+        assert!(!ctrl.note_seek_target(20.0));
+        assert!(!ctrl.note_paused(true));
+
+        let def = ctrl.deferred_load.lock().unwrap();
+        assert!(!def.loading);
+        assert_eq!(def.seek_secs, None);
+        assert_eq!(def.pause, None);
     }
 }

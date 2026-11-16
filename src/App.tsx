@@ -3,6 +3,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { ShortcutsModal } from "./components/ShortcutsModal";
 import { HomeScreen } from "./components/HomeScreen";
 import { WatchRoom } from "./components/WatchRoom";
+import { NotificationStrip } from "./components/ui/NotificationStrip";
 import { isDesktop } from "./lib/bridge";
 import { enqueueMpvLifecycle, mpvStop } from "./lib/mpv";
 import { isTextEntryElement } from "./lib/shortcuts";
@@ -111,6 +112,7 @@ export function App() {
       }}
     >
       <HomeScreen />
+      <NotificationStrip belowTitleBar />
       <SettingsModal open={settingsOpen} onClose={closeSettings} />
       <ShortcutsModal open={shortcutsOpen} onClose={closeShortcuts} />
     </div>

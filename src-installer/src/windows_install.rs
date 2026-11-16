@@ -8,8 +8,8 @@ use epilod_installer_core::plan::{
     APP_VERSION,
 };
 use epilod_installer_core::receipt::{
-    inspect_existing_install, read_receipt, InstallDisposition, InstallReceipt,
-    INSTALL_RECEIPT_FILENAME, UNINSTALLER_FILENAME,
+    collect_managed_delete_targets, inspect_existing_install, read_receipt, InstallDisposition,
+    InstallReceipt, INSTALL_RECEIPT_FILENAME, UNINSTALLER_FILENAME,
 };
 use epilod_installer_core::semver::parse_semver;
 use serde::{Deserialize, Serialize};
@@ -50,9 +50,9 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD,
-    REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
+    KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
@@ -69,6 +69,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
+const UNINSTALL_ROOT_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const UNINSTALL_REG_SUBKEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\EpilodParty";
 const OPEN_WITH_APP_SUBKEY: &str = r"Software\Classes\Applications\Epilod Party.exe";
@@ -495,14 +496,17 @@ pub fn local_user_data_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("EpilodParty"))
 }
 
-pub fn read_hkcu_install_location() -> Option<String> {
-    let subkey = to_wide_null(OsStr::new(UNINSTALL_REG_SUBKEY));
-    let mut hkey: HKEY = ptr::null_mut();
-    let res = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) };
-    if res != ERROR_SUCCESS {
-        return None;
-    }
-    let val_name = to_wide_null(OsStr::new("InstallLocation"));
+fn is_cargo_dev_dir(dir: &Path) -> bool {
+    let norm = dir
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    norm.ends_with("/target/debug") || norm.ends_with("/target/release")
+}
+
+fn read_reg_sz_value(hkey: HKEY, name: &str) -> Option<String> {
+    let val_name = to_wide_null(OsStr::new(name));
     let mut val_type: u32 = 0;
     let mut byte_len: u32 = 0;
     let q1 = unsafe {
@@ -516,9 +520,6 @@ pub fn read_hkcu_install_location() -> Option<String> {
         )
     };
     if q1 != ERROR_SUCCESS || val_type != REG_SZ || byte_len == 0 {
-        unsafe {
-            RegCloseKey(hkey);
-        }
         return None;
     }
 
@@ -533,14 +534,237 @@ pub fn read_hkcu_install_location() -> Option<String> {
             &mut byte_len,
         )
     };
-    unsafe {
-        RegCloseKey(hkey);
-    }
     if q2 != ERROR_SUCCESS || val_type != REG_SZ {
         return None;
     }
     let raw = wide_str_to_string(&buf);
-    resolve_install_dir(raw.trim()).ok()
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn extract_install_dir_from_reg_value(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let exe_str = if let Some(rest) = trimmed.strip_prefix('"') {
+        rest.split('"').next().unwrap_or("").trim()
+    } else if let Some(idx) = trimmed.to_ascii_lowercase().find(".exe") {
+        trimmed[..idx + 4].trim()
+    } else {
+        trimmed
+    };
+    let exe_clean = exe_str.split(',').next().unwrap_or("").trim();
+    if exe_clean.is_empty() {
+        return None;
+    }
+    let parent = Path::new(exe_clean).parent()?.to_string_lossy();
+    resolve_install_dir(parent.trim()).ok()
+}
+
+fn is_epilod_uninstall_subkey(subkey_name: &str, display_name: Option<&str>) -> bool {
+    let lower_key = subkey_name.trim().to_ascii_lowercase();
+    if matches!(
+        lower_key.as_str(),
+        "epilodparty" | "epilod party" | "com.epilod.party"
+    ) {
+        return true;
+    }
+    display_name
+        .map(|dn| dn.trim().eq_ignore_ascii_case(APP_NAME))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+struct UninstallRegEntry {
+    subkey_name: String,
+    install_dir: Option<String>,
+    display_version: Option<String>,
+}
+
+fn scan_uninstall_entries(root_hkey: HKEY) -> Vec<UninstallRegEntry> {
+    let root_wide = to_wide_null(OsStr::new(UNINSTALL_ROOT_SUBKEY));
+    let mut root_handle: HKEY = ptr::null_mut();
+    if unsafe { RegOpenKeyExW(root_hkey, root_wide.as_ptr(), 0, KEY_READ, &mut root_handle) }
+        != ERROR_SUCCESS
+    {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    let mut idx = 0u32;
+    loop {
+        let mut name_buf = vec![0u16; 260];
+        let mut name_len = name_buf.len() as u32;
+        let enum_res = unsafe {
+            RegEnumKeyExW(
+                root_handle,
+                idx,
+                name_buf.as_mut_ptr(),
+                &mut name_len,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if enum_res == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        idx += 1;
+        if enum_res != ERROR_SUCCESS {
+            continue;
+        }
+        let subkey_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        let sub_wide = to_wide_null(OsStr::new(&subkey_name));
+        let mut sub_hkey: HKEY = ptr::null_mut();
+        if unsafe { RegOpenKeyExW(root_handle, sub_wide.as_ptr(), 0, KEY_READ, &mut sub_hkey) }
+            != ERROR_SUCCESS
+        {
+            continue;
+        }
+
+        let display_name = read_reg_sz_value(sub_hkey, "DisplayName");
+        if is_epilod_uninstall_subkey(&subkey_name, display_name.as_deref()) {
+            let install_location = read_reg_sz_value(sub_hkey, "InstallLocation")
+                .and_then(|s| resolve_install_dir(s.trim()).ok());
+            let display_icon_dir = read_reg_sz_value(sub_hkey, "DisplayIcon")
+                .and_then(|s| extract_install_dir_from_reg_value(&s));
+            let uninstall_cmd_dir = read_reg_sz_value(sub_hkey, "UninstallString")
+                .and_then(|s| extract_install_dir_from_reg_value(&s));
+            let display_version = read_reg_sz_value(sub_hkey, "DisplayVersion");
+
+            matches.push(UninstallRegEntry {
+                subkey_name,
+                install_dir: install_location.or(display_icon_dir).or(uninstall_cmd_dir),
+                display_version,
+            });
+        }
+        unsafe {
+            RegCloseKey(sub_hkey);
+        }
+    }
+
+    unsafe {
+        RegCloseKey(root_handle);
+    }
+    matches
+}
+
+pub fn read_hkcu_install_location() -> Option<String> {
+    let subkey = to_wide_null(OsStr::new(UNINSTALL_REG_SUBKEY));
+    let mut hkey: HKEY = ptr::null_mut();
+    let res = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) };
+    if res != ERROR_SUCCESS {
+        return None;
+    }
+    let val = read_reg_sz_value(hkey, "InstallLocation");
+    unsafe {
+        RegCloseKey(hkey);
+    }
+    val.and_then(|raw| resolve_install_dir(raw.trim()).ok())
+}
+
+/// Discovers every existing Epilod Party installation folder on this PC (registry + standard paths),
+/// ordered by priority and deduplicated by canonical path, ignoring Cargo dev build directories.
+pub fn discover_existing_install_dirs() -> Vec<PathBuf> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(hkcu_loc) = read_hkcu_install_location() {
+        candidates.push(hkcu_loc);
+    }
+    for entry in scan_uninstall_entries(HKEY_CURRENT_USER) {
+        if let Some(dir) = entry.install_dir {
+            candidates.push(dir);
+        }
+    }
+    candidates.push(default_install_dir_string());
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            Path::new(&local)
+                .join("Programs")
+                .join(APP_NAME)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    for entry in scan_uninstall_entries(HKEY_LOCAL_MACHINE) {
+        if let Some(dir) = entry.install_dir {
+            candidates.push(dir);
+        }
+    }
+    for env_key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Some(pf) = std::env::var_os(env_key) {
+            candidates.push(Path::new(&pf).join(APP_NAME).to_string_lossy().into_owned());
+        }
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for raw in candidates {
+        let Ok(resolved) = resolve_install_dir(&raw) else {
+            continue;
+        };
+        let path = PathBuf::from(&resolved);
+        if is_cargo_dev_dir(&path) || !existing_install_detected(&path) {
+            continue;
+        }
+        let key = canonical_dir_key(&path);
+        if !key.is_empty() && seen.insert(key) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Picks the active existing installation folder on this PC so re-running Setup updates in place
+/// rather than creating a second copy in a different folder.
+pub fn find_primary_existing_install_dir() -> Option<String> {
+    let dirs = discover_existing_install_dirs();
+    if let Some(writable) = dirs
+        .iter()
+        .find(|d| !is_protected_windows_dir(d) && check_directory_acl_writable(d).is_ok())
+    {
+        return Some(writable.to_string_lossy().into_owned());
+    }
+    dirs.into_iter()
+        .next()
+        .map(|d| d.to_string_lossy().into_owned())
+}
+
+/// Reads the installed version recorded for `dir` (from its receipt or matching Windows Uninstall entry).
+pub fn read_installed_version_for_dir(dir: &Path) -> Option<String> {
+    if let Some(rec) = read_receipt(dir) {
+        return Some(rec.version);
+    }
+    let dir_key = canonical_dir_key(dir);
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        for entry in scan_uninstall_entries(root) {
+            if let Some(ref reg_dir) = entry.install_dir {
+                if canonical_dir_key(Path::new(reg_dir)) == dir_key {
+                    if let Some(ver) = entry.display_version {
+                        return Some(ver);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns `(dir_path, version)` if another Epilod Party installation exists elsewhere on this PC.
+pub fn find_other_existing_install(target_dir: &Path) -> Option<(String, Option<String>)> {
+    let target_key = canonical_dir_key(target_dir);
+    for dir in discover_existing_install_dirs() {
+        if canonical_dir_key(&dir) != target_key {
+            let ver = read_installed_version_for_dir(&dir);
+            return Some((dir.to_string_lossy().into_owned(), ver));
+        }
+    }
+    None
 }
 
 fn strip_verbatim_prefix(raw: &str) -> String {
@@ -665,15 +889,24 @@ fn is_epilod_root_binary(name: &str) -> bool {
     )
 }
 
-pub fn detect_running_processes_in_dir(install_dir: &Path) -> Vec<RunningProcessInfo> {
-    let resolved_dir = resolve_install_dir(&install_dir.to_string_lossy())
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| install_dir.to_path_buf());
-    let dir_key = canonical_dir_key(&resolved_dir);
-    if dir_key.is_empty() {
+fn detect_running_processes_in_dirs(
+    dirs: &[PathBuf],
+    include_global_app_binaries: bool,
+) -> Vec<RunningProcessInfo> {
+    let dir_prefixes: Vec<String> = dirs
+        .iter()
+        .map(|d| {
+            let resolved = resolve_install_dir(&d.to_string_lossy())
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| d.clone());
+            canonical_dir_key(&resolved)
+        })
+        .filter(|k| !k.is_empty())
+        .map(|k| format!("{k}\\"))
+        .collect();
+    if dir_prefixes.is_empty() && !include_global_app_binaries {
         return Vec::new();
     }
-    let dir_prefix = format!("{dir_key}\\");
 
     let rows = snapshot_all_processes();
     let mut children_by_parent: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -684,16 +917,27 @@ pub fn detect_running_processes_in_dir(install_dir: &Path) -> Vec<RunningProcess
             .push(idx);
     }
 
+    let is_in_target_dirs = |row: &OsProcessRow| {
+        row.canonical_image_key
+            .as_deref()
+            .map(|k| dir_prefixes.iter().any(|p| k.starts_with(p)))
+            .unwrap_or(false)
+    };
+
     let mut selected_indices: HashSet<usize> = HashSet::new();
     let mut bfs_queue: VecDeque<u32> = VecDeque::new();
 
     for (idx, row) in rows.iter().enumerate() {
-        let in_dir = row
-            .canonical_image_key
-            .as_deref()
-            .map(|k| k.starts_with(&dir_prefix))
-            .unwrap_or(false);
-        if in_dir {
+        let in_dir = is_in_target_dirs(row);
+        let global_app = include_global_app_binaries
+            && is_epilod_root_binary(&row.exe_name)
+            && !row
+                .image_path
+                .as_deref()
+                .and_then(|p| Path::new(p).parent())
+                .map(is_cargo_dev_dir)
+                .unwrap_or(false);
+        if in_dir || global_app {
             selected_indices.insert(idx);
             if is_epilod_root_binary(&row.exe_name) {
                 bfs_queue.push_back(row.pid);
@@ -711,12 +955,7 @@ pub fn detect_running_processes_in_dir(install_dir: &Path) -> Vec<RunningProcess
         if let Some(children) = children_by_parent.get(&parent_pid) {
             for &child_idx in children {
                 let child = &rows[child_idx];
-                let in_dir = child
-                    .canonical_image_key
-                    .as_deref()
-                    .map(|k| k.starts_with(&dir_prefix))
-                    .unwrap_or(false);
-                if in_dir || is_epilod_descendant_candidate(&child.exe_name) {
+                if is_in_target_dirs(child) || is_epilod_descendant_candidate(&child.exe_name) {
                     selected_indices.insert(child_idx);
                     bfs_queue.push_back(child.pid);
                 }
@@ -737,6 +976,18 @@ pub fn detect_running_processes_in_dir(install_dir: &Path) -> Vec<RunningProcess
         .collect();
     out.sort_by_key(|p| p.pid);
     out
+}
+
+pub fn detect_running_processes_in_dir(install_dir: &Path) -> Vec<RunningProcessInfo> {
+    detect_running_processes_in_dirs(&[install_dir.to_path_buf()], false)
+}
+
+/// Detects running Epilod Party processes across the target folder, any existing install folders,
+/// and non-dev Epilod Party binaries so installing to a new path closes any older running copy too.
+pub fn detect_running_processes_for_install(target_dir: &Path) -> Vec<RunningProcessInfo> {
+    let mut dirs = vec![target_dir.to_path_buf()];
+    dirs.extend(discover_existing_install_dirs());
+    detect_running_processes_in_dirs(&dirs, true)
 }
 
 pub fn wait_for_pid_exit(pid: u32, timeout_secs: u64) {
@@ -770,8 +1021,11 @@ unsafe extern "system" fn enum_windows_close_proc(hwnd: HWND, lparam: LPARAM) ->
     1
 }
 
-pub fn close_running_processes_in_dir(install_dir: &Path) -> Result<usize, String> {
-    let initial = detect_running_processes_in_dir(install_dir);
+fn close_processes_with<F>(detect_fn: F) -> Result<usize, String>
+where
+    F: Fn() -> Vec<RunningProcessInfo>,
+{
+    let initial = detect_fn();
     if initial.is_empty() {
         return Ok(0);
     }
@@ -788,14 +1042,14 @@ pub fn close_running_processes_in_dir(install_dir: &Path) -> Result<usize, Strin
     // Give graceful WM_CLOSE handlers up to ~1.5 seconds across root + child processes.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_500);
     while std::time::Instant::now() < deadline {
-        if detect_running_processes_in_dir(install_dir).is_empty() {
+        if detect_fn().is_empty() {
             return Ok(initial.len());
         }
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
 
     // Terminate survivors cleanly and wait on their process kernel handles so file locks clear.
-    let survivors = detect_running_processes_in_dir(install_dir);
+    let survivors = detect_fn();
     for proc_info in &survivors {
         let hproc =
             unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, proc_info.pid) };
@@ -808,7 +1062,7 @@ pub fn close_running_processes_in_dir(install_dir: &Path) -> Result<usize, Strin
     }
 
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let remaining = detect_running_processes_in_dir(install_dir);
+    let remaining = detect_fn();
     if !remaining.is_empty() {
         let names: Vec<String> = remaining.into_iter().map(|r| r.name).collect();
         return Err(format!(
@@ -818,6 +1072,14 @@ pub fn close_running_processes_in_dir(install_dir: &Path) -> Result<usize, Strin
     }
 
     Ok(initial.len())
+}
+
+pub fn close_running_processes_in_dir(install_dir: &Path) -> Result<usize, String> {
+    close_processes_with(|| detect_running_processes_in_dir(install_dir))
+}
+
+pub fn close_running_processes_for_install(install_dir: &Path) -> Result<usize, String> {
+    close_processes_with(|| detect_running_processes_for_install(install_dir))
 }
 
 fn resolve_known_folder_win32(rfid: *const windows_sys::core::GUID) -> Option<PathBuf> {
@@ -1122,13 +1384,13 @@ impl SystemIntegrator for WindowsIntegrator {
             wait_for_pid_exit(pid, 8);
         }
 
-        let running = detect_running_processes_in_dir(install_dir);
+        let running = detect_running_processes_for_install(install_dir);
         if running.is_empty() {
             return Ok(0);
         }
 
         if force_close_app || wait_pid.is_some() {
-            return close_running_processes_in_dir(install_dir);
+            return close_running_processes_for_install(install_dir);
         }
 
         let names: Vec<String> = running.into_iter().map(|r| r.name).collect();
@@ -1288,6 +1550,9 @@ impl SystemIntegrator for WindowsIntegrator {
             return Err(err);
         }
 
+        // Only retire duplicate/legacy installs AFTER the new installation & registry keys committed.
+        cleanup_duplicate_installs_after_commit(install_dir, &created_shortcuts);
+
         Ok(IntegrationResult {
             created_shortcuts,
             created_registry_keys,
@@ -1384,6 +1649,7 @@ impl SystemIntegrator for WindowsIntegrator {
                 }
             }
         }
+        cleanup_duplicate_hkcu_uninstall_keys(false, &mut warnings);
         let removed_registry = warnings.is_empty();
 
         let mut removed_user_data = false;
@@ -1769,6 +2035,7 @@ pub fn run_silent_install_flow(
 ) -> i32 {
     let resolved_dir = target_dir
         .and_then(|p| resolve_install_dir(&p.to_string_lossy()).ok())
+        .or_else(find_primary_existing_install_dir)
         .unwrap_or_else(default_install_dir_string);
 
     if !allow_downgrade {
@@ -1850,6 +2117,109 @@ pub fn run_silent_update_flow(
     )
 }
 
+fn cleanup_duplicate_hkcu_uninstall_keys(keep_primary: bool, warnings: &mut Vec<String>) {
+    for entry in scan_uninstall_entries(HKEY_CURRENT_USER) {
+        if keep_primary && entry.subkey_name.eq_ignore_ascii_case("EpilodParty") {
+            continue;
+        }
+        let full_subkey = format!(r"{UNINSTALL_ROOT_SUBKEY}\{}", entry.subkey_name);
+        if let Err(err) = delete_hkcu_tree(&full_subkey) {
+            warnings.push(err);
+        }
+    }
+}
+
+fn remove_legacy_nsis_uninstallers_in_dir(dir: &Path) {
+    if !dir.join(UNINSTALLER_FILENAME).is_file() {
+        return;
+    }
+    for legacy_name in ["Uninstall Epilod Party.exe", "uninstall.exe"] {
+        let p = dir.join(legacy_name);
+        if p.is_file() {
+            let _ = remove_file_resilient(&p);
+        }
+    }
+}
+
+fn retire_superseded_install_dir(
+    old_dir: &Path,
+    active_dir: &Path,
+    active_shortcuts: &[String],
+    current_exe: Option<&Path>,
+) {
+    if canonical_dir_key(old_dir) == canonical_dir_key(active_dir) || is_cargo_dev_dir(old_dir) {
+        return;
+    }
+    if check_directory_acl_writable(old_dir).is_err() {
+        return;
+    }
+
+    let old_receipt = read_receipt(old_dir);
+    let current_exe_canon = current_exe.and_then(|p| fs::canonicalize(p).ok());
+
+    let mut targets = collect_managed_delete_targets(old_dir, old_receipt.as_ref());
+    targets.push(old_dir.join(INSTALL_RECEIPT_FILENAME));
+    for legacy_name in ["Uninstall Epilod Party.exe", "uninstall.exe"] {
+        targets.push(old_dir.join(legacy_name));
+    }
+
+    for path in targets {
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(ref cur_canon) = current_exe_canon {
+            if fs::canonicalize(&path).ok().as_ref() == Some(cur_canon) {
+                continue;
+            }
+        }
+        let _ = remove_file_resilient(&path);
+    }
+
+    if let Some(ref rec) = old_receipt {
+        let active_keys: HashSet<String> = active_shortcuts
+            .iter()
+            .map(|s| canonical_dir_key(Path::new(s)))
+            .collect();
+        for old_lnk in &rec.shortcuts {
+            let lnk_path = Path::new(old_lnk);
+            if lnk_path.is_file() && !active_keys.contains(&canonical_dir_key(lnk_path)) {
+                let _ = remove_file_resilient(lnk_path);
+            }
+        }
+    }
+
+    for sub in [
+        "resources/mpv",
+        "resources/fonts",
+        "resources/licenses",
+        "resources",
+    ] {
+        let dir_sub = old_dir.join(sub);
+        if dir_sub.is_dir() {
+            let _ = fs::remove_dir(&dir_sub);
+        }
+    }
+    if old_dir.is_dir() {
+        let _ = fs::remove_dir(old_dir);
+    }
+}
+
+fn cleanup_duplicate_installs_after_commit(install_dir: &Path, active_shortcuts: &[String]) {
+    let mut ignored = Vec::new();
+    cleanup_duplicate_hkcu_uninstall_keys(true, &mut ignored);
+    remove_legacy_nsis_uninstallers_in_dir(install_dir);
+
+    let current_exe = std::env::current_exe().ok();
+    for old_dir in discover_existing_install_dirs() {
+        retire_superseded_install_dir(
+            &old_dir,
+            install_dir,
+            active_shortcuts,
+            current_exe.as_deref(),
+        );
+    }
+}
+
 fn dir_size_bytes(dir: &Path) -> u64 {
     let mut sum = 0u64;
     if let Ok(entries) = fs::read_dir(dir) {
@@ -1865,4 +2235,80 @@ fn dir_size_bytes(dir: &Path) -> u64 {
         }
     }
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use epilod_installer_core::archive::pack_directory_with_version;
+    use epilod_installer_core::receipt::{build_receipt, write_receipt_atomic};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parses_legacy_uninstall_strings_and_detects_epilod_subkeys() {
+        assert_eq!(
+            extract_install_dir_from_reg_value(
+                r#""C:\Users\Demo\AppData\Local\Programs\Epilod Party\Uninstall Epilod Party.exe" --uninstall"#
+            ),
+            Some(r"C:\Users\Demo\AppData\Local\Programs\Epilod Party".to_string())
+        );
+        assert_eq!(
+            extract_install_dir_from_reg_value(r"D:\Apps\Epilod Party\Epilod Party.exe,0"),
+            Some(r"D:\Apps\Epilod Party".to_string())
+        );
+        assert!(is_epilod_uninstall_subkey("EpilodParty", None));
+        assert!(is_epilod_uninstall_subkey("Epilod Party", None));
+        assert!(is_epilod_uninstall_subkey(
+            "{1234-ABCD}",
+            Some("Epilod Party")
+        ));
+        assert!(!is_epilod_uninstall_subkey(
+            "SomeOtherApp",
+            Some("Other Player")
+        ));
+    }
+
+    #[test]
+    fn retire_superseded_install_dir_removes_old_app_files_and_keeps_user_files() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("epilod_retire_test_{nanos}"));
+        let old_dir = root.join("old_copy");
+        let new_dir = root.join("new_copy");
+        let pkg_src = root.join("pkg_src");
+        let pkg_file = root.join("pkg.epkg");
+
+        fs::create_dir_all(pkg_src.join("resources/mpv")).unwrap();
+        fs::write(pkg_src.join("Epilod Party.exe"), b"old-app").unwrap();
+        fs::write(pkg_src.join("resources/mpv/mpv.exe"), b"old-mpv").unwrap();
+        let manifest = pack_directory_with_version(&pkg_src, &pkg_file, "0.1.0").unwrap();
+
+        fs::create_dir_all(old_dir.join("resources/mpv")).unwrap();
+        fs::write(old_dir.join("Epilod Party.exe"), b"old-app").unwrap();
+        fs::write(old_dir.join("resources/mpv/mpv.exe"), b"old-mpv").unwrap();
+        fs::write(old_dir.join(UNINSTALLER_FILENAME), b"old-uninst").unwrap();
+        fs::write(old_dir.join("Uninstall Epilod Party.exe"), b"nsis-uninst").unwrap();
+        let user_note = old_dir.join("my-custom-notes.txt");
+        fs::write(&user_note, b"keep this").unwrap();
+
+        let rec = build_receipt(&manifest, &old_dir, vec![], vec![], true, true, true, None);
+        write_receipt_atomic(&old_dir, &rec).unwrap();
+
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("Epilod Party.exe"), b"new-app").unwrap();
+
+        retire_superseded_install_dir(&old_dir, &new_dir, &[], None);
+
+        assert!(!old_dir.join("Epilod Party.exe").exists());
+        assert!(!old_dir.join("resources/mpv/mpv.exe").exists());
+        assert!(!old_dir.join(UNINSTALLER_FILENAME).exists());
+        assert!(!old_dir.join("Uninstall Epilod Party.exe").exists());
+        assert!(!old_dir.join(INSTALL_RECEIPT_FILENAME).exists());
+        assert!(user_note.is_file(), "User files must never be deleted");
+        assert!(new_dir.join("Epilod Party.exe").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

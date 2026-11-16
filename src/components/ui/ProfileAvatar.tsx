@@ -1,5 +1,6 @@
 import { AppShuffleIcon } from "./AppIcons";
 import { useState, type ReactNode } from "react";
+import { SegmentedTabs } from "./SegmentedTabs";
 
 export type AvatarCategory = "girls" | "boys" | "characters";
 
@@ -422,15 +423,32 @@ interface ProfileAvatarProps {
   className?: string;
 }
 
+export function AvatarSvg({
+  avatarId,
+  className = "w-full h-full block",
+}: {
+  avatarId: AvatarId;
+  className?: string;
+}) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 64 64"
+      className={className}
+      aria-hidden="true"
+    >
+      <AvatarIllustration id={avatarId} />
+    </svg>
+  );
+}
+
 export function ProfileAvatar({ avatarId, size = 32, className = "" }: ProfileAvatarProps) {
   return (
     <span
       className={`inline-flex items-center justify-center rounded-full overflow-hidden shrink-0 ${className}`}
       style={{ width: size, height: size }}
     >
-      <svg viewBox="0 0 64 64" className="w-full h-full block" aria-hidden="true">
-        <AvatarIllustration id={avatarId} />
-      </svg>
+      <AvatarSvg avatarId={avatarId} />
     </span>
   );
 }
@@ -465,23 +483,13 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2">
-        <div className="ep-glass-input p-0.5 rounded-full inline-flex items-center gap-0.5">
-          {CATEGORY_TABS.map((cat) => {
-            const active = filter === cat.value;
-            return (
-              <button
-                key={cat.value}
-                type="button"
-                onClick={() => setFilter(cat.value)}
-                className={`ep-press whitespace-nowrap px-2.5 py-1 rounded-full text-[11px] font-medium cursor-pointer ${
-                  active ? "ep-droplet-indicator text-white" : "text-muted hover:text-primary"
-                }`}
-              >
-                {cat.label}
-              </button>
-            );
-          })}
-        </div>
+        <SegmentedTabs
+          ariaLabel="Avatar style category"
+          size="sm"
+          value={filter}
+          items={CATEGORY_TABS}
+          onChange={setFilter}
+        />
 
         <button
           type="button"

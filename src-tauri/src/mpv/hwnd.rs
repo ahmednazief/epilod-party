@@ -458,17 +458,7 @@ pub fn capture_child_backdrop_rgba(
             SetStretchBltMode(dst_dc.0, HALFTONE);
             SetBrushOrgEx(dst_dc.0, 0, 0, std::ptr::null_mut());
             let blt_ok = StretchBlt(
-                dst_dc.0,
-                0,
-                0,
-                dst_w,
-                dst_h,
-                full_dc.0,
-                0,
-                0,
-                src_w,
-                src_h,
-                SRCCOPY,
+                dst_dc.0, 0, 0, dst_w, dst_h, full_dc.0, 0, 0, src_w, src_h, SRCCOPY,
             );
             if blt_ok != 0 {
                 let px_count = (dst_w as usize) * (dst_h as usize);

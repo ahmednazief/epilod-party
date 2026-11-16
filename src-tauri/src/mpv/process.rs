@@ -59,6 +59,18 @@ pub fn resolve_mpv_exe(app: &AppHandle) -> Result<PathBuf, String> {
     Err("mpv.exe not found in resources/mpv/. See scripts/fetch-mpv.ps1.".to_string())
 }
 
+pub fn resolve_ffmpeg_exe(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(mpv_path) = resolve_mpv_exe(app) {
+        if let Some(dir) = mpv_path.parent() {
+            let candidate = dir.join("ffmpeg.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 pub fn resolve_fonts_dir(app: &AppHandle) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(res_dir) = app.path().resource_dir() {

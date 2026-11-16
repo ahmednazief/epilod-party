@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createSerialQueue } from "./asyncGuard";
 import { isDesktop, safeInvoke } from "./bridge";
+import type { TimelineSegment, TimelineTransform } from "./sourceAlignment";
 
 export type FileMatchStatus =
   | "matched"
@@ -8,6 +9,14 @@ export type FileMatchStatus =
   | "durationMismatch"
   | "differentFile"
   | "noFile";
+
+export type SourceRelation =
+  | "exact"
+  | "differentEncode"
+  | "differentCut"
+  | "fpsMismatch"
+  | "differentMedia"
+  | "missing";
 
 export interface Participant {
   username: string;
@@ -17,7 +26,70 @@ export interface Participant {
   fileDuration?: number | null;
   isReady: boolean;
   isController: boolean;
+  isHost?: boolean;
+  isAdmin?: boolean;
   fileMatch: FileMatchStatus;
+  sourceRelation?: SourceRelation;
+  durationDeltaSecs?: number | null;
+  suggestedFpsScale?: number | null;
+  suggestedFpsLabel?: string | null;
+}
+
+export interface RoomControlState {
+  hostControlActive: boolean;
+  localIsHost: boolean;
+  localIsAdmin: boolean;
+  hostUsername: string | null;
+  adminUsernames: string[];
+}
+
+export type ControlNoticeKind =
+  | "hostEnabled"
+  | "hostReleased"
+  | "adminGranted"
+  | "adminRevoked"
+  | "hostAbsentUnlocked"
+  | "guestBlocked";
+
+export interface ControlNoticePayload {
+  kind: ControlNoticeKind;
+  actor?: string | null;
+}
+
+export interface RoomStatePayload {
+  position: number;
+  paused: boolean;
+}
+
+export type P2pTransportKind = "punching" | "directLan" | "directWan" | "fallbackSyncplay";
+
+export interface P2pPeerStatus {
+  username: string;
+  transport: P2pTransportKind;
+  rttMs?: number | null;
+  autoAlignState: string;
+  summary?: string | null;
+}
+
+export interface P2pStatusPayload {
+  natMode: string;
+  peers: P2pPeerStatus[];
+}
+
+export interface AutoAlignedPayload {
+  offsetSecs: number;
+  scale: number;
+  segmentCount: number;
+  confidence: number;
+  summary: string;
+}
+
+export interface ReactionEventPayload {
+  username: string;
+  avatarId: string;
+  emoji: string;
+  count: number;
+  via: "p2p" | "p2pRelay" | "syncplay";
 }
 
 export type SyncStatusPayload =
@@ -47,6 +119,7 @@ export interface SyncConnectParams {
   roomCode: string;
   literalRoom?: boolean;
   password?: string | null;
+  hostOnly?: boolean;
 }
 
 export async function syncConnect(params: SyncConnectParams): Promise<void> {
@@ -56,6 +129,7 @@ export async function syncConnect(params: SyncConnectParams): Promise<void> {
     roomCode: params.roomCode,
     literalRoom: params.literalRoom ?? false,
     password: params.password ?? null,
+    hostOnly: params.hostOnly ?? false,
   });
 }
 
@@ -67,6 +141,10 @@ export async function syncForceResync(): Promise<void> {
   await safeInvoke("sync_force_resync");
 }
 
+export async function syncSetRoomAdmin(username: string, grant: boolean): Promise<void> {
+  await safeInvoke("sync_set_room_admin", { username, grant });
+}
+
 export async function syncDisconnect(): Promise<void> {
   await safeInvoke("sync_disconnect");
 }
@@ -76,12 +154,14 @@ export async function syncSwitchBackup(params: {
   roomCode: string;
   literalRoom?: boolean;
   password?: string | null;
+  hostOnly?: boolean;
 }): Promise<void> {
   await safeInvoke("sync_switch_backup", {
     username: params.username,
     roomCode: params.roomCode,
     literalRoom: params.literalRoom ?? false,
     password: params.password ?? null,
+    hostOnly: params.hostOnly ?? false,
   });
 }
 
@@ -121,6 +201,41 @@ export async function syncSetScrubbing(scrubbing: boolean): Promise<void> {
   await safeInvoke("sync_set_scrubbing", { scrubbing });
 }
 
+export async function syncSetTimelineTransform(transform: TimelineTransform): Promise<void> {
+  await safeInvoke("sync_set_timeline_transform", {
+    offsetSecs: transform.offsetSecs,
+    scale: transform.scale,
+  });
+}
+
+export async function syncNudgeTimelineOffset(deltaSecs: number): Promise<void> {
+  await safeInvoke("sync_nudge_timeline_offset", { deltaSecs });
+}
+
+export async function syncSetAlignMode(enabled: boolean): Promise<void> {
+  await safeInvoke("sync_set_align_mode", { enabled });
+}
+
+export async function syncAlignSceneHere(
+  localPosSecs?: number | null,
+): Promise<TimelineTransform> {
+  return safeInvoke<TimelineTransform>("sync_align_scene_here", {
+    localPosSecs: localPosSecs ?? null,
+  });
+}
+
+export async function syncRunP2pAutoAlign(force = true): Promise<void> {
+  await safeInvoke("sync_run_p2p_auto_align", { force });
+}
+
+export async function syncSendReaction(
+  emoji: string,
+  avatarId: string,
+  count = 1,
+): Promise<void> {
+  await safeInvoke("sync_send_reaction", { emoji, avatarId, count });
+}
+
 function noopUnlisten(): UnlistenFn {
   return () => undefined;
 }
@@ -143,4 +258,83 @@ export async function onSyncError(cb: (message: string) => void): Promise<Unlist
 export async function onSyncServerOverride(cb: (setBy: string) => void): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<{ setBy: string }>("sync://server-override", (e) => cb(e.payload.setBy));
+}
+
+export async function onSyncPeerNotReady(
+  cb: (payload: { username: string; manual: boolean }) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<{ username: string; manual: boolean }>("sync://peer-not-ready", (e) =>
+    cb(e.payload),
+  );
+}
+
+export async function onSyncPeerLeft(
+  cb: (payload: { username: string }) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<{ username: string }>("sync://peer-left", (e) => cb(e.payload));
+}
+
+export async function onSyncTimelineTransform(
+  cb: (transform: TimelineTransform) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<TimelineTransform>("sync://timeline-transform", (e) => cb(e.payload));
+}
+
+export async function onSyncRoomState(
+  cb: (state: RoomStatePayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<RoomStatePayload>("sync://room-state", (e) => cb(e.payload));
+}
+
+export async function onSyncTimelineSegments(
+  cb: (segments: TimelineSegment[]) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<TimelineSegment[]>("sync://timeline-segments", (e) => cb(e.payload));
+}
+
+export async function onSyncP2pStatus(
+  cb: (status: P2pStatusPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<P2pStatusPayload>("sync://p2p-status", (e) => cb(e.payload));
+}
+
+export async function onSyncAutoAligned(
+  cb: (payload: AutoAlignedPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<AutoAlignedPayload>("sync://auto-aligned", (e) => cb(e.payload));
+}
+
+export async function onSyncPlayBlocked(
+  cb: (payload: { usernames: string[] }) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<{ usernames: string[] }>("sync://play-blocked", (e) => cb(e.payload));
+}
+
+export async function onSyncRoomControl(
+  cb: (control: RoomControlState) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<RoomControlState>("sync://room-control", (e) => cb(e.payload));
+}
+
+export async function onSyncControlNotice(
+  cb: (notice: ControlNoticePayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ControlNoticePayload>("sync://control-notice", (e) => cb(e.payload));
+}
+
+export async function onSyncReaction(
+  cb: (reaction: ReactionEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ReactionEventPayload>("sync://reaction", (e) => cb(e.payload));
 }

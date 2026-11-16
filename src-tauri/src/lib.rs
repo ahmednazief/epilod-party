@@ -1,7 +1,13 @@
 pub mod autosync;
 
 #[cfg(windows)]
+pub mod intro;
+#[cfg(windows)]
 pub mod mpv;
+#[cfg(windows)]
+pub mod p2p;
+#[cfg(windows)]
+pub mod sparse_align;
 #[cfg(windows)]
 pub mod syncplay;
 #[cfg(windows)]
@@ -40,6 +46,52 @@ impl NetworkSharePolicy {
 /// meaning any cached HWND rect must be invalidated.
 pub fn is_zero_viewport(width: i32, height: i32) -> bool {
     width <= 0 || height <= 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragRestoreBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_drag_restore_bounds(
+    cursor_x: i32,
+    cursor_y: i32,
+    max_rect: (i32, i32, i32, i32),
+    work_rect: (i32, i32, i32, i32),
+    normal_size: (i32, i32),
+    min_size: (i32, i32),
+) -> DragRestoreBounds {
+    let max_w = (max_rect.2 - max_rect.0).max(1);
+    let max_h = (max_rect.3 - max_rect.1).max(1);
+    let min_w = min_size.0.max(320).min(max_w);
+    let min_h = min_size.1.max(240).min(max_h);
+
+    let mut width = normal_size.0.max(min_w).min(max_w);
+    let mut height = normal_size.1.max(min_h).min(max_h);
+    if width >= max_w - 24 && height >= max_h - 24 {
+        width = (((max_w as f64) * 0.80).round() as i32)
+            .max(min_w)
+            .min(max_w);
+        height = (((max_h as f64) * 0.82).round() as i32)
+            .max(min_h)
+            .min(max_h);
+    }
+
+    let ratio = ((cursor_x - max_rect.0) as f64 / max_w as f64).clamp(0.08, 0.92);
+    let offset_y = (cursor_y - max_rect.1).clamp(8, 44);
+    let x = cursor_x - ((width as f64 * ratio).round() as i32);
+    let y = (cursor_y - offset_y).max(work_rect.1);
+
+    DragRestoreBounds {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 /// Tracks minimize/restore and fullscreen state transitions so `on_window_event`
@@ -128,8 +180,8 @@ mod windows_app {
     use crate::syncplay::{LocalFileMeta, SyncCommand, SyncController};
     use epilod_core::logging::{LogLevel, LogsSnapshot, RingLogger};
     use epilod_core::mpv_ipc::{
-        loadfile_cmd, seek_absolute_cmd, set_aid_cmd, set_aspect_cmd, set_loop_cmd, set_mute_cmd,
-        set_pause_cmd, set_sid_cmd, set_speed_cmd, set_sub_delay_cmd, set_sub_style_cmds,
+        loadfile_cmd, set_aid_cmd, set_aspect_cmd, set_loop_cmd, set_mute_cmd, set_pause_cmd,
+        set_sid_cmd, set_speed_cmd, set_sub_delay_cmd, set_sub_style_cmds_with_bold,
         set_volume_cmd, sub_add_cmd, sub_remove_cmd,
     };
     use epilod_core::room_code::BACKUP_ENDPOINT;
@@ -146,10 +198,15 @@ mod windows_app {
 
     static DECODED_SUB_SEQ: AtomicU64 = AtomicU64::new(1);
 
+    use crate::intro::{execute_detect_intro, IntroDetectController, IntroDetectRequest};
+    use epilod_core::intro_detect::IntroDetectionOutcome;
+    use epilod_core::mpv_ipc::MpvChapter;
+
     pub struct AppState {
         pub mpv: Arc<MpvController>,
         pub sync: Arc<SyncController>,
         pub autosync: Arc<AutoSyncController>,
+        pub intro_detect: Arc<IntroDetectController>,
         pub logger: Arc<Mutex<RingLogger>>,
         pub rate_guard: Arc<Mutex<CommandRateGuard>>,
         pub network_policy: Arc<NetworkSharePolicy>,
@@ -280,6 +337,7 @@ mod windows_app {
         }
 
         state.autosync.cancel();
+        state.intro_detect.cancel();
         state.mpv.prepare_for_load();
         let pause_req = state.mpv.next_request_id();
         let _ = state.mpv.send_command(set_pause_cmd(pause_req, true));
@@ -294,6 +352,7 @@ mod windows_app {
         }
         state.mpv.set_media_loaded(true);
         state.sync.reset_for_new_file();
+        state.sync.set_local_media_path(Some(valid_path.clone()));
 
         log_backend(
             &state,
@@ -314,22 +373,30 @@ mod windows_app {
     #[tauri::command]
     async fn mpv_set_pause(state: State<'_, AppState>, paused: bool) -> Result<(), String> {
         check_rate(&state, "mpv_transport", 40, Duration::from_secs(2))?;
-        state.mpv.note_paused(paused);
+        if state.mpv.note_paused(paused) {
+            return Ok(());
+        }
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_pause_cmd(req, paused))
     }
 
     #[tauri::command]
-    async fn mpv_seek(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
+    async fn mpv_seek(
+        state: State<'_, AppState>,
+        seconds: f64,
+        preview: Option<bool>,
+        client_seek_seq: Option<u64>,
+    ) -> Result<(), String> {
         check_rate(&state, "mpv_transport", 40, Duration::from_secs(2))?;
-        state.mpv.note_seek_target(seconds);
-        let req = state.mpv.next_request_id();
-        state.mpv.send_command(seek_absolute_cmd(req, seconds))
+        state
+            .mpv
+            .dispatch_seek(seconds, preview.unwrap_or(false), client_seek_seq)
     }
 
     #[tauri::command]
     async fn mpv_stop(state: State<'_, AppState>) -> Result<(), String> {
         state.autosync.cancel();
+        state.intro_detect.cancel();
         state.mpv.stop_and_clear().await;
         Ok(())
     }
@@ -454,6 +521,7 @@ mod windows_app {
     async fn mpv_set_sub_style(
         state: State<'_, AppState>,
         font: String,
+        bold: Option<bool>,
         font_size: u32,
         color: String,
         border_size: f64,
@@ -463,7 +531,7 @@ mod windows_app {
     ) -> Result<(), String> {
         let safe_color = sanitize_hex_color(&color).map_err(|e| e.to_string())?;
         let first_id = state.mpv.next_request_id();
-        let cmds = set_sub_style_cmds(
+        let cmds = set_sub_style_cmds_with_bold(
             first_id,
             font.trim(),
             font_size,
@@ -472,6 +540,7 @@ mod windows_app {
             pos,
             visible,
             override_ass.unwrap_or(false),
+            bold.unwrap_or(false),
         );
         for _ in 1..cmds.len() {
             let _ = state.mpv.next_request_id();
@@ -504,13 +573,13 @@ mod windows_app {
         // Selecting a track must also make subtitles visible in mpv; otherwise a
         // previously hidden state (sub-visibility=no) keeps the chosen CC invisible.
         let vis_req = state.mpv.next_request_id();
-        state.mpv.send_command(
-            epilod_core::mpv_ipc::set_property_cmd(
+        state
+            .mpv
+            .send_command(epilod_core::mpv_ipc::set_property_cmd(
                 vis_req,
                 "sub-visibility",
                 serde_json::json!(sid.is_some()),
-            ),
-        )
+            ))
     }
 
     #[tauri::command]
@@ -522,6 +591,7 @@ mod windows_app {
         subtitle_path: Option<String>,
         audio_track_id: Option<u64>,
         embedded_sub_idx: Option<usize>,
+        embedded_sub_ff_idx: Option<u64>,
         embedded_sub_codec: Option<String>,
         encoding_hint: Option<SubtitleEncodingHint>,
         low_power: Option<bool>,
@@ -534,6 +604,7 @@ mod windows_app {
             subtitle_path.as_deref(),
             audio_track_id,
             embedded_sub_idx,
+            embedded_sub_ff_idx,
             embedded_sub_codec.as_deref(),
             encoding_hint.unwrap_or_default(),
             low_power.unwrap_or(false),
@@ -543,9 +614,15 @@ mod windows_app {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     async fn subtitle_two_anchor_sync(
+        app: AppHandle,
         state: State<'_, AppState>,
-        subtitle_path: String,
+        subtitle_path: Option<String>,
+        video_path: Option<String>,
+        embedded_sub_idx: Option<usize>,
+        embedded_sub_ff_idx: Option<u64>,
+        embedded_sub_codec: Option<String>,
         src_a_secs: f64,
         dst_a_secs: f64,
         src_b_secs: f64,
@@ -554,24 +631,63 @@ mod windows_app {
     ) -> Result<AutoSyncResultDto, String> {
         let opts = state.network_policy.options();
         let hint = encoding_hint.unwrap_or_default();
-        tokio::task::spawn_blocking(move || {
-            execute_two_anchor_sync(
-                &subtitle_path,
-                src_a_secs,
-                dst_a_secs,
-                src_b_secs,
-                dst_b_secs,
-                hint,
-                opts,
-            )
-        })
+        execute_two_anchor_sync(
+            &app,
+            subtitle_path.as_deref(),
+            video_path.as_deref(),
+            embedded_sub_idx,
+            embedded_sub_ff_idx,
+            embedded_sub_codec.as_deref(),
+            src_a_secs,
+            dst_a_secs,
+            src_b_secs,
+            dst_b_secs,
+            hint,
+            opts,
+        )
         .await
-        .map_err(|e| format!("Two-anchor sync task failed: {e}"))?
     }
 
     #[tauri::command]
     async fn subtitle_cancel_auto_sync(state: State<'_, AppState>) -> Result<(), String> {
         state.autosync.cancel();
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[tauri::command]
+    async fn detect_video_intro(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        video_path: String,
+        duration_secs: f64,
+        chapters: Vec<MpvChapter>,
+        sibling_paths: Vec<String>,
+        subtitle_path: Option<String>,
+        embedded_sub_idx: Option<usize>,
+        embedded_sub_codec: Option<String>,
+        audio_stream_idx: Option<usize>,
+        low_power: bool,
+    ) -> Result<IntroDetectionOutcome, String> {
+        check_rate(&state, "intro_detect", 16, Duration::from_secs(4))?;
+        let opts = state.network_policy.options();
+        let req = IntroDetectRequest {
+            video_path,
+            duration_secs,
+            chapters,
+            sibling_paths,
+            subtitle_path,
+            embedded_sub_idx,
+            embedded_sub_codec,
+            audio_stream_idx,
+            low_power,
+        };
+        execute_detect_intro(&app, &state.intro_detect, req, opts).await
+    }
+
+    #[tauri::command]
+    async fn intro_cancel_detect(state: State<'_, AppState>) -> Result<(), String> {
+        state.intro_detect.cancel();
         Ok(())
     }
 
@@ -590,6 +706,98 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn window_drag_from_maximized(window: WebviewWindow) -> Result<(), String> {
+        use std::sync::mpsc;
+        use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, GetWindowPlacement, GetWindowRect, IsZoomed, SetWindowPlacement,
+            SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWNORMAL, WINDOWPLACEMENT,
+        };
+
+        let (tx, rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let win_for_ui = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let res = (|| -> Result<(), String> {
+                    let hwnd = win_for_ui
+                        .hwnd()
+                        .map_err(|e| format!("Could not resolve window HWND: {e}"))?
+                        .0 as HWND;
+                    unsafe {
+                        if IsZoomed(hwnd) != 0 {
+                            let mut cursor_pt: POINT = std::mem::zeroed();
+                            let _ = GetCursorPos(&mut cursor_pt);
+
+                            let mut max_rect: RECT = std::mem::zeroed();
+                            let _ = GetWindowRect(hwnd, &mut max_rect);
+
+                            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                            let mut mi: MONITORINFO = std::mem::zeroed();
+                            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                            let has_mi = GetMonitorInfoW(monitor, &mut mi) != 0;
+                            let work_rect = if has_mi { mi.rcWork } else { max_rect };
+                            let mon_rect = if has_mi { mi.rcMonitor } else { max_rect };
+
+                            let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+                            wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+                            let _ = GetWindowPlacement(hwnd, &mut wp);
+
+                            let normal_w =
+                                (wp.rcNormalPosition.right - wp.rcNormalPosition.left).max(1024);
+                            let normal_h =
+                                (wp.rcNormalPosition.bottom - wp.rcNormalPosition.top).max(640);
+                            let target = compute_drag_restore_bounds(
+                                cursor_pt.x,
+                                cursor_pt.y,
+                                (max_rect.left, max_rect.top, max_rect.right, max_rect.bottom),
+                                (
+                                    work_rect.left,
+                                    work_rect.top,
+                                    work_rect.right,
+                                    work_rect.bottom,
+                                ),
+                                (normal_w, normal_h),
+                                (1024, 640),
+                            );
+
+                            let ws_dx = work_rect.left - mon_rect.left;
+                            let ws_dy = work_rect.top - mon_rect.top;
+                            wp.showCmd = SW_SHOWNORMAL as u32;
+                            wp.rcNormalPosition = RECT {
+                                left: target.x - ws_dx,
+                                top: target.y - ws_dy,
+                                right: (target.x - ws_dx) + target.width,
+                                bottom: (target.y - ws_dy) + target.height,
+                            };
+                            let _ = SetWindowPlacement(hwnd, &wp);
+                            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+                            let _ = SetWindowPos(
+                                hwnd,
+                                std::ptr::null_mut(),
+                                target.x,
+                                target.y,
+                                target.width,
+                                target.height,
+                                SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                        }
+                    }
+                    win_for_ui
+                        .start_dragging()
+                        .map_err(|e| format!("Window drag start failed: {e}"))
+                })();
+                let _ = tx.send(res);
+            })
+            .map_err(|e| format!("Failed dispatching drag restore to main thread: {e}"))?;
+
+        rx.recv_timeout(Duration::from_secs(2))
+            .map_err(|e| format!("Timed out starting window drag: {e}"))?
+    }
+
+    #[tauri::command]
     async fn set_allow_network_shares(
         state: State<'_, AppState>,
         allow: bool,
@@ -598,6 +806,7 @@ mod windows_app {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tauri::command]
     async fn sync_connect(
         app: AppHandle,
@@ -607,6 +816,7 @@ mod windows_app {
         room_code: String,
         literal_room: Option<bool>,
         password: Option<String>,
+        host_only: Option<bool>,
     ) -> Result<(), String> {
         let clean_user = sanitize_username(&username).map_err(|e| e.to_string())?;
         {
@@ -628,6 +838,8 @@ mod windows_app {
                 room_code,
                 literal_room.unwrap_or(false),
                 password,
+                host_only.unwrap_or(false),
+                state.network_policy.options(),
             )
             .await
     }
@@ -641,6 +853,20 @@ mod windows_app {
     async fn sync_force_resync(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
         check_rate(&state, "sync_resync", 6, Duration::from_secs(5))?;
         state.sync.force_resync(app, Arc::clone(&state.mpv)).await
+    }
+
+    #[tauri::command]
+    async fn sync_set_room_admin(
+        state: State<'_, AppState>,
+        username: String,
+        grant: bool,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_admin", 12, Duration::from_secs(5))?;
+        let trimmed = username.trim();
+        if trimmed.is_empty() || trimmed.len() > 64 {
+            return Err("Invalid participant username.".to_string());
+        }
+        state.sync.set_room_admin(trimmed.to_string(), grant).await
     }
 
     #[tauri::command]
@@ -662,9 +888,20 @@ mod windows_app {
             serde_json::json!({ "state": "disconnected" }),
         );
         let _ = app.emit("sync://participants", Vec::<serde_json::Value>::new());
+        let _ = app.emit(
+            "sync://room-control",
+            serde_json::json!({
+                "hostControlActive": false,
+                "localIsHost": false,
+                "localIsAdmin": false,
+                "hostUsername": null,
+                "adminUsernames": [],
+            }),
+        );
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tauri::command]
     async fn sync_switch_backup(
         app: AppHandle,
@@ -673,6 +910,7 @@ mod windows_app {
         room_code: String,
         literal_room: Option<bool>,
         password: Option<String>,
+        host_only: Option<bool>,
     ) -> Result<(), String> {
         let clean_user = sanitize_username(&username).map_err(|e| e.to_string())?;
         {
@@ -700,6 +938,8 @@ mod windows_app {
                 room_code,
                 literal_room.unwrap_or(false),
                 password,
+                host_only.unwrap_or(false),
+                state.network_policy.options(),
             )
             .await
     }
@@ -713,7 +953,23 @@ mod windows_app {
         duration_secs: f64,
         hash_identity: Option<bool>,
     ) -> Result<(), String> {
-        let resolved_size = match (size_bytes, path) {
+        let opts = state.network_policy.options();
+        let validated_path = match path {
+            Some(ref p) => {
+                let p_clone = p.clone();
+                tokio::task::spawn_blocking(move || {
+                    validate_existing_local_file_with_options(&p_clone, opts).ok()
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+            None => None,
+        };
+        if let Some(ref vp) = validated_path {
+            state.sync.set_local_media_path(Some(vp.clone()));
+        }
+        let resolved_size = match (size_bytes, validated_path) {
             (Some(s), _) => Some(s),
             (None, Some(p)) => {
                 tokio::task::spawn_blocking(move || std::fs::metadata(p).ok().map(|m| m.len()))
@@ -766,6 +1022,72 @@ mod windows_app {
     #[tauri::command]
     async fn sync_set_scrubbing(state: State<'_, AppState>, scrubbing: bool) -> Result<(), String> {
         state.sync.set_scrubbing(scrubbing);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_set_timeline_transform(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        offset_secs: f64,
+        scale: f64,
+    ) -> Result<(), String> {
+        let tx = epilod_core::syncplay::TimelineTransform { offset_secs, scale }.sanitized();
+        state.sync.set_timeline_transform(&app, tx);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_nudge_timeline_offset(
+        state: State<'_, AppState>,
+        delta_secs: f64,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_ctl", 40, Duration::from_secs(2))?;
+        state.sync.nudge_timeline_offset(delta_secs);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_set_align_mode(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+        state.sync.set_align_mode(enabled);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_align_scene_here(
+        state: State<'_, AppState>,
+        local_pos_secs: Option<f64>,
+    ) -> Result<epilod_core::syncplay::TimelineTransform, String> {
+        state.sync.align_scene_here(local_pos_secs).await
+    }
+
+    #[tauri::command]
+    async fn sync_run_p2p_auto_align(
+        state: State<'_, AppState>,
+        force: Option<bool>,
+    ) -> Result<(), String> {
+        check_rate(&state, "p2p_align", 6, Duration::from_secs(10))?;
+        state.sync.trigger_p2p_realign(force.unwrap_or(true));
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_reaction(
+        state: State<'_, AppState>,
+        emoji: String,
+        avatar_id: Option<String>,
+        count: Option<u8>,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_reaction", 80, Duration::from_secs(2))?;
+        let clean_emoji = epilod_core::p2p::sanitize_reaction_emoji(&emoji)
+            .ok_or_else(|| "Unsupported reaction emoji.".to_string())?;
+        let clean_avatar = epilod_core::p2p::sanitize_avatar_id(avatar_id.as_deref().unwrap_or(""));
+        let safe_count = count
+            .unwrap_or(1)
+            .clamp(1, epilod_core::p2p::MAX_REACTION_BURST_COUNT);
+        state
+            .sync
+            .send_reaction(clean_emoji, clean_avatar, safe_count);
         Ok(())
     }
 
@@ -910,6 +1232,7 @@ mod windows_app {
         }
 
         state.autosync.cancel();
+        state.intro_detect.cancel();
         state.mpv.stop_and_clear().await;
         state.sync.disconnect().await;
 
@@ -960,6 +1283,7 @@ mod windows_app {
             mpv: Arc::new(MpvController::new()),
             sync: Arc::new(SyncController::new()),
             autosync: Arc::new(AutoSyncController::new()),
+            intro_detect: Arc::new(IntroDetectController::new()),
             logger,
             rate_guard: Arc::new(Mutex::new(CommandRateGuard::new())),
             network_policy: Arc::new(NetworkSharePolicy::new(false)),
@@ -1103,12 +1427,16 @@ mod windows_app {
                 subtitle_auto_sync,
                 subtitle_two_anchor_sync,
                 subtitle_cancel_auto_sync,
+                detect_video_intro,
+                intro_cancel_detect,
                 window_set_fullscreen,
                 window_is_fullscreen,
+                window_drag_from_maximized,
                 set_allow_network_shares,
                 sync_connect,
                 sync_reconnect,
                 sync_force_resync,
+                sync_set_room_admin,
                 sync_disconnect,
                 sync_switch_backup,
                 sync_set_file,
@@ -1117,6 +1445,12 @@ mod windows_app {
                 sync_user_pause,
                 sync_user_seek,
                 sync_set_scrubbing,
+                sync_set_timeline_transform,
+                sync_nudge_timeline_offset,
+                sync_set_align_mode,
+                sync_align_scene_here,
+                sync_run_p2p_auto_align,
+                sync_send_reaction,
                 scan_media_paths,
                 log_frontend_event,
                 get_logs_snapshot,
@@ -1256,5 +1590,35 @@ mod tests {
         assert_eq!(tracker.on_fullscreen_sample(true), Some(true));
         assert_eq!(tracker.on_fullscreen_sample(true), None);
         assert_eq!(tracker.on_fullscreen_sample(false), Some(false));
+    }
+
+    #[test]
+    fn test_compute_drag_restore_bounds_anchors_cursor_and_shrinks_full_normal_rect() {
+        let mid = compute_drag_restore_bounds(
+            960,
+            18,
+            (0, 0, 1920, 1032),
+            (0, 0, 1920, 1032),
+            (1360, 820),
+            (1024, 640),
+        );
+        assert_eq!(mid.width, 1360);
+        assert_eq!(mid.height, 820);
+        assert_eq!(mid.x, 960 - 680);
+        assert_eq!(mid.y, 0);
+
+        // When saved normal rect covers the whole monitor, shrink smoothly below screen bounds.
+        let shrunk = compute_drag_restore_bounds(
+            1800,
+            24,
+            (0, 0, 1920, 1040),
+            (0, 0, 1920, 1040),
+            (1920, 1040),
+            (1024, 640),
+        );
+        assert!(shrunk.width < 1920 && shrunk.width >= 1024);
+        assert!(shrunk.height < 1040 && shrunk.height >= 640);
+        assert!(shrunk.x + shrunk.width >= 1800);
+        assert!(shrunk.y >= 0);
     }
 }

@@ -1,8 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import {
   mpvSeek,
-  mpvSetMute,
-  mpvSetPause,
   mpvSetSpeed,
   mpvSetSubDelay,
   mpvSetSubStyle,
@@ -10,13 +8,18 @@ import {
   mpvSetVolume,
   safeMpvCall,
 } from "../lib/mpv";
-import { shouldReplayFromStart } from "../lib/playbackEnd";
-import { SeekAccumulator } from "../lib/seekCoalesce";
+import { skipActiveOrUpcomingIntro } from "../lib/introActions";
+import { toggleMutePlayback, togglePlayback, toggleReadyStatus } from "../lib/playerActions";
+import { PRESET_REACTIONS, triggerPartyReaction } from "../lib/reactions";
+import { nextClientSeekSeq, stepSharedRelativeSeek } from "../lib/seekCoalesce";
 import { isTextEntryElement } from "../lib/shortcuts";
-import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
+import {
+  formatControllerLockReason,
+  getControllerLockState,
+  resolveEffectiveUsername,
+} from "../lib/syncController";
 import { canChangePlaybackSpeed } from "../lib/syncSpeedGuard";
-import { canToggleReady, resolveReadyToggleTarget } from "../lib/syncReady";
-import { syncSetReady, syncUserPause, syncUserPlay, syncUserSeek } from "../lib/syncplay";
+import { syncUserSeek } from "../lib/syncplay";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
   formatDelaySigned,
@@ -26,24 +29,24 @@ import {
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
-import { useSubtitleStore } from "../store/useSubtitleStore";
+import { buildSubStyleParams, useSubtitleStore } from "../store/useSubtitleStore";
 import { useSyncStore } from "../store/useSyncStore";
 
 interface UsePlayerShortcutsOptions {
   onToggleFullscreen: () => void;
   onExitFullscreen: () => void;
+  onToggleReactions?: () => void;
 }
 
 export function usePlayerShortcuts({
   onToggleFullscreen,
   onExitFullscreen,
+  onToggleReactions,
 }: UsePlayerShortcutsOptions): void {
-  const seekAccRef = useRef(new SeekAccumulator(450));
-
   useEffect(() => {
     const throttledSeek = createLeadingTrailingThrottle(
-      (target: number, synced: boolean) => {
-        safeMpvCall(mpvSeek(target), "shortcut:mpvSeek");
+      (target: number, synced: boolean, seekSeq: number) => {
+        safeMpvCall(mpvSeek(target, { clientSeekSeq: seekSeq }), "shortcut:mpvSeek");
         if (synced) {
           void syncUserSeek(target);
         }
@@ -107,6 +110,7 @@ export function usePlayerShortcuts({
         syncConnected,
         sync.participants,
         effectiveUsername,
+        sync.roomControl,
       );
 
       if (e.code === "KeyF") {
@@ -117,17 +121,26 @@ export function usePlayerShortcuts({
 
       if (e.code === "KeyR") {
         e.preventDefault();
-        if (!canToggleReady(player.loaded)) {
-          pushNote("info", "Load a local video file before marking Ready.");
+        toggleReadyStatus();
+        return;
+      }
+
+      if (appState.roomCode && appState.reactionsEnabled) {
+        if (e.code === "KeyE") {
+          e.preventDefault();
+          onToggleReactions?.();
           return;
         }
-        const nextReady = resolveReadyToggleTarget(player.loaded, sync.localReady);
-        if (nextReady !== null) {
-          sync.setLocalReady(nextReady);
-          void syncSetReady(nextReady, true);
-          player.flashFeedback(nextReady ? "Ready" : "Not Ready");
+        const presetByKey =
+          PRESET_REACTIONS.find((p) => p.shortcut === e.key) ??
+          (e.code.startsWith("Digit")
+            ? PRESET_REACTIONS[Number(e.code.slice(5)) - 1]
+            : undefined);
+        if (presetByKey) {
+          e.preventDefault();
+          triggerPartyReaction(presetByKey.emoji);
+          return;
         }
-        return;
       }
 
       if (!player.loaded) {
@@ -137,49 +150,7 @@ export function usePlayerShortcuts({
       // Play / Pause
       if (e.code === "Space" || e.code === "KeyK") {
         e.preventDefault();
-        if (ctrlLock.lockedForLocalUser) {
-          pushNote("warn", "Playback is controlled by the room controller.");
-          return;
-        }
-
-        if (
-          shouldReplayFromStart({
-            endedAtEof: player.endedAtEof,
-            paused: player.paused,
-            positionSecs: player.positionSecs,
-            durationSecs: player.durationSecs,
-          })
-        ) {
-          player.setEndedAtEof(false);
-          player.setPositionSecs(0);
-          player.setPaused(false);
-          player.flashFeedback("Replay");
-          void (async () => {
-            try {
-              await safeMpvCall(mpvSeek(0), "shortcut:replaySeek");
-              await safeMpvCall(mpvSetPause(false), "shortcut:replayPlay");
-              if (syncConnected) {
-                await syncUserSeek(0);
-                await syncUserPlay(0);
-              }
-            } catch {
-              // Sync errors handled cleanly or ignored on disconnect.
-            }
-          })();
-          return;
-        }
-
-        const nextPaused = !player.paused;
-        player.setPaused(nextPaused);
-        player.flashFeedback(nextPaused ? "Paused" : "Playing");
-        safeMpvCall(mpvSetPause(nextPaused), "shortcut:mpvSetPause");
-        if (syncConnected) {
-          if (nextPaused) {
-            void syncUserPause(player.positionSecs);
-          } else {
-            void syncUserPlay(player.positionSecs);
-          }
-        }
+        togglePlayback({ showFeedback: true });
         return;
       }
 
@@ -192,19 +163,21 @@ export function usePlayerShortcuts({
 
       if (seekDelta !== 0) {
         e.preventDefault();
-        if (ctrlLock.lockedForLocalUser) {
-          pushNote("warn", "Seeking is restricted to the room controller.");
+        const aligning = syncConnected && sync.alignMode;
+        if (ctrlLock.lockedForLocalUser && !aligning) {
+          pushNote("warn", formatControllerLockReason(ctrlLock));
           return;
         }
-        const target = seekAccRef.current.step(
+        const target = stepSharedRelativeSeek(
           seekDelta,
           player.positionSecs,
           player.durationSecs,
         );
+        const seekSeq = nextClientSeekSeq();
         player.setEndedAtEof(false);
         player.setPositionSecs(target);
         player.flashFeedback(`${seekDelta > 0 ? "+" : ""}${seekDelta}s`);
-        throttledSeek.call(target, syncConnected);
+        throttledSeek.call(target, syncConnected && !aligning, seekSeq);
         return;
       }
 
@@ -222,21 +195,22 @@ export function usePlayerShortcuts({
       // Mute
       if (e.code === "KeyM") {
         e.preventDefault();
-        const nextMuted = !player.muted;
-        player.setMuted(nextMuted);
-        player.flashFeedback(nextMuted ? "Muted" : "Unmuted");
-        safeMpvCall(mpvSetMute(nextMuted), "shortcut:mpvSetMute");
+        toggleMutePlayback();
         return;
       }
 
-      // Speed (Fix 09 locked in synced room)
+      // Speed (Fix 09 locked to calibrated room scale in synced room)
       if (e.code === "BracketLeft" || e.code === "BracketRight") {
         e.preventDefault();
         const delta = e.code === "BracketRight" ? 0.1 : -0.1;
         const nextSpeed = Math.round(Math.max(0.25, Math.min(3.0, player.speed + delta)) * 100) / 100;
-        if (!canChangePlaybackSpeed(syncConnected, nextSpeed)) {
-          pushNote("info", "Playback speed is locked to 1.0× while synced with peers.");
-          player.flashFeedback("Speed locked (1.0×)");
+        const targetSpeed = sync.timelineScale;
+        if (!canChangePlaybackSpeed(syncConnected, nextSpeed, targetSpeed)) {
+          pushNote(
+            "info",
+            `Playback speed is locked to ${targetSpeed.toFixed(targetSpeed === 1 ? 1 : 3)}× while synced with peers.`,
+          );
+          player.flashFeedback(`Speed locked (${targetSpeed.toFixed(targetSpeed === 1 ? 1 : 3)}×)`);
           return;
         }
         player.setSpeed(nextSpeed);
@@ -245,22 +219,22 @@ export function usePlayerShortcuts({
         return;
       }
 
-      // Subtitle visibility
+      // Skip detected intro
+      if (e.code === "KeyI") {
+        e.preventDefault();
+        if (useAppStore.getState().skipIntroMode !== "off") {
+          void skipActiveOrUpcomingIntro();
+        }
+        return;
+      }
+
       if (e.code === "KeyV") {
         e.preventDefault();
         const nextVis = !sub.visible;
         sub.setVisible(nextVis);
         player.flashFeedback(nextVis ? "Subtitles On" : "Subtitles Off");
         safeMpvCall(
-          mpvSetSubStyle({
-            font: sub.font,
-            fontSize: sub.fontSize,
-            color: sub.color,
-            borderSize: sub.borderSize,
-            pos: sub.pos,
-            visible: nextVis,
-            overrideAss: sub.overrideAssStyle,
-          }),
+          mpvSetSubStyle(buildSubStyleParams(sub, { visible: nextVis })),
           "shortcut:mpvSetSubStyle",
         );
         return;
@@ -311,5 +285,5 @@ export function usePlayerShortcuts({
       throttledSeek.cancel();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [onExitFullscreen, onToggleFullscreen]);
+  }, [onExitFullscreen, onToggleFullscreen, onToggleReactions]);
 }

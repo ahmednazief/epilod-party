@@ -5,6 +5,7 @@ import { LogoMark } from "./ui/LogoMark";
 
 interface ViewportPlaceholderProps {
   loaded: boolean;
+  isLoading?: boolean;
   isDragActive: boolean;
   playerError: string | null;
   clearanceBottom?: "none" | "bar" | "extended";
@@ -15,6 +16,7 @@ interface ViewportPlaceholderProps {
 
 export function ViewportPlaceholder({
   loaded,
+  isLoading = false,
   isDragActive,
   playerError,
   clearanceBottom = "bar",
@@ -23,6 +25,7 @@ export function ViewportPlaceholder({
   onRetryPlayer,
 }: ViewportPlaceholderProps) {
   if (loaded && !playerError) return null;
+  if (isLoading && !playerError && !isDragActive) return null;
 
   const offsetClass =
     clearanceBottom === "extended"
@@ -39,7 +42,7 @@ export function ViewportPlaceholder({
       </div>
       {playerError ? (
         <div
-          className={`ep-glass-sheet anim-fade-slide-up relative z-10 max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5 transition-transform duration-200 ${offsetClass}`}
+          className={`ep-glass-sheet anim-fade-slide-up relative z-10 max-w-md w-full rounded-[24px] p-7 text-center flex flex-col items-center gap-3.5 transition-[translate,scale,transform] duration-200 ${offsetClass}`}
         >
           <div className="h-11 w-11 rounded-full bg-bad/15 text-bad flex items-center justify-center">
             <AppAlertIcon variant="warn" size={20} />
@@ -61,7 +64,7 @@ export function ViewportPlaceholder({
         </div>
       ) : (
         <div
-          className={`relative z-10 max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-[transform,background-color] duration-200 ${offsetClass} ${
+          className={`relative z-10 max-w-md w-full rounded-[26px] p-8 text-center flex flex-col items-center gap-4 transition-[translate,scale,transform,background-color] duration-200 ${offsetClass} ${
             isDragActive ? "ep-glass-sheet scale-[1.02]" : ""
           }`}
         >

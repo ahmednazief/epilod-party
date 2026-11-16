@@ -171,3 +171,90 @@ test("useAppStore soundEffectsEnabled defaults true and SettingsModal exposes Su
   );
   assert.equal(settingsSrc.includes("Subtle Party Sound Cues"), true);
 });
+
+test("playReactionSoundCue synthesizes throttled subtle liquid pops, ducks during playback, and respects soundEffectsEnabled", async () => {
+  const { playReactionSoundCue } = await bundleAndImport<typeof import("../src/lib/soundEffects")>(
+    "src/lib/soundEffects.ts",
+  );
+  const reactionsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/reactions.ts"), "utf8");
+  assert.equal(reactionsSrc.includes("playReactionSoundCue"), true);
+  assert.equal(reactionsSrc.includes("soundMode"), true);
+
+  let oscStarts = 0;
+  const recordedPeaks: number[] = [];
+  const recordedCutoffs: number[] = [];
+
+  class MockAudioContext {
+    state = "running";
+    currentTime = 1.0;
+    destination = {};
+    createBiquadFilter() {
+      return {
+        type: "lowpass",
+        frequency: {
+          setValueAtTime: (val: number) => {
+            recordedCutoffs.push(val);
+          },
+        },
+        Q: { setValueAtTime: () => undefined },
+        connect: () => undefined,
+      };
+    }
+    createGain() {
+      return {
+        gain: {
+          setValueAtTime: () => undefined,
+          exponentialRampToValueAtTime: (val: number) => {
+            if (val > 0.001) recordedPeaks.push(val);
+          },
+        },
+        connect: () => undefined,
+      };
+    }
+    createOscillator() {
+      return {
+        type: "sine",
+        frequency: {
+          setValueAtTime: () => undefined,
+          exponentialRampToValueAtTime: () => undefined,
+        },
+        connect: () => undefined,
+        start: () => {
+          oscStarts += 1;
+        },
+        stop: () => undefined,
+      };
+    }
+  }
+
+  const prevWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = { AudioContext: MockAudioContext };
+
+  try {
+    playReactionSoundCue("❤️", { moviePlaying: false });
+    assert.equal(oscStarts, 2, "primary click should create fundamental + crystal overtone");
+    const idlePeak = recordedPeaks[0];
+    const idleCutoff = recordedCutoffs[0];
+    assert.ok(idlePeak < 0.04, "idle reaction SFX must remain subtle");
+
+    // Immediate hold repeat within 145ms throttle should be suppressed
+    playReactionSoundCue("❤️", { moviePlaying: false, repeat: true });
+    assert.equal(oscStarts, 2);
+
+    // Wait >30ms for manual click while movie is actively playing -> ducked peak & cutoff
+    await new Promise((r) => setTimeout(r, 40));
+    playReactionSoundCue("😱", { moviePlaying: true });
+    assert.equal(oscStarts, 4);
+    assert.ok(recordedPeaks[recordedPeaks.length - 1] < idlePeak, "playback should duck SFX gain");
+    assert.ok(
+      recordedCutoffs[recordedCutoffs.length - 1] < idleCutoff,
+      "playback should soften lowpass cutoff",
+    );
+  } finally {
+    if (prevWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = prevWindow;
+    }
+  }
+});
