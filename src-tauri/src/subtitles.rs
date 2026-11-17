@@ -4,14 +4,13 @@ use epilod_core::opensubtitles::{
     build_cached_subtitle_filename, build_search_query_string, compute_opensubtitles_file_hash,
     normalize_subtitle_lang_code, parse_cinemeta_search_results, parse_imdb_suggestion_results,
     parse_media_filename, parse_opensubtitles_v1_response, parse_preferred_languages,
-    parse_stremio_subtitles_response, rank_and_filter_candidates,
-    sanitize_subtitle_download_bytes, short_subtitle_cache_tag, subtitle_lang_display_name,
-    subtitle_lang_to_iso1, DownloadRequest, DownloadResponse, ImdbMatch, SearchParams,
-    SubtitleSearchCandidate, MAX_SUBTITLE_ARCHIVE_BYTES,
+    parse_stremio_subtitles_response, rank_and_filter_candidates, sanitize_subtitle_download_bytes,
+    short_subtitle_cache_tag, subtitle_lang_display_name, subtitle_lang_to_iso1, DownloadRequest,
+    DownloadResponse, ImdbMatch, SearchParams, SubtitleSearchCandidate, MAX_SUBTITLE_ARCHIVE_BYTES,
 };
 use epilod_core::updater::{
-    find_http_header_end, parse_http_head, resolve_redirect_url, validate_https_url, ChunkedDecoder,
-    MAX_REDIRECTS,
+    find_http_header_end, parse_http_head, resolve_redirect_url, validate_https_url,
+    ChunkedDecoder, MAX_REDIRECTS,
 };
 use epilod_core::validation::{validate_existing_local_file_with_options, LocalPathOptions};
 use native_tls::TlsConnector as NativeTlsConnector;
@@ -374,7 +373,10 @@ async fn query_stremio_subtitles_for_match(
     }
     if let Some(fname) = file_name {
         if !fname.trim().is_empty() {
-            extra_parts.push(format!("filename={}", percent_encode_component(fname.trim())));
+            extra_parts.push(format!(
+                "filename={}",
+                percent_encode_component(fname.trim())
+            ));
         }
     }
 
@@ -460,7 +462,9 @@ async fn query_opensubtitles_official_api(
 }
 
 fn prune_subtitle_cache(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
@@ -544,7 +548,9 @@ pub async fn search_online_subtitles_impl(
 
     let hash_task = {
         let vp = validated_video.clone();
-        tokio::task::spawn_blocking(move || vp.and_then(|p| compute_opensubtitles_file_hash(&p).ok()))
+        tokio::task::spawn_blocking(move || {
+            vp.and_then(|p| compute_opensubtitles_file_hash(&p).ok())
+        })
     };
 
     let media_hint = req
@@ -694,8 +700,11 @@ pub async fn download_online_subtitle_impl(
             .as_deref()
             .map(str::trim)
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| "OpenSubtitles API key is required for direct file_id downloads.".to_string())?;
-        let payload = serde_json::to_vec(&DownloadRequest { file_id }).map_err(|e| e.to_string())?;
+            .ok_or_else(|| {
+                "OpenSubtitles API key is required for direct file_id downloads.".to_string()
+            })?;
+        let payload =
+            serde_json::to_vec(&DownloadRequest { file_id }).map_err(|e| e.to_string())?;
         let headers = [
             ("Api-Key", key),
             ("User-Agent", OS_API_USER_AGENT),
@@ -747,8 +756,7 @@ pub async fn download_online_subtitle_impl(
     );
     let dest_path = cache_dir.join(&cached_name);
     let tmp_path = cache_dir.join(format!("{cached_name}.part"));
-    fs::write(&tmp_path, &clean_utf8)
-        .map_err(|e| format!("Failed saving subtitle file: {e}"))?;
+    fs::write(&tmp_path, &clean_utf8).map_err(|e| format!("Failed saving subtitle file: {e}"))?;
     if dest_path.exists() {
         let _ = fs::remove_file(&dest_path);
     }
@@ -829,10 +837,7 @@ mod tests {
 
     #[test]
     fn test_percent_encode_component_preserves_unreserved() {
-        assert_eq!(
-            percent_encode_component("Breaking Bad"),
-            "Breaking%20Bad"
-        );
+        assert_eq!(percent_encode_component("Breaking Bad"), "Breaking%20Bad");
         assert_eq!(
             percent_encode_component("Inception.2010.mkv"),
             "Inception.2010.mkv"
@@ -864,7 +869,10 @@ mod tests {
         assert!(res.total_found > 0);
         let dl = res.downloaded.expect("downloaded dto present");
         let saved = fs::read_to_string(&dl.subtitle_path).expect("saved utf-8 srt readable");
-        assert!(saved.contains("-->"), "downloaded file should contain SRT cues");
+        assert!(
+            saved.contains("-->"),
+            "downloaded file should contain SRT cues"
+        );
         let _ = fs::remove_file(&dl.subtitle_path);
     }
 }

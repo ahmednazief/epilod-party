@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { AspectMode, MpvBackdropFrame, MpvTrack } from "../lib/mpv";
+import {
+  clearLastCleanFreezeFrame,
+  type AspectMode,
+  type MpvBackdropFrame,
+  type MpvTrack,
+} from "../lib/mpv";
 
 export interface FeedbackBadge {
   id: number;
@@ -176,6 +181,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   },
 
   resetForNewFile: () => {
+    clearLastCleanFreezeFrame();
     if (seekCueTimer) {
       clearTimeout(seekCueTimer);
       seekCueTimer = null;
@@ -199,6 +205,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   },
 
   reset: () => {
+    clearLastCleanFreezeFrame();
     if (seekCueTimer) {
       clearTimeout(seekCueTimer);
       seekCueTimer = null;

@@ -20,15 +20,28 @@ pub enum RoomCodeError {
     Rng,
 }
 
-/// New random 6-digit numeric invite code (e.g. `482915`) from the OS CSPRNG.
+/// New random 6-digit numeric invite code (e.g. `482915`) from the OS CSPRNG
+/// using rejection sampling so all 1,000,000 codes are uniformly distributed.
 pub fn generate() -> Result<String, RoomCodeError> {
-    let mut bytes = [0u8; 6];
-    getrandom::getrandom(&mut bytes).map_err(|_| RoomCodeError::Rng)?;
     let mut out = String::with_capacity(6);
-    for b in bytes.iter() {
-        out.push((b'0' + (b % 10)) as char);
+    let mut bytes = [0u8; 16];
+    while out.len() < 6 {
+        getrandom::getrandom(&mut bytes).map_err(|_| RoomCodeError::Rng)?;
+        for &b in &bytes {
+            if b < 250 {
+                out.push((b'0' + (b % 10)) as char);
+                if out.len() == 6 {
+                    break;
+                }
+            }
+        }
     }
     Ok(out)
+}
+
+/// Returns true if `input` normalizes to a 6-digit numeric invite code.
+pub fn is_six_digit_code(input: &str) -> bool {
+    normalize(input).is_ok_and(|c| c.len() == 6 && c.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 /// Accepts 6-digit numeric OTP codes (with spaces/hyphens stripped) returning `DDDDDD`,
@@ -203,5 +216,10 @@ mod tests {
         assert!(a.starts_with("ep-"));
         assert_eq!(a.len(), 23);
         assert_ne!(a, syncplay_room_name("482916").unwrap());
+
+        assert!(is_six_digit_code("482915"));
+        assert!(is_six_digit_code("482 915"));
+        assert!(!is_six_digit_code("K7M4-P9X2-W8N5"));
+        assert!(!is_six_digit_code("MovieNight"));
     }
 }

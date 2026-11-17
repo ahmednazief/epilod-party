@@ -170,7 +170,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
       </div>
 
       <div
-        className="flex-1 h-full min-w-8"
+        className="flex-1 h-full min-w-2"
         aria-hidden="true"
       />
 
@@ -186,7 +186,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
                 : `Updating${availableRelease ? ` v${availableRelease.version}` : ""} (${rawPercent}%)`
             }
             title={updateProgress?.message || "Downloading update in background"}
-            className="ep-glass-pill ep-update-pill ep-press relative overflow-hidden h-7 pl-2 pr-1.5 rounded-full inline-flex items-center gap-2 text-xs font-medium text-white cursor-pointer"
+            className="ep-glass-pill ep-update-pill ep-press relative overflow-hidden h-7 pl-2 pr-2.5 rounded-full inline-flex items-center gap-2 text-xs font-medium text-white cursor-pointer"
           >
             <AppUpdateProgressIcon
               progress={progressFraction}
@@ -195,9 +195,21 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
               className="shrink-0"
             />
             <span className="text-[11.5px] font-medium text-white whitespace-nowrap">
-              {isVerifying
-                ? "Verifying Update"
-                : `Updating${availableRelease ? ` v${availableRelease.version}` : ""}`}
+              {isVerifying ? (
+                <>
+                  <span className="hidden sm:inline">Verifying Update</span>
+                  <span className="sm:hidden">Verifying</span>
+                </>
+              ) : (
+                <>
+                  <span className="hidden sm:inline">
+                    {`Updating${availableRelease ? ` v${availableRelease.version}` : ""}`}
+                  </span>
+                  <span className="sm:hidden">
+                    {availableRelease ? `v${availableRelease.version}` : "Updating"}
+                  </span>
+                </>
+              )}
             </span>
             <span
               className="hidden sm:inline-flex h-1.5 w-14 rounded-full bg-white/12 overflow-hidden shrink-0"
@@ -208,14 +220,14 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
                 style={{ transform: `scaleX(${isVerifying ? 1 : progressFraction})` }}
               />
             </span>
-            <span className="ep-update-pct-badge num text-[11px] font-semibold text-accent-soft px-2 py-0.5 rounded-full shrink-0">
+            <span className="num text-[11px] font-semibold text-accent-soft shrink-0">
               {isVerifying ? 100 : rawPercent}%
             </span>
           </button>
         ) : availability === "downloadedReady" && availableRelease ? (
           <div
             data-glass-region={glassControls ? "true" : undefined}
-            className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-1 rounded-full inline-flex items-center gap-2"
+            className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-[2px] rounded-full inline-flex items-center gap-2"
           >
             <button
               type="button"
@@ -224,9 +236,8 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
               className="ep-press inline-flex items-center gap-1.5 text-[11.5px] font-medium text-white hover:text-accent-soft cursor-pointer"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-ok animate-pulse shrink-0" />
-              <span className="whitespace-nowrap">Update Ready · v{availableRelease.version}</span>
-              <span className="ep-update-pct-badge num text-[10.5px] font-semibold text-ok px-1.5 py-0.5 rounded-full shrink-0">
-                100%
+              <span className="whitespace-nowrap">
+                <span className="hidden sm:inline">Update Ready · </span>v{availableRelease.version}
               </span>
             </button>
             <button
@@ -243,7 +254,7 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
         ) : availability === "updateAvailable" && availableRelease ? (
           <div
             data-glass-region={glassControls ? "true" : undefined}
-            className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-1 rounded-full inline-flex items-center gap-2"
+            className="ep-glass-pill ep-update-pill h-7 pl-2.5 pr-[2px] rounded-full inline-flex items-center gap-2"
           >
             <button
               type="button"
@@ -253,14 +264,22 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
             >
               <AppDownloadIcon size={14} className="text-accent-soft shrink-0" />
               <span className="whitespace-nowrap">
-                {isUpdatePaused
-                  ? `Update Paused · v${availableRelease.version}`
-                  : updateError
-                    ? `Update Retry · v${availableRelease.version}`
-                    : `Update Available · v${availableRelease.version}`}
+                {isUpdatePaused ? (
+                  <>
+                    <span className="hidden sm:inline">Update Paused · </span>v{availableRelease.version}
+                  </>
+                ) : updateError ? (
+                  <>
+                    <span className="hidden sm:inline">Update Retry · </span>v{availableRelease.version}
+                  </>
+                ) : (
+                  <>
+                    <span className="hidden sm:inline">Update Available · </span>v{availableRelease.version}
+                  </>
+                )}
               </span>
               {isUpdatePaused && rawPercent > 0 && (
-                <span className="ep-update-pct-badge num text-[10.5px] font-semibold text-accent-soft px-1.5 py-0.5 rounded-full shrink-0">
+                <span className="num text-[11px] font-semibold text-accent-soft shrink-0">
                   {rawPercent}%
                 </span>
               )}

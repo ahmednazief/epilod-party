@@ -1279,3 +1279,175 @@ export function PlayerSeekCueIcon({
     </svg>
   );
 }
+
+/**
+ * Custom sculpted liquid-glass chat bubble icon for the party play bar.
+ */
+export function PlayerChatIcon({
+  size = 19,
+  active = false,
+  className = "",
+}: PlayerIconProps & { active?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const gradId = `ep-chat-fill-${uid}`;
+  const sheenId = `ep-chat-sheen-${uid}`;
+
+  const bubblePath =
+    "M5.1 5.4H18.9C20.06 5.4 21 6.34 21 7.5V14.7C21 15.86 20.06 16.8 18.9 16.8H10.65L6.55 19.85C6.02 20.24 5.28 19.86 5.28 19.2V16.8H5.1C3.94 16.8 3 15.86 3 14.7V7.5C3 6.34 3.94 5.4 5.1 5.4Z";
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={gradId} x1="4" y1="5" x2="20" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.96" />
+          <stop offset="52%" stopColor="#E9D5FF" stopOpacity="0.88" />
+          <stop offset="100%" stopColor="#A78BFA" stopOpacity="0.92" />
+        </linearGradient>
+        <linearGradient id={sheenId} x1="4" y1="5" x2="18" y2="14" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.32" />
+          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {active ? (
+        <>
+          <path d={bubblePath} fill={`url(#${gradId})`} />
+          <path d={bubblePath} fill={`url(#${sheenId})`} />
+          <circle cx="8.6" cy="11.1" r="1.05" fill="#18122B" />
+          <circle cx="12" cy="11.1" r="1.05" fill="#18122B" />
+          <circle cx="15.4" cy="11.1" r="1.05" fill="#18122B" />
+        </>
+      ) : (
+        <>
+          <path
+            d={bubblePath}
+            fill="currentColor"
+            fillOpacity="0.06"
+            stroke="currentColor"
+            strokeWidth="1.65"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <circle cx="8.6" cy="11.1" r="0.95" fill="currentColor" />
+          <circle cx="12" cy="11.1" r="0.95" fill="currentColor" />
+          <circle cx="15.4" cy="11.1" r="0.95" fill="currentColor" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Crisp faceted paper-plane send glyph for the liquid-glass composer orb.
+ */
+export function PlayerSendIcon({ size = 18, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Minimal curved reply glyph for message bubble hover actions.
+ */
+export function PlayerReplyIcon({ size = 14, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M9 7L4 12L9 17M4 12H15C17.76 12 20 14.24 20 17V18"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Compact clock icon for tagging current playback timestamp in chat.
+ */
+export function PlayerClockIcon({ size = 14, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.75" />
+      <path
+        d="M12 7.75V12L14.9 13.85"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Compact pencil edit icon for editing own chat messages.
+ */
+export function PlayerEditIcon({ size = 13, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M4.5 19.5L8.2 18.6L18.4 8.4C19.2 7.6 19.2 6.3 18.4 5.5C17.6 4.7 16.3 4.7 15.5 5.5L5.3 15.7L4.5 19.5Z"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Clean emoji smile icon for the chat composer.
+ */
+export function PlayerSmileIcon({ size = 16, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.65" />
+      <circle cx="9.25" cy="10.25" r="1.05" fill="currentColor" />
+      <circle cx="14.75" cy="10.25" r="1.05" fill="currentColor" />
+      <path
+        d="M8.75 14.1C9.55 15.4 10.7 16.05 12 16.05C13.3 16.05 14.45 15.4 15.25 14.1"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Minimal horizontal ellipsis icon for compact header menus.
+ */
+export function PlayerMoreIcon({ size = 16, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle cx="6.5" cy="12" r="1.45" fill="currentColor" />
+      <circle cx="12" cy="12" r="1.45" fill="currentColor" />
+      <circle cx="17.5" cy="12" r="1.45" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * Rightward dock-collapse glyph (distinguishable from the window Close X directly above).
+ */
+export function PlayerCollapseRightIcon({ size = 15, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path d="M5.5 12H14" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      <path
+        d="M10.5 8.2L14.3 12L10.5 15.8"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M18 5.5V18.5" stroke="currentColor" strokeOpacity="0.85" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}

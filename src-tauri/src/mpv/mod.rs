@@ -4,20 +4,24 @@ pub mod hwnd;
 pub mod ipc;
 pub mod process;
 
-use epilod_core::mpv_ipc::{seek_absolute_cmd, seek_keyframes_cmd, PendingSeekTracker};
+use epilod_core::mpv_ipc::{
+    screenshot_to_file_cmd, seek_absolute_cmd, seek_keyframes_cmd, PendingSeekTracker,
+};
 use epilod_core::syncplay::PlayerSnapshot;
 use hwnd::{
     capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd, is_child_window_alive,
     mark_child_closing_and_hide, resize_child_hwnd, set_child_visible, PendingResize, PhysicalRect,
 };
+use ipc::PendingReplyMap;
 use process::{resolve_fonts_dir, resolve_mpv_exe, spawn_mpv};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 static MPV_PIPE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -53,6 +57,7 @@ pub struct MpvController {
     loading_media: Arc<AtomicBool>,
     deferred_load: Arc<Mutex<DeferredLoadState>>,
     pending_seek: Arc<Mutex<PendingSeekTracker>>,
+    pending_replies: PendingReplyMap,
     client_seek_seq: Arc<AtomicU64>,
     pending_resize: Arc<PendingResize>,
     lifecycle_lock: AsyncMutex<()>,
@@ -63,6 +68,7 @@ pub struct MpvController {
     ui_visible: Arc<AtomicBool>,
     last_app: Arc<Mutex<Option<AppHandle>>>,
     capture_busy: Arc<AtomicBool>,
+    freeze_capture_busy: Arc<AtomicBool>,
 }
 
 impl Default for MpvController {
@@ -79,6 +85,7 @@ impl MpvController {
             loading_media: Arc::new(AtomicBool::new(false)),
             deferred_load: Arc::new(Mutex::new(DeferredLoadState::default())),
             pending_seek: Arc::new(Mutex::new(PendingSeekTracker::new())),
+            pending_replies: Arc::new(Mutex::new(HashMap::new())),
             client_seek_seq: Arc::new(AtomicU64::new(0)),
             pending_resize: Arc::new(PendingResize::default()),
             lifecycle_lock: AsyncMutex::new(()),
@@ -89,6 +96,7 @@ impl MpvController {
             ui_visible: Arc::new(AtomicBool::new(true)),
             last_app: Arc::new(Mutex::new(None)),
             capture_busy: Arc::new(AtomicBool::new(false)),
+            freeze_capture_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -149,6 +157,10 @@ impl MpvController {
             self.loading_media.store(true, Ordering::SeqCst);
         }
         self.pending_seek
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.pending_replies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -321,6 +333,10 @@ impl MpvController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.pending_replies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         let app_for_paths = app.clone();
         let (mpv_exe, fonts_dir) = tokio::task::spawn_blocking(move || {
@@ -383,6 +399,7 @@ impl MpvController {
         let loading_clone = Arc::clone(&self.loading_media);
         let deferred_load_clone = Arc::clone(&self.deferred_load);
         let pending_seek_clone = Arc::clone(&self.pending_seek);
+        let pending_replies_clone = Arc::clone(&self.pending_replies);
         let client_seek_seq_clone = Arc::clone(&self.client_seek_seq);
         let pending_resize_clone = Arc::clone(&self.pending_resize);
         let shutdown_flag = Arc::clone(&self.shutting_down);
@@ -398,6 +415,7 @@ impl MpvController {
                 Arc::clone(&loading_clone),
                 Arc::clone(&deferred_load_clone),
                 Arc::clone(&pending_seek_clone),
+                Arc::clone(&pending_replies_clone),
                 Arc::clone(&client_seek_seq_clone),
                 move || {
                     if let Ok(mut guard) = runtime_for_probe.try_lock() {
@@ -583,6 +601,10 @@ impl MpvController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.pending_replies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let taken = self
             .runtime
             .lock()
@@ -646,6 +668,88 @@ impl MpvController {
         })
         .await
         .map_err(|e| format!("Backdrop capture task failed: {e}"))?
+    }
+
+    /// Captures an uncropped, UI-chrome-free video frame directly from `mpv` via `screenshot-to-file`
+    /// JPEG so layout freeze transitions (`ChatSidebar`, `SettingsModal`, drag resize) scale smoothly
+    /// at full clarity with zero duplicate TitleBar/Play Bar artifacts and zero HWND letterbox bars.
+    pub async fn capture_clean_freeze_frame(&self) -> Result<Vec<u8>, String> {
+        if self.shutting_down.load(Ordering::SeqCst)
+            || !self.has_media.load(Ordering::SeqCst)
+            || self.loading_media.load(Ordering::SeqCst)
+        {
+            return Ok(Vec::new());
+        }
+        if self
+            .freeze_capture_busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Ok(Vec::new());
+        }
+
+        struct BusyReset(Arc<AtomicBool>);
+        impl Drop for BusyReset {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _busy_guard = BusyReset(Arc::clone(&self.freeze_capture_busy));
+
+        struct ReplyCleanup {
+            map: PendingReplyMap,
+            req_id: u64,
+        }
+        impl Drop for ReplyCleanup {
+            fn drop(&mut self) {
+                self.map
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&self.req_id);
+            }
+        }
+
+        struct TempFileCleanup(std::path::PathBuf);
+        impl Drop for TempFileCleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let req_id = self.next_request_id();
+        let temp_path =
+            std::env::temp_dir().join(format!("epilod_freeze_{}_{req_id}.jpg", std::process::id()));
+        let _file_cleanup = TempFileCleanup(temp_path.clone());
+        let Some(path_str) = temp_path.to_str() else {
+            return Ok(Vec::new());
+        };
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut map = self
+                .pending_replies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.insert(req_id, tx);
+        }
+        let _cleanup = ReplyCleanup {
+            map: Arc::clone(&self.pending_replies),
+            req_id,
+        };
+
+        let cmd = screenshot_to_file_cmd(req_id, path_str, true);
+        if self.send_command(cmd).is_err() {
+            return Ok(Vec::new());
+        }
+
+        let Ok(Ok(reply)) = tokio::time::timeout(Duration::from_millis(350), rx).await else {
+            return Ok(Vec::new());
+        };
+        if reply.error != "success" && !reply.error.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(tokio::fs::read(&temp_path).await.unwrap_or_default())
     }
 }
 

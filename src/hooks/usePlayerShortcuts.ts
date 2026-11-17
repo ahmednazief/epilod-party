@@ -36,12 +36,14 @@ interface UsePlayerShortcutsOptions {
   onToggleFullscreen: () => void;
   onExitFullscreen: () => void;
   onToggleReactions?: () => void;
+  onToggleChat?: () => void;
 }
 
 export function usePlayerShortcuts({
   onToggleFullscreen,
   onExitFullscreen,
   onToggleReactions,
+  onToggleChat,
 }: UsePlayerShortcutsOptions): void {
   useEffect(() => {
     const throttledSeek = createLeadingTrailingThrottle(
@@ -122,6 +124,12 @@ export function usePlayerShortcuts({
       if (e.code === "KeyR") {
         e.preventDefault();
         toggleReadyStatus();
+        return;
+      }
+
+      if (appState.roomCode && e.code === "KeyC") {
+        e.preventDefault();
+        onToggleChat?.();
         return;
       }
 
@@ -294,5 +302,5 @@ export function usePlayerShortcuts({
       throttledSeek.cancel();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [onExitFullscreen, onToggleFullscreen, onToggleReactions]);
+  }, [onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleReactions]);
 }

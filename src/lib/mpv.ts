@@ -138,10 +138,12 @@ export async function mpvGetSurfaceState(): Promise<MpvSurfaceState> {
 export interface MpvBackdropFrame {
   width: number;
   height: number;
-  rgba: Uint8ClampedArray;
+  rgba?: Uint8ClampedArray;
+  bitmap?: ImageBitmap;
 }
 
 let lastCapturedBackdropFrame: MpvBackdropFrame | null = null;
+let lastCleanFreezeFrame: MpvBackdropFrame | null = null;
 
 export function getLastCapturedBackdropFrame(): MpvBackdropFrame | null {
   return lastCapturedBackdropFrame;
@@ -151,14 +153,15 @@ export function clearLastCapturedBackdropFrame(): void {
   lastCapturedBackdropFrame = null;
 }
 
-export async function mpvBackdropFrame(
-  maxWidth = 240,
-  maxHeight = 135,
-): Promise<MpvBackdropFrame | null> {
-  const raw = await safeInvoke<ArrayBuffer | Uint8Array | number[]>("mpv_backdrop_frame", {
-    maxWidth,
-    maxHeight,
-  });
+export function getLastCleanFreezeFrame(): MpvBackdropFrame | null {
+  return lastCleanFreezeFrame;
+}
+
+export function clearLastCleanFreezeFrame(): void {
+  lastCleanFreezeFrame = null;
+}
+
+function decodePackedRgbaResponse(raw: unknown): MpvBackdropFrame | null {
   const bytes =
     raw instanceof ArrayBuffer
       ? new Uint8Array(raw)
@@ -177,25 +180,77 @@ export async function mpvBackdropFrame(
   if (width <= 0 || height <= 0 || bytes.byteLength < expected) {
     return null;
   }
-  const frame: MpvBackdropFrame = {
+  return {
     width,
     height,
     rgba: new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 4, width * height * 4),
   };
+}
+
+export async function mpvBackdropFrame(
+  maxWidth = 240,
+  maxHeight = 135,
+): Promise<MpvBackdropFrame | null> {
+  const raw = await safeInvoke<ArrayBuffer | Uint8Array | number[]>("mpv_backdrop_frame", {
+    maxWidth,
+    maxHeight,
+  });
+  const frame = decodePackedRgbaResponse(raw);
+  if (!frame) return null;
   lastCapturedBackdropFrame = frame;
   return frame;
 }
 
-export async function captureFrozenBackdropFrame(): Promise<MpvBackdropFrame | null> {
-  if (!isDesktop()) return lastCapturedBackdropFrame;
+export async function mpvCaptureFreezeFrame(
+  maxWidth = 1280,
+  maxHeight = 720,
+): Promise<MpvBackdropFrame | null> {
+  const raw = await safeInvoke<ArrayBuffer | Uint8Array | number[]>("mpv_capture_freeze_frame");
+  const bytes =
+    raw instanceof ArrayBuffer
+      ? new Uint8Array(raw)
+      : raw instanceof Uint8Array
+        ? new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+        : Array.isArray(raw)
+          ? Uint8Array.from(raw)
+          : null;
+  if (!bytes || bytes.byteLength < 16 || typeof createImageBitmap !== "function") {
+    return null;
+  }
+  // Copy into a standalone ArrayBuffer slice for Blob/createImageBitmap safety
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const blob = new Blob([copy], { type: "image/jpeg" });
+  const bitmap = await createImageBitmap(blob);
+  if (!bitmap || bitmap.width <= 0 || bitmap.height <= 0) {
+    bitmap?.close?.();
+    return null;
+  }
+  const scale = Math.min(1, maxWidth / bitmap.width, maxHeight / bitmap.height);
+  const frame: MpvBackdropFrame = {
+    width: Math.max(1, Math.round(bitmap.width * scale)),
+    height: Math.max(1, Math.round(bitmap.height * scale)),
+    bitmap,
+  };
+  lastCleanFreezeFrame = frame;
+  return frame;
+}
+
+export async function captureCleanFrozenFrame(
+  maxWidth = 1280,
+  maxHeight = 720,
+): Promise<MpvBackdropFrame | null> {
+  if (!isDesktop()) return lastCleanFreezeFrame;
   try {
-    const snap = await mpvBackdropFrame(480, 270);
+    const snap = await mpvCaptureFreezeFrame(maxWidth, maxHeight);
     if (snap) return snap;
   } catch {
-    // Fall back to latest cached frame if capture fails.
+    // Fall back only to the latest clean freeze cache (never PrintWindow chrome snapshots).
   }
-  return lastCapturedBackdropFrame;
+  return lastCleanFreezeFrame;
 }
+
+export const captureFrozenBackdropFrame = captureCleanFrozenFrame;
 
 export async function withHiddenMpvForDialog<T>(
   mpvActive: boolean,
@@ -207,10 +262,10 @@ export async function withHiddenMpvForDialog<T>(
 ): Promise<T> {
   if (mpvActive) {
     if (options.onFreezeFrame) {
-      if (lastCapturedBackdropFrame) {
-        options.onFreezeFrame(lastCapturedBackdropFrame);
+      if (lastCleanFreezeFrame) {
+        options.onFreezeFrame(lastCleanFreezeFrame);
       }
-      const snap = await captureFrozenBackdropFrame();
+      const snap = await captureCleanFrozenFrame();
       if (snap) {
         options.onFreezeFrame(snap);
       }
@@ -232,6 +287,7 @@ export async function withHiddenMpvForDialog<T>(
 
 export async function mpvLoad(path: string): Promise<void> {
   lastCapturedBackdropFrame = null;
+  lastCleanFreezeFrame = null;
   await safeInvoke("mpv_load", { path });
 }
 
@@ -245,6 +301,7 @@ export interface MpvSeekOptions {
 }
 
 export async function mpvSeek(seconds: number, options?: MpvSeekOptions): Promise<void> {
+  lastCleanFreezeFrame = null;
   const clientSeekSeq = options?.clientSeekSeq ?? nextClientSeekSeq();
   await safeInvoke("mpv_seek", {
     seconds,
@@ -255,6 +312,7 @@ export async function mpvSeek(seconds: number, options?: MpvSeekOptions): Promis
 
 export async function mpvStop(): Promise<void> {
   lastCapturedBackdropFrame = null;
+  lastCleanFreezeFrame = null;
   await safeInvoke("mpv_stop");
 }
 
@@ -278,11 +336,20 @@ export async function mpvSetAspectMode(aspect: AspectMode): Promise<void> {
   await safeInvoke("mpv_set_aspect_mode", { aspect });
 }
 
+export async function mpvSetVideoMarginRight(ratio: number): Promise<void> {
+  await safeInvoke("mpv_set_video_margin_right", { ratio });
+}
+
 export async function mpvAddSubtitle(
   path: string,
   encodingHint: SubtitleEncodingHint = "auto",
+  displayTitle?: string | null,
 ): Promise<void> {
-  await safeInvoke("mpv_add_subtitle", { path, encodingHint });
+  await safeInvoke("mpv_add_subtitle", {
+    path,
+    encodingHint,
+    displayTitle: displayTitle ?? null,
+  });
 }
 
 export async function mpvRemoveSubtitle(sid: number): Promise<void> {

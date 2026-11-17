@@ -32,6 +32,7 @@ import {
 } from "../lib/syncReady";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { useAppStore } from "../store/useAppStore";
+import { useChatStore } from "../store/useChatStore";
 import { getEffectiveIntroSegments, useIntroStore } from "../store/useIntroStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -41,6 +42,7 @@ import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
 import {
   PlayerAudioIcon,
   PlayerCaptionsIcon,
+  PlayerChatIcon,
   PlayerEpisodesIcon,
   PlayerFullscreenIcon,
   PlayerPartyChevronIcon,
@@ -60,6 +62,112 @@ import { Scrubber } from "./ui/Scrubber";
 export type CapsuleTab = "room" | "episodes" | "playback" | "subtitles" | "reactions";
 type RightCapsuleTab = "episodes" | "subtitles" | "playback";
 type TransportControlKey = "prev" | "back" | "play" | "forward" | "next";
+export type PlayBarTier = "wide" | "desktop" | "compact" | "stacked" | "mini";
+export type VolumeSliderSize = "none" | "xs" | "sm" | "md" | "lg";
+
+export interface PlayBarLayout {
+  tier: PlayBarTier;
+  isTwoRowControls: boolean;
+  showTextLabels: boolean;
+  showResyncLabel: boolean;
+  showPartyCount: boolean;
+  showPartyAvatarsInline: boolean;
+  maxVisibleAvatars: number;
+  showPartyChevron: boolean;
+  volumeSliderWidth: VolumeSliderSize;
+}
+
+/**
+ * Derives the play bar's responsive layout strictly from its measured stage width
+ * so docked sidebars, DPI scaling, half-screen snaps, and mini windows never collide.
+ */
+export function resolvePlayBarLayout(outerWidth: number): PlayBarLayout {
+  const w = Number.isFinite(outerWidth) && outerWidth > 0 ? outerWidth : 1024;
+  if (w >= 1080) {
+    return {
+      tier: "wide",
+      isTwoRowControls: false,
+      showTextLabels: true,
+      showResyncLabel: w >= 1140,
+      showPartyCount: true,
+      showPartyAvatarsInline: true,
+      maxVisibleAvatars: 3,
+      showPartyChevron: true,
+      volumeSliderWidth: w >= 1180 ? "lg" : "md",
+    };
+  }
+  if (w >= 860) {
+    return {
+      tier: "desktop",
+      isTwoRowControls: false,
+      showTextLabels: false,
+      showResyncLabel: false,
+      showPartyCount: false,
+      showPartyAvatarsInline: true,
+      maxVisibleAvatars: w >= 1000 ? 3 : w >= 920 ? 2 : 1,
+      showPartyChevron: true,
+      volumeSliderWidth: w >= 960 ? "sm" : "xs",
+    };
+  }
+  if (w >= 680) {
+    return {
+      tier: "compact",
+      isTwoRowControls: false,
+      showTextLabels: false,
+      showResyncLabel: false,
+      showPartyCount: false,
+      showPartyAvatarsInline: w >= 740,
+      maxVisibleAvatars: w >= 780 ? 2 : w >= 740 ? 1 : 0,
+      showPartyChevron: w >= 710,
+      volumeSliderWidth: "none",
+    };
+  }
+  if (w >= 430) {
+    return {
+      tier: "stacked",
+      isTwoRowControls: true,
+      showTextLabels: false,
+      showResyncLabel: false,
+      showPartyCount: false,
+      showPartyAvatarsInline: w >= 540,
+      maxVisibleAvatars: w >= 540 ? 2 : 0,
+      showPartyChevron: w >= 540,
+      volumeSliderWidth: w >= 510 ? "xs" : "none",
+    };
+  }
+  return {
+    tier: "mini",
+    isTwoRowControls: true,
+    showTextLabels: false,
+    showResyncLabel: false,
+    showPartyCount: false,
+    showPartyAvatarsInline: false,
+    maxVisibleAvatars: 0,
+    showPartyChevron: false,
+    volumeSliderWidth: "none",
+  };
+}
+
+function getPlayBarLayoutKey(layout: PlayBarLayout): string {
+  return [
+    layout.tier,
+    layout.isTwoRowControls ? 1 : 0,
+    layout.showTextLabels ? 1 : 0,
+    layout.showResyncLabel ? 1 : 0,
+    layout.showPartyCount ? 1 : 0,
+    layout.showPartyAvatarsInline ? 1 : 0,
+    layout.maxVisibleAvatars,
+    layout.showPartyChevron ? 1 : 0,
+    layout.volumeSliderWidth,
+  ].join(":");
+}
+
+const VOLUME_WIDTH_CLASSES: Record<Exclude<VolumeSliderSize, "none">, string> = {
+  xs: "w-12",
+  sm: "w-14",
+  md: "w-16",
+  lg: "w-20",
+};
 
 export function formatClock(secs: number): string {
   if (!Number.isFinite(secs) || secs < 0) return "0:00";
@@ -73,7 +181,13 @@ export function formatClock(secs: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function PlaybackScrubber({ locked }: { locked: boolean }) {
+function PlaybackScrubber({
+  locked,
+  compact = false,
+}: {
+  locked: boolean;
+  compact?: boolean;
+}) {
   const currentPosSecs = usePlayerStore((s) => s.positionSecs);
   const durationSecs = usePlayerStore((s) => s.durationSecs);
   const loaded = usePlayerStore((s) => s.loaded);
@@ -130,9 +244,13 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
   const disabled = !loaded || durationSecs <= 0 || locked;
   const remainingSecs = Math.max(0, durationSecs - displayedPos);
 
+  const clockClass = compact
+    ? "num text-[10.5px] font-medium min-w-9 shrink-0"
+    : "num text-[11.5px] font-medium min-w-12 shrink-0";
+
   return (
-    <div className="flex items-center gap-3 w-full">
-      <span className="num text-[11.5px] font-medium text-white/85 min-w-12 text-left shrink-0">
+    <div className={`flex items-center w-full ${compact ? "gap-2" : "gap-3"}`}>
+      <span className={`${clockClass} text-white/85 text-left`}>
         {formatClock(displayedPos)}
       </span>
       <Scrubber
@@ -197,7 +315,7 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
               : "Click to show remaining time"
             : undefined
         }
-        className="num text-[11.5px] font-medium text-white/60 enabled:hover:text-white/90 min-w-12 text-right shrink-0 enabled:cursor-pointer disabled:cursor-default transition-colors"
+        className={`${clockClass} text-white/60 enabled:hover:text-white/90 text-right enabled:cursor-pointer disabled:cursor-default transition-colors`}
       >
         {durationSecs > 0 && showRemaining
           ? `-${formatClock(remainingSecs)}`
@@ -210,9 +328,13 @@ function PlaybackScrubber({ locked }: { locked: boolean }) {
 const ResyncButton = memo(function ResyncButton({
   loaded,
   paused,
+  showLabel,
+  compact = false,
 }: {
   loaded: boolean;
   paused: boolean;
+  showLabel: boolean;
+  compact?: boolean;
 }) {
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
@@ -251,6 +373,12 @@ const ResyncButton = memo(function ResyncButton({
     }
   };
 
+  const sizeClass = showLabel
+    ? "h-7.5 w-auto px-2.5"
+    : compact
+      ? "h-7 w-7"
+      : "h-7.5 w-7.5";
+
   return (
     <button
       type="button"
@@ -262,7 +390,7 @@ const ResyncButton = memo(function ResyncButton({
           ? `Resync now (${health.statusLabel}) — snaps playback & connection back in sync`
           : "Force instant resync with party timestamp"
       }
-      className={`h-7.5 w-7.5 xl:w-auto xl:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-60 ${
+      className={`${sizeClass} rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-60 ${
         health.needsResync
           ? "ep-press bg-warn/20 border border-warn/45 text-warn hover:bg-warn/30"
           : "ep-bar-icon-btn text-secondary hover:text-white"
@@ -273,9 +401,11 @@ const ResyncButton = memo(function ResyncButton({
         size={15}
         className={`shrink-0 ${busy ? "animate-spin" : ""}`}
       />
-      <span className="hidden xl:inline whitespace-nowrap">
-        {health.maxDriftSecs >= 2.0 ? `Resync · ${health.maxDriftSecs.toFixed(1)}s` : "Resync"}
-      </span>
+      {showLabel && (
+        <span className="whitespace-nowrap">
+          {health.maxDriftSecs >= 2.0 ? `Resync · ${health.maxDriftSecs.toFixed(1)}s` : "Resync"}
+        </span>
+      )}
     </button>
   );
 });
@@ -283,7 +413,9 @@ const ResyncButton = memo(function ResyncButton({
 interface TransportBarProps {
   visible?: boolean;
   activeTab: CapsuleTab | null;
+  chatOpen?: boolean;
   onToggleTab: (tab: CapsuleTab) => void;
+  onToggleChat?: () => void;
   onCloseDrawer?: () => void;
   onChooseFile: () => void;
   onLeaveRoom?: () => void;
@@ -298,7 +430,9 @@ interface TransportBarProps {
 export const TransportBar = memo(function TransportBar({
   visible = true,
   activeTab,
+  chatOpen = false,
   onToggleTab,
+  onToggleChat,
   onCloseDrawer,
   onChooseFile,
   onToggleFullscreen,
@@ -332,8 +466,11 @@ export const TransportBar = memo(function TransportBar({
   const playerError = usePlayerStore((s) => s.playerError);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
+  const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const openSettings = useAppStore((s) => s.openSettings);
+  const unreadChatCount = useChatStore((s) => s.unreadCount);
+  const chatTypingCount = useChatStore((s) => Object.keys(s.typingPeers).length);
   const { mismatch } = usePartyFileMismatch();
 
   const playlistItems = usePlaylistStore((s) => s.items);
@@ -371,6 +508,41 @@ export const TransportBar = memo(function TransportBar({
   );
 
   useEffect(() => () => throttledVol.cancel(), [throttledVol]);
+
+  const outerBarRef = useRef<HTMLDivElement | null>(null);
+  const capsuleBarRef = useRef<HTMLDivElement | null>(null);
+  const [barLayout, setBarLayout] = useState<PlayBarLayout>(() =>
+    resolvePlayBarLayout(typeof window !== "undefined" ? window.innerWidth : 1024),
+  );
+  const layoutKey = getPlayBarLayoutKey(barLayout);
+
+  useLayoutEffect(() => {
+    const outerEl = outerBarRef.current;
+    if (!outerEl) return;
+
+    const syncStageMetrics = () => {
+      const w = outerEl.clientWidth;
+      if (w > 0) {
+        const next = resolvePlayBarLayout(w);
+        const nextKey = getPlayBarLayoutKey(next);
+        setBarLayout((prev) => (getPlayBarLayoutKey(prev) === nextKey ? prev : next));
+      }
+      const capsuleEl = capsuleBarRef.current;
+      const stageEl = outerEl.closest<HTMLElement>('[data-stage-container="true"]');
+      if (capsuleEl && stageEl) {
+        const bottomGap = fullWidthPlayBar ? 12 : w < 430 ? 20 : w < 650 ? 22 : 28;
+        stageEl.style.setProperty("--ep-playbar-clearance", `${capsuleEl.offsetHeight + bottomGap}px`);
+      }
+    };
+
+    syncStageMetrics();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncStageMetrics) : null;
+    ro?.observe(outerEl);
+    if (capsuleBarRef.current) ro?.observe(capsuleBarRef.current);
+    return () => {
+      ro?.disconnect();
+    };
+  }, [fullWidthPlayBar, layoutKey]);
 
   const rightDockRef = useRef<HTMLDivElement | null>(null);
   const rightBtnRefs = useRef<Partial<Record<RightCapsuleTab, HTMLButtonElement | null>>>({});
@@ -477,6 +649,7 @@ export const TransportBar = memo(function TransportBar({
     hasFolderEpisodes,
     activePlaylistItem?.episodeBadge,
     playlistItems.length,
+    layoutKey,
   ]);
 
   const centerDockRef = useRef<HTMLDivElement | null>(null);
@@ -622,7 +795,7 @@ export const TransportBar = memo(function TransportBar({
     return () => {
       ro?.disconnect();
     };
-  }, [hoveredTransport, hasFolderEpisodes, playlistItems.length]);
+  }, [hoveredTransport, hasFolderEpisodes, playlistItems.length, layoutKey]);
 
   const handlePlayPause = () => {
     togglePlayback();
@@ -638,7 +811,14 @@ export const TransportBar = memo(function TransportBar({
     toggleReadyStatus();
   };
 
-  const visiblePeers = participants.slice(0, 3);
+  const isMini = barLayout.tier === "mini";
+  const isCompactGap =
+    barLayout.tier === "compact" || barLayout.tier === "stacked" || barLayout.tier === "mini";
+  const iconBtnSize = isMini ? "h-7 w-7" : "h-7.5 w-7.5";
+  const visiblePeers =
+    barLayout.showPartyAvatarsInline && barLayout.maxVisibleAvatars > 0
+      ? participants.slice(0, barLayout.maxVisibleAvatars)
+      : [];
   const extraPeerCount = Math.max(0, participants.length - visiblePeers.length);
   const localHasFile = loaded && !playerError && Boolean(selectedFileName?.trim());
   const aligned = !isIdentityTransform({
@@ -648,12 +828,692 @@ export const TransportBar = memo(function TransportBar({
   const scaleCalibrated = Math.abs(timelineScale - 1.0) > 0.001;
   const isExtended = activeTab !== null && activeTab !== "episodes" && Boolean(expandedDrawer);
 
+  const outerPadClass = fullWidthPlayBar
+    ? "px-0 pb-0 pt-2"
+    : barLayout.tier === "mini"
+      ? "px-2 pb-2 pt-1.5"
+      : barLayout.tier === "stacked"
+        ? "px-2.5 pb-2.5 pt-2"
+        : barLayout.tier === "compact"
+          ? "px-3 pb-3 pt-2"
+          : "px-4 pb-4 pt-2";
+
+  const capsuleClass = fullWidthPlayBar
+    ? barLayout.tier === "mini"
+      ? "ep-glass-bottom-bar w-full max-w-none rounded-none px-2.5 pt-2 pb-2.5"
+      : barLayout.tier === "stacked"
+        ? "ep-glass-bottom-bar w-full max-w-none rounded-none px-3 pt-2 pb-2.5"
+        : "ep-glass-bottom-bar w-full max-w-none rounded-none px-4 sm:px-6 pt-2.5 pb-3"
+    : barLayout.tier === "mini"
+      ? "ep-glass-capsule w-full max-w-[1140px] rounded-[22px] px-2.5 py-2"
+      : barLayout.tier === "stacked"
+        ? "ep-glass-capsule w-full max-w-[1140px] rounded-[24px] px-3 py-2"
+        : barLayout.tier === "compact"
+          ? "ep-glass-capsule w-full max-w-[1140px] rounded-[26px] px-3 py-2.5"
+          : "ep-glass-capsule w-full max-w-[1140px] rounded-[26px] px-4 py-2.5";
+
+  const nudgeVolumeFromWheel = (deltaY: number) => {
+    const step = deltaY < 0 ? 5 : -5;
+    const base = muted ? 0 : volume;
+    const next = Math.max(0, Math.min(130, Math.round(base + step)));
+    if (next > 0 && muted) {
+      setMutePlayback(false, { flash: false });
+    }
+    setVolume(next);
+    throttledVol.call(next);
+  };
+
+  const partyControls = roomCode ? (
+    <>
+      <button
+        type="button"
+        disabled={!canToggleReady(loaded)}
+        onClick={handleToggleReady}
+        title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
+        className={`ep-bar-icon-btn ${
+          barLayout.showTextLabels ? "h-7.5 w-auto px-2.5" : iconBtnSize
+        } rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
+          !loaded
+            ? "text-secondary hover:text-white"
+            : localReady
+              ? "text-white hover:text-white"
+              : "text-warn hover:text-warn"
+        }`}
+      >
+        <PlayerReadyIcon
+          key={localReady && loaded ? "ready" : "not-ready"}
+          ready={localReady && loaded}
+          size={isMini ? 14 : 15}
+          className="shrink-0 anim-icon-pop"
+        />
+        {barLayout.showTextLabels && (
+          <span className="whitespace-nowrap">
+            {localReady && loaded ? "Ready" : "Not Ready"}
+          </span>
+        )}
+      </button>
+
+      <ResyncButton
+        loaded={loaded}
+        paused={paused}
+        showLabel={barLayout.showResyncLabel}
+        compact={isMini}
+      />
+
+      <button
+        type="button"
+        data-capsule-anchor="room"
+        onClick={() => onToggleTab("room")}
+        aria-label="Open party lounge"
+        aria-pressed={activeTab === "room"}
+        title={
+          mismatch
+            ? `${mismatch.title} — Click to open Watch Party`
+            : hideParticipants
+              ? "Party lounge (profile icons hidden)"
+              : "Friends watching together"
+        }
+        className={`ep-bar-pill ep-party-pill ${
+          !hideParticipants && visiblePeers.length > 0
+            ? `h-7.5 w-auto pl-1 ${barLayout.showPartyCount ? "pr-2.5" : "pr-2"} gap-1.5`
+            : barLayout.showTextLabels
+              ? "h-7.5 w-auto px-2.5 gap-1.5"
+              : barLayout.showPartyChevron
+                ? "h-7.5 w-auto px-2 gap-1.5"
+                : iconBtnSize
+        } rounded-full inline-flex items-center justify-center text-xs shrink-0 cursor-pointer ${
+          activeTab === "room"
+            ? "ep-droplet-indicator text-white font-semibold"
+            : "text-secondary hover:text-white"
+        }`}
+      >
+        {!hideParticipants && visiblePeers.length > 0 ? (
+          <>
+            <span className="flex items-center -space-x-1.5">
+              {visiblePeers.map((p) => {
+                const isSelf =
+                  p.username.trim().toLowerCase() === effectiveUsername.trim().toLowerCase();
+                const badge = formatParticipantMatchBadge(p, {
+                  localHasFile,
+                  isSelf,
+                  aligned,
+                  scaleCalibrated,
+                });
+                const ringClass = badge.isMismatch
+                  ? "ring-warn/90"
+                  : p.isReady
+                    ? "ring-ok/85"
+                    : "ring-warn/80";
+                return (
+                  <ProfileAvatar
+                    key={p.username}
+                    avatarId={resolvePeerAvatarId(
+                      p.username,
+                      effectiveUsername,
+                      avatarId,
+                    )}
+                    size={20}
+                    title={`${p.username}${p.isReady ? " · Ready" : " · Not Ready"}${
+                      badge.isMismatch ? ` · ${badge.text}` : ""
+                    }`}
+                    className={`ring-2 ${ringClass} shrink-0`}
+                  />
+                );
+              })}
+              {extraPeerCount > 0 && (
+                <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90 shrink-0">
+                  +{extraPeerCount}
+                </span>
+              )}
+            </span>
+            {barLayout.showPartyCount && (
+              <span className="text-[11px] font-medium leading-none num">
+                {participants.length}
+              </span>
+            )}
+            {mismatch && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
+                aria-hidden="true"
+              />
+            )}
+            {barLayout.showPartyChevron && (
+              <PlayerPartyChevronIcon
+                open={activeTab === "room"}
+                size={11}
+                className="shrink-0 opacity-80"
+              />
+            )}
+          </>
+        ) : (
+          <>
+            <WatchPartyIcon bare size={isMini ? 14 : 15} className="shrink-0" />
+            {!hideParticipants && barLayout.showTextLabels && (
+              <span className="text-[11px]">Party</span>
+            )}
+            {mismatch && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
+                aria-hidden="true"
+              />
+            )}
+            {barLayout.showPartyChevron && (
+              <PlayerPartyChevronIcon
+                open={activeTab === "room"}
+                size={11}
+                className="shrink-0 opacity-80"
+              />
+            )}
+          </>
+        )}
+      </button>
+
+      {(chatTriggerPlacement === "playbar" || reactionsEnabled) && (() => {
+        const showChat = chatTriggerPlacement === "playbar";
+        const showReactions = reactionsEnabled;
+        const hasBoth = showChat && showReactions;
+        const halfWidth = isMini ? "w-7.5" : "w-8.5";
+        return (
+          <div
+            className={`ep-party-social-pill ${
+              isMini ? "h-7" : "h-7.5"
+            } rounded-full inline-flex items-center shrink-0`}
+          >
+            {showChat && (
+              <button
+                type="button"
+                data-capsule-anchor="chat"
+                aria-pressed={chatOpen}
+                onClick={() => onToggleChat?.()}
+                aria-label="Party chat"
+                title="Party Chat (C)"
+                className={`ep-party-social-half relative h-full ${halfWidth} ${
+                  hasBoth ? "rounded-l-full rounded-r-none" : "rounded-full"
+                } inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                  chatOpen
+                    ? "ep-droplet-indicator text-white"
+                    : "text-secondary hover:text-white"
+                }`}
+              >
+                <PlayerChatIcon
+                  active={chatOpen}
+                  size={isMini ? 15 : 17}
+                  className="shrink-0"
+                />
+                {unreadChatCount > 0 && !chatOpen ? (
+                  <span className="anim-pop-in absolute -top-1 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
+                    {unreadChatCount > 9 ? "9+" : unreadChatCount}
+                  </span>
+                ) : chatTypingCount > 0 && !chatOpen ? (
+                  <span
+                    aria-hidden="true"
+                    className="absolute top-1 right-1 h-2 w-2 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
+                  />
+                ) : null}
+              </button>
+            )}
+
+            {hasBoth && (
+              <span
+                aria-hidden="true"
+                className="w-px h-3.5 bg-white/[0.14] shrink-0"
+              />
+            )}
+
+            {showReactions && (
+              <button
+                type="button"
+                data-capsule-anchor="reactions"
+                aria-pressed={activeTab === "reactions"}
+                onClick={() => onToggleTab("reactions")}
+                aria-label="Live party reactions"
+                title="Live party reactions (E, or keys 1–7)"
+                className={`ep-party-social-half ep-reaction-icon-btn h-full ${halfWidth} ${
+                  hasBoth ? "rounded-r-full rounded-l-none" : "rounded-full"
+                } inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                  activeTab === "reactions" ? "ep-droplet-indicator" : ""
+                }`}
+              >
+                <PlayerReactionsIcon
+                  active={activeTab === "reactions"}
+                  size={isMini ? 18 : 20}
+                  className="shrink-0"
+                />
+              </button>
+            )}
+          </div>
+        );
+      })()}
+    </>
+  ) : (
+    <button
+      type="button"
+      data-capsule-anchor="room"
+      onClick={() => onToggleTab("room")}
+      aria-label="Open party lounge"
+      aria-pressed={activeTab === "room"}
+      title="Start or join a Watch Party"
+      className={`ep-bar-pill ep-party-pill ${
+        barLayout.showTextLabels ? "h-7.5 w-auto px-3" : iconBtnSize
+      } rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium cursor-pointer shrink-0 ${
+        activeTab === "room"
+          ? "ep-droplet-indicator text-white font-semibold"
+          : "text-secondary hover:text-white"
+      }`}
+    >
+      <WatchPartyIcon bare size={isMini ? 14 : 16} className="shrink-0" />
+      {barLayout.showTextLabels && <span className="whitespace-nowrap">Watch Party</span>}
+    </button>
+  );
+
+  const volumeControl = (
+    <div
+      className={`flex items-center gap-1 shrink-0 ${
+        barLayout.volumeSliderWidth !== "none" ? "pl-0.5" : ""
+      }`}
+      onWheel={(e) => {
+        if (Math.abs(e.deltaY) > 0) {
+          nudgeVolumeFromWheel(e.deltaY);
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => toggleMutePlayback()}
+        aria-label={muted ? "Unmute" : "Mute"}
+        title={
+          barLayout.volumeSliderWidth === "none"
+            ? `Mute (M) · Volume ${muted ? 0 : Math.round(volume)}% (scroll wheel or open Audio menu to adjust)`
+            : "Mute (M)"
+        }
+        data-muted={muted || volume === 0 ? "true" : "false"}
+        className={`ep-bar-icon-btn ep-vol-btn ${
+          isMini ? "h-7 w-7" : "h-7 w-7"
+        } rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0`}
+      >
+        <PlayerVolumeIcon
+          muted={muted || volume === 0}
+          size={isMini ? 16 : 18}
+        />
+      </button>
+      {barLayout.volumeSliderWidth !== "none" && (
+        <div className={`${VOLUME_WIDTH_CLASSES[barLayout.volumeSliderWidth]} shrink-0`}>
+          <Scrubber
+            ariaLabel="Volume"
+            value={muted ? 0 : volume}
+            min={0}
+            max={130}
+            step={1}
+            tooltipPlacement="top"
+            tooltipVariant="plain"
+            formatTooltip={(v) => `${Math.round(v)}%`}
+            onChange={(v) => {
+              const rounded = Math.round(v);
+              if (muted && rounded > 0) {
+                setMutePlayback(false, { flash: false });
+              }
+              setVolume(rounded);
+              throttledVol.call(rounded);
+            }}
+            onCommit={(v) => {
+              throttledVol.cancel();
+              const rounded = Math.round(v);
+              setVolume(rounded);
+              safeMpvCall(mpvSetVolume(rounded), "mpvSetVolume");
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+
+  const skipEpSize = isMini ? "h-7 w-7" : "h-8 w-8";
+  const seekBtnSize = isMini ? "h-8.5 w-8.5" : "h-9 w-9";
+  const playOrbSize = isMini ? "h-9.5 w-9.5" : "h-10.5 w-10.5";
+
+  const transportCluster = (
+    <div
+      ref={centerDockRef}
+      onMouseLeave={() => {
+        setHoveredTransport(null);
+        setTransportPressed(false);
+      }}
+      onPointerUp={() => setTransportPressed(false)}
+      onPointerCancel={() => setTransportPressed(false)}
+      className={`relative flex items-center shrink-0 justify-self-center ${
+        isMini
+          ? "gap-1"
+          : barLayout.tier === "compact"
+            ? "gap-1"
+            : "gap-1.5 sm:gap-2"
+      }`}
+    >
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute top-0 left-0 z-0 ${
+          transportLens.animateSlide
+            ? "transition-[transform,width,height] duration-[400ms] ease-[cubic-bezier(0.22,1.28,0.36,1)]"
+            : ""
+        }`}
+        style={{
+          width: `${transportLens.width}px`,
+          height: `${transportLens.height}px`,
+          transform: `translate3d(${transportLens.left}px, ${transportLens.top}px, 0)`,
+        }}
+      >
+        <span
+          data-visible={transportLens.visible ? "true" : "false"}
+          data-morphing={transportMorphing ? "true" : undefined}
+          data-pressed={transportPressed ? "true" : undefined}
+          className="ep-droplet-indicator ep-droplet-core ep-transport-lens block h-full w-full rounded-full"
+        />
+      </span>
+
+      {hasFolderEpisodes && playlistItems.length > 1 && onPrevEpisode && (
+        <button
+          ref={(el) => {
+            centerBtnRefs.current.prev = el;
+          }}
+          type="button"
+          disabled={!hasPrevEpisode || ctrlLock.lockedForLocalUser}
+          onMouseEnter={() => {
+            if (hasPrevEpisode && !ctrlLock.lockedForLocalUser) {
+              setHoveredTransport("prev");
+            } else {
+              setHoveredTransport(null);
+            }
+          }}
+          onPointerDown={() => {
+            if (hasPrevEpisode && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+          }}
+          onClick={onPrevEpisode}
+          aria-label="Previous episode"
+          title={
+            hasPrevEpisode
+              ? `Previous: ${playlistItems[playlistIndex - 1]?.episodeBadge || playlistItems[playlistIndex - 1]?.cleanTitle || "Episode"}`
+              : "No previous episode"
+          }
+          className={`ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 ${skipEpSize} ${
+            isMini ? "" : "mr-0.5"
+          } rounded-full flex items-center justify-center text-white/62 hover:text-white disabled:opacity-30 disabled:pointer-events-none cursor-pointer`}
+        >
+          <PlayerSkipEpisodeIcon direction="prev" size={isMini ? 16 : 18} />
+        </button>
+      )}
+
+      <button
+        ref={(el) => {
+          centerBtnRefs.current.back = el;
+        }}
+        type="button"
+        disabled={!loaded || ctrlLock.lockedForLocalUser}
+        onMouseEnter={() => {
+          if (loaded && !ctrlLock.lockedForLocalUser) {
+            setHoveredTransport("back");
+          } else {
+            setHoveredTransport(null);
+          }
+        }}
+        onPointerDown={() => {
+          if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+        }}
+        onClick={() => handleSeekRelative(-10)}
+        aria-label="Seek back 10 seconds"
+        title="Seek -10s (J)"
+        className={`ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 ${seekBtnSize} rounded-full flex items-center justify-center text-white/84 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer`}
+      >
+        <PlayerSeekIcon direction="back" size={isMini ? 21 : 24} />
+      </button>
+
+      <button
+        ref={(el) => {
+          centerBtnRefs.current.play = el;
+        }}
+        type="button"
+        disabled={!loaded || ctrlLock.lockedForLocalUser}
+        onMouseEnter={() => {
+          if (loaded && !ctrlLock.lockedForLocalUser) {
+            setHoveredTransport("play");
+          } else {
+            setHoveredTransport(null);
+          }
+        }}
+        onPointerDown={() => {
+          if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+        }}
+        onClick={handlePlayPause}
+        aria-label={paused ? "Play" : "Pause"}
+        title={
+          ctrlLock.lockedForLocalUser
+            ? formatControllerLockReason(ctrlLock)
+            : paused && playBlock.message
+              ? playBlock.message
+              : paused
+                ? "Play (Space)"
+                : "Pause (Space)"
+        }
+        className={`ep-orb-play relative z-10 ${playOrbSize} rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer`}
+      >
+        {paused ? (
+          <PlayerPlayIcon key="play" size={isMini ? 21 : 24} className="relative z-10 anim-icon-pop" />
+        ) : (
+          <PlayerPauseIcon key="pause" size={isMini ? 21 : 24} className="relative z-10 anim-icon-pop" />
+        )}
+      </button>
+
+      <button
+        ref={(el) => {
+          centerBtnRefs.current.forward = el;
+        }}
+        type="button"
+        disabled={!loaded || ctrlLock.lockedForLocalUser}
+        onMouseEnter={() => {
+          if (loaded && !ctrlLock.lockedForLocalUser) {
+            setHoveredTransport("forward");
+          } else {
+            setHoveredTransport(null);
+          }
+        }}
+        onPointerDown={() => {
+          if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+        }}
+        onClick={() => handleSeekRelative(10)}
+        aria-label="Seek forward 10 seconds"
+        title="Seek +10s (L)"
+        className={`ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 ${seekBtnSize} rounded-full flex items-center justify-center text-white/84 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer`}
+      >
+        <PlayerSeekIcon direction="forward" size={isMini ? 21 : 24} />
+      </button>
+
+      {hasFolderEpisodes && playlistItems.length > 1 && onNextEpisode && (
+        <button
+          ref={(el) => {
+            centerBtnRefs.current.next = el;
+          }}
+          type="button"
+          disabled={!hasNextEpisode || ctrlLock.lockedForLocalUser}
+          onMouseEnter={() => {
+            if (hasNextEpisode && !ctrlLock.lockedForLocalUser) {
+              setHoveredTransport("next");
+            } else {
+              setHoveredTransport(null);
+            }
+          }}
+          onPointerDown={() => {
+            if (hasNextEpisode && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+          }}
+          onClick={onNextEpisode}
+          aria-label="Next episode"
+          title={
+            hasNextEpisode
+              ? `Next: ${playlistItems[playlistIndex + 1]?.episodeBadge || playlistItems[playlistIndex + 1]?.cleanTitle || "Episode"}`
+              : "No next episode"
+          }
+          className={`ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 ${skipEpSize} ${
+            isMini ? "" : "ml-0.5"
+          } rounded-full flex items-center justify-center text-white/62 hover:text-white disabled:opacity-30 disabled:pointer-events-none cursor-pointer`}
+        >
+          <PlayerSkipEpisodeIcon direction="next" size={isMini ? 16 : 18} />
+        </button>
+      )}
+    </div>
+  );
+
+  const mediaItems = (
+    <>
+      <button
+        type="button"
+        onClick={onChooseFile}
+        aria-label="Open video file"
+        title="Open video file(s)"
+        className={`ep-bar-icon-btn ${iconBtnSize} rounded-full inline-flex items-center justify-center text-xs text-secondary hover:text-white shrink-0 cursor-pointer`}
+      >
+        <OpenMediaIcon bare size={isMini ? 14 : 16} className="shrink-0" />
+      </button>
+
+      <div
+        ref={rightDockRef}
+        className={`relative inline-flex items-center shrink-0 ${
+          isCompactGap ? "gap-0.5" : "gap-1"
+        }`}
+      >
+        <span
+          aria-hidden="true"
+          className={`pointer-events-none absolute top-0 bottom-0 left-0 ${
+            dockIndicator.animateSlide
+              ? "transition-[transform,width] duration-[420ms] ease-[cubic-bezier(0.22,1.30,0.36,1)]"
+              : ""
+          }`}
+          style={{
+            width: `${dockIndicator.width}px`,
+            transform: `translateX(${dockIndicator.left}px)`,
+          }}
+        >
+          <span
+            data-visible={dockIndicator.visible ? "true" : "false"}
+            data-morphing={dockMorphing ? "true" : undefined}
+            className="ep-droplet-indicator ep-droplet-core block h-full w-full rounded-full"
+          />
+        </span>
+
+        {hasFolderEpisodes && (
+          <button
+            ref={(el) => {
+              rightBtnRefs.current.episodes = el;
+            }}
+            type="button"
+            data-capsule-anchor="episodes"
+            aria-pressed={activeTab === "episodes"}
+            onClick={() => onToggleTab("episodes")}
+            aria-label="Episodes drawer"
+            title="Season folder & episodes queue"
+            className={`relative z-10 ${
+              barLayout.showTextLabels ? "h-7.5 w-auto px-2 max-w-[140px]" : iconBtnSize
+            } rounded-full inline-flex items-center justify-center gap-1.5 text-xs min-w-0 shrink-0 cursor-pointer ${
+              activeTab === "episodes"
+                ? "ep-press border border-transparent text-white font-semibold"
+                : "ep-bar-icon-btn text-secondary hover:text-white"
+            }`}
+          >
+            <PlayerEpisodesIcon
+              active={activeTab === "episodes"}
+              size={isMini ? 16 : 18}
+              className="shrink-0"
+            />
+            {barLayout.showTextLabels && (
+              <span className="truncate num">
+                {activePlaylistItem?.episodeBadge ||
+                  (playlistItems.length > 1 ? `Episodes (${playlistItems.length})` : "Episodes")}
+              </span>
+            )}
+          </button>
+        )}
+
+        <button
+          ref={(el) => {
+            rightBtnRefs.current.subtitles = el;
+          }}
+          type="button"
+          data-capsule-anchor="subtitles"
+          aria-pressed={activeTab === "subtitles"}
+          onClick={() => onToggleTab("subtitles")}
+          aria-label="Subtitles popover"
+          title="Subtitles & Magic Sync"
+          className={`relative z-10 ${
+            barLayout.showTextLabels ? "h-7.5 w-auto px-2" : iconBtnSize
+          } rounded-full inline-flex items-center justify-center gap-1.5 text-xs shrink-0 cursor-pointer ${
+            activeTab === "subtitles"
+              ? "ep-press border border-transparent text-white font-semibold"
+              : "ep-bar-icon-btn text-secondary hover:text-white"
+          }`}
+        >
+          <PlayerCaptionsIcon
+            active={activeTab === "subtitles"}
+            size={isMini ? 16 : 18}
+            className="shrink-0"
+          />
+          {barLayout.showTextLabels && <span>CC</span>}
+        </button>
+
+        <button
+          ref={(el) => {
+            rightBtnRefs.current.playback = el;
+          }}
+          type="button"
+          data-capsule-anchor="playback"
+          aria-pressed={activeTab === "playback"}
+          onClick={() => onToggleTab("playback")}
+          aria-label="Audio & playback popover"
+          title="Audio & Playback"
+          className={`relative z-10 ${
+            barLayout.showTextLabels ? "h-7.5 w-auto px-2" : iconBtnSize
+          } rounded-full inline-flex items-center justify-center gap-1.5 text-xs shrink-0 cursor-pointer ${
+            activeTab === "playback"
+              ? "ep-press border border-transparent text-white font-semibold"
+              : "ep-bar-icon-btn text-secondary hover:text-white"
+          }`}
+        >
+          <PlayerAudioIcon
+            active={activeTab === "playback"}
+            size={isMini ? 16 : 18}
+            className="shrink-0"
+          />
+          {barLayout.showTextLabels && <span>Audio</span>}
+        </button>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => openSettings("prefs")}
+        aria-label="Preferences"
+        title="Preferences"
+        className={`ep-bar-icon-btn ${iconBtnSize} rounded-full flex items-center justify-center shrink-0 text-muted hover:text-white cursor-pointer`}
+      >
+        <PlayerSettingsIcon size={isMini ? 16 : 18} />
+      </button>
+
+      <button
+        type="button"
+        onClick={onToggleFullscreen}
+        aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+        title="Fullscreen (F)"
+        className={`ep-bar-icon-btn ${iconBtnSize} rounded-full flex items-center justify-center shrink-0 text-secondary hover:text-white cursor-pointer`}
+      >
+        <PlayerFullscreenIcon
+          key={isFullscreen ? "min" : "max"}
+          isFullscreen={isFullscreen}
+          size={isMini ? 16 : 18}
+          className="anim-icon-pop"
+        />
+      </button>
+    </>
+  );
+
   return (
     <div
+      ref={outerBarRef}
       aria-hidden={!visible}
-      className={`w-full flex flex-col items-center gap-2 select-none pointer-events-none ep-chrome-transition origin-bottom ${
-        fullWidthPlayBar ? "px-0 pb-0 pt-2" : "px-4 pb-4 pt-2"
-      } ${
+      className={`w-full flex flex-col items-center gap-2 select-none pointer-events-none ep-chrome-transition origin-bottom ${outerPadClass} ${
         visible
           ? "opacity-100 translate-y-0 scale-100"
           : fullWidthPlayBar
@@ -684,16 +1544,16 @@ export const TransportBar = memo(function TransportBar({
         ))}
 
       <div
+        ref={capsuleBarRef}
         data-glass-region="true"
         data-capsule-bar="true"
+        data-bar-tier={barLayout.tier}
         data-bar-style={fullWidthPlayBar ? "full-width" : "floating"}
         onMouseEnter={() => onBarHoverChange?.(true)}
         onMouseLeave={() => onBarHoverChange?.(false)}
-        className={`${
-          fullWidthPlayBar
-            ? "ep-glass-bottom-bar w-full max-w-none rounded-none px-4 sm:px-6 pt-2.5 pb-3"
-            : "ep-glass-capsule w-full max-w-[1140px] rounded-[26px] px-3 sm:px-4 py-2.5"
-        } space-y-2 ${visible ? "pointer-events-auto" : "pointer-events-none"}`}
+        className={`${capsuleClass} ${isMini ? "space-y-1.5" : "space-y-2"} ${
+          visible ? "pointer-events-auto" : "pointer-events-none"
+        }`}
       >
         {isExtended && (
           <div className="anim-drawer-bloom pb-1.5 space-y-2.5">
@@ -717,526 +1577,66 @@ export const TransportBar = memo(function TransportBar({
 
         {/* Top capsule line: full-width symmetric elastic scrubber */}
         <div className="w-full px-0.5">
-          <PlaybackScrubber locked={ctrlLock.lockedForLocalUser} />
+          <PlaybackScrubber locked={ctrlLock.lockedForLocalUser} compact={isMini} />
         </div>
 
-        {/* Bottom capsule line: Ready & Avatars / Start Party + Volume | Transport Cluster | File, (Episodes if folder), CC, Audio, Shortcuts, Settings, Fullscreen */}
-        <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 lg:gap-3 pt-0.5">
-          {/* Left: Ready pill + Resync + Friend Avatars + Reactions Orb (or Start Party in Solo) + Volume */}
-          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 max-w-full justify-self-start">
-            {roomCode ? (
-              <>
-                <button
-                  type="button"
-                  disabled={!canToggleReady(loaded)}
-                  onClick={handleToggleReady}
-                  title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
-                  className={`ep-bar-icon-btn h-7.5 w-7.5 lg:w-auto lg:px-2.5 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
-                    !loaded
-                      ? "text-secondary hover:text-white"
-                      : localReady
-                        ? "text-white hover:text-white"
-                        : "text-warn hover:text-warn"
-                  }`}
-                >
-                  <PlayerReadyIcon
-                    key={localReady && loaded ? "ready" : "not-ready"}
-                    ready={localReady && loaded}
-                    size={15}
-                    className="shrink-0 anim-icon-pop"
-                  />
-                  <span className="hidden lg:inline whitespace-nowrap">
-                    {localReady && loaded ? "Ready" : "Not Ready"}
-                  </span>
-                </button>
-
-                <ResyncButton loaded={loaded} paused={paused} />
-
-                <button
-                  type="button"
-                  data-capsule-anchor="room"
-                  onClick={() => onToggleTab("room")}
-                  aria-label="Open party lounge"
-                  aria-pressed={activeTab === "room"}
-                  title={
-                    mismatch
-                      ? `${mismatch.title} — Click to open Watch Party`
-                      : hideParticipants
-                        ? "Party lounge (profile icons hidden)"
-                        : "Friends watching together"
-                  }
-                  className={`ep-bar-pill ep-party-pill h-7.5 w-7.5 rounded-full inline-flex items-center justify-center text-xs shrink-0 cursor-pointer ${
-                    !hideParticipants && visiblePeers.length > 0
-                      ? "sm:w-auto sm:pl-1 sm:pr-2 xl:pr-2.5 gap-1.5"
-                      : "sm:w-auto sm:px-2.5 gap-1.5"
-                  } ${
-                    activeTab === "room"
-                      ? "ep-droplet-indicator text-white font-semibold"
-                      : "text-secondary hover:text-white"
-                  }`}
-                >
-                  {!hideParticipants && visiblePeers.length > 0 ? (
-                    <>
-                      <WatchPartyIcon bare size={14} className="sm:hidden shrink-0" />
-                      <span className="hidden sm:flex items-center -space-x-1.5">
-                        {visiblePeers.map((p) => {
-                          const isSelf =
-                            p.username.trim().toLowerCase() ===
-                            effectiveUsername.trim().toLowerCase();
-                          const badge = formatParticipantMatchBadge(p, {
-                            localHasFile,
-                            isSelf,
-                            aligned,
-                            scaleCalibrated,
-                          });
-                          const ringClass = badge.isMismatch
-                            ? "ring-warn/90"
-                            : p.isReady
-                              ? "ring-ok/85"
-                              : "ring-warn/80";
-                          return (
-                            <ProfileAvatar
-                              key={p.username}
-                              avatarId={resolvePeerAvatarId(
-                                p.username,
-                                effectiveUsername,
-                                avatarId,
-                              )}
-                              size={20}
-                              title={`${p.username}${p.isReady ? " · Ready" : " · Not Ready"}${
-                                badge.isMismatch ? ` · ${badge.text}` : ""
-                              }`}
-                              className={`ring-2 ${ringClass} shrink-0`}
-                            />
-                          );
-                        })}
-                        {extraPeerCount > 0 && (
-                          <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90 shrink-0">
-                            +{extraPeerCount}
-                          </span>
-                        )}
-                      </span>
-                      <span className="hidden xl:inline text-[11px] font-medium leading-none num">
-                        {participants.length}
-                      </span>
-                      {mismatch && (
-                        <span
-                          className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
-                          aria-hidden="true"
-                        />
-                      )}
-                      <PlayerPartyChevronIcon
-                        open={activeTab === "room"}
-                        size={11}
-                        className="hidden sm:block shrink-0 opacity-80"
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <WatchPartyIcon bare size={15} className="shrink-0" />
-                      {!hideParticipants && (
-                        <span className="hidden xl:inline text-[11px]">Party</span>
-                      )}
-                      {mismatch && (
-                        <span
-                          className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
-                          aria-hidden="true"
-                        />
-                      )}
-                      <PlayerPartyChevronIcon
-                        open={activeTab === "room"}
-                        size={11}
-                        className="hidden sm:block shrink-0 opacity-80"
-                      />
-                    </>
-                  )}
-                </button>
-
-                {reactionsEnabled && (
-                  <button
-                    type="button"
-                    data-capsule-anchor="reactions"
-                    aria-pressed={activeTab === "reactions"}
-                    onClick={() => onToggleTab("reactions")}
-                    aria-label="Live party reactions"
-                    title="Live party reactions (E, or keys 1–7)"
-                    className="ep-reaction-icon-btn h-7.5 w-7.5 rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer"
-                  >
-                    <PlayerReactionsIcon
-                      active={activeTab === "reactions"}
-                      size={21}
-                      className="shrink-0"
-                    />
-                  </button>
-                )}
-              </>
-            ) : (
-              <button
-                type="button"
-                data-capsule-anchor="room"
-                onClick={() => onToggleTab("room")}
-                aria-label="Open party lounge"
-                aria-pressed={activeTab === "room"}
-                title="Start or join a Watch Party"
-                className={`ep-bar-pill ep-party-pill h-7.5 w-7.5 sm:w-auto sm:px-3 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium cursor-pointer shrink-0 ${
-                  activeTab === "room"
-                    ? "ep-droplet-indicator text-white font-semibold"
-                    : "text-secondary hover:text-white"
-                }`}
-              >
-                <WatchPartyIcon bare size={16} className="shrink-0" />
-                <span className="hidden sm:inline whitespace-nowrap">Watch Party</span>
-              </button>
-            )}
-
-            {/* Compact Volume */}
-            <div className="flex items-center gap-1 pl-0.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => toggleMutePlayback()}
-                aria-label={muted ? "Unmute" : "Mute"}
-                title="Mute (M)"
-                data-muted={muted || volume === 0 ? "true" : "false"}
-                className="ep-bar-icon-btn ep-vol-btn h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
-              >
-                <PlayerVolumeIcon
-                  muted={muted || volume === 0}
-                  size={18}
-                />
-              </button>
-              <div className="hidden md:block w-14 lg:w-16 xl:w-20 shrink-0">
-                <Scrubber
-                  ariaLabel="Volume"
-                  value={muted ? 0 : volume}
-                  min={0}
-                  max={130}
-                  step={1}
-                  tooltipPlacement="top"
-                  tooltipVariant="plain"
-                  formatTooltip={(v) => `${Math.round(v)}%`}
-                  onChange={(v) => {
-                    const rounded = Math.round(v);
-                    if (muted && rounded > 0) {
-                      setMutePlayback(false, { flash: false });
-                    }
-                    setVolume(rounded);
-                    throttledVol.call(rounded);
-                  }}
-                  onCommit={(v) => {
-                    throttledVol.cancel();
-                    const rounded = Math.round(v);
-                    setVolume(rounded);
-                    safeMpvCall(mpvSetVolume(rounded), "mpvSetVolume");
-                  }}
-                />
+        {/* Controls rows adapt cleanly to measured stage container width */}
+        {barLayout.tier === "mini" ? (
+          <div className="flex flex-col gap-1.5 pt-0.5">
+            <div className="flex items-center justify-center">
+              {transportCluster}
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 w-full min-w-0">
+              <div className="inline-flex items-center gap-0.5 shrink-0">
+                {partyControls}
+              </div>
+              <div className="inline-flex flex-wrap items-center justify-center gap-0.5 max-w-full">
+                {volumeControl}
+                {mediaItems}
               </div>
             </div>
           </div>
-
-          {/* Center: Hero Transport Cluster */}
-          <div
-            ref={centerDockRef}
-            onMouseLeave={() => {
-              setHoveredTransport(null);
-              setTransportPressed(false);
-            }}
-            onPointerUp={() => setTransportPressed(false)}
-            onPointerCancel={() => setTransportPressed(false)}
-            className="relative flex items-center gap-1.5 sm:gap-2 shrink-0 justify-self-center"
-          >
-            <span
-              aria-hidden="true"
-              className={`pointer-events-none absolute top-0 left-0 z-0 ${
-                transportLens.animateSlide
-                  ? "transition-[transform,width,height] duration-[400ms] ease-[cubic-bezier(0.22,1.28,0.36,1)]"
-                  : ""
-              }`}
-              style={{
-                width: `${transportLens.width}px`,
-                height: `${transportLens.height}px`,
-                transform: `translate3d(${transportLens.left}px, ${transportLens.top}px, 0)`,
-              }}
-            >
-              <span
-                data-visible={transportLens.visible ? "true" : "false"}
-                data-morphing={transportMorphing ? "true" : undefined}
-                data-pressed={transportPressed ? "true" : undefined}
-                className="ep-droplet-indicator ep-droplet-core ep-transport-lens block h-full w-full rounded-full"
-              />
-            </span>
-
-            {hasFolderEpisodes && playlistItems.length > 1 && onPrevEpisode && (
-              <button
-                ref={(el) => {
-                  centerBtnRefs.current.prev = el;
-                }}
-                type="button"
-                disabled={!hasPrevEpisode || ctrlLock.lockedForLocalUser}
-                onMouseEnter={() => {
-                  if (hasPrevEpisode && !ctrlLock.lockedForLocalUser) {
-                    setHoveredTransport("prev");
-                  } else {
-                    setHoveredTransport(null);
-                  }
-                }}
-                onPointerDown={() => {
-                  if (hasPrevEpisode && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
-                }}
-                onClick={onPrevEpisode}
-                aria-label="Previous episode"
-                title={
-                  hasPrevEpisode
-                    ? `Previous: ${playlistItems[playlistIndex - 1]?.episodeBadge || playlistItems[playlistIndex - 1]?.cleanTitle || "Episode"}`
-                    : "No previous episode"
-                }
-                className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-8 w-8 mr-0.5 rounded-full flex items-center justify-center text-white/62 hover:text-white disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
-              >
-                <PlayerSkipEpisodeIcon direction="prev" size={18} />
-              </button>
-            )}
-
-            <button
-              ref={(el) => {
-                centerBtnRefs.current.back = el;
-              }}
-              type="button"
-              disabled={!loaded || ctrlLock.lockedForLocalUser}
-              onMouseEnter={() => {
-                if (loaded && !ctrlLock.lockedForLocalUser) {
-                  setHoveredTransport("back");
-                } else {
-                  setHoveredTransport(null);
-                }
-              }}
-              onPointerDown={() => {
-                if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
-              }}
-              onClick={() => handleSeekRelative(-10)}
-              aria-label="Seek back 10 seconds"
-              title="Seek -10s (J)"
-              className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-9 w-9 rounded-full flex items-center justify-center text-white/84 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
-            >
-              <PlayerSeekIcon direction="back" size={24} />
-            </button>
-
-            <button
-              ref={(el) => {
-                centerBtnRefs.current.play = el;
-              }}
-              type="button"
-              disabled={!loaded || ctrlLock.lockedForLocalUser}
-              onMouseEnter={() => {
-                if (loaded && !ctrlLock.lockedForLocalUser) {
-                  setHoveredTransport("play");
-                } else {
-                  setHoveredTransport(null);
-                }
-              }}
-              onPointerDown={() => {
-                if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
-              }}
-              onClick={handlePlayPause}
-              aria-label={paused ? "Play" : "Pause"}
-              title={
-                ctrlLock.lockedForLocalUser
-                  ? formatControllerLockReason(ctrlLock)
-                  : paused && playBlock.message
-                    ? playBlock.message
-                    : paused
-                      ? "Play (Space)"
-                      : "Pause (Space)"
-              }
-              className="ep-orb-play relative z-10 h-10.5 w-10.5 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
-            >
-              {paused ? (
-                <PlayerPlayIcon key="play" size={24} className="relative z-10 anim-icon-pop" />
-              ) : (
-                <PlayerPauseIcon key="pause" size={24} className="relative z-10 anim-icon-pop" />
-              )}
-            </button>
-
-            <button
-              ref={(el) => {
-                centerBtnRefs.current.forward = el;
-              }}
-              type="button"
-              disabled={!loaded || ctrlLock.lockedForLocalUser}
-              onMouseEnter={() => {
-                if (loaded && !ctrlLock.lockedForLocalUser) {
-                  setHoveredTransport("forward");
-                } else {
-                  setHoveredTransport(null);
-                }
-              }}
-              onPointerDown={() => {
-                if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
-              }}
-              onClick={() => handleSeekRelative(10)}
-              aria-label="Seek forward 10 seconds"
-              title="Seek +10s (L)"
-              className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-9 w-9 rounded-full flex items-center justify-center text-white/84 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
-            >
-              <PlayerSeekIcon direction="forward" size={24} />
-            </button>
-
-            {hasFolderEpisodes && playlistItems.length > 1 && onNextEpisode && (
-              <button
-                ref={(el) => {
-                  centerBtnRefs.current.next = el;
-                }}
-                type="button"
-                disabled={!hasNextEpisode || ctrlLock.lockedForLocalUser}
-                onMouseEnter={() => {
-                  if (hasNextEpisode && !ctrlLock.lockedForLocalUser) {
-                    setHoveredTransport("next");
-                  } else {
-                    setHoveredTransport(null);
-                  }
-                }}
-                onPointerDown={() => {
-                  if (hasNextEpisode && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
-                }}
-                onClick={onNextEpisode}
-                aria-label="Next episode"
-                title={
-                  hasNextEpisode
-                    ? `Next: ${playlistItems[playlistIndex + 1]?.episodeBadge || playlistItems[playlistIndex + 1]?.cleanTitle || "Episode"}`
-                    : "No next episode"
-                }
-                className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-8 w-8 ml-0.5 rounded-full flex items-center justify-center text-white/62 hover:text-white disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
-              >
-                <PlayerSkipEpisodeIcon direction="next" size={18} />
-              </button>
-            )}
+        ) : barLayout.isTwoRowControls ? (
+          <div className="flex flex-col gap-1.5 pt-0.5">
+            <div className="flex items-center justify-center">
+              {transportCluster}
+            </div>
+            <div className="flex items-center justify-between gap-2 w-full min-w-0">
+              <div className="flex items-center gap-0.5 shrink-0">
+                {partyControls}
+              </div>
+              {volumeControl}
+              <div className="flex items-center gap-0.5 shrink-0">
+                {mediaItems}
+              </div>
+            </div>
           </div>
-
-          {/* Right: Open File + Liquid Glass Option Dock (Episodes, CC, Audio) + Settings + Fullscreen */}
-          <div className="flex items-center gap-1 min-w-0 max-w-full justify-self-end">
-            <button
-              type="button"
-              onClick={onChooseFile}
-              aria-label="Open video file"
-              title="Open video file(s)"
-              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full hidden sm:inline-flex items-center justify-center text-xs text-secondary hover:text-white shrink-0 cursor-pointer"
-            >
-              <OpenMediaIcon bare size={16} className="shrink-0" />
-            </button>
-
+        ) : (
+          <div
+            className={`grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center pt-0.5 ${
+              barLayout.tier === "compact" ? "gap-1.5" : "gap-2 lg:gap-3"
+            }`}
+          >
             <div
-              ref={rightDockRef}
-              className="relative inline-flex items-center gap-1 min-w-0"
+              className={`flex items-center min-w-0 max-w-full justify-self-start ${
+                isCompactGap ? "gap-0.5" : "gap-1.5"
+              }`}
             >
-              <span
-                aria-hidden="true"
-                className={`pointer-events-none absolute top-0 bottom-0 left-0 ${
-                  dockIndicator.animateSlide
-                    ? "transition-[transform,width] duration-[420ms] ease-[cubic-bezier(0.22,1.30,0.36,1)]"
-                    : ""
-                }`}
-                style={{
-                  width: `${dockIndicator.width}px`,
-                  transform: `translateX(${dockIndicator.left}px)`,
-                }}
-              >
-                <span
-                  data-visible={dockIndicator.visible ? "true" : "false"}
-                  data-morphing={dockMorphing ? "true" : undefined}
-                  className="ep-droplet-indicator ep-droplet-core block h-full w-full rounded-full"
-                />
-              </span>
-
-              {hasFolderEpisodes && (
-                <button
-                  ref={(el) => {
-                    rightBtnRefs.current.episodes = el;
-                  }}
-                  type="button"
-                  data-capsule-anchor="episodes"
-                  aria-pressed={activeTab === "episodes"}
-                  onClick={() => onToggleTab("episodes")}
-                  aria-label="Episodes drawer"
-                  title="Season folder & episodes queue"
-                  className={`relative z-10 h-7.5 w-7.5 lg:w-auto lg:px-2 rounded-full inline-flex items-center justify-center gap-1.5 text-xs min-w-0 max-w-[140px] cursor-pointer ${
-                    activeTab === "episodes"
-                      ? "ep-press border border-transparent text-white font-semibold"
-                      : "ep-bar-icon-btn text-secondary hover:text-white"
-                  }`}
-                >
-                  <PlayerEpisodesIcon active={activeTab === "episodes"} size={18} className="shrink-0" />
-                  <span className="hidden lg:inline truncate num">
-                    {activePlaylistItem?.episodeBadge ||
-                      (playlistItems.length > 1 ? `Episodes (${playlistItems.length})` : "Episodes")}
-                  </span>
-                </button>
-              )}
-
-              <button
-                ref={(el) => {
-                  rightBtnRefs.current.subtitles = el;
-                }}
-                type="button"
-                data-capsule-anchor="subtitles"
-                aria-pressed={activeTab === "subtitles"}
-                onClick={() => onToggleTab("subtitles")}
-                aria-label="Subtitles popover"
-                title="Subtitles & Magic Sync"
-                className={`relative z-10 h-7.5 w-7.5 lg:w-auto lg:px-2 rounded-full inline-flex items-center justify-center gap-1.5 text-xs shrink-0 cursor-pointer ${
-                  activeTab === "subtitles"
-                    ? "ep-press border border-transparent text-white font-semibold"
-                    : "ep-bar-icon-btn text-secondary hover:text-white"
-                }`}
-              >
-                <PlayerCaptionsIcon active={activeTab === "subtitles"} size={18} className="shrink-0" />
-                <span className="hidden lg:inline">CC</span>
-              </button>
-
-              <button
-                ref={(el) => {
-                  rightBtnRefs.current.playback = el;
-                }}
-                type="button"
-                data-capsule-anchor="playback"
-                aria-pressed={activeTab === "playback"}
-                onClick={() => onToggleTab("playback")}
-                aria-label="Audio & playback popover"
-                title="Audio & Playback"
-                className={`relative z-10 h-7.5 w-7.5 lg:w-auto lg:px-2 rounded-full inline-flex items-center justify-center gap-1.5 text-xs shrink-0 cursor-pointer ${
-                  activeTab === "playback"
-                    ? "ep-press border border-transparent text-white font-semibold"
-                    : "ep-bar-icon-btn text-secondary hover:text-white"
-                }`}
-              >
-                <PlayerAudioIcon active={activeTab === "playback"} size={18} className="shrink-0" />
-                <span className="hidden lg:inline">Audio</span>
-              </button>
+              {partyControls}
+              {volumeControl}
             </div>
 
-            <button
-              type="button"
-              onClick={() => openSettings("prefs")}
-              aria-label="Preferences"
-              title="Preferences"
-              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center shrink-0 text-muted hover:text-white cursor-pointer"
-            >
-              <PlayerSettingsIcon size={18} />
-            </button>
+            {transportCluster}
 
-            <button
-              type="button"
-              onClick={onToggleFullscreen}
-              aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-              title="Fullscreen (F)"
-              className="ep-bar-icon-btn h-7.5 w-7.5 rounded-full flex items-center justify-center shrink-0 text-secondary hover:text-white cursor-pointer"
+            <div
+              className={`flex items-center min-w-0 max-w-full justify-self-end ${
+                isCompactGap ? "gap-0.5" : "gap-1"
+              }`}
             >
-              <PlayerFullscreenIcon
-                key={isFullscreen ? "min" : "max"}
-                isFullscreen={isFullscreen}
-                size={18}
-                className="anim-icon-pop"
-              />
-            </button>
+              {mediaItems}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

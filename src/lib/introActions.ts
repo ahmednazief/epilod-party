@@ -97,7 +97,6 @@ export async function executeSkipIntro(
 
   const segKey = buildIntroSegmentKey(intro.videoKey, segment);
   intro.markAutoSkipped(segKey);
-  intro.dismissSegment(segKey);
 
   const seekSeq = nextClientSeekSeq();
   resetSharedRelativeSeek();

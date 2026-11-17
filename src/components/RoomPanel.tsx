@@ -208,6 +208,7 @@ export const RoomPanel = memo(function RoomPanel({
     verifyTimerRef.current = window.setTimeout(() => {
       verifyTimerRef.current = null;
       setVerifyingJoin(false);
+      useAppStore.getState().setCreatingRoom(false);
       setHostOnlyRoom(false);
       setRoomCode(cleaned);
     }, 220);
@@ -243,6 +244,7 @@ export const RoomPanel = memo(function RoomPanel({
       // ignore
     }
     setHostOnlyRoom(hostOnlyMidMovie);
+    useAppStore.getState().setCreatingRoom(!literalRoom);
     setRoomCode(code);
     pushNote(
       "success",
@@ -259,6 +261,7 @@ export const RoomPanel = memo(function RoomPanel({
       pushNote("info", "Enter a valid room code to join.");
       return;
     }
+    useAppStore.getState().setCreatingRoom(false);
     setHostOnlyRoom(false);
     setRoomCode(cleaned);
   };

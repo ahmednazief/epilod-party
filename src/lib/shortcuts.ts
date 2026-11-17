@@ -24,6 +24,7 @@ export const PLAYER_SHORTCUTS: ShortcutSpec[] = [
   { keys: ["F"], label: "Toggle fullscreen", category: "Room & Window" },
   { keys: ["Esc"], label: "Exit fullscreen or close dialog", category: "Room & Window" },
   { keys: ["R"], label: "Toggle Ready state in room", category: "Room & Window" },
+  { keys: ["C"], label: "Toggle party chat (in room)", category: "Room & Window" },
   { keys: ["E"], label: "Toggle live reaction bar (in party)", category: "Room & Window" },
   { keys: ["1–7"], label: "Send quick emoji reaction (❤️ 😂 😮 😱 😢 🔥 👏)", category: "Room & Window" },
   { keys: ["?"], label: "Open keyboard shortcuts", category: "Room & Window" },

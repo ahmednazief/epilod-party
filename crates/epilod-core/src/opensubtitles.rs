@@ -222,32 +222,162 @@ struct LangMapping {
 }
 
 const LANG_TABLE: &[LangMapping] = &[
-    LangMapping { iso2: "eng", iso1: "en", label: "English", aliases: &["en", "eng", "english"] },
-    LangMapping { iso2: "ara", iso1: "ar", label: "Arabic", aliases: &["ar", "ara", "arb", "arabic"] },
-    LangMapping { iso2: "fre", iso1: "fr", label: "French", aliases: &["fr", "fre", "fra", "french"] },
-    LangMapping { iso2: "spa", iso1: "es", label: "Spanish", aliases: &["es", "spa", "spanish"] },
-    LangMapping { iso2: "ger", iso1: "de", label: "German", aliases: &["de", "ger", "deu", "german"] },
-    LangMapping { iso2: "tur", iso1: "tr", label: "Turkish", aliases: &["tr", "tur", "turkish"] },
-    LangMapping { iso2: "por", iso1: "pt", label: "Portuguese", aliases: &["pt", "por", "portuguese"] },
-    LangMapping { iso2: "pob", iso1: "pt-br", label: "Portuguese (BR)", aliases: &["pob", "pt-br", "pb"] },
-    LangMapping { iso2: "ita", iso1: "it", label: "Italian", aliases: &["it", "ita", "italian"] },
-    LangMapping { iso2: "rus", iso1: "ru", label: "Russian", aliases: &["ru", "rus", "russian"] },
-    LangMapping { iso2: "jpn", iso1: "ja", label: "Japanese", aliases: &["ja", "jpn", "japanese"] },
-    LangMapping { iso2: "kor", iso1: "ko", label: "Korean", aliases: &["ko", "kor", "korean"] },
-    LangMapping { iso2: "chi", iso1: "zh", label: "Chinese", aliases: &["zh", "chi", "zho", "zhs", "zht", "chinese"] },
-    LangMapping { iso2: "per", iso1: "fa", label: "Persian", aliases: &["fa", "per", "fas", "persian", "farsi"] },
-    LangMapping { iso2: "nld", iso1: "nl", label: "Dutch", aliases: &["nl", "nld", "dut", "dutch"] },
-    LangMapping { iso2: "pol", iso1: "pl", label: "Polish", aliases: &["pl", "pol", "polish"] },
-    LangMapping { iso2: "ind", iso1: "id", label: "Indonesian", aliases: &["id", "ind", "indonesian"] },
-    LangMapping { iso2: "hin", iso1: "hi", label: "Hindi", aliases: &["hi", "hin", "hindi"] },
-    LangMapping { iso2: "heb", iso1: "he", label: "Hebrew", aliases: &["he", "heb", "iw", "hebrew"] },
-    LangMapping { iso2: "ron", iso1: "ro", label: "Romanian", aliases: &["ro", "ron", "rum", "romanian"] },
-    LangMapping { iso2: "ell", iso1: "el", label: "Greek", aliases: &["el", "ell", "gre", "greek"] },
-    LangMapping { iso2: "swe", iso1: "sv", label: "Swedish", aliases: &["sv", "swe", "swedish"] },
-    LangMapping { iso2: "hun", iso1: "hu", label: "Hungarian", aliases: &["hu", "hun", "hungarian"] },
-    LangMapping { iso2: "cze", iso1: "cs", label: "Czech", aliases: &["cs", "cze", "ces", "czech"] },
-    LangMapping { iso2: "vie", iso1: "vi", label: "Vietnamese", aliases: &["vi", "vie", "vietnamese"] },
-    LangMapping { iso2: "ukr", iso1: "uk", label: "Ukrainian", aliases: &["uk", "ukr", "ukrainian"] },
+    LangMapping {
+        iso2: "eng",
+        iso1: "en",
+        label: "English",
+        aliases: &["en", "eng", "english"],
+    },
+    LangMapping {
+        iso2: "ara",
+        iso1: "ar",
+        label: "Arabic",
+        aliases: &["ar", "ara", "arb", "arabic"],
+    },
+    LangMapping {
+        iso2: "fre",
+        iso1: "fr",
+        label: "French",
+        aliases: &["fr", "fre", "fra", "french"],
+    },
+    LangMapping {
+        iso2: "spa",
+        iso1: "es",
+        label: "Spanish",
+        aliases: &["es", "spa", "spanish"],
+    },
+    LangMapping {
+        iso2: "ger",
+        iso1: "de",
+        label: "German",
+        aliases: &["de", "ger", "deu", "german"],
+    },
+    LangMapping {
+        iso2: "tur",
+        iso1: "tr",
+        label: "Turkish",
+        aliases: &["tr", "tur", "turkish"],
+    },
+    LangMapping {
+        iso2: "por",
+        iso1: "pt",
+        label: "Portuguese",
+        aliases: &["pt", "por", "portuguese"],
+    },
+    LangMapping {
+        iso2: "pob",
+        iso1: "pt-br",
+        label: "Portuguese (BR)",
+        aliases: &["pob", "pt-br", "pb"],
+    },
+    LangMapping {
+        iso2: "ita",
+        iso1: "it",
+        label: "Italian",
+        aliases: &["it", "ita", "italian"],
+    },
+    LangMapping {
+        iso2: "rus",
+        iso1: "ru",
+        label: "Russian",
+        aliases: &["ru", "rus", "russian"],
+    },
+    LangMapping {
+        iso2: "jpn",
+        iso1: "ja",
+        label: "Japanese",
+        aliases: &["ja", "jpn", "japanese"],
+    },
+    LangMapping {
+        iso2: "kor",
+        iso1: "ko",
+        label: "Korean",
+        aliases: &["ko", "kor", "korean"],
+    },
+    LangMapping {
+        iso2: "chi",
+        iso1: "zh",
+        label: "Chinese",
+        aliases: &["zh", "chi", "zho", "zhs", "zht", "chinese"],
+    },
+    LangMapping {
+        iso2: "per",
+        iso1: "fa",
+        label: "Persian",
+        aliases: &["fa", "per", "fas", "persian", "farsi"],
+    },
+    LangMapping {
+        iso2: "nld",
+        iso1: "nl",
+        label: "Dutch",
+        aliases: &["nl", "nld", "dut", "dutch"],
+    },
+    LangMapping {
+        iso2: "pol",
+        iso1: "pl",
+        label: "Polish",
+        aliases: &["pl", "pol", "polish"],
+    },
+    LangMapping {
+        iso2: "ind",
+        iso1: "id",
+        label: "Indonesian",
+        aliases: &["id", "ind", "indonesian"],
+    },
+    LangMapping {
+        iso2: "hin",
+        iso1: "hi",
+        label: "Hindi",
+        aliases: &["hi", "hin", "hindi"],
+    },
+    LangMapping {
+        iso2: "heb",
+        iso1: "he",
+        label: "Hebrew",
+        aliases: &["he", "heb", "iw", "hebrew"],
+    },
+    LangMapping {
+        iso2: "ron",
+        iso1: "ro",
+        label: "Romanian",
+        aliases: &["ro", "ron", "rum", "romanian"],
+    },
+    LangMapping {
+        iso2: "ell",
+        iso1: "el",
+        label: "Greek",
+        aliases: &["el", "ell", "gre", "greek"],
+    },
+    LangMapping {
+        iso2: "swe",
+        iso1: "sv",
+        label: "Swedish",
+        aliases: &["sv", "swe", "swedish"],
+    },
+    LangMapping {
+        iso2: "hun",
+        iso1: "hu",
+        label: "Hungarian",
+        aliases: &["hu", "hun", "hungarian"],
+    },
+    LangMapping {
+        iso2: "cze",
+        iso1: "cs",
+        label: "Czech",
+        aliases: &["cs", "cze", "ces", "czech"],
+    },
+    LangMapping {
+        iso2: "vie",
+        iso1: "vi",
+        label: "Vietnamese",
+        aliases: &["vi", "vie", "vietnamese"],
+    },
+    LangMapping {
+        iso2: "ukr",
+        iso1: "uk",
+        label: "Ukrainian",
+        aliases: &["uk", "ukr", "ukrainian"],
+    },
 ];
 
 pub fn normalize_subtitle_lang_code(raw: &str) -> String {
@@ -268,7 +398,12 @@ pub fn subtitle_lang_to_iso1(raw: &str) -> String {
     let low = raw.trim().to_ascii_lowercase();
     for entry in LANG_TABLE {
         if entry.iso2 == low || entry.iso1 == low || entry.aliases.contains(&low.as_str()) {
-            return entry.iso1.split('-').next().unwrap_or(entry.iso1).to_string();
+            return entry
+                .iso1
+                .split('-')
+                .next()
+                .unwrap_or(entry.iso1)
+                .to_string();
         }
     }
     if low.len() >= 2 {
@@ -336,7 +471,11 @@ pub fn compute_opensubtitles_file_hash(path: &Path) -> Result<(String, u64), Str
 
 fn is_valid_imdb_id(token: &str) -> Option<String> {
     let t = token.trim().to_ascii_lowercase();
-    if t.starts_with("tt") && t.len() >= 7 && t.len() <= 12 && t[2..].bytes().all(|b| b.is_ascii_digit()) {
+    if t.starts_with("tt")
+        && t.len() >= 7
+        && t.len() <= 12
+        && t[2..].bytes().all(|b| b.is_ascii_digit())
+    {
         Some(t)
     } else {
         None
@@ -348,7 +487,20 @@ fn strip_file_extension(name: &str) -> &str {
         let ext_low = ext.to_ascii_lowercase();
         if matches!(
             ext_low.as_str(),
-            "mkv" | "mp4" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "ts" | "mpg" | "mpeg" | "srt" | "ass" | "vtt"
+            "mkv"
+                | "mp4"
+                | "avi"
+                | "mov"
+                | "wmv"
+                | "flv"
+                | "webm"
+                | "m4v"
+                | "ts"
+                | "mpg"
+                | "mpeg"
+                | "srt"
+                | "ass"
+                | "vtt"
         ) {
             return stem;
         }
@@ -359,18 +511,108 @@ fn strip_file_extension(name: &str) -> &str {
 fn is_release_noise_token(low: &str) -> bool {
     matches!(
         low,
-        "2160p" | "1080p" | "720p" | "480p" | "360p" | "4k" | "uhd" | "fhd" | "hd" | "sd"
-            | "bluray" | "blu" | "ray" | "bdrip" | "brrip" | "webrip" | "web" | "dl" | "webdl"
-            | "hdrip" | "dvdrip" | "dvd" | "hdtv" | "pdtv" | "cam" | "hdcam" | "ts" | "telesync"
-            | "remux" | "repack" | "proper" | "extended" | "uncut" | "unrated" | "theatrical"
-            | "x264" | "x265" | "h264" | "h265" | "hevc" | "avc" | "av1" | "xvid" | "divx"
-            | "10bit" | "8bit" | "hdr" | "hdr10" | "hdr10plus" | "dv" | "dolby" | "vision"
-            | "atmos" | "truehd" | "dts" | "ddp5" | "dd5" | "ddp" | "ac3" | "eac3" | "aac" | "flac"
-            | "mp3" | "opus" | "5" | "1" | "7" | "2" | "ch" | "6ch" | "2ch"
-            | "multi" | "dual" | "dubbed" | "subbed" | "eng" | "ara" | "arabic" | "english"
-            | "yts" | "yify" | "rarbg" | "etrg" | "sparks" | "geckos" | "tigole" | "qxr"
-            | "subsplease" | "erai" | "raws" | "horriblesubs" | "psa" | "galaxy" | "galaxyrg"
-            | "amzn" | "nf" | "netflix" | "dsnp" | "hmax" | "atvp" | "pcok" | "hulu"
+        "2160p"
+            | "1080p"
+            | "720p"
+            | "480p"
+            | "360p"
+            | "4k"
+            | "uhd"
+            | "fhd"
+            | "hd"
+            | "sd"
+            | "bluray"
+            | "blu"
+            | "ray"
+            | "bdrip"
+            | "brrip"
+            | "webrip"
+            | "web"
+            | "dl"
+            | "webdl"
+            | "hdrip"
+            | "dvdrip"
+            | "dvd"
+            | "hdtv"
+            | "pdtv"
+            | "cam"
+            | "hdcam"
+            | "ts"
+            | "telesync"
+            | "remux"
+            | "repack"
+            | "proper"
+            | "extended"
+            | "uncut"
+            | "unrated"
+            | "theatrical"
+            | "x264"
+            | "x265"
+            | "h264"
+            | "h265"
+            | "hevc"
+            | "avc"
+            | "av1"
+            | "xvid"
+            | "divx"
+            | "10bit"
+            | "8bit"
+            | "hdr"
+            | "hdr10"
+            | "hdr10plus"
+            | "dv"
+            | "dolby"
+            | "vision"
+            | "atmos"
+            | "truehd"
+            | "dts"
+            | "ddp5"
+            | "dd5"
+            | "ddp"
+            | "ac3"
+            | "eac3"
+            | "aac"
+            | "flac"
+            | "mp3"
+            | "opus"
+            | "5"
+            | "1"
+            | "7"
+            | "2"
+            | "ch"
+            | "6ch"
+            | "2ch"
+            | "multi"
+            | "dual"
+            | "dubbed"
+            | "subbed"
+            | "eng"
+            | "ara"
+            | "arabic"
+            | "english"
+            | "yts"
+            | "yify"
+            | "rarbg"
+            | "etrg"
+            | "sparks"
+            | "geckos"
+            | "tigole"
+            | "qxr"
+            | "subsplease"
+            | "erai"
+            | "raws"
+            | "horriblesubs"
+            | "psa"
+            | "galaxy"
+            | "galaxyrg"
+            | "amzn"
+            | "nf"
+            | "netflix"
+            | "dsnp"
+            | "hmax"
+            | "atvp"
+            | "pcok"
+            | "hulu"
     )
 }
 
@@ -481,10 +723,7 @@ pub fn parse_media_filename(raw_input: &str) -> ParsedMediaQuery {
         };
     }
 
-    let base_name = trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(trimmed);
+    let base_name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
     let stem = strip_file_extension(base_name);
     let cleaned_brackets = strip_bracketed_segments(stem);
 
@@ -555,7 +794,9 @@ pub fn parse_media_filename(raw_input: &str) -> ParsedMediaQuery {
 
         if raw_tok == "-" && !title_tokens.is_empty() {
             // Allow hyphen inside titles (e.g., "Spider-Man") unless followed by noise/episode
-            if idx + 1 < tokens.len() && is_release_noise_token(&tokens[idx + 1].to_ascii_lowercase()) {
+            if idx + 1 < tokens.len()
+                && is_release_noise_token(&tokens[idx + 1].to_ascii_lowercase())
+            {
                 break;
             }
             idx += 1;
@@ -606,7 +847,11 @@ fn title_similarity_score(candidate: &str, query: &str) -> i32 {
             hits += 1;
         }
     }
-    let prefix_bonus = if c_words.starts_with(&q_words) { 120 } else { 0 };
+    let prefix_bonus = if c_words.starts_with(&q_words) {
+        120
+    } else {
+        0
+    };
     let extra_penalty = ((c_words.len() as i32 - q_words.len() as i32).abs()) * 15;
     (hits * 90) + prefix_bonus - extra_penalty
 }
@@ -652,12 +897,13 @@ pub fn parse_cinemeta_search_results(
     };
     let mut matches: Vec<ImdbMatch> = Vec::new();
     for (idx, meta) in resp.metas.into_iter().take(12).enumerate() {
-        let imdb = meta
-            .imdb_id
-            .or(meta.id)
-            .and_then(|s| is_valid_imdb_id(&s));
+        let imdb = meta.imdb_id.or(meta.id).and_then(|s| is_valid_imdb_id(&s));
         let Some(imdb_id) = imdb else { continue };
-        let Some(name) = meta.name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        let Some(name) = meta
+            .name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let mtype = meta
@@ -706,10 +952,7 @@ struct ImdbSuggestionItem {
     y: Option<u32>,
 }
 
-pub fn parse_imdb_suggestion_results(
-    json_str: &str,
-    parsed: &ParsedMediaQuery,
-) -> Vec<ImdbMatch> {
+pub fn parse_imdb_suggestion_results(json_str: &str, parsed: &ParsedMediaQuery) -> Vec<ImdbMatch> {
     let Ok(resp) = serde_json::from_str::<ImdbSuggestionResponse>(json_str) else {
         return Vec::new();
     };
@@ -718,7 +961,11 @@ pub fn parse_imdb_suggestion_results(
         let Some(imdb_id) = item.id.as_deref().and_then(is_valid_imdb_id) else {
             continue;
         };
-        let Some(title) = item.l.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        let Some(title) = item
+            .l
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let qid = item.qid.unwrap_or_default().to_ascii_lowercase();
@@ -799,9 +1046,28 @@ fn release_similarity_bonus(release_a: &str, release_b: &str) -> i32 {
     for tok in set_a.intersection(&set_b) {
         if matches!(
             tok.as_str(),
-            "bluray" | "web" | "webdl" | "webrip" | "bdrip" | "brrip" | "hdtv" | "remux"
-                | "yify" | "yts" | "rarbg" | "sparks" | "geckos" | "subsplease" | "erai"
-                | "x264" | "x265" | "hevc" | "1080p" | "720p" | "2160p" | "4k"
+            "bluray"
+                | "web"
+                | "webdl"
+                | "webrip"
+                | "bdrip"
+                | "brrip"
+                | "hdtv"
+                | "remux"
+                | "yify"
+                | "yts"
+                | "rarbg"
+                | "sparks"
+                | "geckos"
+                | "subsplease"
+                | "erai"
+                | "x264"
+                | "x265"
+                | "hevc"
+                | "1080p"
+                | "720p"
+                | "2160p"
+                | "4k"
         ) {
             score += 90;
         } else {
@@ -854,7 +1120,11 @@ pub fn parse_stremio_subtitles_response(
     };
     let mut items = Vec::new();
     for raw in resp.subtitles {
-        let Some(url) = raw.url.map(|u| u.trim().to_string()).filter(|u| u.starts_with("https://")) else {
+        let Some(url) = raw
+            .url
+            .map(|u| u.trim().to_string())
+            .filter(|u| u.starts_with("https://"))
+        else {
             continue;
         };
         let lang = normalize_subtitle_lang_code(raw.lang.as_deref().unwrap_or("eng"));
@@ -881,14 +1151,19 @@ pub fn parse_stremio_subtitles_response(
             });
         let match_kind = if raw.m.as_deref() == Some("h") {
             "hash".to_string()
-        } else if video_name.is_some() && release_similarity_bonus(&release_name, video_name.unwrap_or("")) >= 90 {
+        } else if video_name.is_some()
+            && release_similarity_bonus(&release_name, video_name.unwrap_or("")) >= 90
+        {
             "release".to_string()
         } else {
             "imdb".to_string()
         };
         let hi = raw.hearing_impaired.unwrap_or_else(|| {
             let low = format!("{release_name} {file_name}").to_ascii_lowercase();
-            low.contains(".hi.") || low.contains("_hi") || low.contains("[hi]") || low.contains("sdh")
+            low.contains(".hi.")
+                || low.contains("_hi")
+                || low.contains("[hi]")
+                || low.contains("sdh")
         });
         let fps = raw
             .fps_milli
@@ -962,8 +1237,12 @@ pub fn parse_opensubtitles_v1_response(
     };
     let mut items = Vec::new();
     for raw in resp.data {
-        let Some(attrs) = raw.attributes else { continue };
-        let Some(file) = attrs.files.first() else { continue };
+        let Some(attrs) = raw.attributes else {
+            continue;
+        };
+        let Some(file) = attrs.files.first() else {
+            continue;
+        };
         let lang = normalize_subtitle_lang_code(attrs.language.as_deref().unwrap_or("en"));
         if !preferred_langs.is_empty() && !preferred_langs.contains(&lang) {
             continue;
@@ -980,7 +1259,9 @@ pub fn parse_opensubtitles_v1_response(
             .unwrap_or_else(|| strip_file_extension(&file_name).to_string());
         let match_kind = if attrs.moviehash_match.unwrap_or(false) {
             "hash".to_string()
-        } else if video_name.is_some() && release_similarity_bonus(&release_name, video_name.unwrap_or("")) >= 90 {
+        } else if video_name.is_some()
+            && release_similarity_bonus(&release_name, video_name.unwrap_or("")) >= 90
+        {
             "release".to_string()
         } else {
             "query".to_string()
@@ -1050,7 +1331,9 @@ pub fn sanitize_subtitle_download_bytes(bytes: &[u8]) -> Result<Vec<u8>, String>
         return Err("Downloaded subtitle file exceeded safety limit.".to_string());
     }
     if bytes.starts_with(b"PK\x03\x04") {
-        return Err("ZIP-packaged subtitle payload is not supported from this endpoint.".to_string());
+        return Err(
+            "ZIP-packaged subtitle payload is not supported from this endpoint.".to_string(),
+        );
     }
     let text = decode_subtitle_bytes(bytes)
         .map_err(|e| format!("Failed decoding downloaded subtitle text: {e}"))?;
@@ -1058,9 +1341,15 @@ pub fn sanitize_subtitle_download_bytes(bytes: &[u8]) -> Result<Vec<u8>, String>
     if trimmed.len() < 8 {
         return Err("Downloaded subtitle did not contain valid cues.".to_string());
     }
-    let head_low = trimmed.chars().take(256).collect::<String>().to_ascii_lowercase();
+    let head_low = trimmed
+        .chars()
+        .take(256)
+        .collect::<String>()
+        .to_ascii_lowercase();
     if head_low.starts_with("<!doctype html") || head_low.starts_with("<html") {
-        return Err("Subtitle provider returned an HTML error page instead of a subtitle file.".to_string());
+        return Err(
+            "Subtitle provider returned an HTML error page instead of a subtitle file.".to_string(),
+        );
     }
     Ok(text.into_bytes())
 }
@@ -1256,7 +1545,8 @@ mod tests {
     #[test]
     fn test_sanitize_subtitle_download_rejects_html_and_normalizes_text() {
         assert!(sanitize_subtitle_download_bytes(b"<!DOCTYPE html><html>error</html>").is_err());
-        let ok = sanitize_subtitle_download_bytes(b"1\r\n00:00:01,000 --> 00:00:02,000\r\nHello").unwrap();
+        let ok = sanitize_subtitle_download_bytes(b"1\r\n00:00:01,000 --> 00:00:02,000\r\nHello")
+            .unwrap();
         assert!(String::from_utf8(ok).unwrap().contains("Hello"));
     }
 }

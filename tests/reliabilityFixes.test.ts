@@ -580,9 +580,10 @@ test("Transparent backdrop invariant: engineSurfaceVisible and mpv lifecycle gua
   assert.deepEqual(lostEvents, ["Video player is not running."]);
 
   const watchRoomSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  assert.match(watchRoomSrc, /const videoSurfacePaused = modalBlockingVideo;/);
   assert.match(
     watchRoomSrc,
-    /const showVideoBackdrop =\s*loaded &&\s*!playerError &&\s*!modalBlockingVideo &&\s*\(!desktopRuntime \|\| engineSurfaceVisible\);/,
+    /const showVideoBackdrop =\s*loaded &&\s*!playerError &&\s*!videoSurfacePaused &&\s*!surfaceHoldPending &&\s*\(!desktopRuntime \|\| engineSurfaceVisible\);/,
   );
   assert.match(watchRoomSrc, /onMpvSurfaceState\(/);
   assert.match(watchRoomSrc, /mpvGetSurfaceState\(/);
@@ -697,6 +698,29 @@ test("Embedded caption track normalization, closed-caption detection, and cross-
       ]);
       mod.autoEnableEmbeddedSubtitle(bitmapPlusForeignText);
       assert.ok(!calls.some((c) => c.cmd === "mpv_set_sub_track"));
+
+      // Should override a non-English/non-Arabic default track in favor of English,
+      // and prioritize Arabic over English when an Arabic track is present.
+      calls.length = 0;
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Ep05.mkv", "Ep05.mkv");
+      const weirdDefaultPlusEng = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "subrip", lang: "cze", default: true, selected: true, external: false },
+        { id: 2, type: "sub", codec: "subrip", lang: "eng", default: false, selected: false, external: false },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(weirdDefaultPlusEng);
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_track" && c.args.sid === 2));
+
+      calls.length = 0;
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Ep06.mkv", "Ep06.mkv");
+      const weirdDefaultPlusEngAndAra = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "subrip", lang: "cze", default: true, selected: true, external: false },
+        { id: 2, type: "sub", codec: "subrip", lang: "eng", default: false, selected: false, external: false },
+        { id: 3, type: "sub", codec: "subrip", lang: "ara", default: false, selected: false, external: false },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(weirdDefaultPlusEngAndAra);
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_track" && c.args.sid === 3));
 
       // 3. Two-point manual anchor sync passes embedded track fallback when no external file exists
       calls.length = 0;
@@ -1086,4 +1110,132 @@ test("Untagged subtitle detection probes only untagged text tracks, labels CCs c
   assert.deepEqual(playerStoreMod.usePlayerStore.getState().detectedSubLangs, { 2: "eng" });
   store.resetForNewFile();
   assert.deepEqual(playerStoreMod.usePlayerStore.getState().detectedSubLangs, {});
+
+  // Internal transcoded/synced temp filenames never leak into UI subtitle labels
+  const decodedExternal = tr.formatSubtitleTrackDisplay(
+    {
+      id: 9,
+      type: "sub",
+      title: "decoded_164668_2.srt",
+      lang: undefined,
+      selected: true,
+      external: true,
+    },
+    { externalFileName: "Movie.2025.English.srt" },
+  );
+  assert.deepEqual(decodedExternal, {
+    label: "Movie.2025.English.srt",
+    metaTags: ["External"],
+  });
+
+  const decodedFallback = tr.formatSubtitleTrackDisplay({
+    id: 10,
+    type: "sub",
+    title: "synced_9981_4.srt",
+    lang: undefined,
+    selected: true,
+    external: true,
+  });
+  assert.deepEqual(decodedFallback, {
+    label: "External Subtitles",
+    metaTags: ["External"],
+  });
+});
+
+test("executeSkipIntro leaves Skip Intro available when rewinding back into the intro", async () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "epilod-intro-test-"));
+  const outFile = path.join(outDir, "bundle.mjs");
+  buildSync({
+    stdin: {
+      contents: `
+        export * from "./src/lib/introActions";
+        export * from "./src/store/useIntroStore";
+        export * from "./src/store/usePlayerStore";
+      `,
+      resolveDir: REPO_ROOT,
+      loader: "ts",
+    },
+    outfile: outFile,
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node22",
+  });
+  const {
+    executeSkipIntro,
+    findActiveIntroAt,
+    useIntroStore,
+    usePlayerStore,
+    buildIntroSegmentKey,
+  } = (await import(pathToFileURL(outFile).href)) as {
+    executeSkipIntro: typeof import("../src/lib/introActions").executeSkipIntro;
+    findActiveIntroAt: typeof import("../src/lib/introActions").findActiveIntroAt;
+    useIntroStore: typeof import("../src/store/useIntroStore").useIntroStore;
+    usePlayerStore: typeof import("../src/store/usePlayerStore").usePlayerStore;
+    buildIntroSegmentKey: typeof import("../src/store/useIntroStore").buildIntroSegmentKey;
+  };
+
+  usePlayerStore.getState().reset();
+  usePlayerStore.getState().setLoaded(true);
+  usePlayerStore.getState().setDurationSecs(1440);
+  usePlayerStore.getState().setPositionSecs(95);
+
+  const segment = {
+    startSecs: 85,
+    endSecs: 175,
+    skipTargetSecs: 175,
+    kind: "intro" as const,
+    source: "audioMatch" as const,
+    confidence: "high" as const,
+    label: "Skip Intro",
+    similarity: 0.92,
+    matchedEpisodes: 4,
+  };
+  useIntroStore.getState().setDetectedOutcome("episode_01.mkv", {
+    segments: [segment],
+    durationSecs: 1440,
+    audioMatchedEpisodes: 4,
+  });
+
+  const skipped = await executeSkipIntro(segment, { seekLocal: async () => undefined });
+  assert.equal(skipped, true);
+  assert.equal(usePlayerStore.getState().positionSecs, 175);
+
+  // Rewind back inside the intro window: Skip Intro must still be active (not permanently dismissed)
+  const introState = useIntroStore.getState();
+  const segKey = buildIntroSegmentKey(introState.videoKey, segment);
+  assert.equal(introState.dismissedKeys.includes(segKey), false);
+  assert.equal(introState.autoSkippedKeys.includes(segKey), true);
+
+  usePlayerStore.getState().setPositionSecs(100);
+  assert.ok(findActiveIntroAt(usePlayerStore.getState().positionSecs, [segment]));
+
+  const skippedAgain = await executeSkipIntro(segment, { seekLocal: async () => undefined });
+  assert.equal(skippedAgain, true);
+  assert.equal(usePlayerStore.getState().positionSecs, 175);
+});
+
+test("useAppStore clamps playBarOpacity and scales floating and full-width bar CSS variables cleanly", async () => {
+  const appStoreMod = await loadModules<typeof import("../src/store/useAppStore")>(
+    "src/store/useAppStore.ts",
+  );
+  assert.equal(appStoreMod.DEFAULT_PLAY_BAR_OPACITY, 60);
+  assert.equal(appStoreMod.clampPlayBarOpacity(-12), 0);
+  assert.equal(appStoreMod.clampPlayBarOpacity(180), 100);
+  assert.equal(appStoreMod.clampPlayBarOpacity(Number.NaN), 60);
+
+  const defVars = appStoreMod.computePlayBarCssVars(60);
+  assert.equal(defVars["--ep-playbar-capsule-bg"], "0.580");
+  assert.equal(defVars["--ep-playbar-bar-bg"], "0.640");
+
+  const clearVars = appStoreMod.computePlayBarCssVars(0);
+  assert.equal(Number(clearVars["--ep-playbar-capsule-bg"]) < 0.1, true);
+  assert.equal(Number(clearVars["--ep-playbar-bar-bg"]) < 0.1, true);
+
+  const solidVars = appStoreMod.computePlayBarCssVars(100);
+  assert.equal(solidVars["--ep-playbar-capsule-bg"], "0.980");
+  assert.equal(solidVars["--ep-playbar-bar-bg"], "0.980");
+
+  appStoreMod.useAppStore.getState().setPlayBarOpacity(85);
+  assert.equal(appStoreMod.useAppStore.getState().playBarOpacity, 85);
 });

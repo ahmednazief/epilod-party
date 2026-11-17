@@ -131,12 +131,12 @@ html.ep-video-active #root {
 }
 
 .ep-glass-capsule {
-  background-color: rgba(10, 10, 14, 0.58);
+  background-color: rgba(10, 10, 14, var(--ep-playbar-capsule-bg, 0.58));
   background-image: linear-gradient(
     180deg,
-    rgba(16, 16, 22, 0.16) 0%,
-    rgba(12, 12, 18, 0.24) 44%,
-    rgba(8, 8, 12, 0.34) 100%
+    rgba(16, 16, 22, var(--ep-playbar-capsule-top, 0.16)) 0%,
+    rgba(12, 12, 18, var(--ep-playbar-capsule-mid, 0.24)) 44%,
+    rgba(8, 8, 12, var(--ep-playbar-capsule-bot, 0.34)) 100%
   );
   border: 1px solid rgba(255, 255, 255, 0.11);
   -webkit-backdrop-filter: blur(22px) saturate(112%) brightness(0.92);
@@ -148,11 +148,11 @@ html.ep-video-active #root {
 }
 
 .ep-glass-bottom-bar {
-  background-color: rgba(10, 10, 15, 0.64);
+  background-color: rgba(10, 10, 15, var(--ep-playbar-bar-bg, 0.64));
   background-image: linear-gradient(
     180deg,
-    rgba(14, 14, 20, 0.18) 0%,
-    rgba(8, 8, 12, 0.38) 100%
+    rgba(14, 14, 20, var(--ep-playbar-bar-top, 0.18)) 0%,
+    rgba(8, 8, 12, var(--ep-playbar-bar-bot, 0.38)) 100%
   );
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   -webkit-backdrop-filter: blur(22px) saturate(114%) brightness(0.92);
@@ -590,10 +590,6 @@ button.ep-glass-pill:active:not(:disabled) {
     0 8px 22px -6px rgba(4, 2, 10, 0.68);
 }
 
-.ep-update-pct-badge {
-  background: rgba(124, 58, 237, 0.24);
-  box-shadow: inset 0 1px 0 0 rgba(237, 233, 254, 0.16);
-}
 
 .ep-glass-btn-party {
   background-color: rgba(109, 40, 217, 0.32);
@@ -1416,7 +1412,8 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-bar-pill,
-.ep-bar-dock {
+.ep-bar-dock,
+.ep-party-social-pill {
   background-color: rgba(255, 255, 255, 0.055);
   background-image: linear-gradient(
     180deg,
@@ -1451,6 +1448,27 @@ button.ep-glass-pill:active:not(:disabled) {
   transform: scale(0.96);
   transition-duration: 70ms;
   transition-timing-function: ease-out;
+}
+
+.ep-party-social-half {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  transition:
+    background-color 110ms var(--ease-glass),
+    color 95ms var(--ease-glass);
+}
+
+.ep-party-social-half:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.11);
+}
+
+.ep-party-social-half:active:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.17);
+}
+
+.ep-party-social-half.ep-droplet-indicator {
+  border-color: transparent;
 }
 
 .ep-bar-icon-btn {
@@ -1733,8 +1751,81 @@ button.ep-glass-pill:active:not(:disabled) {
   animation: ep-seek-bubble-bounce-b 280ms var(--spring-fluid) both;
 }
 
+.ep-scrubber-track {
+  background-color: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.45);
+}
+
+.ep-scrubber-track .ep-scrubber-fill {
+  border-radius: 9999px;
+}
+
+.ep-scrubber-track .ep-scrubber-fill,
+.ep-scrubber-track .ep-scrubber-fill-cap {
+  background: linear-gradient(
+    180deg,
+    rgba(167, 139, 250, 0.96) 0%,
+    rgba(139, 92, 246, 0.96) 58%,
+    rgba(124, 58, 237, 0.96) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(59, 7, 100, 0.28);
+}
+
+.ep-scrubber:hover .ep-scrubber-end-cap {
+  opacity: 0;
+}
+
 .ep-scrubber-fill {
-  background: linear-gradient(90deg, #6D28D9 0%, #7C3AED 55%, #8B5CF6 84%, #C4B5FD 100%);
+  background: linear-gradient(
+    90deg,
+    rgba(124, 58, 237, 0.92) 0%,
+    rgba(139, 92, 246, 0.95) 68%,
+    rgba(167, 139, 250, 0.98) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    0 0 10px rgba(139, 92, 246, 0.32);
+}
+
+.ep-scrubber-glass-thumb {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.98) 0%,
+    rgba(244, 242, 255, 0.88) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 1),
+    0 0 0 0.5px rgba(255, 255, 255, 0.55),
+    0 3px 10px rgba(0, 0, 0, 0.45);
+  transition:
+    opacity 150ms var(--ease-glass),
+    scale 150ms var(--ease-glass),
+    transform 240ms var(--spring-fluid),
+    background 160ms var(--ease-glass),
+    box-shadow 180ms var(--ease-glass);
+}
+
+.ep-scrubber-glass-thumb[data-dragging="true"] {
+  transform: scale(1.56, 1.50);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.025) 48%,
+    rgba(255, 255, 255, 0.09) 100%
+  );
+  -webkit-backdrop-filter: url(#ep-scrubber-liquid-lens);
+  backdrop-filter: url(#ep-scrubber-liquid-lens);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.92),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.42),
+    0 0 0 0.8px rgba(255, 255, 255, 0.44),
+    0 6px 18px rgba(0, 0, 0, 0.52);
+}
+
+.ep-scrubber-glass-thumb.ep-scrubber-hover-thumb[data-dragging="true"] {
+  transform: scale(1.65, 1.48);
 }
 
 .ep-scrubber-intro-range {
@@ -1856,6 +1947,94 @@ button.ep-glass-pill:active:not(:disabled) {
     inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.40),
     inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.10),
     0 6px 16px -6px rgba(0, 0, 0, 0.55);
+}
+
+.ep-avatar-more-orb {
+  background-color: rgba(14, 12, 22, 0.58);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.19) 0%,
+    rgba(255, 255, 255, 0.055) 46%,
+    rgba(139, 92, 246, 0.08) 80%,
+    rgba(255, 255, 255, 0.11) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.44),
+    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.12),
+    inset 0 0 10px 0 rgba(255, 255, 255, 0.04),
+    0 8px 20px -6px rgba(0, 0, 0, 0.62);
+  transition:
+    background-color 140ms var(--ease-glass),
+    box-shadow 160ms var(--ease-glass);
+}
+
+.ep-avatar-more-orb::before {
+  content: "";
+  position: absolute;
+  inset: 1px 5px auto 5px;
+  height: 44%;
+  border-radius: 9999px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.24) 0%,
+    rgba(255, 255, 255, 0.03) 62%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
+button:hover > .ep-avatar-more-orb {
+  background-color: rgba(28, 24, 44, 0.72);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.58),
+    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 12px 0 rgba(255, 255, 255, 0.07),
+    0 8px 22px -6px rgba(139, 92, 246, 0.28),
+    0 6px 16px -4px rgba(0, 0, 0, 0.65);
+}
+
+.ep-avatar-reveal-tile {
+  transform-origin: center center;
+  transition:
+    opacity 260ms var(--ease-glass),
+    transform 320ms var(--spring-fluid),
+    filter 220ms var(--ease-glass);
+}
+
+.ep-avatar-reveal-tile[data-revealed="false"] {
+  opacity: 0;
+  transform: scale(0.84);
+  filter: blur(4px);
+  pointer-events: none;
+}
+
+.ep-avatar-reveal-tile[data-revealed="true"] {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0px);
+  pointer-events: auto;
+}
+
+.ep-avatar-more-slot {
+  transform-origin: center center;
+  transition:
+    opacity 200ms var(--ease-glass),
+    transform 260ms var(--ease-glass),
+    filter 190ms var(--ease-glass);
+}
+
+.ep-avatar-more-slot[data-revealed="false"] {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0px);
+  pointer-events: auto;
+}
+
+.ep-avatar-more-slot[data-revealed="true"] {
+  opacity: 0;
+  transform: scale(0.82);
+  filter: blur(4px);
+  pointer-events: none;
 }
 
 .ep-droplet-core[data-visible="false"] {
@@ -2222,6 +2401,35 @@ button.ep-glass-pill:active:not(:disabled) {
   min-height: 0;
 }
 
+.ep-collapse-liquid {
+  transition:
+    grid-template-rows 300ms var(--ease-glass),
+    opacity 220ms var(--ease-glass);
+}
+
+.ep-collapse-liquid[data-open="true"] {
+  transition:
+    grid-template-rows 340ms var(--spring-soft),
+    opacity 250ms var(--ease-glass);
+}
+
+.ep-collapse-liquid > .ep-collapse-inner {
+  transform-origin: top center;
+  transform: translateY(-6px) scale(0.975);
+  filter: blur(3px);
+  transition:
+    transform 260ms var(--ease-glass),
+    filter 210ms var(--ease-glass);
+}
+
+.ep-collapse-liquid[data-open="true"] > .ep-collapse-inner {
+  transform: translateY(0) scale(1);
+  filter: blur(0px);
+  transition:
+    transform 340ms var(--spring-fluid),
+    filter 240ms var(--ease-glass);
+}
+
 .ep-chrome-transition {
   transition:
     opacity 340ms var(--ease-glass),
@@ -2427,10 +2635,522 @@ button.ep-glass-pill:active:not(:disabled) {
   }
 }
 
+@keyframes ep-chat-msg-in-left {
+  0% {
+    opacity: 0;
+    transform: translate3d(-4px, 12px, 0) scale(0.93);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes ep-chat-msg-in-right {
+  0% {
+    opacity: 0;
+    transform: translate3d(4px, 12px, 0) scale(0.93);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes ep-chat-jumbo-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(0.76);
+  }
+  65% {
+    opacity: 1;
+    transform: translate3d(0, -2px, 0) scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes ep-chat-react-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.62);
+  }
+  65% {
+    opacity: 1;
+    transform: scale(1.16);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ep-chat-send-recoil {
+  0% {
+    transform: scale(0.84);
+  }
+  55% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes ep-chat-typing-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.86);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2.5px) scale(1);
+  }
+}
+
+@keyframes ep-chat-target-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(196, 181, 253, 0.55);
+  }
+  55% {
+    box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.25);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(139, 92, 246, 0);
+  }
+}
+
 @layer components {
 .ep-eq-bar {
   transform-origin: bottom center;
   animation: ep-eq-bounce 0.9s ease-in-out infinite;
+}
+
+/* Liquid-glass chat bubbles: crisp smoked obsidian (incoming) & luminous amethyst crystal (outgoing) */
+.ep-chat-bubble-in {
+  position: relative;
+  background-color: rgba(255, 255, 255, 0.088);
+  background-image: linear-gradient(
+    172deg,
+    rgba(255, 255, 255, 0.095) 0%,
+    rgba(255, 255, 255, 0.025) 54%,
+    rgba(0, 0, 0, 0.09) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.17),
+    0 6px 18px -8px rgba(0, 0, 0, 0.56);
+  transition:
+    background-color 140ms var(--ease-glass),
+    box-shadow 140ms var(--ease-glass);
+}
+
+.ep-chat-bubble-in:hover {
+  background-color: rgba(255, 255, 255, 0.115);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.22),
+    0 8px 22px -8px rgba(0, 0, 0, 0.62);
+}
+
+.ep-chat-bubble-out {
+  position: relative;
+  background-color: rgba(116, 48, 232, 0.80);
+  background-image: linear-gradient(
+    165deg,
+    rgba(196, 181, 253, 0.24) 0%,
+    rgba(124, 58, 237, 0.44) 42%,
+    rgba(91, 33, 182, 0.72) 100%
+  );
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.30),
+    0 8px 22px -10px rgba(124, 58, 237, 0.50);
+  transition:
+    background-color 140ms var(--ease-glass),
+    box-shadow 140ms var(--ease-glass);
+}
+
+.ep-chat-bubble-out:hover {
+  background-color: rgba(124, 58, 237, 0.88);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.36),
+    0 10px 24px -10px rgba(139, 92, 246, 0.58);
+}
+
+.ep-chat-feed-mask {
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    transparent 0px,
+    #000 18px,
+    #000 calc(100% - 16px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    180deg,
+    transparent 0px,
+    #000 18px,
+    #000 calc(100% - 16px),
+    transparent 100%
+  );
+}
+
+.ep-chat-hover-pill {
+  background-color: rgba(16, 16, 24, 0.92);
+  -webkit-backdrop-filter: blur(14px) saturate(135%);
+  backdrop-filter: blur(14px) saturate(135%);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.16),
+    0 10px 24px -6px rgba(0, 0, 0, 0.78);
+  transition:
+    opacity 130ms var(--ease-glass),
+    transform 160ms var(--spring-fluid);
+}
+
+.ep-chat-jumbo-in {
+  transform-origin: bottom center;
+  animation: ep-chat-jumbo-in 280ms var(--spring-fluid) both;
+}
+
+.ep-chat-react-pop {
+  animation: ep-chat-react-pop 240ms var(--spring-fluid) both;
+}
+
+.ep-chat-send-btn {
+  border: none;
+  background-color: rgba(255, 255, 255, 0.065);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.11) 0%,
+    rgba(255, 255, 255, 0.025) 55%,
+    rgba(0, 0, 0, 0.14) 100%
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    inset 0 4px 8px -4px rgba(255, 255, 255, 0.16),
+    0 3px 10px -4px rgba(0, 0, 0, 0.50);
+  transition:
+    transform 200ms var(--spring-fluid),
+    background-color 140ms var(--ease-glass),
+    box-shadow 180ms var(--ease-glass),
+    color 140ms var(--ease-glass);
+}
+
+.ep-chat-send-btn[data-ready="true"] {
+  background-color: #7c3aed;
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.24) 0%,
+    rgba(255, 255, 255, 0.04) 48%,
+    rgba(46, 16, 101, 0.26) 100%
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(237, 233, 254, 0.34),
+    inset 0 5px 10px -4px rgba(255, 255, 255, 0.38),
+    inset 0 -5px 10px -4px rgba(46, 16, 101, 0.45),
+    0 6px 18px -4px rgba(124, 58, 237, 0.65),
+    0 2px 6px -1px rgba(0, 0, 0, 0.45);
+}
+
+.ep-chat-send-btn[data-ready="true"]:hover {
+  background-color: #8b5cf6;
+  transform: scale(1.06) translateY(-0.5px);
+  box-shadow:
+    inset 0 0 0 1px rgba(237, 233, 254, 0.48),
+    inset 0 5px 10px -4px rgba(255, 255, 255, 0.46),
+    inset 0 -5px 10px -4px rgba(46, 16, 101, 0.38),
+    0 8px 22px -3px rgba(139, 92, 246, 0.78),
+    0 3px 8px -1px rgba(0, 0, 0, 0.50);
+}
+
+.ep-chat-send-btn[data-ready="true"]:active {
+  transform: scale(0.92);
+  box-shadow:
+    inset 0 0 0 1px rgba(237, 233, 254, 0.30),
+    inset 0 4px 8px -2px rgba(46, 16, 101, 0.50),
+    0 3px 10px -3px rgba(124, 58, 237, 0.60);
+}
+
+.ep-chat-send-recoil {
+  animation: ep-chat-send-recoil 220ms var(--spring-fluid) 1;
+}
+
+.ep-chat-msg-in-left {
+  transform-origin: bottom left;
+  animation: ep-chat-msg-in-left 230ms var(--spring-fluid) both;
+}
+
+.ep-chat-msg-in-right {
+  transform-origin: bottom right;
+  animation: ep-chat-msg-in-right 230ms var(--spring-fluid) both;
+}
+
+.ep-chat-target-pulse {
+  animation: ep-chat-target-pulse 900ms var(--ease-glass) 1;
+}
+
+.ep-chat-typing-dot {
+  animation: ep-chat-typing-dot 1.15s ease-in-out infinite;
+}
+
+@keyframes ep-chat-sidebar-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes ep-chat-sidebar-out {
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px) scale(0.985);
+  }
+}
+
+@keyframes ep-peek-bubble-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(-12px, 10px, 0) scale(0.92);
+  }
+  65% {
+    opacity: 1;
+    transform: translate3d(2px, -1px, 0) scale(1.015);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes ep-peek-bubble-out {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-10px, -6px, 0) scale(0.94);
+  }
+}
+
+/* Opaque smoked obsidian-slate glass base with subtle micro-dot texture (zero OS desktop bleed-through beside child mpv HWND) */
+.ep-chat-sidebar {
+  background-color: #0c0c15;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.032) 1px, transparent 1px),
+    radial-gradient(
+      95% 42% at 88% 0%,
+      rgba(124, 58, 237, 0.14) 0%,
+      rgba(88, 28, 135, 0.05) 48%,
+      transparent 100%
+    ),
+    radial-gradient(
+      85% 40% at 15% 100%,
+      rgba(139, 92, 246, 0.08) 0%,
+      transparent 70%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(26, 24, 40, 0.45) 0%,
+      rgba(13, 13, 22, 0.92) 38%,
+      rgba(9, 9, 16, 0.98) 100%
+    );
+  background-size: 22px 22px, 100% 100%, 100% 100%, 100% 100%;
+  box-shadow:
+    inset 1px 0 0 0 rgba(255, 255, 255, 0.075),
+    -18px 0 48px -18px rgba(0, 0, 0, 0.85);
+}
+
+/* Soft smoked-amethyst zone anchoring for header and composer vs. quieter message feed */
+.ep-chat-header-zone {
+  background-image:
+    radial-gradient(120% 90% at 75% 0%, rgba(124, 58, 237, 0.14) 0%, transparent 72%),
+    linear-gradient(180deg, rgba(20, 18, 34, 0.65) 0%, rgba(12, 12, 21, 0) 100%);
+}
+
+.ep-chat-composer-zone {
+  background-image:
+    radial-gradient(110% 95% at 50% 100%, rgba(124, 58, 237, 0.12) 0%, transparent 74%),
+    linear-gradient(0deg, rgba(16, 15, 28, 0.72) 0%, rgba(10, 10, 18, 0) 100%);
+}
+
+.ep-chat-dock-slot {
+  overflow: hidden;
+  flex-shrink: 0;
+  height: 100%;
+  background-color: #060608;
+  will-change: width, opacity;
+  transition:
+    width 320ms var(--spring-fluid),
+    opacity 200ms var(--ease-glass);
+}
+
+.ep-chat-dock-slot[data-open="false"] {
+  width: 0 !important;
+  opacity: 0;
+  transition:
+    width 240ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 160ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.ep-chat-dock-slot[data-resizing="true"] {
+  transition: none !important;
+}
+
+.ep-chat-dock-panel {
+  transform-origin: right center;
+  will-change: transform, opacity;
+  transition:
+    transform 320ms var(--spring-fluid),
+    opacity 220ms var(--ease-glass);
+}
+
+.ep-chat-dock-slot[data-open="false"] .ep-chat-dock-panel {
+  opacity: 0;
+  transform: translate3d(20px, 0, 0) scale(0.985);
+  transition:
+    transform 240ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 160ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.ep-chat-dock-slot[data-open="true"] .ep-chat-dock-panel {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.ep-chat-sidebar-in {
+  animation: ep-chat-sidebar-in 300ms var(--spring-fluid) both;
+}
+
+.ep-chat-sidebar-out {
+  animation: ep-chat-sidebar-out 220ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+.ep-chat-edge-rail {
+  background-color: rgba(14, 14, 22, 0.34);
+  background-image: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.18) 0%,
+    rgba(255, 255, 255, 0.04) 48%,
+    rgba(139, 92, 246, 0.08) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  border-right: none;
+  -webkit-backdrop-filter: blur(18px) saturate(140%) brightness(1.02);
+  backdrop-filter: blur(18px) saturate(140%) brightness(1.02);
+  box-shadow:
+    inset 1px 1px 0.5px 0 rgba(255, 255, 255, 0.34),
+    inset 0 -1px 0.5px 0 rgba(196, 181, 253, 0.14),
+    -8px 6px 24px -6px rgba(0, 0, 0, 0.62);
+  transition:
+    transform 180ms var(--spring-fluid),
+    background-color 140ms var(--ease-glass),
+    border-color 140ms var(--ease-glass),
+    opacity 220ms var(--ease-calm);
+}
+
+.ep-chat-edge-rail:hover {
+  background-color: rgba(24, 22, 36, 0.48);
+  border-color: rgba(221, 214, 254, 0.36);
+  transform: translateX(-2px);
+}
+
+/* Cushioned, tactile pill-to-dock composer surface with calm neutral glass focus */
+.ep-chat-composer-surface {
+  background-color: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 22px;
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.10),
+    0 2px 10px -4px rgba(0, 0, 0, 0.35);
+  transition:
+    background-color 160ms var(--ease-glass),
+    border-color 160ms var(--ease-glass),
+    border-radius 180ms var(--ease-glass),
+    box-shadow 180ms var(--ease-glass);
+}
+
+.ep-chat-composer-surface[data-expanded="true"] {
+  border-radius: 17px;
+}
+
+.ep-chat-composer-surface:focus-within {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.14),
+    0 4px 16px -6px rgba(0, 0, 0, 0.48);
+}
+
+/* Genuine iOS-style Liquid Glass floating message bubbles when chat is closed */
+.ep-glass-peek-bubble {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background-color: rgba(10, 10, 16, 0.52);
+  background-image: linear-gradient(
+    172deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(255, 255, 255, 0.04) 42%,
+    rgba(139, 92, 246, 0.08) 76%,
+    rgba(12, 12, 18, 0.28) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  -webkit-backdrop-filter: blur(20px) saturate(140%) brightness(0.90);
+  backdrop-filter: blur(20px) saturate(140%) brightness(0.90);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.44),
+    inset 0 -1px 0.5px 0 rgba(196, 181, 253, 0.18),
+    inset 0 0 12px 0 rgba(255, 255, 255, 0.04),
+    0 14px 32px -10px rgba(0, 0, 0, 0.72);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.65);
+  transition:
+    background-color 130ms var(--ease-glass),
+    border-color 130ms var(--ease-glass),
+    box-shadow 140ms var(--ease-glass);
+}
+
+.ep-glass-peek-bubble::before {
+  content: "";
+  position: absolute;
+  inset: 1px 12px auto 12px;
+  height: 36%;
+  border-radius: 9999px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.10) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
+.ep-glass-peek-bubble:hover {
+  background-color: rgba(16, 16, 26, 0.64);
+  border-color: rgba(255, 255, 255, 0.36);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.56),
+    inset 0 -1px 0.5px 0 rgba(221, 214, 254, 0.24),
+    inset 0 0 14px 0 rgba(255, 255, 255, 0.06),
+    0 16px 36px -10px rgba(0, 0, 0, 0.80);
+}
+
+.ep-peek-bubble-in {
+  transform-origin: bottom left;
+  animation: ep-peek-bubble-in 280ms var(--spring-fluid) both;
+}
+
+.ep-peek-bubble-out {
+  transform-origin: bottom left;
+  animation: ep-peek-bubble-out 200ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
 }
 }
 
@@ -2451,6 +3171,10 @@ button.ep-glass-pill:active:not(:disabled) {
   .anim-drawer-bloom,
   .anim-chrome-in,
   .ep-collapse,
+  .ep-collapse-liquid,
+  .ep-collapse-liquid > .ep-collapse-inner,
+  .ep-avatar-reveal-tile,
+  .ep-avatar-more-slot,
   .ep-chrome-transition,
   .ep-switch-track,
   .ep-switch-slide,
@@ -2478,6 +3202,22 @@ button.ep-glass-pill:active:not(:disabled) {
   .ep-seek-cue-forward-out,
   .ep-seek-bubble-bounce-a,
   .ep-seek-bubble-bounce-b,
+  .ep-chat-msg-in-left,
+  .ep-chat-msg-in-right,
+  .ep-chat-jumbo-in,
+  .ep-chat-react-pop,
+  .ep-chat-send-btn,
+  .ep-chat-send-recoil,
+  .ep-chat-hover-pill,
+  .ep-chat-typing-dot,
+  .ep-chat-target-pulse,
+  .ep-chat-dock-slot,
+  .ep-chat-dock-panel,
+  .ep-chat-sidebar-in,
+  .ep-chat-sidebar-out,
+  .ep-chat-edge-rail,
+  .ep-peek-bubble-in,
+  .ep-peek-bubble-out,
   .animate-ping,
   .animate-pulse,
   .animate-spin {

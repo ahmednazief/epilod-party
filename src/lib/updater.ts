@@ -39,6 +39,107 @@ export interface UpdateProgressEvent {
   message: string;
 }
 
+export interface ReleaseNoteSegment {
+  text: string;
+  bold: boolean;
+}
+
+export interface ReleaseNoteItem {
+  title?: string;
+  body: string;
+  segments: ReleaseNoteSegment[];
+}
+
+export function splitInlineBold(text: string): ReleaseNoteSegment[] {
+  const clean = text.trim();
+  if (!clean) return [];
+  const out: ReleaseNoteSegment[] = [];
+  const pattern = /\*\*([^*]+?)\*\*/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(clean)) !== null) {
+    if (match.index > lastIndex) {
+      out.push({ text: clean.slice(lastIndex, match.index), bold: false });
+    }
+    const inner = match[1].trim();
+    if (inner) {
+      out.push({ text: inner, bold: true });
+    }
+    lastIndex = pattern.lastIndex;
+  }
+  if (lastIndex < clean.length) {
+    out.push({ text: clean.slice(lastIndex), bold: false });
+  }
+  return out.length > 0 ? out : [{ text: clean, bold: false }];
+}
+
+/**
+ * Normalizes markdown bullets, legacy semicolon-separated strings, and inline bold markers
+ * into concise UI-ready release note items so raw markdown symbols never show in Settings.
+ */
+export function parseReleaseNotes(rawNotes?: string | null): ReleaseNoteItem[] {
+  const normalized = (rawNotes ?? "").replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  let rawLines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/^#{1,6}\s+/.test(line));
+
+  if (rawLines.length === 1 && rawLines[0].includes("; ")) {
+    rawLines = rawLines[0]
+      .split(/;\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+
+  const items: ReleaseNoteItem[] = [];
+  for (const rawLine of rawLines) {
+    const stripped = rawLine
+      .replace(/^(?:[-*•]+|\d+[.)])\s+/, "")
+      .trim();
+    if (!stripped) continue;
+
+    const boldLeadMatch = /^\*\*([^*]+?)\*\*(?:\s*[:\-—–]\s*|\s+)(.+)$/.exec(stripped);
+    if (boldLeadMatch) {
+      const title = boldLeadMatch[1].replace(/[:\-—–\s]+$/, "").trim();
+      const body = boldLeadMatch[2].trim();
+      items.push({
+        title,
+        body,
+        segments: splitInlineBold(body),
+      });
+      continue;
+    }
+
+    const boldOnlyMatch = /^\*\*([^*]+?)\*\*$/.exec(stripped);
+    if (boldOnlyMatch) {
+      const title = boldOnlyMatch[1].trim();
+      items.push({ title, body: "", segments: [] });
+      continue;
+    }
+
+    const plainColonMatch = /^([^:]{2,40}):\s+(.+)$/.exec(stripped);
+    if (plainColonMatch && !plainColonMatch[1].includes("**")) {
+      const title = plainColonMatch[1].trim();
+      const body = plainColonMatch[2].trim();
+      items.push({
+        title,
+        body,
+        segments: splitInlineBold(body),
+      });
+      continue;
+    }
+
+    items.push({
+      body: stripped,
+      segments: splitInlineBold(stripped),
+    });
+  }
+
+  return items;
+}
+
 export function formatBytesCompact(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
@@ -87,7 +188,11 @@ function getPreviewRelease(): ReleaseManifest {
   return {
     version: "0.2.0",
     releasedAt: "2026-11-15T12:00:00Z",
-    notes: "Improved embedded mpv sync stability and incremental SHA-256 updater.",
+    notes: [
+      "- **Smoother Skipping**: Jumping through a video lands cleanly without glitches.",
+      "- **Clearer Seek Bubble**: Skipping shows a liquid-glass bubble that pops in and fades out smoothly.",
+      "- **Seamless Updates**: Automatic background downloads verify safely and stay ready to restart.",
+    ].join("\n"),
     downloadUrl:
       "https://github.com/ahmednazief/epilod-party/releases/download/v0.2.0/Epilod.Party.Setup.exe",
     sha256: "a".repeat(64),

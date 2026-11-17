@@ -44,7 +44,8 @@ test("ViewportPlaceholder and WatchRoom uphold child HWND empty-surface and over
 
   const watchRoom = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
   assert.equal(watchRoom.includes("modalBlockingVideo"), true);
-  assert.equal(watchRoom.includes("mpvSetVisible(shouldShow)"), true);
+  assert.equal(watchRoom.includes("mpvSetVisible(false)"), true);
+  assert.equal(watchRoom.includes("mpvSetVisible(true)"), true);
   assert.equal(watchRoom.includes("<FrozenVideoFrame"), true);
   assert.equal(watchRoom.includes("useShallow"), true);
   assert.equal(watchRoom.includes("<PlaybackPanel />"), true);
@@ -76,7 +77,7 @@ test("Animation and compositor performance invariants hold in UI primitives and 
   assert.equal(transport.includes("PlaybackScrubber"), true);
 
   const scrubber = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"), "utf8");
-  assert.equal(scrubber.includes("scaleX("), true);
+  assert.equal(scrubber.includes("translateX(${(ratio - 1) * 100}%)"), true);
   assert.equal(scrubber.includes("translateX("), true);
   assert.doesNotMatch(scrubber, /ep-scrubber-fill[^"]*rounded-full/);
 
@@ -423,6 +424,9 @@ test("Auto-hiding and re-showing play bar, top bar, and video backdrop glide smo
   assert.equal(watchSrc.includes("backdropPresence.mounted"), true);
   assert.equal(watchSrc.includes("ep-chrome-transition"), true);
   assert.equal(watchSrc.includes("-translate-y-3 scale-[0.988]"), true);
+  assert.equal(watchSrc.includes("handleBarHoverChange"), true);
+  assert.equal(watchSrc.includes("onPassivePointerMove"), true);
+  assert.match(watchSrc, /barLeaveCooldownUntilRef/);
 
   const backdropSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"),
@@ -854,7 +858,7 @@ test("TransportBar and Scrubber ergonomics: remaining time toggle, hour-safe lab
   assert.match(transportSrc, /showRemaining/);
   assert.match(transportSrc, /Click to show remaining time/);
   assert.match(transportSrc, /min-w-12/);
-  assert.match(transportSrc, /w-14 lg:w-16 xl:w-20/);
+  assert.match(transportSrc, /VOLUME_WIDTH_CLASSES[\s\S]*?"w-12"[\s\S]*?"w-14"[\s\S]*?"w-16"[\s\S]*?"w-20"/);
 
   const scrubberSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"),
@@ -926,7 +930,7 @@ test("TransportBar party avatar dock aligns concentrically with custom chevron a
   const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
 
   // Users pill aligns avatar concentrically (pl-1 + 1px border - 2px ring = 3px margin) and displays custom chevron arrow
-  assert.match(transportSrc, /!hideParticipants && visiblePeers\.length > 0[\s\S]*?"sm:w-auto sm:pl-1 sm:pr-2 xl:pr-2\.5 gap-1\.5"/);
+  assert.match(transportSrc, /!hideParticipants && visiblePeers\.length > 0[\s\S]*?pl-1 \$\{barLayout\.showPartyCount \? "pr-2\.5" : "pr-2"\} gap-1\.5/);
   assert.match(transportSrc, /<PlayerPartyChevronIcon\s+open=\{activeTab === "room"\}/);
   assert.equal(iconsSrc.includes("export function PlayerPartyChevronIcon"), true);
   assert.equal(transportSrc.includes("ep-reaction-icon-btn"), true);
@@ -1019,6 +1023,196 @@ test("Seek cue renders a highly translucent iOS Liquid Glass bubble with bubbly 
   assert.match(globalsCss, /@keyframes ep-seek-cue-back-out/);
   assert.match(globalsCss, /@keyframes ep-seek-cue-forward-out/);
 });
+
+test("AvatarPicker hides visible name captions, enlarges avatar artwork, and provides 24 character variations", () => {
+  const avatarSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/ProfileAvatar.tsx"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(avatarSrc, /\{preset\.label\}<\/span>/);
+  assert.match(avatarSrc, /const avatarSize = compact \? 48 : 54;/);
+  assert.match(avatarSrc, /aria-label=\{preset\.label\}/);
+  const presetIds = Array.from(avatarSrc.matchAll(/\{\s*id:\s*"([^"]+)"/g)).map((m) => m[1]);
+  assert.equal(presetIds.length, 24);
+  assert.equal(new Set(presetIds).size, 24);
+  assert.match(avatarSrc, /COLLAPSED_GRID_LIMIT\s*=\s*16/);
+  assert.match(avatarSrc, /grid grid-cols-4/);
+  assert.match(avatarSrc, /rounded-2xl py-2 px-1[\s\S]*bg-white\/\[0\.045\]/);
+  assert.match(avatarSrc, /ep-avatar-more-orb[\s\S]*more<\/span>/);
+  assert.match(avatarSrc, /ep-collapse-liquid/);
+  assert.match(avatarSrc, /ep-avatar-reveal-tile/);
+  assert.match(avatarSrc, /ep-avatar-more-slot/);
+  assert.doesNotMatch(avatarSrc, /Show \$\{hiddenCount\} more characters[\s\S]{0,160}bg-white\/\[0\.045\]/);
+  assert.match(avatarSrc, /ep-press h-7[\s\S]*Surprise me/);
+
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+  assert.match(globalsCss, /\.ep-avatar-more-orb\s*\{/);
+
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  const profileSection = settingsSrc.slice(
+    settingsSrc.indexOf('tab === "profile"'),
+    settingsSrc.indexOf('tab === "appearance"'),
+  );
+  assert.doesNotMatch(profileSection, /ep-glass-well/);
+  assert.match(profileSection, /flex items-end gap-3/);
+});
+
+test("Appearance preferences expose Play Bar Opacity slider wired to both floating and full-width play bars", () => {
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+
+  assert.match(settingsSrc, /Play Bar Opacity/);
+  assert.match(settingsSrc, /ariaLabel="Play Bar Opacity"/);
+  assert.match(settingsSrc, /setPlayBarOpacity/);
+  assert.match(globalsCss, /\.ep-glass-capsule[\s\S]*--ep-playbar-capsule-bg/);
+  assert.match(globalsCss, /\.ep-glass-bottom-bar[\s\S]*--ep-playbar-bar-bg/);
+});
+
+test("Preference sliders use iOS Liquid Glass pill thumb, recessed track, and refractive drag state", () => {
+  const scrubberSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"),
+    "utf8",
+  );
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  const subPanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+    "utf8",
+  );
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+
+  assert.match(scrubberSrc, /ep-scrubber-track/);
+  assert.match(scrubberSrc, /ep-scrubber-glass-thumb/);
+  assert.match(scrubberSrc, /alwaysShowThumb/);
+  assert.match(scrubberSrc, /alwaysShowThumb \? "left-\[11px\] right-\[11px\]" : "left-\[7px\] right-\[7px\]"/);
+  assert.match(scrubberSrc, /alwaysShowThumb \? "left-\[19px\] right-\[19px\]" : "left-\[7px\] right-\[7px\]"/);
+  assert.match(scrubberSrc, /-ml-\[7px\] h-3\.5 w-3\.5 rounded-full ep-scrubber-glass-thumb ep-scrubber-hover-thumb/);
+  assert.match(settingsSrc, /ariaLabel="Play Bar Opacity"[\s\S]{0,160}alwaysShowThumb/);
+  assert.match(settingsSrc, /ariaLabel="Subtitle Vertical Position"[\s\S]{0,160}alwaysShowThumb/);
+  assert.match(subPanelSrc, /ariaLabel="Subtitle Font Size"[\s\S]{0,160}alwaysShowThumb/);
+  assert.match(globalsCss, /\.ep-scrubber-track \.ep-scrubber-fill[\s\S]*border-radius:\s*9999px/);
+  assert.match(globalsCss, /\.ep-scrubber-glass-thumb\[data-dragging="true"\][\s\S]*backdrop-filter:\s*url\(#ep-scrubber-liquid-lens\)/);
+
+  const appSrc = fs.readFileSync(path.join(REPO_ROOT, "src/App.tsx"), "utf8");
+  const appIconsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/AppIcons.tsx"), "utf8");
+  assert.match(appSrc, /<AppLiquidGlassDefs \/>/);
+  assert.match(appIconsSrc, /id="ep-scrubber-liquid-lens"/);
+  assert.match(appIconsSrc, /<feDisplacementMap/);
+});
+
+test("Docked chat & modal video handoffs avoid transparent punch-through, double chrome, and letterbox crops", () => {
+  const frozenSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/FrozenVideoFrame.tsx"),
+    "utf8",
+  );
+  const mpvLibSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/mpv.ts"), "utf8");
+  const watchRoomSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  const chatSidebarSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ChatSidebar.tsx"),
+    "utf8",
+  );
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+
+  assert.match(frozenSrc, /useLayoutEffect/);
+  assert.match(frozenSrc, /object-contain bg-canvas/);
+
+  assert.match(mpvLibSrc, /mpv_capture_freeze_frame/);
+  assert.match(mpvLibSrc, /mpv_set_video_margin_right/);
+  assert.match(mpvLibSrc, /let lastCleanFreezeFrame: MpvBackdropFrame \| null = null;/);
+  assert.match(mpvLibSrc, /clearLastCleanFreezeFrame/);
+
+  assert.match(watchRoomSrc, /!videoSurfacePaused &&[\s\S]{0,60}!surfaceHoldPending/);
+  assert.match(watchRoomSrc, /mpvSetVideoMarginRight/);
+  assert.match(watchRoomSrc, /syncMpvRightMarginNow/);
+  assert.match(watchRoomSrc, /measurePhysicalRect\(stageRef\.current \?\? viewportRef\.current\)/);
+  assert.match(watchRoomSrc, /onDockTransitionEnd/);
+  assert.doesNotMatch(watchRoomSrc, /getLastCapturedBackdropFrame|captureFrozenBackdropFrame/);
+
+  assert.match(chatSidebarSrc, /ep-chat-dock-slot/);
+  assert.match(chatSidebarSrc, /onTransitionEnd/);
+
+  assert.match(globalsCss, /\.ep-chat-sidebar\s*\{[^}]*background-color:\s*#0c0c15/);
+  assert.match(globalsCss, /\.ep-chat-dock-slot\s*\{[^}]*background-color:\s*#060608/);
+  assert.match(
+    globalsCss,
+    /\.ep-chat-dock-slot\[data-open="false"\] \.ep-chat-dock-panel\s*\{[^}]*opacity:\s*0;/,
+  );
+});
+
+test("TransportBar, PlaybackPanel, SkipIntroOverlay, and WatchRoom adapt cleanly across extreme narrow and mini scales", () => {
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  assert.match(transportSrc, /export function resolvePlayBarLayout\(outerWidth: number\)/);
+  assert.match(transportSrc, /data-bar-tier=\{barLayout\.tier\}/);
+  assert.match(transportSrc, /ref=\{rightDockRef\}[\s\S]{0,120}shrink-0/);
+  assert.match(transportSrc, /resolvePlayBarLayout\(w\)/);
+
+  const playbackSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/PlaybackPanel.tsx"),
+    "utf8",
+  );
+  assert.match(playbackSrc, /ariaLabel="Playback volume"/);
+
+  const skipSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SkipIntroOverlay.tsx"),
+    "utf8",
+  );
+  assert.match(skipSrc, /--ep-playbar-clearance/);
+
+  const watchSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  assert.match(watchSrc, /stageAvailableW/);
+  assert.match(watchSrc, /data-stage-container="true"/);
+});
+
+test("Default play bar is full-width and TransportBar groups chat + reactions in one pill after users", () => {
+  const appStoreSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/store/useAppStore.ts"),
+    "utf8",
+  );
+  assert.match(
+    appStoreSrc,
+    /initialFullWidthPlayBar\s*=\s*readStorage\("ep\.fullWidthPlayBar",\s*"true"\)\s*!==\s*"false"/,
+  );
+
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  const roomIdx = transportSrc.indexOf('data-capsule-anchor="room"');
+  const pillIdx = transportSrc.indexOf("ep-party-social-pill");
+  const chatIdx = transportSrc.indexOf('data-capsule-anchor="chat"');
+  const reactionsIdx = transportSrc.indexOf('data-capsule-anchor="reactions"');
+  assert.ok(roomIdx !== -1 && pillIdx > roomIdx, "Social pill should follow the party/users pill");
+  assert.ok(
+    chatIdx > pillIdx && reactionsIdx > chatIdx,
+    "Chat trigger should appear before reactions trigger inside ep-party-social-pill",
+  );
+
+  const globalsCss = fs.readFileSync(
+    path.join(REPO_ROOT, "src/styles/globals.css"),
+    "utf8",
+  );
+  assert.equal(globalsCss.includes(".ep-party-social-pill"), true);
+});
+
+
 
 
 

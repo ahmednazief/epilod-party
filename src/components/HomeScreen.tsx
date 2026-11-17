@@ -43,17 +43,24 @@ import { OtpCodeInput } from "./ui/OtpCodeInput";
 import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
 
 export function generateRoomCode(): string {
-  const randomBytes = new Uint8Array(6);
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-    crypto.getRandomValues(randomBytes);
-  } else {
-    for (let i = 0; i < 6; i++) {
-      randomBytes[i] = Math.floor(Math.random() * 256);
+  const digits: string[] = [];
+  const randomBytes = new Uint8Array(16);
+  while (digits.length < 6) {
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+      crypto.getRandomValues(randomBytes);
+    } else {
+      for (let i = 0; i < randomBytes.length; i++) {
+        randomBytes[i] = Math.floor(Math.random() * 256);
+      }
+    }
+    for (const b of randomBytes) {
+      if (b < 250) {
+        digits.push(String(b % 10));
+        if (digits.length === 6) break;
+      }
     }
   }
-  return Array.from(randomBytes)
-    .map((b) => String(b % 10))
-    .join("");
+  return digits.join("");
 }
 
 export function formatRoomCodeDisplay(code: string): string {
@@ -330,7 +337,7 @@ export function HomeScreen() {
     } catch {
       // ignore
     }
-    enterRoom(draftRoomCode, false, hostOnlyCreate);
+    enterRoom(draftRoomCode, false, hostOnlyCreate, true);
   };
 
   const handleJoinRoom = (e: FormEvent) => {

@@ -10,9 +10,15 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 pub const EP2_CHAT_PREFIX: &str = "~EP2:";
 pub const EP_REACTION_CHAT_PREFIX: &str = "~EPR:";
+pub const EP_CHAT_TEXT_PREFIX: &str = "~EPT:";
+pub const EP_CHAT_REACT_PREFIX: &str = "~EPCR:";
 pub const EP2_URI_PREFIX: &str = "epilod://p2p/";
 pub const MAX_CHAT_BEACON_CHARS: usize = 144;
 pub const MAX_CHAT_REACTION_CHARS: usize = 144;
+pub const MAX_CHAT_FALLBACK_LINE_CHARS: usize = 144;
+pub const MAX_CHAT_MESSAGE_CHARS: usize = 500;
+pub const MAX_CHAT_ID_LEN: usize = 24;
+pub const MAX_EPT_CHUNKS: usize = 24;
 pub const MAX_P2P_DATAGRAM_BYTES: usize = 1024;
 pub const MAX_REACTION_EMOJI_BYTES: usize = 48;
 pub const MAX_REACTION_BURST_COUNT: u8 = 25;
@@ -273,8 +279,7 @@ pub fn sanitize_reaction_emoji(raw: &str) -> Option<String> {
         return None;
     }
     let has_invalid_ascii = clean.chars().any(|c| {
-        c.is_ascii()
-            && !(matches!(c, '0'..='9' | '*' | '#') && clean.contains('\u{20E3}'))
+        c.is_ascii() && !(matches!(c, '0'..='9' | '*' | '#') && clean.contains('\u{20E3}'))
     });
     if has_invalid_ascii {
         return None;
@@ -340,10 +345,7 @@ pub fn decode_epr_reaction(message: &str) -> Option<ReactionFallbackPacket> {
     pos += avatar_len;
     let emoji_len = bytes[pos] as usize;
     pos += 1;
-    if emoji_len == 0
-        || emoji_len > MAX_REACTION_EMOJI_BYTES
-        || pos + emoji_len != bytes.len()
-    {
+    if emoji_len == 0 || emoji_len > MAX_REACTION_EMOJI_BYTES || pos + emoji_len != bytes.len() {
         return None;
     }
     let emoji_raw = std::str::from_utf8(&bytes[pos..]).ok()?;
@@ -354,6 +356,320 @@ pub fn decode_epr_reaction(message: &str) -> Option<ReactionFallbackPacket> {
         count,
         seq,
     })
+}
+
+pub fn sanitize_chat_id(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(MAX_CHAT_ID_LEN)
+        .collect()
+}
+
+pub fn sanitize_chat_text(raw: &str) -> Option<String> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::with_capacity(normalized.len().min(MAX_CHAT_MESSAGE_CHARS * 4));
+    let mut consecutive_newlines = 0u8;
+    let mut char_count = 0usize;
+
+    for c in normalized.chars() {
+        if c == '\n' {
+            if consecutive_newlines < 2 {
+                out.push('\n');
+                consecutive_newlines += 1;
+                char_count += 1;
+            }
+        } else if c.is_control()
+            || matches!(
+                c,
+                '\u{00AD}'
+                    | '\u{061C}'
+                    | '\u{200B}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2060}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{FEFF}'
+            )
+        {
+            continue;
+        } else {
+            consecutive_newlines = 0;
+            out.push(c);
+            char_count += 1;
+        }
+        if char_count >= MAX_CHAT_MESSAGE_CHARS {
+            break;
+        }
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFallbackPacket {
+    pub msg_id: String,
+    pub avatar_id: String,
+    pub reply_to_id: Option<String>,
+    pub text: String,
+    pub is_edit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatReactFallbackPacket {
+    pub msg_id: String,
+    pub emoji: String,
+}
+
+pub fn encode_epcr_chat_react(packet: &ChatReactFallbackPacket) -> Option<String> {
+    let msg_id = sanitize_chat_id(&packet.msg_id);
+    let emoji = sanitize_reaction_emoji(&packet.emoji)?;
+    if msg_id.is_empty() {
+        return None;
+    }
+    let short_id: String = msg_id.chars().take(12).collect();
+    let encoded = format!(
+        "{EP_CHAT_REACT_PREFIX}{short_id}:{}",
+        encode_base64_url(emoji.as_bytes())
+    );
+    if encoded.len() > MAX_CHAT_FALLBACK_LINE_CHARS {
+        None
+    } else {
+        Some(encoded)
+    }
+}
+
+pub fn decode_epcr_chat_react(message: &str) -> Option<ChatReactFallbackPacket> {
+    let body = message.trim().strip_prefix(EP_CHAT_REACT_PREFIX)?;
+    let (raw_id, b64_emoji) = body.split_once(':')?;
+    let msg_id = sanitize_chat_id(raw_id);
+    if msg_id.is_empty() {
+        return None;
+    }
+    let bytes = decode_base64_url(b64_emoji)?;
+    let raw_emoji = std::str::from_utf8(&bytes).ok()?;
+    let emoji = sanitize_reaction_emoji(raw_emoji)?;
+    Some(ChatReactFallbackPacket { msg_id, emoji })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EptChatChunk {
+    pub msg_id: String,
+    pub idx: usize,
+    pub total: usize,
+    pub payload_part: String,
+}
+
+fn encode_ept_binary_payload(packet: &ChatFallbackPacket) -> Option<Vec<u8>> {
+    let text = sanitize_chat_text(&packet.text)?;
+    let avatar_id = sanitize_avatar_id(&packet.avatar_id);
+    let reply_id = packet
+        .reply_to_id
+        .as_deref()
+        .map(sanitize_chat_id)
+        .filter(|s| !s.is_empty());
+
+    let avatar_bytes = avatar_id.as_bytes();
+    let reply_bytes = reply_id.as_deref().unwrap_or("").as_bytes();
+    let text_bytes = text.as_bytes();
+    if avatar_bytes.len() > 24 || reply_bytes.len() > MAX_CHAT_ID_LEN || text_bytes.len() > 2400 {
+        return None;
+    }
+
+    let mut raw = Vec::with_capacity(5 + avatar_bytes.len() + reply_bytes.len() + text_bytes.len());
+    raw.push(if packet.is_edit { 2u8 } else { 1u8 });
+    raw.push(avatar_bytes.len() as u8);
+    raw.extend_from_slice(avatar_bytes);
+    raw.push(reply_bytes.len() as u8);
+    raw.extend_from_slice(reply_bytes);
+    raw.extend_from_slice(&(text_bytes.len() as u16).to_be_bytes());
+    raw.extend_from_slice(text_bytes);
+    Some(raw)
+}
+
+fn decode_ept_binary_payload(msg_id: String, bytes: &[u8]) -> Option<ChatFallbackPacket> {
+    if bytes.len() < 5 || (bytes[0] != 1 && bytes[0] != 2) {
+        return None;
+    }
+    let is_edit = bytes[0] == 2;
+    let mut pos = 1usize;
+    let avatar_len = bytes[pos] as usize;
+    pos += 1;
+    if avatar_len > 24 || pos + avatar_len + 1 > bytes.len() {
+        return None;
+    }
+    let avatar_raw = std::str::from_utf8(&bytes[pos..pos + avatar_len]).ok()?;
+    let avatar_id = sanitize_avatar_id(avatar_raw);
+    pos += avatar_len;
+
+    let reply_len = bytes[pos] as usize;
+    pos += 1;
+    if reply_len > MAX_CHAT_ID_LEN || pos + reply_len + 2 > bytes.len() {
+        return None;
+    }
+    let reply_to_id = if reply_len > 0 {
+        let raw_reply = std::str::from_utf8(&bytes[pos..pos + reply_len]).ok()?;
+        let clean_reply = sanitize_chat_id(raw_reply);
+        if clean_reply.is_empty() {
+            None
+        } else {
+            Some(clean_reply)
+        }
+    } else {
+        None
+    };
+    pos += reply_len;
+
+    let text_len = u16::from_be_bytes(bytes[pos..pos + 2].try_into().ok()?) as usize;
+    pos += 2;
+    if text_len == 0 || text_len > 2400 || pos + text_len != bytes.len() {
+        return None;
+    }
+    let text_raw = std::str::from_utf8(&bytes[pos..]).ok()?;
+    let text = sanitize_chat_text(text_raw)?;
+
+    Some(ChatFallbackPacket {
+        msg_id,
+        avatar_id,
+        reply_to_id,
+        text,
+        is_edit,
+    })
+}
+
+pub fn encode_ept_chat_chunks(packet: &ChatFallbackPacket) -> Option<Vec<String>> {
+    let msg_id = sanitize_chat_id(&packet.msg_id);
+    if msg_id.is_empty() {
+        return None;
+    }
+    let short_id: String = msg_id.chars().take(12).collect();
+    let raw = encode_ept_binary_payload(packet)?;
+    let b64 = encode_base64_url(&raw);
+    // Header `~EPT:<id>/<idx>/<total>:` is <= 5 + 12 + 1 + 2 + 1 + 2 + 1 = 24 bytes, leaving >= 120 chars.
+    let max_part = MAX_CHAT_FALLBACK_LINE_CHARS.saturating_sub(24).max(64);
+    let total = b64.len().div_ceil(max_part).max(1);
+    if total > MAX_EPT_CHUNKS {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(total);
+    for (idx, chunk) in b64.as_bytes().chunks(max_part).enumerate() {
+        let part = std::str::from_utf8(chunk).ok()?;
+        let line = format!("{EP_CHAT_TEXT_PREFIX}{short_id}/{}/{total}:{part}", idx + 1);
+        if line.len() > MAX_CHAT_FALLBACK_LINE_CHARS {
+            return None;
+        }
+        lines.push(line);
+    }
+    Some(lines)
+}
+
+pub fn decode_ept_chat_chunk(message: &str) -> Option<EptChatChunk> {
+    let body = message.trim().strip_prefix(EP_CHAT_TEXT_PREFIX)?;
+    let (header, payload_part) = body.split_once(':')?;
+    let mut header_parts = header.split('/');
+    let raw_id = header_parts.next()?;
+    let idx_str = header_parts.next()?;
+    let total_str = header_parts.next()?;
+    if header_parts.next().is_some() {
+        return None;
+    }
+    let msg_id = sanitize_chat_id(raw_id);
+    if msg_id.is_empty() {
+        return None;
+    }
+    let idx: usize = idx_str.parse().ok()?;
+    let total: usize = total_str.parse().ok()?;
+    if idx == 0 || total == 0 || idx > total || total > MAX_EPT_CHUNKS {
+        return None;
+    }
+    if payload_part.is_empty()
+        || !payload_part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    Some(EptChatChunk {
+        msg_id,
+        idx,
+        total,
+        payload_part: payload_part.to_string(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct EptChunkAssembly {
+    total: usize,
+    parts: Vec<Option<String>>,
+    order_seq: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct EptChatReassembler {
+    entries: std::collections::HashMap<(String, String), EptChunkAssembly>,
+    order_counter: u64,
+}
+
+impl EptChatReassembler {
+    pub fn push_chunk(&mut self, sender: &str, chunk: EptChatChunk) -> Option<ChatFallbackPacket> {
+        let sender_key = sender.trim().to_ascii_lowercase();
+        if sender_key.is_empty() {
+            return None;
+        }
+        if chunk.total == 1 && chunk.idx == 1 {
+            let bytes = decode_base64_url(&chunk.payload_part)?;
+            return decode_ept_binary_payload(chunk.msg_id, &bytes);
+        }
+
+        let key = (sender_key, chunk.msg_id.clone());
+        self.order_counter = self.order_counter.wrapping_add(1);
+        let order_seq = self.order_counter;
+
+        if !self.entries.contains_key(&key) && self.entries.len() >= 32 {
+            if let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, v)| v.order_seq)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest_key);
+            }
+        }
+
+        let entry = self
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| EptChunkAssembly {
+                total: chunk.total,
+                parts: vec![None; chunk.total],
+                order_seq,
+            });
+        if entry.total != chunk.total || entry.parts.len() != chunk.total {
+            *entry = EptChunkAssembly {
+                total: chunk.total,
+                parts: vec![None; chunk.total],
+                order_seq,
+            };
+        } else {
+            entry.order_seq = order_seq;
+        }
+        entry.parts[chunk.idx - 1] = Some(chunk.payload_part);
+
+        if entry.parts.iter().all(Option::is_some) {
+            let full_b64: String = entry.parts.iter().filter_map(|p| p.as_deref()).collect();
+            self.entries.remove(&key);
+            let bytes = decode_base64_url(&full_b64)?;
+            decode_ept_binary_payload(chunk.msg_id, &bytes)
+        } else {
+            None
+        }
+    }
 }
 
 /// Builds an RFC 5389 STUN Binding Request (20 bytes).
@@ -1292,7 +1608,88 @@ mod tests {
 
         // Plain ASCII or control characters must be rejected
         assert_eq!(sanitize_reaction_emoji("hello"), None);
-        assert_eq!(sanitize_reaction_emoji("❤️\u{202E}"), Some("❤️".to_string()));
+        assert_eq!(
+            sanitize_reaction_emoji("❤️\u{202E}"),
+            Some("❤️".to_string())
+        );
         assert_eq!(sanitize_reaction_emoji("\u{200D}😱"), None);
+    }
+
+    #[test]
+    fn ept_chat_single_and_multichunk_roundtrip_including_arabic_and_emoji() {
+        let short = ChatFallbackPacket {
+            msg_id: "m1234567890".to_string(),
+            avatar_id: "violet-fox".to_string(),
+            reply_to_id: Some("m0987654321".to_string()),
+            text: "يلا نبدأ؟ 🍿".to_string(),
+            is_edit: false,
+        };
+        let chunks = encode_ept_chat_chunks(&short).expect("encode short ept");
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].len() <= MAX_CHAT_FALLBACK_LINE_CHARS);
+
+        let mut reassembler = EptChatReassembler::default();
+        let parsed_chunk = decode_ept_chat_chunk(&chunks[0]).expect("decode chunk");
+        let decoded = reassembler
+            .push_chunk("Maya", parsed_chunk)
+            .expect("reassemble single");
+        assert_eq!(decoded, short);
+
+        let edit_pkt = ChatFallbackPacket {
+            msg_id: "m1234567890".to_string(),
+            avatar_id: "violet-fox".to_string(),
+            reply_to_id: None,
+            text: "edited line".to_string(),
+            is_edit: true,
+        };
+        let edit_chunks = encode_ept_chat_chunks(&edit_pkt).expect("encode edit ept");
+        let edit_decoded = reassembler
+            .push_chunk("Maya", decode_ept_chat_chunk(&edit_chunks[0]).unwrap())
+            .expect("decode edit");
+        assert_eq!(edit_decoded, edit_pkt);
+
+        let react_pkt = ChatReactFallbackPacket {
+            msg_id: "m1234567890".to_string(),
+            emoji: "🔥".to_string(),
+        };
+        let react_wire = encode_epcr_chat_react(&react_pkt).expect("encode epcr");
+        assert!(react_wire.len() <= MAX_CHAT_FALLBACK_LINE_CHARS);
+        assert_eq!(decode_epcr_chat_react(&react_wire), Some(react_pkt));
+
+        let long_text = "Hold on!! ".repeat(45);
+        let long = ChatFallbackPacket {
+            msg_id: "m9988776655".to_string(),
+            avatar_id: "luna".to_string(),
+            reply_to_id: None,
+            text: long_text.trim().to_string(),
+            is_edit: false,
+        };
+        let long_chunks = encode_ept_chat_chunks(&long).expect("encode long ept");
+        assert!(long_chunks.len() >= 3);
+        for line in &long_chunks {
+            assert!(line.len() <= MAX_CHAT_FALLBACK_LINE_CHARS);
+        }
+
+        // Deliver out of order
+        let mut out = None;
+        for line in long_chunks.into_iter().rev() {
+            let c = decode_ept_chat_chunk(&line).expect("decode multi chunk");
+            out = reassembler.push_chunk("Tariq", c);
+        }
+        assert_eq!(out, Some(long));
+    }
+
+    #[test]
+    fn sanitize_chat_text_strips_controls_and_caps_length() {
+        assert_eq!(sanitize_chat_text("   \n\t  "), None);
+        assert_eq!(
+            sanitize_chat_text("  hello\u{202E}\n\n\n\nworld  "),
+            Some("hello\n\nworld".to_string())
+        );
+        let huge = "a".repeat(MAX_CHAT_MESSAGE_CHARS + 50);
+        assert_eq!(
+            sanitize_chat_text(&huge).unwrap().chars().count(),
+            MAX_CHAT_MESSAGE_CHARS
+        );
     }
 }

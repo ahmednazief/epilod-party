@@ -1006,7 +1006,7 @@ impl AudioEnvelopeBuilder {
     fn subtract_adaptive_floor(bins: &[f32], chunk_bins: usize, scale: f32) -> Vec<f32> {
         let mut sorted_all = bins.to_vec();
         sorted_all.sort_unstable_by(|a, b| a.total_cmp(b));
-        let global_p25 = sorted_all[(sorted_all.len() * 25 / 100).min(sorted_all.len() - 1)];
+        let global_p60 = sorted_all[(sorted_all.len() * 60 / 100).min(sorted_all.len() - 1)];
 
         let mut out = Vec::with_capacity(bins.len());
         let mut scratch = Vec::with_capacity(chunk_bins);
@@ -1015,7 +1015,7 @@ impl AudioEnvelopeBuilder {
             scratch.extend_from_slice(chunk);
             scratch.sort_unstable_by(|a, b| a.total_cmp(b));
             let chunk_p15 = scratch[(scratch.len() * 15 / 100).min(scratch.len() - 1)];
-            let floor = chunk_p15.min(global_p25 * 1.5);
+            let floor = chunk_p15.min(global_p60 * 1.5);
             for &b in chunk {
                 out.push((b - scale * floor).max(0.0));
             }
@@ -1058,7 +1058,8 @@ impl AudioEnvelopeBuilder {
         let log_denom = (1.0f32 + 4.0).ln();
         let mut out = work;
         for b in &mut out {
-            let u = (*b / ref_level).clamp(0.0, 1.5);
+            let raw_u = (*b / ref_level).clamp(0.0, 1.5);
+            let u = ((raw_u - 0.05) / 0.95).clamp(0.0, 1.5);
             *b = ((1.0 + 4.0 * u).ln() / log_denom).clamp(0.0, 1.0);
         }
         out
@@ -1481,7 +1482,7 @@ fn run_global_fft_align(
     let mut candidate_scales = vec![1.0f64];
     if config.check_framerate_drift && total_bins >= 9_000 {
         candidate_scales.extend([23.976 / 25.0, 25.0 / 23.976, 24.0 / 25.0, 25.0 / 24.0]);
-        if total_bins >= 120_000 {
+        if total_bins >= 45_000 {
             let ntsc_film = 24_000.0 / 1001.0;
             candidate_scales.extend([ntsc_film / 24.0, 24.0 / ntsc_film]);
         }
@@ -1822,7 +1823,7 @@ fn evaluate_cue_blocks(
                 continue;
             }
             let z = measure_background_z(&ncc_points, best_l, best_r, 250);
-            if best_r >= 0.14 && z >= 3.0 {
+            if best_r >= 0.11 && z >= 2.7 {
                 candidates.push(BlockCandidate {
                     offset_ms: (best_l as i64) * 10,
                     corr: best_r,
@@ -1845,7 +1846,7 @@ fn try_ransac_linear_blocks(blocks: &[CueBlock]) -> Option<(AutoSyncOutcome, usi
     let strong: Vec<(usize, &CueBlock)> = blocks
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.candidates.first().is_some_and(|c| c.z >= 3.6))
+        .filter(|(_, b)| b.candidates.first().is_some_and(|c| c.z >= 3.0))
         .collect();
     if strong.len() < 4 || blocks.len() < 4 {
         return None;
@@ -1921,7 +1922,13 @@ fn try_ransac_linear_blocks(blocks: &[CueBlock]) -> Option<(AutoSyncOutcome, usi
 
     let mean_z = best_inliers.iter().map(|v| v.2).sum::<f64>() / (inlier_count as f64);
     let mean_r = best_inliers.iter().map(|v| v.3).sum::<f64>() / (inlier_count as f64);
-    if mean_z < 4.2 || mean_r < 0.17 {
+    let strong_consensus = inlier_count >= 5 && inlier_count * 2 >= blocks.len();
+    let (min_req_z, min_req_r) = if strong_consensus {
+        (3.2, 0.11)
+    } else {
+        (4.2, 0.17)
+    };
+    if mean_z < min_req_z || mean_r < min_req_r {
         return None;
     }
 
@@ -2094,7 +2101,13 @@ fn solve_piecewise_dp(
     }
     let mean_z = path_rev.iter().map(|(_, c)| c.z).sum::<f64>() / (matched_count as f64);
     let mean_r = path_rev.iter().map(|(_, c)| c.corr).sum::<f64>() / (matched_count as f64);
-    if mean_z < 4.2 || mean_r < 0.17 {
+    let strong_consensus = matched_count >= 5 && matched_count * 2 >= blocks.len();
+    let (min_req_z, min_req_r) = if strong_consensus {
+        (3.2, 0.11)
+    } else {
+        (4.2, 0.17)
+    };
+    if mean_z < min_req_z || mean_r < min_req_r {
         return None;
     }
 
@@ -3633,5 +3646,73 @@ mod tests {
         let sdh_only =
             "1\n00:00:01,000 --> 00:00:03,000\n[Music]\n\n2\n00:00:04,000 --> 00:00:06,000\n♪♪\n";
         assert_eq!(detect_subtitle_language(sdh_only), None);
+    }
+
+    #[test]
+    fn test_autosync_aligns_music_heavy_movie_with_quiet_opening_and_padded_cues() {
+        // Reproduce a film with 40% dead-quiet scenes (low global p25) followed by sustained
+        // mid-band background score + speech cues with +750ms trailing reading padding.
+        let total_secs = 240usize;
+        let sample_rate = 16_000usize;
+        let total_samples = total_secs * sample_rate;
+        let mut speech_windows = Vec::new();
+        let mut t = 100_000u64;
+        let mut step = 0u64;
+        while t < 228_000 {
+            let dur = 1_100 + ((step * 613) % 900);
+            let gap = 2_400 + ((step * 1_907) % 3_500);
+            speech_windows.push((t, t + dur));
+            t += dur + gap;
+            step += 1;
+        }
+        assert!(speech_windows.len() >= 18);
+
+        let mut pcm = Vec::with_capacity(total_samples * 2);
+        let two_pi = 2.0 * std::f64::consts::PI;
+        for s in 0..total_samples {
+            let t_ms = (s as u64 * 1000) / sample_rate as u64;
+            let tf = s as f64 / sample_rate as f64;
+            // First 96 seconds dead quiet -> drives global_p25 near 0; 96..240s continuous score
+            let score = if t_ms >= 96_000 {
+                0.08 * (two_pi * 440.0 * tf).sin() + 0.06 * (two_pi * 660.0 * tf).sin()
+            } else {
+                0.0
+            };
+            let in_speech = speech_windows.iter().any(|&(a, b)| t_ms >= a && t_ms <= b);
+            let voice = if in_speech {
+                0.28 * (two_pi * 920.0 * tf).sin() + 0.22 * (two_pi * 1_450.0 * tf).sin()
+            } else {
+                0.0
+            };
+            let sample = ((score + voice).clamp(-1.0, 1.0) * 30_000.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let mut builder = AudioEnvelopeBuilder::new();
+        builder.push_pcm_s16le_bytes(&pcm);
+        let env = builder.finish().expect("finish envelope");
+
+        let shift_ms = 6_400u64;
+        let cues: Vec<SubtitleCue> = speech_windows
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b))| SubtitleCue {
+                index: i + 1,
+                start_ms: a + shift_ms,
+                // Realistic trailing reading-speed padding (+150..+450ms) past spoken utterance end
+                end_ms: b + shift_ms + 150 + ((i as u64 * 97) % 300),
+                text: format!("Spoken line {i}"),
+            })
+            .collect();
+
+        let outcome =
+            auto_align_subtitles(&cues, &env, &AutoSyncConfig::default()).expect("music align");
+        assert!(
+            (outcome.offset_ms + shift_ms as i64).abs() <= 450,
+            "expected ~-{shift_ms}ms, got {}ms (r={}, z={})",
+            outcome.offset_ms,
+            outcome.correlation,
+            outcome.confidence_z
+        );
     }
 }

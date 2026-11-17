@@ -80,8 +80,26 @@ fn main() {
                 };
                 sign_key_arg = Some(val.clone());
                 idx += 2;
+            } else if args[idx] == "--notes-file" {
+                let Some(path) = args.get(idx + 1) else {
+                    eprintln!("--notes-file requires a path to a UTF-8 release notes file");
+                    process::exit(2);
+                };
+                match fs::read_to_string(path) {
+                    Ok(content) => {
+                        let normalized = content.replace("\r\n", "\n").trim().to_string();
+                        if !normalized.is_empty() {
+                            notes = Some(normalized);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to read notes file '{path}': {err}");
+                        process::exit(1);
+                    }
+                }
+                idx += 2;
             } else if notes.is_none() {
-                notes = Some(args[idx].clone());
+                notes = Some(args[idx].replace("\r\n", "\n").trim().to_string());
                 idx += 1;
             } else {
                 eprintln!("Unexpected extra argument: {}", args[idx]);
@@ -171,7 +189,7 @@ fn main() {
     //   epilod-pack <source-staging-dir> <output-epkg-path> [--version <ver>]
     if args.len() != 3 && !(args.len() == 5 && args[3] == "--version") {
         eprintln!(
-            "Usage:\n  epilod-pack <source-staging-dir> <output-epkg-path> [--version <ver>]\n  epilod-pack --attach-sfx <base-exe> <archive.epkg> <out-setup-exe>\n  epilod-pack --write-update-manifest <setup-exe> <version> <download-url> <out-json> [notes] [--sign-key <hex-or-file>]"
+            "Usage:\n  epilod-pack <source-staging-dir> <output-epkg-path> [--version <ver>]\n  epilod-pack --attach-sfx <base-exe> <archive.epkg> <out-setup-exe>\n  epilod-pack --write-update-manifest <setup-exe> <version> <download-url> <out-json> [notes | --notes-file <path>] [--sign-key <hex-or-file>]"
         );
         process::exit(2);
     }

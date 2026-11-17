@@ -127,6 +127,18 @@ pub fn stop_cmd(request_id: u64) -> String {
     encode_command(request_id, &[json!("stop")])
 }
 
+/// Captures an uncropped, UI-chrome-free video frame directly to a temporary image file.
+/// (`mpv` JSON IPC cannot serialize `screenshot-raw`'s byte array, whereas `screenshot-to-file`
+/// writes a fast sRGB JPEG cleanly in ~34ms with subtitles preserved.)
+pub fn screenshot_to_file_cmd(request_id: u64, path: &str, include_subtitles: bool) -> String {
+    let mode = if include_subtitles {
+        "subtitles"
+    } else {
+        "video"
+    };
+    encode_command(request_id, &[json!("screenshot-to-file"), json!(path), json!(mode)])
+}
+
 pub fn set_property_cmd(request_id: u64, name: &str, value: Value) -> String {
     encode_command(request_id, &[json!("set_property"), json!(name), value])
 }
@@ -168,11 +180,35 @@ pub fn set_aspect_cmd(request_id: u64, aspect: &str) -> String {
     set_property_cmd(request_id, "video-aspect-override", json!(normalized))
 }
 
+/// Shifts and scales live rendered video + subtitles horizontally on the GPU without resizing
+/// the underlying child HWND (`0.0` = full stage, `0.25` = 25% right margin for docked panels).
+pub fn set_video_margin_right_cmd(request_id: u64, ratio: f64) -> String {
+    let clamped = if ratio.is_finite() {
+        (ratio.clamp(0.0, 0.75) * 10_000.0).round() / 10_000.0
+    } else {
+        0.0
+    };
+    set_property_cmd(request_id, "video-margin-ratio-right", json!(clamped))
+}
+
 pub fn sub_add_cmd(request_id: u64, path: &str) -> String {
-    encode_command(
-        request_id,
-        &[json!("sub-add"), json!(path), json!("select")],
-    )
+    sub_add_cmd_with_title(request_id, path, None)
+}
+
+/// Add an external subtitle track and optionally attach a user-facing title so transcoded or
+/// auto-synced temp files do not expose internal `decoded_*` / `synced_*` filenames in mpv.
+pub fn sub_add_cmd_with_title(request_id: u64, path: &str, title: Option<&str>) -> String {
+    let clean_title = title.map(str::trim).filter(|t| !t.is_empty());
+    match clean_title {
+        Some(t) => encode_command(
+            request_id,
+            &[json!("sub-add"), json!(path), json!("select"), json!(t)],
+        ),
+        None => encode_command(
+            request_id,
+            &[json!("sub-add"), json!(path), json!("select")],
+        ),
+    }
 }
 
 pub fn sub_remove_cmd(request_id: u64, sid: u64) -> String {
@@ -464,6 +500,10 @@ pub fn launch_args_with_fonts(
         "--msg-level=all=warn".to_string(),
         "--demuxer-max-bytes=150MiB".to_string(),
         "--demuxer-max-back-bytes=50MiB".to_string(),
+        // Fast clean JPEG frame capture for seamless resize/modal freeze transitions
+        "--screenshot-format=jpg".to_string(),
+        "--screenshot-jpeg-quality=90".to_string(),
+        "--screenshot-high-bit-depth=no".to_string(),
         // Crisp libass rendering: light stem hinting preserves glyph proportions, micro-blur
         // smooths outer outline stair-stepping without softening text fill, and a subtle
         // translucent border + drop shadow avoids harsh sticker cutouts across bright/dark scenes.
@@ -1238,7 +1278,8 @@ mod tests {
         assert!(sub_ext.iter().any(|a| a == "0:s:0"));
         let stream_ext = autosync_extract_stream_args_ffmpeg("movie.mkv", "out.srt", 4);
         assert!(stream_ext.windows(2).any(|w| w == ["-map", "0:4"]));
-        let bmp_crc = autosync_extract_bitmap_framecrc_args_ffmpeg("movie.mkv", "crc.txt", Some(3), 0);
+        let bmp_crc =
+            autosync_extract_bitmap_framecrc_args_ffmpeg("movie.mkv", "crc.txt", Some(3), 0);
         assert!(bmp_crc.windows(2).any(|w| w == ["-map", "0:3"]));
         assert!(bmp_crc.windows(2).any(|w| w == ["-f", "framecrc"]));
         assert!(bmp_crc.windows(2).any(|w| w == ["-c:s", "copy"]));
@@ -1317,6 +1358,27 @@ mod tests {
     fn test_subtitle_commands_and_rtl_paths() {
         let add = sub_add_cmd(1, r"C:\Subs\العربية.srt");
         assert!(add.contains("sub-add"));
+        let add_titled = sub_add_cmd_with_title(
+            2,
+            r"C:\Temp\decoded_164668_2.srt",
+            Some("Movie.2025.Arabic.srt"),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(add_titled.trim()).unwrap();
+        assert_eq!(
+            parsed["command"],
+            json!([
+                "sub-add",
+                r"C:\Temp\decoded_164668_2.srt",
+                "select",
+                "Movie.2025.Arabic.srt"
+            ])
+        );
+        let add_blank = sub_add_cmd_with_title(3, r"C:\Temp\decoded_164668_2.srt", Some("   "));
+        let parsed_blank: serde_json::Value = serde_json::from_str(add_blank.trim()).unwrap();
+        assert_eq!(
+            parsed_blank["command"],
+            json!(["sub-add", r"C:\Temp\decoded_164668_2.srt", "select"])
+        );
         let rem = sub_remove_cmd(2, 4);
         assert!(rem.contains("sub-remove") && rem.contains("4"));
         let cmds_forced =
@@ -1583,6 +1645,37 @@ mod tests {
         assert_eq!(
             tracker.filter_time_pos(900.04, t0 + Duration::from_millis(1850)),
             TimePosDecision::AcceptAfterSeek(900.04)
+        );
+    }
+
+    #[test]
+    fn test_screenshot_to_file_cmd_encodes_mode_and_path() {
+        let cmd = screenshot_to_file_cmd(55, r"C:\Temp\epilod_freeze.jpg", true);
+        let parsed: Value = serde_json::from_str(cmd.trim()).expect("valid cmd json");
+        assert_eq!(parsed["request_id"], 55);
+        assert_eq!(
+            parsed["command"],
+            json!(["screenshot-to-file", r"C:\Temp\epilod_freeze.jpg", "subtitles"])
+        );
+
+        let video_only = screenshot_to_file_cmd(56, "/tmp/out.jpg", false);
+        let parsed2: Value = serde_json::from_str(video_only.trim()).expect("valid cmd json");
+        assert_eq!(
+            parsed2["command"],
+            json!(["screenshot-to-file", "/tmp/out.jpg", "video"])
+        );
+
+        let margin = set_video_margin_right_cmd(57, 0.197916);
+        let parsed3: Value = serde_json::from_str(margin.trim()).expect("valid margin json");
+        assert_eq!(
+            parsed3["command"],
+            json!(["set_property", "video-margin-ratio-right", 0.1979])
+        );
+        let clamped_neg = set_video_margin_right_cmd(58, f64::NAN);
+        let parsed4: Value = serde_json::from_str(clamped_neg.trim()).expect("valid nan json");
+        assert_eq!(
+            parsed4["command"],
+            json!(["set_property", "video-margin-ratio-right", 0.0])
         );
     }
 }

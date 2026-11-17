@@ -17,6 +17,7 @@ interface ScrubberProps {
   onChange: (val: number, meta?: ScrubberChangeMeta) => void;
   onCommit?: (val: number) => void;
   highlightRange?: { start: number; end: number } | null;
+  alwaysShowThumb?: boolean;
   className?: string;
 }
 
@@ -39,6 +40,7 @@ export function Scrubber({
   onChange,
   onCommit,
   highlightRange = null,
+  alwaysShowThumb = false,
   className = "",
 }: ScrubberProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
@@ -66,7 +68,10 @@ export function Scrubber({
     const el = trackRef.current;
     if (!el) return value;
     const rect = el.getBoundingClientRect();
-    const r = rect.width > 0 ? clamp((clientX - rect.left) / rect.width, 0, 1) : 0;
+    const pad = alwaysShowThumb ? 11 : 7;
+    const effectivePad = rect.width > pad * 2 ? pad : 0;
+    const span = rect.width - effectivePad * 2;
+    const r = span > 0 ? clamp((clientX - rect.left - effectivePad) / span, 0, 1) : 0;
     const raw = min + r * (safeMax - min);
     const snapped = step > 0 ? Math.round(raw / step) * step : raw;
     return clamp(snapped, min, max > min ? max : min);
@@ -215,11 +220,38 @@ export function Scrubber({
             {formatTooltip(hoverVal)}
           </div>
         ))}
-      <div className="relative w-full h-1.5 group-hover:h-2.5 bg-white/14 rounded-full overflow-hidden transition-[height] duration-200 ease-out">
+      <div
+        className={`ep-scrubber-track relative w-full ${
+          alwaysShowThumb
+            ? "h-1.5"
+            : dragging
+              ? "h-2.5"
+              : "h-1.5 group-hover:h-2.5"
+        } rounded-full overflow-hidden transition-[height] duration-200 ease-out`}
+      >
+        {ratio > 0 && (
+          <div
+            className={`ep-scrubber-fill-cap absolute inset-y-0 left-0 pointer-events-none ${
+              alwaysShowThumb ? "w-[11px]" : "w-[7px]"
+            }`}
+          />
+        )}
         <div
-          className="ep-scrubber-fill absolute inset-0 origin-left will-change-transform"
-          style={{ transform: `scaleX(${ratio})` }}
-        />
+          className={`absolute inset-y-0 overflow-hidden ${
+            alwaysShowThumb ? "left-[11px] right-[11px]" : "left-[7px] right-[7px]"
+          }`}
+        >
+          <div
+            className="ep-scrubber-fill absolute inset-y-0 left-0 right-0 will-change-transform"
+            style={{
+              transform: `translateX(${(ratio - 1) * 100}%)`,
+              opacity: ratio > 0 ? 1 : 0,
+            }}
+          />
+        </div>
+        {!alwaysShowThumb && !dragging && ratio >= 0.999 && (
+          <div className="ep-scrubber-fill-cap ep-scrubber-end-cap absolute inset-y-0 right-0 w-[7px] pointer-events-none" />
+        )}
         {highlightSpan && (
           <div
             aria-hidden="true"
@@ -231,16 +263,34 @@ export function Scrubber({
           />
         )}
       </div>
-      <div className="pointer-events-none absolute inset-0 overflow-x-clip">
-        <div className="absolute inset-y-0 left-[7px] right-[7px] flex items-center">
+      <div
+        className={`pointer-events-none absolute inset-y-0 overflow-x-clip ${
+          alwaysShowThumb ? "-inset-x-2" : "inset-x-0"
+        }`}
+      >
+        <div
+          className={`absolute inset-y-0 flex items-center ${
+            alwaysShowThumb ? "left-[19px] right-[19px]" : "left-[7px] right-[7px]"
+          }`}
+        >
           <div className="w-full" style={{ transform: `translateX(${ratio * 100}%)` }}>
-            <div
-              className={`-ml-[7px] h-3.5 w-3.5 rounded-full bg-white shadow-md transition-[opacity,scale,transform] duration-150 ${
-                dragging
-                  ? "opacity-100 scale-100"
-                  : "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 scale-90 group-hover:scale-100"
-              }`}
-            />
+            {alwaysShowThumb ? (
+              <div className="-ml-[14px] w-7 flex items-center justify-center">
+                <div
+                  data-dragging={dragging ? "true" : undefined}
+                  className="ep-scrubber-glass-thumb h-[14px] w-[22px] shrink-0 rounded-full"
+                />
+              </div>
+            ) : (
+              <div
+                data-dragging={dragging ? "true" : undefined}
+                className={`-ml-[7px] h-3.5 w-3.5 rounded-full ep-scrubber-glass-thumb ep-scrubber-hover-thumb ${
+                  dragging
+                    ? "opacity-100 scale-100"
+                    : "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 scale-90 group-hover:scale-100"
+                }`}
+              />
+            )}
           </div>
         </div>
       </div>

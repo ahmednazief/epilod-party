@@ -29,6 +29,7 @@ import {
   PartyViewersIcon,
   PlayerAudioIcon,
   PlayerCaptionsIcon,
+  PlayerChatIcon,
   PlayerEpisodesIcon,
   PlayerEyeIcon,
   PlayerFollowIcon,
@@ -61,14 +62,15 @@ import { getFileDisplayName, splitDroppedFiles } from "../lib/fileDrop";
 import { resolveFullscreenChromeState } from "../lib/fullscreenUi";
 import { logFrontendEvent } from "../lib/logger";
 import {
-  captureFrozenBackdropFrame,
+  captureCleanFrozenFrame,
   enqueueMpvLifecycle,
-  getLastCapturedBackdropFrame,
+  getLastCleanFreezeFrame,
   isMpvNotRunningError,
   mpvAddSubtitle,
   mpvGetSurfaceState,
   mpvLoad,
   mpvResize,
+  mpvSeek,
   mpvSetPause,
   mpvSetSpeed,
   mpvSetSubDelay,
@@ -100,6 +102,7 @@ import {
   subscribeMpvRuntimeLost,
   mpvSetLoop,
   mpvSetAspectMode,
+  mpvSetVideoMarginRight,
   mpvSetMute,
   mpvSetSubTrack,
   mpvSetVolume,
@@ -139,7 +142,11 @@ import {
   type PlaylistItem,
 } from "../lib/playlist";
 import { isTextEntryElement } from "../lib/shortcuts";
-import { resetSharedRelativeSeek, shouldAcceptMpvTimeEvent } from "../lib/seekCoalesce";
+import {
+  nextClientSeekSeq,
+  resetSharedRelativeSeek,
+  shouldAcceptMpvTimeEvent,
+} from "../lib/seekCoalesce";
 import {
   executeSkipIntro,
   findActiveIntroAt,
@@ -193,7 +200,12 @@ import {
   onSyncPeerSeek,
   onSyncPlayBlocked,
   onSyncReaction,
+  onSyncChat,
+  onSyncChatEdit,
+  onSyncChatReact,
+  onSyncChatTyping,
   onSyncRoomControl,
+  onSyncRoomRerolled,
   onSyncRoomState,
   onSyncServerOverride,
   onSyncStatus,
@@ -237,8 +249,11 @@ import {
   useSubtitleStore,
 } from "../store/useSubtitleStore";
 import { enqueueReactionBurst } from "../store/useReactionStore";
+import { useChatStore } from "../store/useChatStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { ChatSidebar } from "./ChatSidebar";
 import { EpisodesPanel } from "./EpisodesPanel";
+import { FloatingChatPeeks } from "./FloatingChatPeeks";
 import { FloatingReactionsOverlay } from "./FloatingReactionsOverlay";
 import { SkipIntroOverlay } from "./SkipIntroOverlay";
 import { FileMismatchBanner } from "./FileMismatchBanner";
@@ -280,7 +295,6 @@ function computeCapsulePopoverLayout(tab: SideTab): CapsulePopoverLayout {
         : tab === "reactions"
           ? 368
           : 356;
-  const width = Math.min(maxWidth, Math.max(240, winW - 32));
   const barEl = document.querySelector<HTMLElement>('[data-capsule-bar="true"]');
   const anchorEl = document.querySelector<HTMLElement>(`[data-capsule-anchor="${tab}"]`);
 
@@ -297,9 +311,11 @@ function computeCapsulePopoverLayout(tab: SideTab): CapsulePopoverLayout {
   const minBottom = isFullWidth ? barHeight + 12 : 136;
   const bottom = Math.max(minBottom, Math.round(barTopDist + popoverGap));
 
-  const minLeft = barRect && barRect.width > 0 ? Math.max(16, Math.round(barRect.left)) : 16;
+  const minLeft = barRect && barRect.width > 0 ? Math.max(8, Math.round(barRect.left)) : 12;
   const maxRight =
-    barRect && barRect.width > 0 ? Math.min(winW - 16, Math.round(barRect.right)) : winW - 16;
+    barRect && barRect.width > 0 ? Math.min(winW - 8, Math.round(barRect.right)) : winW - 12;
+  const stageAvailableW = Math.max(200, maxRight - minLeft);
+  const width = Math.min(maxWidth, Math.min(Math.max(200, winW - 16), stageAvailableW));
   const maxLeft = Math.max(minLeft, maxRight - width);
 
   const btnRect = anchorEl?.getBoundingClientRect();
@@ -431,8 +447,29 @@ export function WatchRoom() {
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [popoverPos, setPopoverPos] = useState<CapsulePopoverLayout | null>(null);
+  const [windowWidth, setWindowWidth] = useState<number>(() =>
+    typeof window !== "undefined" ? window.innerWidth : 1280,
+  );
+  const [chatResizing, setChatResizing] = useState(false);
+  const [chatLayoutTransitioning, setChatLayoutTransitioning] = useState(false);
+  const [surfaceHoldPending, setSurfaceHoldPending] = useState(false);
+  const chatTransitionTimerRef = useRef<number | null>(null);
+  const chatTransitionSeqRef = useRef(0);
+  const surfaceHoldTimerRef = useRef<number | null>(null);
+  const surfaceRestoreSeqRef = useRef(0);
 
+  const chatSidebarOpen = useChatStore((s) => s.chatOpen);
+  const chatSidebarWidth = useChatStore((s) => s.sidebarWidth);
+  const unreadChatCount = useChatStore((s) => s.unreadCount);
+  const setChatOpen = useChatStore((s) => s.setChatOpen);
+  const reducedMotion = useAppStore((s) => s.reducedMotion);
+  const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
+  const chatDocked = windowWidth >= 860;
+  const chatSidebarPresence = useAnimatedPresence(Boolean(roomCode) && chatSidebarOpen, 280);
+
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const lastMarginRatioRef = useRef(-1);
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
   const soundTrackerRef = useRef(new RoomSoundTracker());
   const syncDisconnectTrackerRef = useRef(new SyncDisconnectTracker());
@@ -443,10 +480,12 @@ export function WatchRoom() {
   const listenersReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const loadInFlightRef = useRef(false);
   const roomSessionStartedRef = useRef(false);
+  const activeBackendRoomRef = useRef<string | null>(null);
   const panelOpenRef = useRef(false);
   const sideTabRef = useRef<SideTab>(sideTab);
   const contextMenuOpenRef = useRef(false);
   const barHoveredRef = useRef(false);
+  const barLeaveCooldownUntilRef = useRef(0);
   const idleTimerRef = useRef<number | null>(null);
   const announcedFileKeyRef = useRef<string | null>(null);
   const autoReadyMarkedRef = useRef(false);
@@ -473,18 +512,13 @@ export function WatchRoom() {
   sideTabRef.current = sideTab;
   contextMenuOpenRef.current = contextMenu !== null;
 
-  const wakeChrome = useCallback(() => {
-    setChromeIdle(false);
-    if (idleTimerRef.current !== null) {
-      window.clearTimeout(idleTimerRef.current);
-      idleTimerRef.current = null;
-    }
+  const canAutoHideChromeNow = useCallback(() => {
     const p = usePlayerStore.getState();
     const app = useAppStore.getState();
     const sync = useSyncStore.getState();
     const shouldAutoHidePlaying = !p.paused;
-    const shouldAutoHidePausedFullscreen = p.paused && p.isFullscreen && !barHoveredRef.current;
-    if (
+    const shouldAutoHidePausedFullscreen = p.paused && p.isFullscreen;
+    return (
       p.loaded &&
       (shouldAutoHidePlaying || shouldAutoHidePausedFullscreen) &&
       !sync.alignMode &&
@@ -493,15 +527,57 @@ export function WatchRoom() {
       !app.settingsOpen &&
       !app.shortcutsOpen &&
       !p.playerError
-    ) {
+    );
+  }, []);
+
+  const wakeChrome = useCallback(() => {
+    barLeaveCooldownUntilRef.current = 0;
+    setChromeIdle(false);
+    if (idleTimerRef.current !== null) {
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    if (canAutoHideChromeNow() && !barHoveredRef.current) {
+      const p = usePlayerStore.getState();
       const delayMs = p.isFullscreen ? 2200 : 2600;
       idleTimerRef.current = window.setTimeout(() => {
         setChromeIdle(true);
       }, delayMs);
     }
-  }, []);
+  }, [canAutoHideChromeNow]);
 
-  const rect = useViewportRect(viewportRef, viewportTick);
+  const handleBarHoverChange = useCallback(
+    (hovered: boolean) => {
+      const wasHovered = barHoveredRef.current;
+      barHoveredRef.current = hovered;
+      if (hovered) {
+        wakeChrome();
+        return;
+      }
+      if (wasHovered) {
+        barLeaveCooldownUntilRef.current = Date.now() + 650;
+        if (idleTimerRef.current !== null) {
+          window.clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = null;
+        }
+        if (canAutoHideChromeNow()) {
+          idleTimerRef.current = window.setTimeout(() => {
+            setChromeIdle(true);
+          }, 180);
+        }
+      }
+    },
+    [canAutoHideChromeNow, wakeChrome],
+  );
+
+  const onPassivePointerMove = useCallback(() => {
+    if (!barHoveredRef.current && Date.now() < barLeaveCooldownUntilRef.current) {
+      return;
+    }
+    wakeChrome();
+  }, [wakeChrome]);
+
+  const stageRect = useViewportRect(stageRef, viewportTick);
 
   const toggleFullscreen = useCallback(() => {
     const next = !usePlayerStore.getState().isFullscreen;
@@ -535,10 +611,212 @@ export function WatchRoom() {
     }
   }, [wakeChrome]);
 
+  const syncMpvRightMarginNow = useCallback((force = false) => {
+    const stageEl = stageRef.current;
+    const vpEl = viewportRef.current;
+    if (!stageEl || !vpEl || !isDesktop() || !mpvStartedRef.current) return;
+    const sRect = stageEl.getBoundingClientRect();
+    const vRect = vpEl.getBoundingClientRect();
+    const ratio =
+      sRect.width > 1
+        ? Math.max(0, Math.min(0.75, (sRect.width - vRect.width) / sRect.width))
+        : 0;
+    const rounded = Math.round(ratio * 10_000) / 10_000;
+    if (force || Math.abs(rounded - lastMarginRatioRef.current) >= 0.0004) {
+      lastMarginRatioRef.current = rounded;
+      safeMpvCall(mpvSetVideoMarginRight(rounded), "mpvSetVideoMarginRight");
+    }
+  }, []);
+
+  const restoreLiveMpvSurfaceAfterPause = useCallback(async () => {
+    const restoreSeq = ++surfaceRestoreSeqRef.current;
+    if (surfaceHoldTimerRef.current !== null) {
+      window.clearTimeout(surfaceHoldTimerRef.current);
+      surfaceHoldTimerRef.current = null;
+    }
+
+    setSurfaceHoldPending(true);
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+    if (!mountedRef.current || surfaceRestoreSeqRef.current !== restoreSeq) return;
+
+    const settled = measurePhysicalRect(stageRef.current ?? viewportRef.current);
+    if (settled.width > 0 && settled.height > 0) {
+      const plan = viewportTrackerRef.current.planResize(settled);
+      if (plan.send || plan.forceFlag) {
+        await safeMpvCall(mpvResize(settled, true), "restore:mpvResize");
+      }
+    }
+    syncMpvRightMarginNow(true);
+    if (!mountedRef.current || surfaceRestoreSeqRef.current !== restoreSeq) return;
+
+    const pNow = usePlayerStore.getState();
+    const aNow = useAppStore.getState();
+    if (
+      aNow.settingsOpen ||
+      aNow.shortcutsOpen ||
+      Boolean(pNow.playerError) ||
+      dialogOpenRef.current
+    ) {
+      setSurfaceHoldPending(false);
+      return;
+    }
+
+    await safeMpvCall(mpvSetVisible(true), "restore:mpvSetVisible");
+    if (!mountedRef.current || surfaceRestoreSeqRef.current !== restoreSeq) return;
+
+    surfaceHoldTimerRef.current = window.setTimeout(() => {
+      surfaceHoldTimerRef.current = null;
+      if (mountedRef.current && surfaceRestoreSeqRef.current === restoreSeq) {
+        setSurfaceHoldPending(false);
+      }
+    }, 72);
+  }, [syncMpvRightMarginNow]);
+
+  const finishChatLayoutTransition = useCallback(
+    (expectedSeq?: number) => {
+      if (expectedSeq !== undefined && chatTransitionSeqRef.current !== expectedSeq) return;
+      if (chatTransitionTimerRef.current !== null) {
+        window.clearTimeout(chatTransitionTimerRef.current);
+        chatTransitionTimerRef.current = null;
+      }
+      requestAnimationFrame(() => {
+        syncMpvRightMarginNow(true);
+      });
+      setChatLayoutTransitioning(false);
+    },
+    [syncMpvRightMarginNow],
+  );
+
+  const setChatSidebarOpenSmooth = useCallback(
+    (nextOpen: boolean) => {
+      if (useChatStore.getState().chatOpen === nextOpen) return;
+      const seq = ++chatTransitionSeqRef.current;
+      if (chatTransitionTimerRef.current !== null) {
+        window.clearTimeout(chatTransitionTimerRef.current);
+        chatTransitionTimerRef.current = null;
+      }
+
+      const playerNow = usePlayerStore.getState();
+      const liveMarginAnimate =
+        !reducedMotion &&
+        isDesktop() &&
+        mpvStartedRef.current &&
+        chatDocked &&
+        playerNow.loaded &&
+        !playerNow.playerError;
+
+      setChatOpen(nextOpen);
+      if (!liveMarginAnimate) return;
+
+      setChatLayoutTransitioning(true);
+      chatTransitionTimerRef.current = window.setTimeout(() => {
+        chatTransitionTimerRef.current = null;
+        finishChatLayoutTransition(seq);
+      }, nextOpen ? 400 : 310);
+    },
+    [chatDocked, finishChatLayoutTransition, reducedMotion, setChatOpen],
+  );
+
+  // Pump live video-margin-ratio-right updates on every frame during dock spring / handle drag
+  useEffect(() => {
+    if (!isDesktop() || !mpvStartedRef.current) return;
+    if (!chatLayoutTransitioning && !chatResizing) return;
+
+    let rafId = 0;
+    const step = () => {
+      syncMpvRightMarginNow();
+      rafId = requestAnimationFrame(step);
+    };
+    rafId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafId);
+  }, [chatLayoutTransitioning, chatResizing, syncMpvRightMarginNow]);
+
+  // Keep settled GPU right margin synced immediately on drag, open/close, breakpoint, or media load
+  useLayoutEffect(() => {
+    syncMpvRightMarginNow();
+  }, [
+    chatSidebarOpen,
+    chatDocked,
+    roomCode,
+    chatSidebarWidth,
+    windowWidth,
+    loaded,
+    syncMpvRightMarginNow,
+  ]);
+
+  const setChatSidebarOpenSmoothRef = useRef(setChatSidebarOpenSmooth);
+  setChatSidebarOpenSmoothRef.current = setChatSidebarOpenSmooth;
+
+  const toggleChatSidebar = useCallback(() => {
+    wakeChrome();
+    setChatSidebarOpenSmooth(!useChatStore.getState().chatOpen);
+  }, [setChatSidebarOpenSmooth, wakeChrome]);
+
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      if (chatTransitionTimerRef.current !== null) {
+        window.clearTimeout(chatTransitionTimerRef.current);
+        chatTransitionTimerRef.current = null;
+      }
+      if (surfaceHoldTimerRef.current !== null) {
+        window.clearTimeout(surfaceHoldTimerRef.current);
+        surfaceHoldTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const prevChatDockedOpenRef = useRef(Boolean(roomCode) && chatSidebarOpen && chatDocked);
+  useEffect(() => {
+    const dockedNow = Boolean(roomCode) && chatSidebarOpen && chatDocked;
+    if (dockedNow === prevChatDockedOpenRef.current) return;
+    prevChatDockedOpenRef.current = dockedNow;
+    syncMpvRightMarginNow(true);
+  }, [chatSidebarOpen, chatDocked, roomCode, syncMpvRightMarginNow]);
+
+  const handleSeekToChatTimestamp = useCallback(
+    (secs: number) => {
+      const p = usePlayerStore.getState();
+      if (!p.loaded) {
+        pushNote("info", "Load the video file first to jump to timestamps.");
+        return;
+      }
+      const sync = useSyncStore.getState();
+      const appState = useAppStore.getState();
+      const syncConnected = sync.status.state === "connected";
+      const effUser = resolveEffectiveUsername(sync.status, appState.username);
+      const ctrlLock = getControllerLockState(
+        syncConnected,
+        sync.participants,
+        effUser,
+        sync.roomControl,
+      );
+      if (ctrlLock.lockedForLocalUser && !(syncConnected && sync.alignMode)) {
+        pushNote("warn", formatControllerLockReason(ctrlLock));
+        return;
+      }
+      const clamped = p.durationSecs > 0 ? Math.max(0, Math.min(secs, p.durationSecs)) : Math.max(0, secs);
+      const clientSeekSeq = nextClientSeekSeq();
+      p.setEndedAtEof(false);
+      p.setPositionSecs(clamped);
+      p.flashFeedback(`Jumped to ${formatClock(clamped)}`);
+      safeMpvCall(mpvSeek(clamped, { clientSeekSeq }), "chat:mpvSeek");
+      if (syncConnected && !sync.alignMode) {
+        void syncUserSeek(clamped);
+      }
+    },
+    [pushNote],
+  );
+
   usePlayerShortcuts({
     onToggleFullscreen: toggleFullscreen,
     onExitFullscreen: exitFullscreen,
     onToggleReactions: toggleReactionsPopover,
+    onToggleChat: toggleChatSidebar,
   });
 
   const ensureMpvStarted = useCallback(async () => {
@@ -552,7 +830,7 @@ export function WatchRoom() {
       await listenersReadyPromiseRef.current;
       if (!mountedRef.current || mpvStartedRef.current) return;
 
-      const rawRect = measurePhysicalRect(viewportRef.current);
+      const rawRect = measurePhysicalRect(stageRef.current ?? viewportRef.current);
       const initialRect = {
         x: rawRect.x,
         y: rawRect.y,
@@ -561,6 +839,7 @@ export function WatchRoom() {
       };
 
       mpvLifecycleActiveRef.current = true;
+      lastMarginRatioRef.current = -1;
       try {
         await mpvStart(initialRect);
       } catch (err) {
@@ -577,6 +856,7 @@ export function WatchRoom() {
       setViewportTick((t) => t + 1);
       const appState = useAppStore.getState();
       const playerNow = usePlayerStore.getState();
+      syncMpvRightMarginNow(true);
       safeMpvCall(mpvSetVolume(playerNow.volume), "mpvSetVolume:start");
       safeMpvCall(mpvSetMute(playerNow.muted), "mpvSetMute:start");
       safeMpvCall(
@@ -589,7 +869,7 @@ export function WatchRoom() {
 
     mpvStartPromiseRef.current = startPromise;
     await startPromise;
-  }, []);
+  }, [syncMpvRightMarginNow]);
 
   // Load media + subtitle files safely
   const loadSubtitlePath = useCallback(
@@ -997,13 +1277,20 @@ export function WatchRoom() {
         syncState.setServerOverrideNotice(null);
         syncState.setLastError(null);
         try {
+          const appNow = useAppStore.getState();
+          const claimEmpty =
+            appNow.creatingRoom && !literalRoom && /^\d{6}$/.test(roomCode);
+          if (claimEmpty) {
+            appNow.setCreatingRoom(false);
+          }
           await syncConnect({
             endpoint,
             username,
             roomCode,
             literalRoom,
             password: password || null,
-            hostOnly: useAppStore.getState().hostOnlyRoom,
+            hostOnly: appNow.hostOnlyRoom,
+            claimEmpty,
           });
         } catch (err) {
           pushNote("error", formatUserError(err, "Could not connect to Syncplay server."));
@@ -1310,9 +1597,10 @@ export function WatchRoom() {
   }, [loaded, selectedFilePath, autoFetchSubtitles, preferredSubtitleLangs, openSubtitlesApiKey, pushNote]);
 
   useEffect(() => {
-    const timer = roomCode
+    const timer = roomCode && !(roomSessionStartedRef.current && activeBackendRoomRef.current === roomCode)
       ? window.setTimeout(() => {
           roomSessionStartedRef.current = true;
+          activeBackendRoomRef.current = roomCode;
           connectRoom(serverEndpoint, serverPassword);
         }, 0)
       : null;
@@ -1323,7 +1611,11 @@ export function WatchRoom() {
       if (!roomSessionStartedRef.current) {
         return;
       }
+      if (activeBackendRoomRef.current && activeBackendRoomRef.current !== roomCode) {
+        return;
+      }
       roomSessionStartedRef.current = false;
+      activeBackendRoomRef.current = null;
       void enqueueSyncLifecycle(async () => {
         await syncDisconnect();
       });
@@ -1345,6 +1637,7 @@ export function WatchRoom() {
       usePlayerStore.getState().setEngineSurfaceVisible(false);
       if (roomSessionStartedRef.current) {
         roomSessionStartedRef.current = false;
+        activeBackendRoomRef.current = null;
         void enqueueSyncLifecycle(async () => {
           await syncDisconnect();
         });
@@ -1633,6 +1926,22 @@ export function WatchRoom() {
               Boolean(useAppStore.getState().roomCode),
             );
           }),
+          onSyncRoomRerolled(({ roomCode: nextCode }) => {
+            if (!active || !nextCode) return;
+            if (useAppStore.getState().roomCode === nextCode) return;
+            activeBackendRoomRef.current = nextCode;
+            useAppStore.getState().applyRerolledRoomCode(nextCode);
+            try {
+              void navigator.clipboard?.writeText(nextCode).catch(() => undefined);
+            } catch {
+              // ignore clipboard restriction
+            }
+            pushNote(
+              "info",
+              `Code was already in use — switched to ${formatRoomCodeDisplay(nextCode)} and copied it.`,
+              6500,
+            );
+          }),
           onSyncParticipants((list) => {
             if (!active) return;
             const prevParticipants = useSyncStore.getState().participants;
@@ -1796,6 +2105,46 @@ export function WatchRoom() {
               isSelf: false,
             });
           }),
+          onSyncChat((chatMsg) => {
+            if (!active) return;
+            const chatStore = useChatStore.getState();
+            const appState = useAppStore.getState();
+            const syncState = useSyncStore.getState();
+            const allowPeek = appState.chatPeeksEnabled;
+            const localUsername = resolveEffectiveUsername(syncState.status, appState.username);
+            const added = chatStore.receiveRemoteMessage(
+              {
+                id: chatMsg.id,
+                sender: chatMsg.username,
+                avatarId: chatMsg.avatarId,
+                text: chatMsg.text,
+                replyToId: chatMsg.replyToId ?? null,
+                via: chatMsg.via,
+              },
+              { allowPeek, localUsername },
+            );
+            if (added && !chatStore.chatOpen) {
+              playSoundCue("chatMessage", {
+                moviePlaying: !usePlayerStore.getState().paused,
+              });
+            }
+          }),
+          onSyncChatEdit((edit) => {
+            if (!active) return;
+            useChatStore
+              .getState()
+              .applyMessageEdit(edit.targetMsgId, edit.username, edit.text, { isSelf: false });
+          }),
+          onSyncChatReact((react) => {
+            if (!active) return;
+            useChatStore
+              .getState()
+              .toggleMessageReaction(react.targetMsgId, react.username, react.emoji);
+          }),
+          onSyncChatTyping((typing) => {
+            if (!active) return;
+            useChatStore.getState().setPeerTyping(typing.username, typing.isTyping);
+          }),
           onSyncPeerSeek(({ username, deltaSecs }) => {
             if (!active) return;
             const rawAbs = Math.abs(deltaSecs);
@@ -1885,24 +2234,34 @@ export function WatchRoom() {
     };
   }, [loadMediaInputs, pushNote]);
 
-  // Resize child mpv HWND inside the viewport container once started (Fix 15)
+  // Keep child mpv HWND spanning the full stage container so live margin shifts never recreate its swapchain (Fix 15)
   useEffect(() => {
-    if (!isDesktop() || !mpvStartedRef.current) return;
-    const plan = viewportTrackerRef.current.planResize(rect);
-    if (plan.send) {
-      safeMpvCall(mpvResize(rect, plan.forceFlag), "mpvResize");
+    if (!isDesktop() || !mpvStartedRef.current || surfaceHoldPending) {
+      return;
     }
-  }, [rect]);
+    const plan = viewportTrackerRef.current.planResize(stageRect);
+    if (plan.send) {
+      safeMpvCall(mpvResize(stageRect, plan.forceFlag), "mpvResize");
+    }
+  }, [stageRect, surfaceHoldPending]);
 
   const modalPresence = useAnimatedPresence(settingsOpen || shortcutsOpen, 200);
   const modalBlockingVideo = settingsOpen || shortcutsOpen || modalPresence.mounted;
+  const videoSurfacePaused = modalBlockingVideo;
 
-  // Hide child HWND while fullscreen modals open/exit over live video or player fails (Fix 16)
+  // Hide child HWND while fullscreen modals or player failure cover video (Fix 16)
   useEffect(() => {
     if (!isDesktop() || !mpvStartedRef.current) return;
-    const shouldShow = !modalBlockingVideo && !playerError && !dialogOpenRef.current;
+    const shouldShow = !videoSurfacePaused && !playerError && !dialogOpenRef.current;
     if (!shouldShow) {
-      const cached = getLastCapturedBackdropFrame();
+      ++surfaceRestoreSeqRef.current;
+      if (surfaceHoldTimerRef.current !== null) {
+        window.clearTimeout(surfaceHoldTimerRef.current);
+        surfaceHoldTimerRef.current = null;
+      }
+      setSurfaceHoldPending(false);
+
+      const cached = getLastCleanFreezeFrame();
       if (cached && !usePlayerStore.getState().frozenFrame) {
         usePlayerStore.getState().setFrozenFrame(cached);
       }
@@ -1913,9 +2272,14 @@ export function WatchRoom() {
       ) {
         let cancelled = false;
         void (async () => {
-          const snap = await captureFrozenBackdropFrame();
+          const snap = await captureCleanFrozenFrame(1280, 720);
           if (snap && !cancelled) {
             usePlayerStore.getState().setFrozenFrame(snap);
+          }
+          if (!cancelled) {
+            await new Promise<void>((resolve) => {
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+            });
           }
           if (!cancelled) {
             safeMpvCall(mpvSetVisible(false), "mpvSetVisible");
@@ -1925,9 +2289,16 @@ export function WatchRoom() {
           cancelled = true;
         };
       }
+      safeMpvCall(mpvSetVisible(false), "mpvSetVisible");
+      return;
     }
-    safeMpvCall(mpvSetVisible(shouldShow), "mpvSetVisible");
-  }, [modalBlockingVideo, playerError, loaded]);
+
+    if (!usePlayerStore.getState().engineSurfaceVisible) {
+      void restoreLiveMpvSurfaceAfterPause();
+    } else {
+      safeMpvCall(mpvSetVisible(true), "mpvSetVisible");
+    }
+  }, [videoSurfacePaused, playerError, loaded, restoreLiveMpvSurfaceAfterPause]);
 
   // Wake/auto-hide cinema chrome & allow Escape to close floating popover
   useEffect(() => {
@@ -1954,21 +2325,39 @@ export function WatchRoom() {
 
   useEffect(() => {
     const onPointerActivity = () => {
-      wakeChrome();
+      onPassivePointerMove();
+    };
+    const onDocumentMouseLeave = () => {
+      barHoveredRef.current = false;
+      if (canAutoHideChromeNow()) {
+        hideChrome();
+      }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      wakeChrome();
-      if (e.code === "Escape" && panelOpenRef.current && !useAppStore.getState().settingsOpen && !useAppStore.getState().shortcutsOpen) {
-        setPanelOpen(false);
+      if (!isTextEntryElement(e.target)) {
+        wakeChrome();
+      }
+      if (
+        e.code === "Escape" &&
+        !useAppStore.getState().settingsOpen &&
+        !useAppStore.getState().shortcutsOpen
+      ) {
+        if (panelOpenRef.current) {
+          setPanelOpen(false);
+        } else if (useChatStore.getState().chatOpen) {
+          setChatSidebarOpenSmoothRef.current(false);
+        }
       }
     };
     window.addEventListener("mousemove", onPointerActivity, { passive: true });
+    document.addEventListener("mouseleave", onDocumentMouseLeave);
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("mousemove", onPointerActivity);
+      document.removeEventListener("mouseleave", onDocumentMouseLeave);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [wakeChrome]);
+  }, [canAutoHideChromeNow, hideChrome, onPassivePointerMove, wakeChrome]);
 
   const syncStatusState = syncStatus.state;
   const syncActiveEndpoint =
@@ -2146,18 +2535,33 @@ export function WatchRoom() {
   const showVideoBackdrop =
     loaded &&
     !playerError &&
-    !modalBlockingVideo &&
+    !videoSurfacePaused &&
+    !surfaceHoldPending &&
     (!desktopRuntime || engineSurfaceVisible);
 
   useEffect(() => {
     if (!frozenFrame) return;
-    if (loaded && !playerError && !modalBlockingVideo && (!desktopRuntime || engineSurfaceVisible)) {
+    if (
+      loaded &&
+      !playerError &&
+      !videoSurfacePaused &&
+      !surfaceHoldPending &&
+      (!desktopRuntime || engineSurfaceVisible)
+    ) {
       const timer = window.setTimeout(() => {
         usePlayerStore.getState().setFrozenFrame(null);
       }, 48);
       return () => window.clearTimeout(timer);
     }
-  }, [frozenFrame, loaded, playerError, modalBlockingVideo, desktopRuntime, engineSurfaceVisible]);
+  }, [
+    frozenFrame,
+    loaded,
+    playerError,
+    videoSurfacePaused,
+    surfaceHoldPending,
+    desktopRuntime,
+    engineSurfaceVisible,
+  ]);
 
   useEffect(() => {
     const rootEl = document.documentElement;
@@ -2186,7 +2590,16 @@ export function WatchRoom() {
     const updatePosition = () => setPopoverPos(computeCapsulePopoverLayout(sideTab));
     updatePosition();
     window.addEventListener("resize", updatePosition);
-    return () => window.removeEventListener("resize", updatePosition);
+    const barEl = document.querySelector<HTMLElement>('[data-capsule-bar="true"]');
+    const ro =
+      barEl && typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(updatePosition)
+        : null;
+    if (barEl) ro?.observe(barEl);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      ro?.disconnect();
+    };
   }, [
     panelOpen,
     sideTab,
@@ -2198,7 +2611,13 @@ export function WatchRoom() {
     syncStatus.state,
     isFullscreen,
     fullWidthPlayBar,
+    chatSidebarOpen,
+    chatSidebarWidth,
+    windowWidth,
   ]);
+
+  const chatPeeksCount = useChatStore((s) => s.peeks.length);
+  const chatPeeksEnabled = useAppStore((s) => s.chatPeeksEnabled);
 
   const fileMismatch = usePartyFileMismatch();
   const visibleFileMismatch =
@@ -2259,7 +2678,8 @@ export function WatchRoom() {
         alignMode ||
         notificationCount > 0 ||
         Boolean(feedback) ||
-        Boolean(activeFloatingIntro),
+        Boolean(activeFloatingIntro) ||
+        (chatPeeksEnabled && chatPeeksCount > 0 && !popover.mounted),
     ),
     320,
   );
@@ -2816,6 +3236,15 @@ export function WatchRoom() {
                   setPanelOpen(true);
                 },
               },
+              {
+                id: "open-chat",
+                label: "Party Chat…",
+                shortcut: "C",
+                icon: <PlayerChatIcon size={14} />,
+                onSelect: () => {
+                  setChatSidebarOpenSmooth(true);
+                },
+              },
               ...(reactionsEnabled
                 ? ([
                     {
@@ -2901,8 +3330,9 @@ export function WatchRoom() {
 
   return (
     <div
+      ref={stageRef}
       onMouseEnter={wakeChrome}
-      onMouseMove={wakeChrome}
+      onMouseMove={onPassivePointerMove}
       onPointerDown={wakeChrome}
       onContextMenu={(e) => {
         if (isTextEntryElement(e.target)) return;
@@ -2911,78 +3341,157 @@ export function WatchRoom() {
         wakeChrome();
         setContextMenu({ x: e.clientX, y: e.clientY });
       }}
-      className={`relative h-full w-full text-primary overflow-hidden ${
+      className={`relative h-full w-full text-primary overflow-hidden flex ${
         showVideoBackdrop ? "bg-transparent" : "bg-canvas"
       }`}
     >
-      <VideoGlassBackdrop
-        active={showVideoBackdrop}
-        visible={backdropPresence.mounted}
-        playing={!paused}
-        viewportRef={viewportRef}
-        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${viewportTick}`}
-        pausedRefreshKey={`${Math.round(positionSecs * 2)}:${seekSettledTick}:${viewportTick}`}
-      />
-      {seekCuePresence.mounted && seekCuePresence.value && (
-        <div
-          key={`${seekCuePresence.value.direction}:${seekCuePresence.value.actor ?? ""}`}
-          role="status"
-          aria-live="polite"
-          className={`pointer-events-none fixed top-1/2 -translate-y-1/2 z-[45] select-none ${
-            seekCuePresence.value.direction === "back"
-              ? "left-[12%] sm:left-[18%]"
-              : "right-[12%] sm:right-[18%]"
-          }`}
-        >
-          <div
-            className={
-              seekCuePresence.exiting
-                ? seekCuePresence.value.direction === "back"
-                  ? "ep-seek-cue-back-out"
-                  : "ep-seek-cue-forward-out"
-                : seekCuePresence.value.direction === "back"
-                  ? "ep-seek-cue-back-in"
-                  : "ep-seek-cue-forward-in"
-            }
-          >
-            <div
-              data-glass-region="true"
-              className={`ep-glass-seek-bubble rounded-full px-4 py-2 inline-flex items-center gap-2 ${
-                seekCuePresence.value.step > 1
-                  ? seekCuePresence.value.step % 2 === 0
-                    ? "ep-seek-bubble-bounce-a"
-                    : "ep-seek-bubble-bounce-b"
-                  : ""
-              }`}
-            >
-              {seekCuePresence.value.direction === "back" && (
-                <PlayerSeekCueIcon direction="back" size={17} className="relative z-10 shrink-0" />
-              )}
-              <div className="relative z-10 flex items-center gap-1.5 whitespace-nowrap">
-                {seekCuePresence.value.actor && (
-                  <span className="text-[11.5px] font-medium text-accent-soft max-w-[110px] truncate">
-                    {seekCuePresence.value.actor}
-                  </span>
-                )}
-                <span className="text-[13.5px] font-semibold tracking-tight text-white/95 num">
-                  {seekCuePresence.value.direction === "back" ? "-" : "+"}
-                  {Math.round(seekCuePresence.value.deltaSecs) >= 60
-                    ? `${Math.floor(Math.round(seekCuePresence.value.deltaSecs) / 60)}m ${Math.round(seekCuePresence.value.deltaSecs) % 60}s`
-                    : `${Math.round(seekCuePresence.value.deltaSecs)}s`}
-                </span>
-              </div>
-              {seekCuePresence.value.direction === "forward" && (
-                <PlayerSeekCueIcon direction="forward" size={17} className="relative z-10 shrink-0" />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
       <div
-        className={`pointer-events-none fixed left-1/2 -translate-x-1/2 z-[45] flex flex-col items-center gap-2 max-w-[520px] w-[calc(100vw-2rem)] transition-[top] duration-300 ${
-          showWindowBar ? "top-14" : "top-4"
+        aria-hidden={!showWindowBar}
+        className={`ep-top-scrim absolute top-0 inset-x-0 z-[46] ep-chrome-transition origin-top ${
+          showWindowBar
+            ? "opacity-100 translate-y-0 scale-100"
+            : "opacity-0 -translate-y-3 scale-[0.988] pointer-events-none"
         }`}
       >
+        <TitleBar
+          leftSlot={
+            <div
+              className="inline-flex items-center gap-2 min-w-0 max-w-[60vw] pl-1"
+              style={
+                roomCode && chatSidebarOpen && chatDocked
+                  ? { maxWidth: `${Math.max(180, windowWidth - chatSidebarWidth - 28)}px` }
+                  : undefined
+              }
+            >
+              <button
+                type="button"
+                onClick={handleLeaveRoom}
+                aria-label={roomCode ? "Leave room" : "Back to lobby"}
+                title={roomCode ? "Leave room" : "Back to lobby"}
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-white/80 hover:text-white cursor-pointer shrink-0"
+              >
+                <AppChevronIcon direction="left" size={16} />
+              </button>
+              <span className="text-[13px] font-medium text-white/90 truncate max-w-[360px]">
+                {cleanHeaderTitle}
+              </span>
+              {activePlaylistItem?.episodeBadge && (
+                <span className="hidden min-[360px]:inline shrink-0 num text-[11px] font-medium text-white/60">
+                  {activePlaylistItem.episodeBadge}
+                </span>
+              )}
+              {roomCode && (
+                <button
+                  type="button"
+                  onClick={() => handleToggleCapsuleTab("room")}
+                  aria-label="Open Watch Party panel"
+                  title="Watch Party room · Click to view invite & viewers"
+                  className="ep-press shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] text-white/80 hover:text-white hover:bg-white/[0.12] num cursor-pointer"
+                >
+                  <StatusDot
+                    tone={
+                      syncStatus.state === "connected"
+                        ? "ok"
+                        : syncStatus.state === "error"
+                          ? "bad"
+                          : "warn"
+                    }
+                    pulse={
+                      syncStatus.state === "connecting" || syncStatus.state === "reconnecting"
+                    }
+                  />
+                  <span>{formatRoomCodeDisplay(roomCode)}</span>
+                </button>
+              )}
+            </div>
+          }
+          glassControls={showVideoBackdrop}
+        />
+      </div>
+      {!showWindowBar && !isFullscreen && (
+        <div
+          data-tauri-drag-region
+          onMouseEnter={wakeChrome}
+          onMouseMove={wakeChrome}
+          onClick={wakeChrome}
+          title="Move mouse here to show window controls"
+          className="absolute top-0 inset-x-0 h-2.5 z-[46] cursor-pointer"
+        />
+      )}
+
+      {/* Main video stage: shrinks smoothly when ChatSidebar is docked on the right */}
+      <div
+        data-stage-container="true"
+        className="relative flex-1 min-w-0 h-full overflow-hidden"
+      >
+        <VideoGlassBackdrop
+          active={showVideoBackdrop}
+          visible={backdropPresence.mounted}
+          playing={!paused}
+          viewportRef={stageRef}
+          layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${chatPeeksCount}:${chatSidebarOpen}:${chatSidebarWidth}:${viewportTick}`}
+          pausedRefreshKey={`${Math.round(positionSecs * 2)}:${seekSettledTick}:${viewportTick}`}
+        />
+        {seekCuePresence.mounted && seekCuePresence.value && (
+          <div
+            key={`${seekCuePresence.value.direction}:${seekCuePresence.value.actor ?? ""}`}
+            role="status"
+            aria-live="polite"
+            className={`pointer-events-none absolute top-1/2 -translate-y-1/2 z-[45] select-none ${
+              seekCuePresence.value.direction === "back"
+                ? "left-[12%] sm:left-[18%]"
+                : "right-[12%] sm:right-[18%]"
+            }`}
+          >
+            <div
+              className={
+                seekCuePresence.exiting
+                  ? seekCuePresence.value.direction === "back"
+                    ? "ep-seek-cue-back-out"
+                    : "ep-seek-cue-forward-out"
+                  : seekCuePresence.value.direction === "back"
+                    ? "ep-seek-cue-back-in"
+                    : "ep-seek-cue-forward-in"
+              }
+            >
+              <div
+                data-glass-region="true"
+                className={`ep-glass-seek-bubble rounded-full px-4 py-2 inline-flex items-center gap-2 ${
+                  seekCuePresence.value.step > 1
+                    ? seekCuePresence.value.step % 2 === 0
+                      ? "ep-seek-bubble-bounce-a"
+                      : "ep-seek-bubble-bounce-b"
+                    : ""
+                }`}
+              >
+                {seekCuePresence.value.direction === "back" && (
+                  <PlayerSeekCueIcon direction="back" size={17} className="relative z-10 shrink-0" />
+                )}
+                <div className="relative z-10 flex items-center gap-1.5 whitespace-nowrap">
+                  {seekCuePresence.value.actor && (
+                    <span className="text-[11.5px] font-medium text-accent-soft max-w-[110px] truncate">
+                      {seekCuePresence.value.actor}
+                    </span>
+                  )}
+                  <span className="text-[13.5px] font-semibold tracking-tight text-white/95 num">
+                    {seekCuePresence.value.direction === "back" ? "-" : "+"}
+                    {Math.round(seekCuePresence.value.deltaSecs) >= 60
+                      ? `${Math.floor(Math.round(seekCuePresence.value.deltaSecs) / 60)}m ${Math.round(seekCuePresence.value.deltaSecs) % 60}s`
+                      : `${Math.round(seekCuePresence.value.deltaSecs)}s`}
+                  </span>
+                </div>
+                {seekCuePresence.value.direction === "forward" && (
+                  <PlayerSeekCueIcon direction="forward" size={17} className="relative z-10 shrink-0" />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        <div
+          className={`pointer-events-none absolute left-1/2 -translate-x-1/2 z-[45] flex flex-col items-center gap-2 max-w-[520px] w-[calc(100%-2rem)] transition-[top] duration-300 ${
+            showWindowBar ? "top-14" : "top-4"
+          }`}
+        >
         <NotificationStrip inline />
         {panelOpen && feedback && (
           <span
@@ -3039,73 +3548,6 @@ export function WatchRoom() {
         )}
       </div>
 
-      <div
-        aria-hidden={!showWindowBar}
-        className={`ep-top-scrim absolute top-0 inset-x-0 z-30 ep-chrome-transition origin-top ${
-          showWindowBar
-            ? "opacity-100 translate-y-0 scale-100"
-            : "opacity-0 -translate-y-3 scale-[0.988] pointer-events-none"
-        }`}
-      >
-        <TitleBar
-          leftSlot={
-            <div className="inline-flex items-center gap-2.5 min-w-0 max-w-[60vw] pl-1">
-              <button
-                type="button"
-                onClick={handleLeaveRoom}
-                aria-label={roomCode ? "Leave room" : "Back to lobby"}
-                title={roomCode ? "Leave room" : "Back to lobby"}
-                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-white/80 hover:text-white cursor-pointer shrink-0"
-              >
-                <AppChevronIcon direction="left" size={16} />
-              </button>
-              <span className="text-[13px] font-medium text-white/90 truncate max-w-[360px]">
-                {cleanHeaderTitle}
-              </span>
-              {activePlaylistItem?.episodeBadge && (
-                <span className="shrink-0 num text-[11px] font-medium text-white/60">
-                  {activePlaylistItem.episodeBadge}
-                </span>
-              )}
-              {roomCode && (
-                <button
-                  type="button"
-                  onClick={() => handleToggleCapsuleTab("room")}
-                  aria-label="Open Watch Party panel"
-                  title="Watch Party room · Click to view invite & viewers"
-                  className="ep-press shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] text-white/80 hover:text-white hover:bg-white/[0.12] num cursor-pointer"
-                >
-                  <StatusDot
-                    tone={
-                      syncStatus.state === "connected"
-                        ? "ok"
-                        : syncStatus.state === "error"
-                          ? "bad"
-                          : "warn"
-                    }
-                    pulse={
-                      syncStatus.state === "connecting" || syncStatus.state === "reconnecting"
-                    }
-                  />
-                  <span>{formatRoomCodeDisplay(roomCode)}</span>
-                </button>
-              )}
-            </div>
-          }
-          glassControls={showVideoBackdrop}
-        />
-      </div>
-      {!showWindowBar && !isFullscreen && (
-        <div
-          data-tauri-drag-region
-          onMouseEnter={wakeChrome}
-          onMouseMove={wakeChrome}
-          onClick={wakeChrome}
-          title="Move mouse here to show window controls"
-          className="absolute top-0 inset-x-0 h-2.5 z-20 cursor-pointer"
-        />
-      )}
-
       {/* Full-window video viewport: title bar and glass play bar float directly over the film */}
       <div
         ref={viewportRef}
@@ -3115,7 +3557,7 @@ export function WatchRoom() {
       >
         <FrozenVideoFrame
           frame={
-            loaded && !playerError && (!engineSurfaceVisible || modalBlockingVideo)
+            loaded && !playerError && (!engineSurfaceVisible || videoSurfacePaused || surfaceHoldPending)
               ? frozenFrame
               : null
           }
@@ -3201,7 +3643,7 @@ export function WatchRoom() {
             left: popover.value.pos.left,
             bottom: popover.value.pos.bottom,
             width: popover.value.pos.width,
-            maxHeight: `calc(100vh - ${popover.value.pos.bottom + 64}px)`,
+            maxHeight: `max(110px, calc(100vh - ${popover.value.pos.bottom + 54}px))`,
           }}
           className={`${
             popover.value.tab === "reactions"
@@ -3259,6 +3701,16 @@ export function WatchRoom() {
         </aside>
       )}
 
+      <FloatingChatPeeks
+        chromeVisible={showFloatingCapsule}
+        popoverOpen={popover.mounted}
+        localUsername={effectiveUserNow}
+        onOpenChat={() => {
+          wakeChrome();
+          setChatSidebarOpenSmooth(true);
+        }}
+      />
+
       <FloatingReactionsOverlay
         enabled={Boolean(roomCode) && reactionsEnabled}
         chromeVisible={showFloatingCapsule}
@@ -3271,21 +3723,49 @@ export function WatchRoom() {
         lockedForLocalUser={introLockedNow}
       />
 
+      {/* Slim vertical liquid-glass bar on the right edge (only when placement is "edge") */}
+      {roomCode &&
+        chatTriggerPlacement === "edge" &&
+        !chatSidebarOpen &&
+        !chatSidebarPresence.mounted && (
+          <button
+            type="button"
+            data-glass-region="true"
+            onClick={() => {
+              wakeChrome();
+              setChatSidebarOpenSmooth(true);
+            }}
+            aria-label="Open Party Chat"
+            title="Open Party Chat (C)"
+            className={`ep-chat-edge-rail absolute right-0 top-1/2 -translate-y-1/2 z-[36] rounded-l-2xl py-3 px-1.5 flex flex-col items-center gap-1.5 cursor-pointer ${
+              showFloatingCapsule || unreadChatCount > 0
+                ? "opacity-100"
+                : "opacity-0 hover:opacity-100 focus-visible:opacity-100"
+            }`}
+          >
+            <PlayerChatIcon size={16} className="text-white/85" />
+            {unreadChatCount > 0 && (
+              <span className="min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center num leading-none">
+                {unreadChatCount > 9 ? "9+" : unreadChatCount}
+              </span>
+            )}
+          </button>
+        )}
+
       <div className="absolute bottom-0 inset-x-0 z-30 pointer-events-none">
         <TransportBar
           visible={showFloatingCapsule}
           activeTab={panelOpen ? sideTab : null}
+          chatOpen={chatSidebarOpen}
           onToggleTab={handleToggleCapsuleTab}
+          onToggleChat={toggleChatSidebar}
           onCloseDrawer={() => setPanelOpen(false)}
           onChooseFile={() => void handleChooseFile()}
           onLeaveRoom={handleLeaveRoom}
           onToggleFullscreen={toggleFullscreen}
           onPrevEpisode={handlePrevEpisode}
           onNextEpisode={handleNextEpisode}
-          onBarHoverChange={(hovered) => {
-            barHoveredRef.current = hovered;
-            wakeChrome();
-          }}
+          onBarHoverChange={handleBarHoverChange}
           drawerTabs={null}
           expandedDrawer={null}
         />
@@ -3299,6 +3779,19 @@ export function WatchRoom() {
           className={`absolute bottom-0 inset-x-0 z-20 cursor-pointer ${
             fullWidthPlayBar || isFullscreen ? "h-5" : "h-3"
           }`}
+        />
+      )}
+      </div>
+
+      {roomCode && chatSidebarPresence.mounted && (
+        <ChatSidebar
+          docked={chatDocked}
+          exiting={chatSidebarPresence.exiting}
+          topChromeOffset={!isFullscreen && showWindowBar}
+          onClose={() => setChatSidebarOpenSmooth(false)}
+          onSeekToTimestamp={handleSeekToChatTimestamp}
+          onResizingChange={setChatResizing}
+          onDockTransitionEnd={() => finishChatLayoutTransition()}
         />
       )}
 

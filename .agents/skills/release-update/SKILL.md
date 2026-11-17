@@ -32,8 +32,20 @@ git log -n 10 --oneline
 1. **Determine Target Version**:
    - If the user passed a version (`0.1.2`, `v0.1.2`, `1.0.0-rc.1`) or bump keyword (`patch`, `minor`, `major`), use it.
    - If not specified, ask the user once (suggesting the next `patch` and `minor` versions based on `src-tauri/tauri.conf.json` and recent commits) before modifying files.
-2. **Determine Release Notes**:
-   - Use any release notes provided by the user, or draft a concise summary from `git log` since the previous release tag (or recent commits if no tag exists yet).
+2. **Draft User-Friendly Release Notes**:
+   - If the user supplied custom notes, lightly polish them into the format below while keeping their exact meaning; otherwise summarize the changes since the previous release tag (`git log <last-tag>..HEAD --oneline`, or recent commits if no tag exists).
+   - **Follow these strict writing rules** (these notes are shown directly to everyday viewers inside **Settings -> Updates** and on GitHub Releases):
+     - **Plain everyday language (zero technical jargon):** Translate internal/engineering changes into what the viewer actually feels or notices. Never include file names, code/symbol names, CSS classes, library/crate names, IPC details, or commit hashes.
+       - *Bad (too technical):* `Coalesce mpv IPC seeks, fix SyncStateMachine offset reset, and refine .ep-glass-seek-bubble CSS.`
+       - *Good (user-friendly):* `- **Smoother Video Skipping**: Jumping ahead or back lands cleanly on the right frame without glitches.`
+     - **Bold points & concise bullets (3–5 bullets max):** Keep each point short and scannable in under 3 seconds — never dump walls of text or commit logs.
+     - **Exact format:** One bullet per line using `- **Short Title**: One clear sentence.`:
+       ```markdown
+       - **Smoother Skipping**: Jumping through a video lands cleanly without glitches.
+       - **Clearer Seek Bubble**: Skipping shows a clearer liquid-glass bubble with smooth animations.
+       - **Refined Menu Polish**: Cleaner captions options, steadier party pills, and character cards.
+       ```
+   - Write the drafted notes to a temporary UTF-8 `.md` file and pass `-NotesFile <path>` (or `-Notes`) to `publish-release.ps1` so multi-line bold bullets are preserved identically in both GitHub Releases and `epilod-update-manifest.json`.
 
 ---
 
@@ -85,7 +97,7 @@ Once preflight passes and git state/notes are confirmed, run the full release sc
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\.agents\skills\release-update\scripts\publish-release.ps1 `
   -Version <TargetVersion> `
-  -Notes "<ReleaseNotes>" `
+  -NotesFile "<ReleaseNotesMdPath>" `
   -CommitAndTag
 ```
 

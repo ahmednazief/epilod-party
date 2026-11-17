@@ -1,22 +1,36 @@
-import { AppShuffleIcon } from "./AppIcons";
+import { AppChevronIcon, AppShuffleIcon } from "./AppIcons";
 import { useState, type ReactNode } from "react";
+import { useAnimatedPresence } from "../../lib/useAnimatedPresence";
+import { AnimatedCollapse } from "./AnimatedCollapse";
 import { SegmentedTabs } from "./SegmentedTabs";
 
 export type AvatarCategory = "girls" | "boys" | "characters";
 
 export type AvatarId =
   | "nova"
+  | "nova-star"
   | "luna"
+  | "luna-mint"
   | "sakura"
+  | "sakura-gold"
   | "maya"
+  | "aria-beret"
   | "leo"
+  | "leo-amber"
   | "kai"
+  | "kai-crimson"
   | "omar"
+  | "omar-cobalt"
   | "zayd"
+  | "milo-gamer"
   | "snoo-violet"
   | "snoo-cinema"
+  | "snoo-gold"
+  | "snoo-mint"
   | "mochi-cat"
-  | "astro-pip";
+  | "kuro-cat"
+  | "astro-pip"
+  | "astro-rose";
 
 export interface AvatarPreset {
   id: AvatarId;
@@ -26,17 +40,29 @@ export interface AvatarPreset {
 
 export const AVATAR_PRESETS: readonly AvatarPreset[] = [
   { id: "nova", label: "Nova", category: "girls" },
+  { id: "nova-star", label: "Nova Star", category: "girls" },
   { id: "luna", label: "Luna", category: "girls" },
+  { id: "luna-mint", label: "Luna Mint", category: "girls" },
   { id: "sakura", label: "Sakura", category: "girls" },
+  { id: "sakura-gold", label: "Sakura Gold", category: "girls" },
   { id: "maya", label: "Maya", category: "girls" },
+  { id: "aria-beret", label: "Aria", category: "girls" },
   { id: "leo", label: "Leo", category: "boys" },
+  { id: "leo-amber", label: "Leo Amber", category: "boys" },
   { id: "kai", label: "Kai", category: "boys" },
+  { id: "kai-crimson", label: "Kai Crimson", category: "boys" },
   { id: "omar", label: "Omar", category: "boys" },
+  { id: "omar-cobalt", label: "Omar Cobalt", category: "boys" },
   { id: "zayd", label: "Zayd", category: "boys" },
+  { id: "milo-gamer", label: "Milo", category: "boys" },
   { id: "snoo-violet", label: "PopBot", category: "characters" },
   { id: "snoo-cinema", label: "Cinema", category: "characters" },
+  { id: "snoo-gold", label: "StarBot", category: "characters" },
+  { id: "snoo-mint", label: "MintBot", category: "characters" },
   { id: "mochi-cat", label: "Mochi", category: "characters" },
+  { id: "kuro-cat", label: "Kuro", category: "characters" },
   { id: "astro-pip", label: "Astro", category: "characters" },
+  { id: "astro-rose", label: "Astro Rose", category: "characters" },
 ] as const;
 
 export const DEFAULT_AVATAR_ID: AvatarId = "snoo-violet";
@@ -50,12 +76,13 @@ export function isValidAvatarId(raw: string): raw is AvatarId {
 export function resolvePeerAvatarId(
   peerUsername: string,
   localUsername?: string,
-  localAvatarId: AvatarId = DEFAULT_AVATAR_ID,
+  localAvatarId: AvatarId | string = DEFAULT_AVATAR_ID,
 ): AvatarId {
+  const safeAvatarId = isValidAvatarId(localAvatarId) ? localAvatarId : DEFAULT_AVATAR_ID;
   const cleanPeer = peerUsername.trim().toLowerCase();
   const cleanLocal = (localUsername ?? "").trim().toLowerCase();
   if (cleanPeer && cleanLocal && cleanPeer === cleanLocal) {
-    return localAvatarId;
+    return safeAvatarId;
   }
 
   // Natural defaults for common demo/friend names before deterministic hashing
@@ -401,7 +428,7 @@ function AvatarIllustration({ id }: { id: AvatarId }): ReactNode {
           <circle cx="14" cy="20" r="1.5" fill="#FDE047" />
           <circle cx="52" cy="46" r="1.5" fill="#C4B5FD" />
           {/* Suit */}
-          <path d="M14 64 C15 50 22 46 32 46 C42 46 49 50 50 64 Z" fill="#E2E8F0" />
+          <path d="M14 64 C15 50 22 46 32 46 C42 46 50 50 50 64 Z" fill="#E2E8F0" />
           <rect x="26" y="51" width="12" height="6" rx="3" fill="#7C3AED" />
           {/* Helmet outer & visor */}
           <circle cx="32" cy="33" r="16.5" fill="#F8FAFC" />
@@ -412,6 +439,271 @@ function AvatarIllustration({ id }: { id: AvatarId }): ReactNode {
           <circle cx="27.6" cy="32.1" r="0.9" fill="#FFFFFF" />
           <circle cx="38" cy="32.1" r="0.9" fill="#FFFFFF" />
           <path d="M29 38.2 Q32 40.2 35 38.2" fill="none" stroke="#C4B5FD" strokeWidth="1.7" strokeLinecap="round" />
+        </>
+      );
+
+    case "nova-star":
+      return (
+        <>
+          <rect width="64" height="64" fill="#1E1B4B" />
+          <circle cx="16" cy="16" r="16" fill="#0EA5E9" opacity="0.32" />
+          {/* Lavender space buns + star ties */}
+          <circle cx="15" cy="20" r="8" fill="#4C1D95" />
+          <circle cx="49" cy="20" r="8" fill="#4C1D95" />
+          <circle cx="15" cy="20" r="3" fill="#38BDF8" />
+          <circle cx="49" cy="20" r="3" fill="#38BDF8" />
+          {/* Hoodie */}
+          <path d="M12 64 C13 49 22 45 32 45 C42 45 51 49 52 64 Z" fill="#0284C7" />
+          <path d="M24 46 Q32 52 40 46" fill="none" stroke="#E0F2FE" strokeWidth="2.2" strokeLinecap="round" />
+          {/* Face */}
+          <circle cx="16.5" cy="34" r="4" fill="#FCD3B8" />
+          <circle cx="47.5" cy="34" r="4" fill="#FCD3B8" />
+          <circle cx="32" cy="32" r="15.5" fill="#FFE7D6" />
+          <path
+            d="M16 30 C17 17 24 14 32 14 C40 14 47 17 48 30 C44 23 39 22 33 26 C29 22 21 23 16 30 Z"
+            fill="#5B21B6"
+          />
+          <polygon points="41,19 42.2,21.5 44.8,21.8 42.9,23.6 43.4,26.2 41,24.9 38.6,26.2 39.1,23.6 37.2,21.8 39.8,21.5" fill="#FDE047" />
+          <CuteEyes eyeColor="#1E1B4B" winkRight />
+          <Cheeks color="#FB7185" />
+          <path d="M28.5 39.8 Q32 43.2 35.5 39.8" fill="none" stroke="#9F584A" strokeWidth="1.9" strokeLinecap="round" />
+        </>
+      );
+
+    case "luna-mint":
+      return (
+        <>
+          <rect width="64" height="64" fill="#0F2933" />
+          <circle cx="48" cy="18" r="18" fill="#14B8A6" opacity="0.32" />
+          {/* Flowing silver hair */}
+          <path d="M13 30 C13 14 22 12 32 12 C42 12 51 14 51 30 L52 62 L12 62 Z" fill="#94A3B8" />
+          {/* Teal cat-ear headset */}
+          <path d="M15 24 L19 11 L26 19 Z" fill="#2DD4BF" />
+          <path d="M49 24 L45 11 L38 19 Z" fill="#2DD4BF" />
+          <path d="M17 22 L19.8 14 L24 19.5 Z" fill="#FDE047" />
+          <path d="M47 22 L44.2 14 L40 19.5 Z" fill="#FDE047" />
+          <path d="M14 64 C15 50 23 46 32 46 C41 46 49 50 50 64 Z" fill="#0D9488" />
+          <circle cx="32" cy="33" r="14.5" fill="#FFE6D5" />
+          <path
+            d="M17 31 C18 19 25 16 32 16 C39 16 46 19 47 31 C42 25 36 23 32 27 C27 23 22 25 17 31 Z"
+            fill="#CBD5E1"
+          />
+          <CuteEyes y={34.5} eyeColor="#0F766E" />
+          <Cheeks y={38.5} color="#FDA4AF" />
+          <path d="M29.2 41 Q32 43.2 34.8 41" fill="none" stroke="#9F584A" strokeWidth="1.9" strokeLinecap="round" />
+        </>
+      );
+
+    case "sakura-gold":
+      return (
+        <>
+          <rect width="64" height="64" fill="#451A2B" />
+          <circle cx="16" cy="16" r="18" fill="#F59E0B" opacity="0.28" />
+          {/* Warm chestnut bob */}
+          <path d="M14 35 C13 17 21 12 32 12 C43 12 51 17 50 35 C51 43 47 49 43 50 L21 50 C17 49 13 43 14 35 Z" fill="#78350F" />
+          <path d="M14 64 C15 50 23 46 32 46 C41 46 49 50 50 64 Z" fill="#FB7185" />
+          <path d="M26 46 L32 54 L38 46 Z" fill="#FFFBEB" />
+          <circle cx="32" cy="33" r="14.5" fill="#FFE4D6" />
+          <path d="M18 30 C19 18 26 16 32 16 C38 16 45 18 46 30 C41 25 35 23 32 25 C28 22 22 24 18 30 Z" fill="#92400E" />
+          {/* Gold clip */}
+          <circle cx="21" cy="23" r="3" fill="#FDE047" />
+          <circle cx="21" cy="23" r="1.3" fill="#F97316" />
+          <CuteEyes y={34} eyeColor="#451A03" winkRight />
+          <Cheeks y={38.8} color="#FB7185" />
+          <path d="M29 41 Q32 43.8 35 41" fill="none" stroke="#9D4E59" strokeWidth="1.8" strokeLinecap="round" />
+        </>
+      );
+
+    case "aria-beret":
+      return (
+        <>
+          <rect width="64" height="64" fill="#3B1228" />
+          <circle cx="48" cy="48" r="18" fill="#BE185D" opacity="0.28" />
+          {/* Caramel braids */}
+          <circle cx="15" cy="44" r="5" fill="#92400E" />
+          <circle cx="14" cy="52" r="4.5" fill="#92400E" />
+          <circle cx="49" cy="44" r="5" fill="#92400E" />
+          <circle cx="50" cy="52" r="4.5" fill="#92400E" />
+          {/* Cream sweater & scarf */}
+          <path d="M13 64 C14 49 22 45 32 45 C42 45 50 49 51 64 Z" fill="#F5F3FF" />
+          <rect x="20" y="46" width="24" height="6.5" rx="3.2" fill="#E11D48" />
+          <circle cx="32" cy="33" r="14.5" fill="#F7CFAF" />
+          <path d="M17 31 C18 19 25 16 32 16 C39 16 46 19 47 31 C42 23 36 22 32 25 C27 22 22 24 17 31 Z" fill="#B45309" />
+          {/* Tilted velvet beret */}
+          <ellipse cx="34" cy="17" rx="16" ry="6.5" transform="rotate(-10 34 17)" fill="#9F1239" />
+          <line x1="33" y1="10.5" x2="34.5" y2="8" stroke="#9F1239" strokeWidth="2.2" strokeLinecap="round" />
+          <CuteEyes y={34} eyeColor="#3B1D0E" />
+          <Cheeks y={38.5} color="#F43F5E" />
+          <path d="M29.2 41 Q32 43.2 34.8 41" fill="none" stroke="#85453A" strokeWidth="1.9" strokeLinecap="round" />
+        </>
+      );
+
+    case "leo-amber":
+      return (
+        <>
+          <rect width="64" height="64" fill="#2B190E" />
+          <circle cx="18" cy="16" r="16" fill="#EA580C" opacity="0.34" />
+          <path d="M12 64 C13 49 22 45 32 45 C42 45 51 49 52 64 Z" fill="#334155" />
+          <path d="M23 46 L32 54 L41 46" fill="none" stroke="#FDBA74" strokeWidth="2" strokeLinecap="round" />
+          {/* Amber headphones */}
+          <path d="M14 33 C14 14 50 14 50 33" fill="none" stroke="#F59E0B" strokeWidth="4" />
+          <rect x="11" y="27" width="6.5" height="13" rx="3.2" fill="#FB923C" />
+          <rect x="46.5" y="27" width="6.5" height="13" rx="3.2" fill="#FB923C" />
+          <circle cx="32" cy="33" r="15" fill="#FCDAC2" />
+          {/* Golden spiky hair */}
+          <path
+            d="M17 29 C17 17 25 14 33 14 C41 14 47 18 47 29 L43 24 L37 26 L32 21 L26 26 L21 23 Z"
+            fill="#D97706"
+          />
+          <CuteEyes y={34} eyeColor="#1E293B" winkRight />
+          <Cheeks y={38} color="#F97316" />
+          <path d="M28.5 40.5 Q32 43.5 35.8 40.2" fill="none" stroke="#8D5144" strokeWidth="2" strokeLinecap="round" />
+        </>
+      );
+
+    case "kai-crimson":
+      return (
+        <>
+          <rect width="64" height="64" fill="#31101C" />
+          <circle cx="48" cy="18" r="16" fill="#E11D48" opacity="0.32" />
+          <path d="M12 64 C13 49 22 45 32 45 C42 45 51 49 52 64 Z" fill="#BE123C" />
+          <path d="M22 47 L28 64 M42 47 L36 64" stroke="#881337" strokeWidth="2.5" />
+          <circle cx="16.5" cy="34.5" r="3.8" fill="#E8B998" />
+          <circle cx="47.5" cy="34.5" r="3.8" fill="#E8B998" />
+          <circle cx="32" cy="33.5" r="14.5" fill="#F3CBB0" />
+          {/* Charcoal knit beanie */}
+          <path d="M16.5 27 C17 14 25 11 32 11 C39 11 47 14 47.5 27 Z" fill="#1E293B" />
+          <rect x="15.5" y="23" width="33" height="6.5" rx="3.2" fill="#334155" />
+          {/* Round tinted shades */}
+          <circle cx="25.2" cy="33.5" r="5" fill="#18181B" stroke="#E2E8F0" strokeWidth="1.6" />
+          <circle cx="38.8" cy="33.5" r="5" fill="#18181B" stroke="#E2E8F0" strokeWidth="1.6" />
+          <line x1="30.2" y1="33.5" x2="33.8" y2="33.5" stroke="#E2E8F0" strokeWidth="1.6" />
+          <path d="M29 41 Q32 43.2 35 41" fill="none" stroke="#854E3E" strokeWidth="1.9" strokeLinecap="round" />
+        </>
+      );
+
+    case "omar-cobalt":
+      return (
+        <>
+          <rect width="64" height="64" fill="#0F172A" />
+          <circle cx="16" cy="48" r="16" fill="#2563EB" opacity="0.34" />
+          <path d="M12 64 C13 49 22 45 32 45 C42 45 51 49 52 64 Z" fill="#2563EB" />
+          <path d="M25 46 L32 58 L39 46 Z" fill="#EFF6FF" />
+          {/* Clean cropped fade */}
+          <path d="M17 31 C17 16 24 13 32 13 C40 13 47 16 47 31 Z" fill="#18121E" />
+          <circle cx="16.5" cy="34.5" r="3.8" fill="#C98D68" />
+          <circle cx="47.5" cy="34.5" r="3.8" fill="#C98D68" />
+          <circle cx="32" cy="33.5" r="14.5" fill="#D99E78" />
+          <path d="M17.5 28 C18 18 25 15 32 15 C39 15 46 18 46.5 28 C41 23 36 22 32 22 C28 22 23 23 17.5 28 Z" fill="#18121E" />
+          <CuteEyes y={34} eyeColor="#120F1A" />
+          <Cheeks y={38} color="#E11D48" />
+          <path d="M28.5 40.5 Q32 43.2 36 39.8" fill="none" stroke="#6B3A2E" strokeWidth="2" strokeLinecap="round" />
+        </>
+      );
+
+    case "milo-gamer":
+      return (
+        <>
+          <rect width="64" height="64" fill="#112A2C" />
+          <circle cx="48" cy="18" r="16" fill="#10B981" opacity="0.34" />
+          <path d="M12 64 C13 49 22 45 32 45 C42 45 51 49 52 64 Z" fill="#10B981" />
+          <circle cx="32" cy="55" r="3.2" fill="#A7F3D0" />
+          <circle cx="16.5" cy="34.5" r="3.8" fill="#F1C39E" />
+          <circle cx="47.5" cy="34.5" r="3.8" fill="#F1C39E" />
+          <circle cx="32" cy="33.5" r="14.5" fill="#FDE2CE" />
+          {/* Violet cap */}
+          <path d="M16 26 C17 14 25 11 32 11 C39 11 47 14 48 26 Z" fill="#7C3AED" />
+          <path d="M15 24.5 L49 24.5 L47 27.5 L17 27.5 Z" fill="#5B21B6" />
+          {/* Retro pixel visor */}
+          <rect x="19.5" y="30" width="25" height="7" rx="2.5" fill="#0F172A" />
+          <rect x="23" y="32.2" width="5" height="2.6" rx="1" fill="#34D399" />
+          <rect x="36" y="32.2" width="5" height="2.6" rx="1" fill="#34D399" />
+          <path d="M28.5 40.5 Q32 43.2 35.5 40.5" fill="none" stroke="#854E3E" strokeWidth="1.9" strokeLinecap="round" />
+        </>
+      );
+
+    case "snoo-gold":
+      return (
+        <>
+          <rect width="64" height="64" fill="#18122B" />
+          <circle cx="32" cy="18" r="18" fill="#F59E0B" opacity="0.32" />
+          {/* Antenna with gold star tip */}
+          <path d="M32 21 L35 11 L43 12.5" fill="none" stroke="#FDE68A" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="44.5" cy="13" r="3.6" fill="#FBBF24" />
+          <path d="M15 64 C16 50 23 47 32 47 C41 47 48 50 49 64 Z" fill="#F59E0B" />
+          <circle cx="15" cy="33" r="4.5" fill="#272042" />
+          <circle cx="49" cy="33" r="4.5" fill="#272042" />
+          <circle cx="15" cy="33" r="2.2" fill="#FBBF24" />
+          <circle cx="49" cy="33" r="2.2" fill="#FBBF24" />
+          <ellipse cx="32" cy="35" rx="16.5" ry="13.5" fill="#1E1B38" stroke="#FBBF24" strokeWidth="1.6" />
+          <circle cx="25.2" cy="34.5" r="3.3" fill="#FBBF24" />
+          <circle cx="38.8" cy="34.5" r="3.3" fill="#FBBF24" />
+          <circle cx="26.2" cy="33.4" r="1.1" fill="#FFFFFF" />
+          <circle cx="39.8" cy="33.4" r="1.1" fill="#FFFFFF" />
+          <path d="M27.5 41.2 Q32 44.5 36.5 41.2" fill="none" stroke="#FDE68A" strokeWidth="2" strokeLinecap="round" />
+        </>
+      );
+
+    case "snoo-mint":
+      return (
+        <>
+          <rect width="64" height="64" fill="#0B2E33" />
+          <circle cx="18" cy="18" r="18" fill="#2DD4BF" opacity="0.35" />
+          <path d="M32 21 L34 11 L42 12.5" fill="none" stroke="#CCFBF1" strokeWidth="2.4" strokeLinecap="round" />
+          <circle cx="43.5" cy="13" r="3.6" fill="#5EEAD4" />
+          <path d="M15 64 C16 50 23 47 32 47 C41 47 48 50 49 64 Z" fill="#14B8A6" />
+          <circle cx="15" cy="33" r="4.5" fill="#ECFDF5" />
+          <circle cx="49" cy="33" r="4.5" fill="#ECFDF5" />
+          <circle cx="15" cy="33" r="2.2" fill="#5EEAD4" />
+          <circle cx="49" cy="33" r="2.2" fill="#5EEAD4" />
+          <ellipse cx="32" cy="35" rx="16.5" ry="13.5" fill="#F0FDFA" />
+          <CuteEyes y={34.5} eyeColor="#0F766E" winkRight />
+          <Cheeks y={38.8} color="#2DD4BF" />
+          <path d="M27.5 41.2 Q32 44.5 36.5 41.2" fill="none" stroke="#0F766E" strokeWidth="2" strokeLinecap="round" />
+        </>
+      );
+
+    case "kuro-cat":
+      return (
+        <>
+          <rect width="64" height="64" fill="#1A102C" />
+          <circle cx="48" cy="16" r="16" fill="#8B5CF6" opacity="0.32" />
+          <path d="M15 64 C16 50 23 46 32 46 C41 46 48 50 49 64 Z" fill="#7C3AED" />
+          <circle cx="32" cy="52.5" r="3.3" fill="#FDE047" />
+          {/* Black cat ears */}
+          <path d="M15 30 L17 13 L28 23 Z" fill="#1F1B2E" />
+          <path d="M49 30 L47 13 L36 23 Z" fill="#1F1B2E" />
+          <path d="M18 26 L19 16.5 L25.5 22.5 Z" fill="#A78BFA" />
+          <path d="M46 26 L45 16.5 L38.5 22.5 Z" fill="#A78BFA" />
+          <ellipse cx="32" cy="35.5" rx="16.5" ry="14" fill="#1F1B2E" />
+          {/* Golden cat eyes */}
+          <circle cx="25.2" cy="34.5" r="3.4" fill="#FACC15" />
+          <circle cx="38.8" cy="34.5" r="3.4" fill="#FACC15" />
+          <circle cx="26.2" cy="33.4" r="1.1" fill="#FFFFFF" />
+          <circle cx="39.8" cy="33.4" r="1.1" fill="#FFFFFF" />
+          <line x1="17" y1="36" x2="12" y2="35" stroke="#64748B" strokeWidth="1.4" strokeLinecap="round" />
+          <line x1="17" y1="39" x2="12" y2="40" stroke="#64748B" strokeWidth="1.4" strokeLinecap="round" />
+          <line x1="47" y1="36" x2="52" y2="35" stroke="#64748B" strokeWidth="1.4" strokeLinecap="round" />
+          <line x1="47" y1="39" x2="52" y2="40" stroke="#64748B" strokeWidth="1.4" strokeLinecap="round" />
+          <path d="M28 40.5 Q30 43 32 40.5 Q34 43 36 40.5" fill="none" stroke="#F472B6" strokeWidth="1.7" strokeLinecap="round" />
+        </>
+      );
+
+    case "astro-rose":
+      return (
+        <>
+          <rect width="64" height="64" fill="#2A0F24" />
+          <circle cx="16" cy="14" r="14" fill="#EC4899" opacity="0.38" />
+          <circle cx="50" cy="20" r="1.5" fill="#FDE047" />
+          <circle cx="14" cy="48" r="1.5" fill="#F9A8D4" />
+          <path d="M14 64 C15 50 22 46 32 46 C42 46 49 50 50 64 Z" fill="#FDF2F8" />
+          <rect x="26" y="51" width="12" height="6" rx="3" fill="#EC4899" />
+          <circle cx="32" cy="33" r="16.5" fill="#FCE7F3" />
+          <ellipse cx="32" cy="33.5" rx="12.5" ry="10.5" fill="#3B0764" />
+          <circle cx="26.8" cy="33" r="2.6" fill="#F472B6" />
+          <circle cx="27.6" cy="32.1" r="0.9" fill="#FFFFFF" />
+          <path d="M34.2 33.4 Q37.2 30.6 40.2 33.4" fill="none" stroke="#F472B6" strokeWidth="2.1" strokeLinecap="round" />
+          <path d="M29 38.2 Q32 40.2 35 38.2" fill="none" stroke="#FDE68A" strokeWidth="1.7" strokeLinecap="round" />
         </>
       );
   }
@@ -473,13 +765,39 @@ const CATEGORY_TABS: ReadonlyArray<{ value: "all" | AvatarCategory; label: strin
   { value: "characters", label: "Mascots" },
 ];
 
+const COLLAPSED_GRID_LIMIT = 16;
+
 export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerProps) {
   const [filter, setFilter] = useState<"all" | AvatarCategory>("all");
+  const [expanded, setExpanded] = useState(false);
+  const extraPresence = useAnimatedPresence(expanded, 340);
 
   const visiblePresets =
     filter === "all"
       ? AVATAR_PRESETS
       : AVATAR_PRESETS.filter((preset) => preset.category === filter);
+
+  const needsCollapse = visiblePresets.length > COLLAPSED_GRID_LIMIT;
+  const previewLimit = COLLAPSED_GRID_LIMIT - 1;
+  const hiddenCount = Math.max(0, visiblePresets.length - previewLimit);
+  const avatarSize = compact ? 48 : 54;
+  const gridGapClass = compact ? "gap-1.5" : "gap-2";
+
+  const selectedPreset = visiblePresets.find((p) => p.id === value) ?? null;
+  const basePreview = visiblePresets.slice(0, previewLimit);
+  const inBasePreview = basePreview.some((p) => p.id === value);
+
+  // Keep the 15 visible preview tiles crisp; if collapsed while holding a late character, pin it in slot 15.
+  const topPresets = (() => {
+    if (!needsCollapse) return visiblePresets;
+    if (expanded || extraPresence.mounted || inBasePreview || !selectedPreset) {
+      return basePreview;
+    }
+    return [...visiblePresets.slice(0, previewLimit - 1), selectedPreset];
+  })();
+
+  const slot16Preset = needsCollapse ? visiblePresets[previewLimit] ?? null : null;
+  const extraPresets = needsCollapse ? visiblePresets.slice(COLLAPSED_GRID_LIMIT) : [];
 
   const handleRandomAvatar = () => {
     const others = AVATAR_PRESETS.filter((p) => p.id !== value);
@@ -487,50 +805,119 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
     onChange(chosen.id);
   };
 
+  const renderPresetTile = (
+    preset: AvatarPreset,
+    opts?: { extraClass?: string; hidden?: boolean; revealed?: boolean },
+  ) => {
+    const selected = preset.id === value;
+    const isHidden = Boolean(opts?.hidden);
+    return (
+      <button
+        key={preset.id}
+        type="button"
+        onClick={() => onChange(preset.id)}
+        aria-label={preset.label}
+        aria-pressed={selected}
+        aria-hidden={isHidden || undefined}
+        tabIndex={isHidden ? -1 : undefined}
+        data-revealed={
+          opts?.revealed === undefined ? undefined : opts.revealed ? "true" : "false"
+        }
+        title={preset.label}
+        className={`ep-press rounded-2xl py-2 px-1 flex items-center justify-center cursor-pointer ${
+          selected
+            ? "bg-accent/25 ring-2 ring-accent-soft text-white shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
+            : "bg-white/[0.045] hover:bg-white/[0.09] text-secondary hover:text-white"
+        } ${opts?.extraClass ?? ""}`}
+      >
+        <ProfileAvatar avatarId={preset.id} size={avatarSize} />
+      </button>
+    );
+  };
+
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
         <SegmentedTabs
           ariaLabel="Avatar style category"
           size="sm"
           value={filter}
           items={CATEGORY_TABS}
-          onChange={setFilter}
+          onChange={(next) => {
+            setFilter(next);
+            setExpanded(false);
+          }}
         />
 
         <button
           type="button"
           onClick={handleRandomAvatar}
           title="Pick a random look"
-          className="ep-press whitespace-nowrap shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/[0.07] hover:bg-white/[0.13] text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+          className="ep-press h-7 whitespace-nowrap shrink-0 inline-flex items-center gap-1 px-2.5 rounded-full bg-white/[0.07] hover:bg-white/[0.14] text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
         >
           <AppShuffleIcon size={12} />
           <span>Surprise me</span>
         </button>
       </div>
 
-      <div className={`grid grid-cols-4 ${compact ? "gap-1.5" : "gap-2"}`}>
-        {visiblePresets.map((preset) => {
-          const selected = preset.id === value;
-          return (
+      <div>
+        <div className={`grid grid-cols-4 ${gridGapClass}`}>
+          {topPresets.map((preset) => renderPresetTile(preset))}
+
+          {needsCollapse && slot16Preset && (
+            <div className="relative">
+              {renderPresetTile(slot16Preset, {
+                extraClass: "ep-avatar-reveal-tile w-full",
+                hidden: !expanded,
+                revealed: expanded,
+              })}
               <button
-                key={preset.id}
                 type="button"
-                onClick={() => onChange(preset.id)}
-                aria-pressed={selected}
-                className={`ep-press rounded-2xl py-2 px-1 flex flex-col items-center gap-1 cursor-pointer ${
-                  selected
-                    ? "bg-accent/25 ring-2 ring-accent-soft text-white"
-                    : "bg-white/[0.04] hover:bg-white/[0.09] text-secondary hover:text-white"
-                }`}
+                onClick={() => setExpanded(true)}
+                aria-expanded={expanded}
+                aria-hidden={expanded || undefined}
+                tabIndex={expanded ? -1 : undefined}
+                aria-label={`Show ${hiddenCount} more characters`}
+                title={`Show ${hiddenCount} more characters`}
+                data-revealed={expanded ? "true" : "false"}
+                className="ep-avatar-more-slot ep-press absolute inset-0 rounded-2xl py-2 px-1 flex items-center justify-center cursor-pointer"
               >
-              <ProfileAvatar avatarId={preset.id} size={compact ? 34 : 38} />
-              <span className="text-[10px] font-medium leading-none truncate max-w-full">
-                {preset.label}
-              </span>
-            </button>
-          );
-        })}
+                <span
+                  style={{ width: avatarSize, height: avatarSize }}
+                  className="ep-avatar-more-orb relative overflow-hidden rounded-full flex flex-col items-center justify-center text-white/95"
+                >
+                  <span className="relative z-10 text-[12.5px] font-bold leading-none num">+{hiddenCount}</span>
+                  <span className="relative z-10 text-[9.5px] font-medium leading-tight text-secondary">more</span>
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {needsCollapse && (
+          <AnimatedCollapse
+            open={expanded}
+            durationMs={340}
+            className="ep-collapse-liquid -mx-1"
+            innerClassName={`px-1 pb-1 ${compact ? "pt-1.5" : "pt-2"} space-y-2.5`}
+          >
+            <div className={`grid grid-cols-4 ${gridGapClass}`}>
+              {extraPresets.map((preset) => renderPresetTile(preset))}
+            </div>
+
+            <div className="flex justify-center pt-0.5">
+              <button
+                type="button"
+                onClick={() => setExpanded(false)}
+                aria-expanded={expanded}
+                className="ep-glass-pill ep-press h-7.5 px-3.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+              >
+                <span>Show fewer</span>
+                <AppChevronIcon direction="down" size={11} className="rotate-180" />
+              </button>
+            </div>
+          </AnimatedCollapse>
+        )}
       </div>
     </div>
   );

@@ -1,16 +1,19 @@
-import { memo } from "react";
+import { memo, useEffect, useMemo } from "react";
 import {
   mpvSetAspectMode,
   mpvSetSpeed,
+  mpvSetVolume,
   safeMpvCall,
   type AspectMode,
 } from "../lib/mpv";
 import {
   selectAudioTrackOption,
+  setMutePlayback,
   toggleLoopPlayback,
   toggleMutePlayback,
 } from "../lib/playerActions";
 import { canChangePlaybackSpeed } from "../lib/syncSpeedGuard";
+import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { buildAudioTrackOptions } from "../lib/tracks";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
@@ -18,6 +21,7 @@ import { useSyncStore } from "../store/useSyncStore";
 import { AppCheckIcon, AppLockIcon, AppRepeatIcon } from "./ui/AppIcons";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { PlayerVolumeIcon } from "./ui/PlayerIcons";
+import { Scrubber } from "./ui/Scrubber";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 2.0] as const;
@@ -33,17 +37,29 @@ const FRAME_PILLS: ReadonlyArray<{ value: AspectMode; label: string }> = [
 export const PlaybackPanel = memo(function PlaybackPanel() {
   const loaded = usePlayerStore((s) => s.loaded);
   const muted = usePlayerStore((s) => s.muted);
+  const volume = usePlayerStore((s) => s.volume);
   const speed = usePlayerStore((s) => s.speed);
   const looping = usePlayerStore((s) => s.looping);
   const aspectMode = usePlayerStore((s) => s.aspectMode);
   const tracks = usePlayerStore((s) => s.tracks);
 
+  const setVolume = usePlayerStore((s) => s.setVolume);
   const setSpeed = usePlayerStore((s) => s.setSpeed);
   const setAspectMode = usePlayerStore((s) => s.setAspectMode);
   const syncStatus = useSyncStore((s) => s.status);
   const syncConnected = syncStatus.state === "connected";
   const timelineScale = useSyncStore((s) => s.timelineScale);
   const pushNote = useNotificationStore((s) => s.push);
+
+  const throttledVol = useMemo(
+    () =>
+      createLeadingTrailingThrottle((v: number) => {
+        safeMpvCall(mpvSetVolume(v), "mpvSetVolume");
+      }, 60),
+    [],
+  );
+
+  useEffect(() => () => throttledVol.cancel(), [throttledVol]);
 
   const audioOptions = buildAudioTrackOptions(tracks);
   const audioCount = audioOptions.filter((o) => o.track !== null).length;
@@ -78,6 +94,38 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </span>
         <GlassSwitchTrack checked={muted} size="sm" />
       </button>
+
+      <div className="px-3 flex items-center gap-2.5">
+        <span className="text-[11px] font-medium text-secondary shrink-0">Volume</span>
+        <Scrubber
+          className="flex-1"
+          ariaLabel="Playback volume"
+          value={muted ? 0 : volume}
+          min={0}
+          max={130}
+          step={1}
+          tooltipPlacement="top"
+          tooltipVariant="plain"
+          formatTooltip={(v) => `${Math.round(v)}%`}
+          onChange={(v) => {
+            const rounded = Math.round(v);
+            if (muted && rounded > 0) {
+              setMutePlayback(false, { flash: false });
+            }
+            setVolume(rounded);
+            throttledVol.call(rounded);
+          }}
+          onCommit={(v) => {
+            throttledVol.cancel();
+            const rounded = Math.round(v);
+            setVolume(rounded);
+            safeMpvCall(mpvSetVolume(rounded), "mpvSetVolume");
+          }}
+        />
+        <span className="num text-[11px] font-medium text-white/60 w-9 text-right shrink-0">
+          {muted ? "0%" : `${Math.round(volume)}%`}
+        </span>
+      </div>
 
       <div className="space-y-2">
         <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">

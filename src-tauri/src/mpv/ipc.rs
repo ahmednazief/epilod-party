@@ -2,17 +2,20 @@
 
 use super::DeferredLoadState;
 use epilod_core::mpv_ipc::{
-    encode_observe, parse_line, seek_absolute_cmd, set_pause_cmd, MpvEvent, MpvMessage,
+    encode_observe, parse_line, seek_absolute_cmd, set_pause_cmd, MpvEvent, MpvMessage, MpvReply,
     PendingSeekTracker, TimePosDecision, TimePosThrottle,
 };
 use epilod_core::syncplay::PlayerSnapshot;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ClientOptions;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+pub type PendingReplyMap = Arc<Mutex<HashMap<u64, oneshot::Sender<MpvReply>>>>;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_and_run_ipc<F>(
@@ -24,6 +27,7 @@ pub async fn connect_and_run_ipc<F>(
     loading_media: Arc<AtomicBool>,
     deferred_load: Arc<Mutex<DeferredLoadState>>,
     pending_seek: Arc<Mutex<PendingSeekTracker>>,
+    pending_replies: PendingReplyMap,
     client_seek_seq: Arc<AtomicU64>,
     check_child_exited: F,
 ) -> String
@@ -268,6 +272,14 @@ where
                 MpvEvent::Other => {}
             },
             Ok(MpvMessage::Reply(rep)) => {
+                let pending_tx = pending_replies
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&rep.request_id);
+                if let Some(tx) = pending_tx {
+                    let _ = tx.send(rep);
+                    continue;
+                }
                 if rep.error == "success" || rep.error.is_empty() {
                     pending_seek
                         .lock()
@@ -288,6 +300,10 @@ where
         }
     }
 
+    pending_replies
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     writer_task.abort();
     "Playback engine stopped unexpectedly.".to_string()
 }

@@ -403,24 +403,58 @@ export function resetAutoSubtitleState(): void {
   lastAutoSubSignature = "";
 }
 
+function isArabicSubtitleTrack(t: MpvTrack): boolean {
+  const lang = t.lang?.trim().toLowerCase() ?? "";
+  if (lang === "ar" || lang === "ara" || lang === "arb" || lang === "arabic") {
+    return true;
+  }
+  const title = t.title?.trim().toLowerCase() ?? "";
+  return /\barabic\b|العربية|عربي/.test(title);
+}
+
+function isEnglishSubtitleTrack(t: MpvTrack): boolean {
+  const lang = t.lang?.trim().toLowerCase() ?? "";
+  if (lang === "en" || lang === "eng" || lang === "english") {
+    return true;
+  }
+  const title = t.title?.trim().toLowerCase() ?? "";
+  return /\benglish\b|\beng\b/.test(title);
+}
+
+function scoreSubtitleTrack(t: MpvTrack): number {
+  let score = 0;
+  if (t.external) score += 100_000;
+  if (isArabicSubtitleTrack(t)) {
+    score += 10_000;
+  } else if (isEnglishSubtitleTrack(t)) {
+    score += 5_000;
+  }
+  if (!t.forced) score += 1_000;
+  if (!isBitmapSubtitleTrack(t)) score += 500;
+  if (!isClosedCaptionTrack(t)) score += 100;
+  if (t.default) score += 50;
+  return score;
+}
+
 function pickPreferredSubtitleTrack(subs: readonly MpvTrack[]): MpvTrack {
-  return (
-    subs.find((t) => t.external) ??
-    subs.find(
-      (t) => t.default && !t.forced && !isBitmapSubtitleTrack(t) && !isClosedCaptionTrack(t),
-    ) ??
-    subs.find((t) => !t.forced && !isBitmapSubtitleTrack(t) && !isClosedCaptionTrack(t)) ??
-    subs.find((t) => !isBitmapSubtitleTrack(t) && !isClosedCaptionTrack(t)) ??
-    subs.find((t) => !isBitmapSubtitleTrack(t)) ??
-    subs[0]
-  );
+  let best = subs[0];
+  let bestScore = scoreSubtitleTrack(best);
+  for (let i = 1; i < subs.length; i++) {
+    const candidate = subs[i];
+    const score = scoreSubtitleTrack(candidate);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 /**
- * When a new file's track list arrives, make sure the subtitle bundled with the
- * episode is actually on: pick the default (or first text) embedded track if mpv
- * didn't select one, and push subtitle visibility/style to mpv. Runs once per
- * distinct file + track set so a user choosing "Off" is never overridden.
+ * When a new file's track list arrives, prioritize Arabic (if available), then English,
+ * then fallback text/default tracks—even when mpv pre-selected another default language.
+ * Runs once per distinct file + track set so a user choosing "Off" or another track is
+ * never overridden.
  */
 export function autoEnableEmbeddedSubtitle(tracks: readonly MpvTrack[]): void {
   const subs = tracks.filter((t) => t.type === "sub");
@@ -436,36 +470,14 @@ export function autoEnableEmbeddedSubtitle(tracks: readonly MpvTrack[]): void {
   const sub = useSubtitleStore.getState();
   sub.setVisible(true);
   const currentSelected = subs.find((t) => t.selected);
+  const pick = pickPreferredSubtitleTrack(subs);
   if (!currentSelected) {
-    const pick = pickPreferredSubtitleTrack(subs);
     safeMpvCall(mpvSetSubTrack(pick.id));
-  } else if (isBitmapSubtitleTrack(currentSelected) && !currentSelected.external) {
-    // If mpv auto-selected a bitmap (PGS/VobSub) track on open while a same-language text
-    // track exists in the container, switch to the text track so styling & Magic Sync work cleanly.
-    const curLang = currentSelected.lang?.trim().toLowerCase();
-    const sameLangText = curLang
-      ? subs.find(
-          (t) =>
-            !t.external &&
-            !t.forced &&
-            !isBitmapSubtitleTrack(t) &&
-            !isClosedCaptionTrack(t) &&
-            t.lang?.trim().toLowerCase() === curLang,
-        )
-      : undefined;
-    const sameLangCc =
-      !sameLangText && curLang
-        ? subs.find(
-            (t) =>
-              !t.external &&
-              !isBitmapSubtitleTrack(t) &&
-              t.lang?.trim().toLowerCase() === curLang,
-          )
-        : undefined;
-    const better = sameLangText ?? sameLangCc;
-    if (better) {
-      safeMpvCall(mpvSetSubTrack(better.id));
-    }
+  } else if (
+    pick.id !== currentSelected.id &&
+    scoreSubtitleTrack(pick) > scoreSubtitleTrack(currentSelected)
+  ) {
+    safeMpvCall(mpvSetSubTrack(pick.id));
   }
   pushSubStyle(true);
 }

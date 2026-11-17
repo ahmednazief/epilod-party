@@ -182,7 +182,8 @@ export function VideoGlassBackdrop({
     ctx.clearRect(0, 0, w, h);
 
     const frame = latestFrameRef.current;
-    if (!active || !visible || !frame) {
+    const frameRgba = frame?.rgba;
+    if (!active || !visible || !frame || !frameRgba) {
       return;
     }
 
@@ -199,7 +200,7 @@ export function VideoGlassBackdrop({
     const dw = vpRect && vpRect.width > 0 ? vpRect.width : w;
     const dh = vpRect && vpRect.height > 0 ? vpRect.height : h;
 
-    const activeBox = detectActiveFrameBounds(frame.rgba, frame.width, frame.height);
+    const activeBox = detectActiveFrameBounds(frameRgba, frame.width, frame.height);
 
     let scratch = regionScratchRef.current;
     if (!scratch) {
@@ -294,7 +295,7 @@ export function VideoGlassBackdrop({
                 ? Math.max(activeBox.minV, activeBox.maxV - Math.min(0.06, rawV - activeBox.maxV))
                 : rawV;
 
-          const [rr, gg, bb] = sampleBilinear(frame.rgba, frame.width, frame.height, u, v);
+          const [rr, gg, bb] = sampleBilinear(frameRgba, frame.width, frame.height, u, v);
           const idx = (py * rw + px) * 4;
           out[idx] = rr;
           out[idx + 1] = gg;

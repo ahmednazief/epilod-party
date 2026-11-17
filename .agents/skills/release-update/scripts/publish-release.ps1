@@ -425,13 +425,19 @@ try {
         & $buildScript @buildArgs
 
         $defaultNotes = "Epilod Party v$targetVersion Windows release"
-        $manifestNotes = ($resolvedNotes -replace '(\r?\n)+', '; ').Trim()
+        $manifestNotes = ($resolvedNotes -replace "\r\n", "`n").Trim()
         if ($manifestNotes -ne $defaultNotes -and -not [string]::IsNullOrWhiteSpace($manifestNotes)) {
             Write-Host "==> Updating release manifest with custom notes..."
-            Invoke-NativeChecked -FilePath "cargo" -Arguments @(
-                "run", "--release", "-p", "epilod-installer-core", "--bin", "epilod-pack", "--",
-                "--write-update-manifest", $setupExe, $targetVersion, $expectedDownloadUrl, $manifestJson, $manifestNotes
-            ) -FailureMessage "epilod-pack --write-update-manifest failed"
+            $manifestNotesFile = Join-Path ([System.IO.Path]::GetTempPath()) ("epilod-manifest-notes-" + [System.Guid]::NewGuid().ToString("N") + ".md")
+            Write-Utf8NoBomFile -Path $manifestNotesFile -Content $manifestNotes
+            try {
+                Invoke-NativeChecked -FilePath "cargo" -Arguments @(
+                    "run", "--release", "-p", "epilod-installer-core", "--bin", "epilod-pack", "--",
+                    "--write-update-manifest", $setupExe, $targetVersion, $expectedDownloadUrl, $manifestJson, "--notes-file", $manifestNotesFile
+                ) -FailureMessage "epilod-pack --write-update-manifest failed"
+            } finally {
+                Remove-Item -Path $manifestNotesFile -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 

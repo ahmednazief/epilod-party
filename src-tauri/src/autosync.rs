@@ -241,7 +241,10 @@ fn parse_timebase_header(line: &str) -> Option<(u128, u128)> {
 
 /// Reconstruct dialogue-like `(start_ms, end_ms)` cues from `ffmpeg -c:s copy -f framecrc` output
 /// for bitmap subtitle streams (`dvd_subtitle`, `hdmv_pgs_subtitle`, `dvb_subtitle`, `xsub`).
-pub fn parse_bitmap_framecrc_cues(raw: &str, codec: Option<&str>) -> Result<Vec<SubtitleCue>, String> {
+pub fn parse_bitmap_framecrc_cues(
+    raw: &str,
+    codec: Option<&str>,
+) -> Result<Vec<SubtitleCue>, String> {
     let mut tb_num: u128 = 1;
     let mut tb_den: u128 = 1000;
     let mut packets: Vec<BitmapPacketMeta> = Vec::new();
@@ -288,8 +291,14 @@ pub fn parse_bitmap_framecrc_cues(raw: &str, codec: Option<&str>) -> Result<Vec<
             .and_then(|s| s.trim().parse::<usize>().ok())
             .unwrap_or(0);
 
-        let pts_ms = ((ts_ticks as u128).saturating_mul(1000).saturating_mul(tb_num) / tb_den) as u64;
-        let dur_ms = ((dur_ticks as u128).saturating_mul(1000).saturating_mul(tb_num) / tb_den) as u64;
+        let pts_ms = ((ts_ticks as u128)
+            .saturating_mul(1000)
+            .saturating_mul(tb_num)
+            / tb_den) as u64;
+        let dur_ms = ((dur_ticks as u128)
+            .saturating_mul(1000)
+            .saturating_mul(tb_num)
+            / tb_den) as u64;
         packets.push(BitmapPacketMeta {
             pts_ms,
             dur_ms,
@@ -737,7 +746,9 @@ mod windows_impl {
             );
         };
         if embedded_sub_ff_idx.is_none() && sub_idx.is_none() {
-            return Err("No subtitle track index available for bitmap timing extraction.".to_string());
+            return Err(
+                "No subtitle track index available for bitmap timing extraction.".to_string(),
+            );
         }
         let out_crc = work_dir.join(format!("bitmap_{pid}_{job_seq}.framecrc.txt"));
         let args = autosync_extract_bitmap_framecrc_args_ffmpeg(
@@ -943,7 +954,8 @@ mod windows_impl {
                             return Err(format!("Failed reading subtitle file: {e}"));
                         }
                     };
-                    let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, effective_hint) {
+                    let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, effective_hint)
+                    {
                         Ok(d) => d,
                         Err(e) => {
                             let _ = fs::remove_file(&pcm_path_clone);
@@ -1160,10 +1172,7 @@ mod windows_impl {
         })
     }
 
-    async fn run_ffmpeg_sample_extract(
-        ffmpeg_exe: &Path,
-        args: &[String],
-    ) -> Result<(), String> {
+    async fn run_ffmpeg_sample_extract(ffmpeg_exe: &Path, args: &[String]) -> Result<(), String> {
         let mut child = Command::new(ffmpeg_exe)
             .args(args)
             .kill_on_drop(true)
@@ -1337,7 +1346,9 @@ mod tests {
         for (idx, &(audio_start, audio_end)) in speech_windows.iter().enumerate() {
             let sub_start = audio_start + shift_early_ms;
             let sub_end = audio_end + shift_early_ms;
-            pgs_crc.push_str(&format!("0, {sub_start}, {sub_start}, 0, 1850, 0xaaa{idx}\n"));
+            pgs_crc.push_str(&format!(
+                "0, {sub_start}, {sub_start}, 0, 1850, 0xaaa{idx}\n"
+            ));
             // Split packet 30ms later for the same cue must not duplicate cue
             let split_t = sub_start + 30;
             pgs_crc.push_str(&format!("0, {split_t}, {split_t}, 0, 420, 0xbbb{idx}\n"));
@@ -2471,7 +2482,8 @@ mod tests {
             let s1 = ((s_ms + len_ms) as usize * 16).min(total_samples);
             for (idx, slot) in pcm[s0..s1].iter_mut().enumerate() {
                 let t = idx as f32 / 16_000.0;
-                *slot = ((0.3 * (2.0 * std::f32::consts::PI * 620.0 * t).sin()) * i16::MAX as f32) as i16;
+                *slot = ((0.3 * (2.0 * std::f32::consts::PI * 620.0 * t).sin()) * i16::MAX as f32)
+                    as i16;
             }
         }
         let mut pcm_bytes = Vec::with_capacity(pcm.len() * 2);
@@ -2487,8 +2499,7 @@ mod tests {
         let shift_early_ms = 3_100u64;
         // CP1256 bytes for "مرحبا يا صديقي": E3 D1 CD C8 C7 20 ED C7 20 D5 CF ED DE ED
         let ar_cp1256 = [
-            0xE3u8, 0xD1, 0xCD, 0xC8, 0xC7, b' ', 0xED, 0xC7, b' ', 0xD5, 0xCF, 0xED, 0xDE,
-            0xED,
+            0xE3u8, 0xD1, 0xCD, 0xC8, 0xC7, b' ', 0xED, 0xC7, b' ', 0xD5, 0xCF, 0xED, 0xDE, 0xED,
         ];
         for (i, &(s_ms, len_ms)) in bursts.iter().enumerate() {
             let sub_s = s_ms - shift_early_ms;
@@ -2523,7 +2534,8 @@ mod tests {
         assert!(synced_ar_txt.contains("مرحبا يا صديقي"));
 
         // 2. UTF-8 RTL SRT with U+200F RLM marks before cue timestamps (Arabic + English mix)
-        let mut rtl_utf8 = String::from("\u{FEFF}1\n\u{200F}00:00:00,300 --> \u{200F}00:00:01,500\n[موسيقى]\n\n");
+        let mut rtl_utf8 =
+            String::from("\u{FEFF}1\n\u{200F}00:00:00,300 --> \u{200F}00:00:01,500\n[موسيقى]\n\n");
         for (i, &(s_ms, len_ms)) in bursts.iter().enumerate() {
             let sub_s = s_ms - shift_early_ms;
             rtl_utf8.push_str(&format!(

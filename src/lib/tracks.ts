@@ -17,11 +17,15 @@ export interface SubtitleTrackDisplay {
  * Falls back to FFmpeg-detected language for untagged text tracks and `"Closed Captions"`
  * for untagged EIA-608/CEA-708 streams.
  */
+const INTERNAL_TEMP_SUB_RE = /^(?:decoded|embedded|autosync|epilod_synced|synced)_\d+_/i;
+
 export function formatSubtitleTrackDisplay(
   track: MpvTrack,
   options?: { detectedLang?: string | null; externalFileName?: string | null },
 ): SubtitleTrackDisplay {
-  const cleanTitle = track.title?.trim() || null;
+  const rawTitle = track.title?.trim() || null;
+  const cleanTitle =
+    rawTitle && !(track.external && INTERNAL_TEMP_SUB_RE.test(rawTitle)) ? rawTitle : null;
   const tagLang = normalizeSubtitleLang(track.lang);
   const detectedLangCode =
     !tagLang && !track.external && options?.detectedLang

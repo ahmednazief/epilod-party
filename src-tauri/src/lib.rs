@@ -185,7 +185,7 @@ mod windows_app {
     use epilod_core::mpv_ipc::{
         loadfile_cmd, set_aid_cmd, set_aspect_cmd, set_loop_cmd, set_mute_cmd, set_pause_cmd,
         set_sid_cmd, set_speed_cmd, set_sub_delay_cmd, set_sub_style_cmds_with_bold,
-        set_volume_cmd, sub_add_cmd, sub_remove_cmd,
+        set_video_margin_right_cmd, set_volume_cmd, sub_add_cmd_with_title, sub_remove_cmd,
     };
     use epilod_core::room_code::BACKUP_ENDPOINT;
     use epilod_core::subtitle_sync::{decode_subtitle_bytes_with_hint, SubtitleEncodingHint};
@@ -315,6 +315,14 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn mpv_capture_freeze_frame(
+        state: State<'_, AppState>,
+    ) -> Result<tauri::ipc::Response, String> {
+        let bytes = state.mpv.capture_clean_freeze_frame().await?;
+        Ok(tauri::ipc::Response::new(bytes))
+    }
+
+    #[tauri::command]
     async fn mpv_load(state: State<'_, AppState>, path: String) -> Result<(), String> {
         let opts = state.network_policy.options();
         let valid_path = tokio::task::spawn_blocking(move || {
@@ -438,6 +446,14 @@ mod windows_app {
         state.mpv.send_command(set_aspect_cmd(req, safe))
     }
 
+    #[tauri::command]
+    async fn mpv_set_video_margin_right(state: State<'_, AppState>, ratio: f64) -> Result<(), String> {
+        let req = state.mpv.next_request_id();
+        state
+            .mpv
+            .send_command(set_video_margin_right_cmd(req, ratio))
+    }
+
     fn prune_decoded_subs_dir(sub_dir: &Path, keep_latest: usize) {
         let Ok(entries) = std::fs::read_dir(sub_dir) else {
             return;
@@ -467,50 +483,82 @@ mod windows_app {
         }
     }
 
+    fn is_internal_temp_sub_name(name: &str) -> bool {
+        let lower = name.trim().to_ascii_lowercase();
+        lower.starts_with("decoded_")
+            || lower.starts_with("synced_")
+            || lower.starts_with("epilod_synced_")
+            || lower.starts_with("embedded_")
+            || lower.starts_with("autosync_")
+    }
+
+    fn derive_external_sub_title(path: &Path, explicit_title: Option<&str>) -> Option<String> {
+        if let Some(raw) = explicit_title {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && !is_internal_temp_sub_name(trimmed) {
+                return Some(trimmed.chars().take(120).collect());
+            }
+        }
+        let fname = path.file_name()?.to_str()?.trim();
+        if fname.is_empty() || is_internal_temp_sub_name(fname) {
+            None
+        } else {
+            Some(fname.chars().take(120).collect())
+        }
+    }
+
     #[tauri::command]
     async fn mpv_add_subtitle(
         state: State<'_, AppState>,
         path: String,
         encoding_hint: Option<SubtitleEncodingHint>,
+        display_title: Option<String>,
     ) -> Result<(), String> {
         let opts = state.network_policy.options();
         let hint = encoding_hint.unwrap_or_default();
 
         // Fix 25: Convert legacy non-UTF8 or explicit-hint subtitle files to clean UTF-8 temp file for libass.
         // Run all filesystem & decoding work off the async executor so UNC/large files never stall IPC.
-        let load_path = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let valid = validate_existing_local_file_with_options(&path, opts)
-                .map_err(|e| e.to_string())?;
-            match std::fs::read(&valid) {
-                Ok(bytes) => {
-                    let needs_transcode =
-                        hint != SubtitleEncodingHint::Auto || std::str::from_utf8(&bytes).is_err();
-                    if needs_transcode {
-                        let decoded = decode_subtitle_bytes_with_hint(&bytes, hint)
-                            .map_err(|e| e.to_string())?;
-                        let sub_dir = std::env::temp_dir().join("epilod-subs");
-                        std::fs::create_dir_all(&sub_dir)
-                            .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
-                        let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
-                        let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
-                        let out =
-                            sub_dir.join(format!("decoded_{}_{seq}.{ext}", std::process::id()));
-                        std::fs::write(&out, decoded.as_bytes())
-                            .map_err(|e| format!("Failed writing decoded UTF-8 subtitle: {e}"))?;
-                        prune_decoded_subs_dir(&sub_dir, 10);
-                        Ok(out.to_string_lossy().into_owned())
-                    } else {
-                        Ok(valid.to_string_lossy().into_owned())
+        let (load_path, resolved_title) =
+            tokio::task::spawn_blocking(move || -> Result<(String, Option<String>), String> {
+                let valid = validate_existing_local_file_with_options(&path, opts)
+                    .map_err(|e| e.to_string())?;
+                let title = derive_external_sub_title(&valid, display_title.as_deref());
+                match std::fs::read(&valid) {
+                    Ok(bytes) => {
+                        let needs_transcode = hint != SubtitleEncodingHint::Auto
+                            || std::str::from_utf8(&bytes).is_err();
+                        if needs_transcode {
+                            let decoded = decode_subtitle_bytes_with_hint(&bytes, hint)
+                                .map_err(|e| e.to_string())?;
+                            let sub_dir = std::env::temp_dir().join("epilod-subs");
+                            std::fs::create_dir_all(&sub_dir)
+                                .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
+                            let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
+                            let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
+                            let out =
+                                sub_dir.join(format!("decoded_{}_{seq}.{ext}", std::process::id()));
+                            std::fs::write(&out, decoded.as_bytes()).map_err(|e| {
+                                format!("Failed writing decoded UTF-8 subtitle: {e}")
+                            })?;
+                            prune_decoded_subs_dir(&sub_dir, 10);
+                            Ok((out.to_string_lossy().into_owned(), title))
+                        } else {
+                            Ok((valid.to_string_lossy().into_owned(), title))
+                        }
                     }
+                    Err(_) => Ok((valid.to_string_lossy().into_owned(), title)),
                 }
-                Err(_) => Ok(valid.to_string_lossy().into_owned()),
-            }
-        })
-        .await
-        .map_err(|e| format!("Subtitle processing task failed: {e}"))??;
+            })
+            .await
+            .map_err(|e| format!("Subtitle processing task failed: {e}"))??;
 
         let req = state.mpv.next_request_id();
-        state.mpv.send_command(sub_add_cmd(req, &load_path))
+        state.mpv.send_command(sub_add_cmd_with_title(
+            req,
+            &load_path,
+            resolved_title.as_deref(),
+        ))
     }
 
     #[tauri::command]
@@ -861,6 +909,7 @@ mod windows_app {
         literal_room: Option<bool>,
         password: Option<String>,
         host_only: Option<bool>,
+        claim_empty: Option<bool>,
     ) -> Result<(), String> {
         let clean_user = sanitize_username(&username).map_err(|e| e.to_string())?;
         {
@@ -883,6 +932,7 @@ mod windows_app {
                 literal_room.unwrap_or(false),
                 password,
                 host_only.unwrap_or(false),
+                claim_empty.unwrap_or(false),
                 state.network_policy.options(),
             )
             .await
@@ -983,6 +1033,7 @@ mod windows_app {
                 literal_room.unwrap_or(false),
                 password,
                 host_only.unwrap_or(false),
+                false,
                 state.network_policy.options(),
             )
             .await
@@ -1132,6 +1183,76 @@ mod windows_app {
         state
             .sync
             .send_reaction(clean_emoji, clean_avatar, safe_count);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_chat(
+        state: State<'_, AppState>,
+        id: String,
+        text: String,
+        avatar_id: Option<String>,
+        reply_to_id: Option<String>,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat", 20, Duration::from_secs(5))?;
+        let clean_id = epilod_core::p2p::sanitize_chat_id(&id);
+        if clean_id.is_empty() {
+            return Err("Invalid chat message id.".to_string());
+        }
+        let clean_text = epilod_core::p2p::sanitize_chat_text(&text)
+            .ok_or_else(|| "Chat message cannot be empty.".to_string())?;
+        let clean_avatar = epilod_core::p2p::sanitize_avatar_id(avatar_id.as_deref().unwrap_or(""));
+        let clean_reply = reply_to_id
+            .as_deref()
+            .map(epilod_core::p2p::sanitize_chat_id)
+            .filter(|s| !s.is_empty());
+        state
+            .sync
+            .send_chat(clean_id, clean_text, clean_avatar, clean_reply);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_chat_typing(
+        state: State<'_, AppState>,
+        is_typing: bool,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat_typing", 16, Duration::from_secs(5))?;
+        state.sync.send_typing(is_typing);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_chat_edit(
+        state: State<'_, AppState>,
+        target_msg_id: String,
+        text: String,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat_edit", 16, Duration::from_secs(5))?;
+        let clean_id = epilod_core::p2p::sanitize_chat_id(&target_msg_id);
+        if clean_id.is_empty() {
+            return Err("Invalid chat message id.".to_string());
+        }
+        let clean_text = epilod_core::p2p::sanitize_chat_text(&text)
+            .ok_or_else(|| "Edited message cannot be empty.".to_string())?;
+        state.sync.send_chat_edit(clean_id, clean_text);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_chat_react(
+        state: State<'_, AppState>,
+        target_msg_id: String,
+        emoji: String,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat_react", 30, Duration::from_secs(5))?;
+        let clean_id = epilod_core::p2p::sanitize_chat_id(&target_msg_id);
+        if clean_id.is_empty() {
+            return Err("Invalid chat message id.".to_string());
+        }
+        let clean_emoji = epilod_core::p2p::sanitize_reaction_emoji(&emoji)
+            .ok_or_else(|| "Unsupported reaction emoji.".to_string())?;
+        state.sync.send_chat_react(clean_id, clean_emoji);
         Ok(())
     }
 
@@ -1453,6 +1574,7 @@ mod windows_app {
                 mpv_set_visible,
                 mpv_get_surface_state,
                 mpv_backdrop_frame,
+                mpv_capture_freeze_frame,
                 mpv_load,
                 mpv_set_pause,
                 mpv_seek,
@@ -1462,6 +1584,7 @@ mod windows_app {
                 mpv_set_speed,
                 mpv_set_loop,
                 mpv_set_aspect_mode,
+                mpv_set_video_margin_right,
                 mpv_add_subtitle,
                 mpv_remove_subtitle,
                 mpv_set_sub_style,
@@ -1499,6 +1622,10 @@ mod windows_app {
                 sync_align_scene_here,
                 sync_run_p2p_auto_align,
                 sync_send_reaction,
+                sync_send_chat,
+                sync_send_chat_edit,
+                sync_send_chat_react,
+                sync_send_chat_typing,
                 scan_media_paths,
                 log_frontend_event,
                 get_logs_snapshot,

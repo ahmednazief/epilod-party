@@ -21,11 +21,16 @@ import { mpvSetSubStyle, safeMpvCall, setAllowNetworkShares } from "../lib/mpv";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
 import { playSoundCue } from "../lib/soundEffects";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
-import { formatBytesCompact, formatTransferSpeed } from "../lib/updater";
+import {
+  formatBytesCompact,
+  formatTransferSpeed,
+  parseReleaseNotes,
+} from "../lib/updater";
 import { validateServerEndpointInput } from "../lib/webviewHardening";
 import {
   useAppStore,
   type AutoFetchSubtitleMode,
+  type ChatTriggerPlacement,
   type SettingsTab,
   type SkipIntroMode,
 } from "../store/useAppStore";
@@ -143,7 +148,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const preferredSubtitleLangs = useAppStore((s) => s.preferredSubtitleLangs);
   const openSubtitlesApiKey = useAppStore((s) => s.openSubtitlesApiKey);
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
+  const chatPeeksEnabled = useAppStore((s) => s.chatPeeksEnabled);
+  const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
+  const playBarOpacity = useAppStore((s) => s.playBarOpacity);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const autoDownloadUpdates = useAppStore((s) => s.autoDownloadUpdates);
 
@@ -162,7 +170,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setPreferredSubtitleLangs = useAppStore((s) => s.setPreferredSubtitleLangs);
   const setOpenSubtitlesApiKey = useAppStore((s) => s.setOpenSubtitlesApiKey);
   const setReactionsEnabled = useAppStore((s) => s.setReactionsEnabled);
+  const setChatPeeksEnabled = useAppStore((s) => s.setChatPeeksEnabled);
+  const setChatTriggerPlacement = useAppStore((s) => s.setChatTriggerPlacement);
   const setFullWidthPlayBar = useAppStore((s) => s.setFullWidthPlayBar);
+  const setPlayBarOpacity = useAppStore((s) => s.setPlayBarOpacity);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
   const setAutoDownloadUpdates = useAppStore((s) => s.setAutoDownloadUpdates);
   const boldSubtitles = useSubtitleStore((s) => s.bold);
@@ -289,6 +300,12 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     }
   }, [open, tab]);
 
+  const availableRelease = updateStatus?.availableRelease ?? null;
+  const releaseNoteItems = useMemo(
+    () => parseReleaseNotes(availableRelease?.notes),
+    [availableRelease?.notes],
+  );
+
   if (!mounted) return null;
 
   const handleSaveServer = () => {
@@ -305,7 +322,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     onClose();
   };
 
-  const availableRelease = updateStatus?.availableRelease ?? null;
   const availability = updateStatus?.availability ?? "upToDate";
   const progressFraction = Math.min(1, Math.max(0, (updateProgress?.percent ?? 0) / 100));
   const lastCheckedLabel = updateStatus?.checkedAtUnix
@@ -467,31 +483,29 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
           <div className="ep-settings-scroll flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden pl-6 pr-[18px] mr-1.5 my-1 py-3">
             {tab === "profile" && (
-              <div className="anim-tab-in space-y-4">
-                <div className="ep-glass-well rounded-[20px] p-3.5 space-y-3">
-                  <div className="flex items-center gap-3">
-                    <ProfileAvatar
-                      avatarId={avatarId}
-                      size={44}
-                      className="ring-2 ring-accent/55 shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <TextField
-                        label="Display Name"
-                        value={username}
-                        maxLength={32}
-                        placeholder="Viewer"
-                        onChange={(e) => setUsername(e.target.value)}
-                      />
-                    </div>
-                  </div>
-
-                  <AvatarPicker
-                    value={avatarId}
-                    onChange={setAvatarId}
-                    compact
+              <div className="anim-tab-in px-3 py-1 space-y-4">
+                <div className="flex items-end gap-3">
+                  <ProfileAvatar
+                    avatarId={avatarId}
+                    size={40}
+                    className="ring-2 ring-accent/55 shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
                   />
+                  <div className="flex-1 min-w-0">
+                    <TextField
+                      label="Display Name"
+                      value={username}
+                      maxLength={32}
+                      placeholder="Viewer"
+                      onChange={(e) => setUsername(e.target.value)}
+                    />
+                  </div>
                 </div>
+
+                <AvatarPicker
+                  value={avatarId}
+                  onChange={setAvatarId}
+                  compact
+                />
               </div>
             )}
 
@@ -517,6 +531,47 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     ]}
                     onChange={(mode) => setFullWidthPlayBar(mode === "full-width")}
                   />
+                </div>
+
+                <div className="px-3 py-3 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="text-xs font-medium text-white">
+                        Play Bar Opacity
+                      </div>
+                      <p className="text-[11px] text-secondary leading-relaxed">
+                        Adjust how translucent or solid both the floating and full-width play bars appear over video.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                      {playBarOpacity !== 60 && (
+                        <button
+                          type="button"
+                          onClick={() => setPlayBarOpacity(60)}
+                          className="text-[11px] font-medium text-accent-soft hover:text-white cursor-pointer"
+                        >
+                          Reset
+                        </button>
+                      )}
+                      <span className="text-xs num text-secondary min-w-[34px] text-right">
+                        {playBarOpacity}%
+                      </span>
+                    </div>
+                  </div>
+                  <Scrubber
+                    ariaLabel="Play Bar Opacity"
+                    value={playBarOpacity}
+                    min={0}
+                    max={100}
+                    step={1}
+                    alwaysShowThumb
+                    formatTooltip={(v) => `${Math.round(v)}%`}
+                    onChange={setPlayBarOpacity}
+                  />
+                  <div className="flex items-center justify-between text-[10px] text-muted select-none">
+                    <span>Translucent</span>
+                    <span>Solid</span>
+                  </div>
                 </div>
 
                 <ComfortSwitchRow
@@ -603,6 +658,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     min={20}
                     max={100}
                     step={1}
+                    alwaysShowThumb
                     onChange={(val) => {
                       setSubPos(val);
                       throttledApplySubStyle.call();
@@ -676,6 +732,33 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 />
 
                 <ComfortSwitchRow
+                  title="Ambient Chat Peeks"
+                  description="Briefly surface incoming room messages in soft glass pills over the corner when chat is closed."
+                  checked={chatPeeksEnabled}
+                  onChange={setChatPeeksEnabled}
+                />
+
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">Chat Button Placement</div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Choose whether to keep the Party Chat button in the bottom play bar or as a slim tab on the right edge.
+                    </div>
+                  </div>
+                  <SegmentedTabs<ChatTriggerPlacement>
+                    ariaLabel="Chat Button Placement"
+                    size="sm"
+                    fullWidth
+                    value={chatTriggerPlacement}
+                    onChange={setChatTriggerPlacement}
+                    items={[
+                      { value: "playbar", label: "Play Bar" },
+                      { value: "edge", label: "Right Edge" },
+                    ]}
+                  />
+                </div>
+
+                <ComfortSwitchRow
                   title="Subtle Party Sound Cues"
                   description="Play soft acoustic glass tones when friends join, leave, or ready up (automatically quieter during playback)."
                   checked={soundEffectsEnabled}
@@ -704,8 +787,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             )}
 
             {tab === "updates" && (
-              <div className="anim-tab-in space-y-5">
-                <div className="space-y-2.5">
+              <div className="anim-tab-in space-y-3.5">
+                <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span
@@ -731,71 +814,130 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   <p className="text-xs text-secondary leading-relaxed">
                     {updateStatus?.message ?? "Check GitHub Releases for verified updates."}
                   </p>
+                </div>
 
-                  {availableRelease && (
-                    <div className="rounded-2xl bg-white/5 p-3.5 space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium text-white">
+                {availableRelease && (
+                  <div className="ep-glass-well rounded-2xl p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs font-semibold text-white truncate">
                           Epilod Party v{availableRelease.version}
                         </span>
-                        <span className="text-[11px] num text-muted">
-                          {formatBytesCompact(availableRelease.sizeBytes)}
+                        <span className="text-[11px] font-medium text-accent-soft shrink-0">
+                          · What’s New
                         </span>
                       </div>
-                      {availableRelease.notes && (
-                        <p className="text-[11px] text-secondary leading-relaxed whitespace-pre-line">
-                          {availableRelease.notes}
-                        </p>
+                      <span className="text-[11px] num text-muted shrink-0">
+                        {formatBytesCompact(availableRelease.sizeBytes)}
+                      </span>
+                    </div>
+                    {releaseNoteItems.length > 0 && (
+                      <ul className="ep-menu-scroll max-h-32 overflow-y-auto pr-1 space-y-1.5">
+                        {releaseNoteItems.map((item, idx) => (
+                          <li
+                            key={`${idx}-${item.title ?? item.body.slice(0, 16)}`}
+                            className="flex items-start gap-2 text-[11.5px] leading-snug text-secondary"
+                          >
+                            <span
+                              className="mt-[6px] h-1.5 w-1.5 rounded-full bg-accent-soft/85 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span className="min-w-0">
+                              {item.title && (
+                                <span className="font-semibold text-white">
+                                  {item.title}
+                                  {item.body ? ": " : ""}
+                                </span>
+                              )}
+                              {item.segments.map((seg, segIdx) =>
+                                seg.bold ? (
+                                  <strong key={segIdx} className="font-semibold text-white">
+                                    {seg.text}
+                                  </strong>
+                                ) : (
+                                  <span key={segIdx}>{seg.text}</span>
+                                ),
+                              )}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="flex items-center gap-1.5 text-[10.5px] num text-muted">
+                      <AppShieldIcon size={12} className="text-ok shrink-0" />
+                      <span className="truncate">
+                        {updateStatus?.signatureVerified
+                          ? `Ed25519 Signed · SHA-256: ${availableRelease.sha256.slice(0, 16)}...`
+                          : `SHA-256 Verified: ${availableRelease.sha256.slice(0, 16)}...`}
+                      </span>
+                    </div>
+
+                    {(isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
+                      updateProgress && (
+                        <div className="pt-2 space-y-1.5">
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="text-secondary truncate">{updateProgress.message}</span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {updateProgress.speedBps > 0 && (
+                                <span className="num text-muted">
+                                  {formatTransferSpeed(updateProgress.speedBps)}
+                                </span>
+                              )}
+                              <span className="num text-[11.5px] font-semibold text-accent-soft">
+                                {Math.round(updateProgress.percent)}%
+                              </span>
+                            </div>
+                          </div>
+                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
+                            <div
+                              className="ep-scrubber-fill h-full w-full origin-left transition-transform duration-150 ease-out"
+                              style={{ transform: `scaleX(${progressFraction})` }}
+                            />
+                          </div>
+                          {updateProgress.totalBytes > 0 && (
+                            <div className="flex justify-between text-[10.5px] num text-muted">
+                              <span>{formatBytesCompact(updateProgress.downloadedBytes)}</span>
+                              <span>{formatBytesCompact(updateProgress.totalBytes)}</span>
+                            </div>
+                          )}
+                        </div>
                       )}
-                      <div className="flex items-center gap-1.5 pt-1 text-[10.5px] num text-muted">
-                        <AppShieldIcon size={12} className="text-ok shrink-0" />
-                        <span className="truncate">
-                          {updateStatus?.signatureVerified
-                            ? `Ed25519 Signed · SHA-256: ${availableRelease.sha256.slice(0, 16)}...`
-                            : `SHA-256 Verified: ${availableRelease.sha256.slice(0, 16)}...`}
-                        </span>
+                  </div>
+                )}
+
+                {!availableRelease &&
+                  (isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
+                  updateProgress && (
+                    <div className="ep-glass-well rounded-2xl p-3.5 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-secondary truncate">{updateProgress.message}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {updateProgress.speedBps > 0 && (
+                            <span className="num text-muted">
+                              {formatTransferSpeed(updateProgress.speedBps)}
+                            </span>
+                          )}
+                          <span className="num text-[11.5px] font-semibold text-accent-soft">
+                            {Math.round(updateProgress.percent)}%
+                          </span>
+                        </div>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
+                        <div
+                          className="ep-scrubber-fill h-full w-full origin-left transition-transform duration-150 ease-out"
+                          style={{ transform: `scaleX(${progressFraction})` }}
+                        />
                       </div>
                     </div>
                   )}
 
-                  {(isDownloadingUpdate || isUpdatePaused || updateProgress?.stage === "verifying") &&
-                    updateProgress && (
-                      <div className="ep-glass-well rounded-2xl p-3.5 space-y-2">
-                        <div className="flex items-center justify-between gap-2 text-[11px]">
-                          <span className="text-secondary truncate">{updateProgress.message}</span>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {updateProgress.speedBps > 0 && (
-                              <span className="num text-muted">
-                                {formatTransferSpeed(updateProgress.speedBps)}
-                              </span>
-                            )}
-                            <span className="ep-update-pct-badge num text-xs font-semibold text-accent-soft px-2.5 py-0.5 rounded-full">
-                              {Math.round(updateProgress.percent)}%
-                            </span>
-                          </div>
-                        </div>
-                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
-                          <div
-                            className="ep-scrubber-fill h-full w-full origin-left transition-transform duration-150 ease-out"
-                            style={{ transform: `scaleX(${progressFraction})` }}
-                          />
-                        </div>
-                        {updateProgress.totalBytes > 0 && (
-                          <div className="flex justify-between text-[10.5px] num text-muted">
-                            <span>{formatBytesCompact(updateProgress.downloadedBytes)}</span>
-                            <span>{formatBytesCompact(updateProgress.totalBytes)}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                {updateError && (
+                  <p className="text-[11px] text-bad bg-bad/10 rounded-xl px-3 py-2">
+                    {updateError}
+                  </p>
+                )}
 
-                  {updateError && (
-                    <p className="text-[11px] text-bad bg-bad/10 rounded-xl px-3 py-2">
-                      {updateError}
-                    </p>
-                  )}
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                     <Button
                       variant="secondary"
                       size="sm"
@@ -851,10 +993,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                         </Button>
                       )}
                     </div>
-                  </div>
                 </div>
 
-                <div className="pt-1 space-y-0.5">
+                <div className="pt-0.5 space-y-0.5">
                   <ComfortSwitchRow
                     title="Automatic updates"
                     description="Automatically download and verify new updates in the background so they are ready to install in one click."

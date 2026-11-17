@@ -239,7 +239,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         if (selectedSub?.external) {
           await mpvRemoveSubtitle(selectedSub.id).catch(() => undefined);
         }
-        await mpvAddSubtitle(targetPath, hint);
+        await mpvAddSubtitle(targetPath, hint, getFileDisplayName(targetPath));
         applyStyleNow();
         pushNote("info", "Reloaded subtitle encoding.");
       } catch (err) {
@@ -294,7 +294,9 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         if (activeSub?.external) {
           await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
         }
-        await mpvAddSubtitle(result.syncedSubtitlePath, "utf8");
+        const syncedDisplaySource = originalFilePath || result.sourceSubtitlePath || "";
+        const syncedTitle = syncedDisplaySource ? getFileDisplayName(syncedDisplaySource) : null;
+        await mpvAddSubtitle(result.syncedSubtitlePath, "utf8", syncedTitle);
         await mpvSetSubDelay(0);
         setDelaySecs(0);
         setLoadedTrack(result.syncedSubtitlePath, result.sourceSubtitlePath);
@@ -657,9 +659,12 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             {subOptions.map((opt) => {
               const active = opt.value === currentSubVal;
               const t = opt.track!;
+              const externalDisplaySource = originalFilePath || loadedFilePath;
               const { label: primaryLabel, metaTags } = formatSubtitleTrackDisplay(t, {
                 detectedLang: detectedSubLangs[t.id],
-                externalFileName: loadedFilePath ? getFileDisplayName(loadedFilePath) : null,
+                externalFileName: externalDisplaySource
+                  ? getFileDisplayName(externalDisplaySource)
+                  : null,
               });
               return (
                 <button
@@ -974,6 +979,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 min={20}
                 max={80}
                 step={2}
+                alwaysShowThumb
                 onChange={(val) => {
                   setFontSize(val);
                   throttledApplyStyle.call();
@@ -993,6 +999,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 min={20}
                 max={100}
                 step={1}
+                alwaysShowThumb
                 onChange={(val) => {
                   setPos(val);
                   throttledApplyStyle.call();
@@ -1012,6 +1019,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 min={0}
                 max={6}
                 step={0.5}
+                alwaysShowThumb
                 onChange={(val) => {
                   setBorderSize(val);
                   throttledApplyStyle.call();

@@ -4,6 +4,7 @@ import { ShortcutsModal } from "./components/ShortcutsModal";
 import { HomeScreen } from "./components/HomeScreen";
 import { WatchRoom } from "./components/WatchRoom";
 import { NotificationStrip } from "./components/ui/NotificationStrip";
+import { AppLiquidGlassDefs } from "./components/ui/AppIcons";
 import { isDesktop } from "./lib/bridge";
 import { enqueueMpvLifecycle, mpvStop } from "./lib/mpv";
 import { isTextEntryElement } from "./lib/shortcuts";
@@ -99,6 +100,7 @@ export function App() {
           if (!isTextEntryElement(e.target)) e.preventDefault();
         }}
       >
+        <AppLiquidGlassDefs />
         <WatchRoom />
       </div>
     );
@@ -111,6 +113,7 @@ export function App() {
         if (!isTextEntryElement(e.target)) e.preventDefault();
       }}
     >
+      <AppLiquidGlassDefs />
       <HomeScreen />
       <NotificationStrip belowTitleBar />
       <SettingsModal open={settingsOpen} onClose={closeSettings} />

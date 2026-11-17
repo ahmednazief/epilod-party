@@ -205,3 +205,55 @@ test("TitleBar, SettingsModal, HomeScreen, and App expose TitleBar update pill &
   assert.equal(appSrc.includes("autoDownloadUpdates"), true);
   assert.equal(appSrc.includes("PERIODIC_UPDATE_CHECK_MS"), true);
 });
+
+test("parseReleaseNotes converts markdown bold points and legacy strings into clean UI items", async () => {
+  const updaterLib = await bundleAndImport<typeof import("../src/lib/updater")>(
+    "src/lib/updater.ts",
+  );
+
+  const mdItems = updaterLib.parseReleaseNotes(
+    [
+      "## What's New",
+      "- **Smoother Skipping**: Jumping ahead lands cleanly without flashes.",
+      "* **Clearer Seek Bubble** — Floating pill now uses **brighter** glass.",
+      "• Character Cards: Rounded cards are back behind every character.",
+    ].join("\n"),
+  );
+  assert.equal(mdItems.length, 3);
+  assert.equal(mdItems[0].title, "Smoother Skipping");
+  assert.equal(mdItems[0].body, "Jumping ahead lands cleanly without flashes.");
+  assert.equal(mdItems[1].title, "Clearer Seek Bubble");
+  assert.deepEqual(mdItems[1].segments, [
+    { text: "Floating pill now uses ", bold: false },
+    { text: "brighter", bold: true },
+    { text: " glass.", bold: false },
+  ]);
+  assert.equal(mdItems[2].title, "Character Cards");
+
+  const legacyItems = updaterLib.parseReleaseNotes(
+    "- **Fix One**: Better audio; - **Fix Two**: Faster launch",
+  );
+  assert.equal(legacyItems.length, 2);
+  assert.equal(legacyItems[0].title, "Fix One");
+  assert.equal(legacyItems[1].title, "Fix Two");
+
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+  assert.equal(settingsSrc.includes("parseReleaseNotes("), true);
+  assert.equal(settingsSrc.includes("What’s New"), true);
+
+  const skillSrc = fs.readFileSync(
+    path.join(REPO_ROOT, ".agents/skills/release-update/SKILL.md"),
+    "utf8",
+  );
+  assert.match(skillSrc, /Plain everyday language/);
+  assert.match(skillSrc, /- \*\*Short Title\*\*:/);
+
+  const publishSrc = fs.readFileSync(
+    path.join(REPO_ROOT, ".agents/skills/release-update/scripts/publish-release.ps1"),
+    "utf8",
+  );
+  assert.equal(publishSrc.includes("--notes-file"), true);
+});

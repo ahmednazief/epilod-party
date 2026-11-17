@@ -5,10 +5,15 @@ use crate::p2p::{P2pAutoAlignment, P2pControlCmd, P2pLocalMedia, P2pSessionHandl
 use epilod_core::matching::{analyze_files, FileIdentity, FileMatchStatus, SourceRelation};
 use epilod_core::mpv_ipc::{set_pause_cmd, set_speed_cmd};
 use epilod_core::p2p::{
-    decode_epr_reaction, encode_epr_reaction, ReactionFallbackPacket, EP2_CHAT_PREFIX,
-    EP_REACTION_CHAT_PREFIX, MAX_REACTION_BURST_COUNT,
+    decode_epcr_chat_react, decode_epr_reaction, decode_ept_chat_chunk, encode_epcr_chat_react,
+    encode_epr_reaction, encode_ept_chat_chunks, ChatFallbackPacket, ChatReactFallbackPacket,
+    EptChatReassembler, ReactionFallbackPacket, EP2_CHAT_PREFIX, EP_CHAT_REACT_PREFIX,
+    EP_CHAT_TEXT_PREFIX, EP_REACTION_CHAT_PREFIX, MAX_REACTION_BURST_COUNT,
 };
-use epilod_core::room_code::resolve_syncplay_room;
+use epilod_core::room_code::{
+    generate as generate_room_code, is_six_digit_code, normalize as normalize_room_code,
+    resolve_syncplay_room,
+};
 use epilod_core::room_control::{
     PersistedHostAuthority, RoomControlChatOutcome, RoomControlSession, RoomControlSummary,
     EPC_CHAT_PREFIX, EPC_QUERY_MSG,
@@ -95,16 +100,69 @@ pub enum SyncCommand {
         avatar_id: String,
         count: u8,
     },
+    SendChat {
+        id: String,
+        text: String,
+        avatar_id: String,
+        reply_to_id: Option<String>,
+    },
+    SendChatEdit {
+        target_msg_id: String,
+        text: String,
+    },
+    SendChatReact {
+        target_msg_id: String,
+        emoji: String,
+    },
+    SendTyping {
+        is_typing: bool,
+    },
     ManualRetry,
 }
+
+const MAX_CLAIM_REROLLS: u8 = 5;
+const CLAIM_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct SyncSessionConfig {
     endpoint: String,
     username: String,
-    wire_room: String,
+    wire_room: Arc<Mutex<String>>,
     password: Option<String>,
     host_only: bool,
     network_opts: LocalPathOptions,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LoopExit {
+    Clean,
+    RoomOccupiedCollision,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionExit {
+    Clean,
+    RoomOccupiedCollision,
+    Error { message: String, room_claimed: bool },
+}
+
+fn is_room_occupied_by_others(items: &[RoomParticipantUpdate], local_username: &str) -> bool {
+    items
+        .iter()
+        .any(|p| !p.username.eq_ignore_ascii_case(local_username))
+}
+
+fn reroll_distinct_six_digit_code(current: Option<&str>) -> Option<(String, String)> {
+    for _ in 0..8 {
+        if let Ok(code) = generate_room_code() {
+            if current.is_some_and(|prev| prev == code) {
+                continue;
+            }
+            if let Ok(wire_room) = resolve_syncplay_room(&code, false) {
+                return Some((code, wire_room));
+            }
+        }
+    }
+    None
 }
 
 struct SyncRuntime {
@@ -143,11 +201,18 @@ impl SyncController {
         literal_room: bool,
         password: Option<String>,
         host_only: bool,
+        claim_empty: bool,
         network_opts: LocalPathOptions,
     ) -> Result<(), String> {
         let valid_endpoint = validate_endpoint(&endpoint).map_err(|e| e.to_string())?;
         let wire_room =
             resolve_syncplay_room(&room_input, literal_room).map_err(|e| e.to_string())?;
+        let initial_six_digit = if !literal_room && is_six_digit_code(&room_input) {
+            normalize_room_code(&room_input).ok()
+        } else {
+            None
+        };
+        let effective_claim_empty = claim_empty && initial_six_digit.is_some();
         if let Ok(mut guard) = self.network_opts.lock() {
             *guard = network_opts;
         }
@@ -175,10 +240,11 @@ impl SyncController {
         );
 
         let (tx, rx) = mpsc::channel::<SyncCommand>(64);
+        let shared_wire_room = Arc::new(Mutex::new(wire_room.clone()));
         let cfg = SyncSessionConfig {
             endpoint: valid_endpoint.clone(),
             username: username.clone(),
-            wire_room: wire_room.clone(),
+            wire_room: Arc::clone(&shared_wire_room),
             password: password.clone(),
             host_only,
             network_opts,
@@ -199,6 +265,9 @@ impl SyncController {
                 valid_endpoint,
                 username,
                 wire_room,
+                shared_wire_room,
+                initial_six_digit,
+                effective_claim_empty,
                 password,
                 host_only,
                 network_opts,
@@ -239,7 +308,7 @@ impl SyncController {
                     rt.task.is_finished(),
                     rt.config.endpoint.clone(),
                     rt.config.username.clone(),
-                    rt.config.wire_room.clone(),
+                    Arc::clone(&rt.config.wire_room),
                     rt.config.password.clone(),
                     rt.config.host_only,
                     rt.config.network_opts,
@@ -247,8 +316,16 @@ impl SyncController {
             })
         };
 
-        let Some((tx, finished, endpoint, username, wire_room, password, host_only, network_opts)) =
-            existing_tx
+        let Some((
+            tx,
+            finished,
+            endpoint,
+            username,
+            shared_wire_room,
+            password,
+            host_only,
+            network_opts,
+        )) = existing_tx
         else {
             return Err("No active room session to retry.".to_string());
         };
@@ -259,11 +336,15 @@ impl SyncController {
 
         // Loop had exited or channel closed — respawn cleanly with same session config
         self.disconnect_internal().await;
+        let wire_room = shared_wire_room
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         let (new_tx, rx) = mpsc::channel::<SyncCommand>(64);
         let cfg = SyncSessionConfig {
             endpoint: endpoint.clone(),
             username: username.clone(),
-            wire_room: wire_room.clone(),
+            wire_room: Arc::clone(&shared_wire_room),
             password: password.clone(),
             host_only,
             network_opts,
@@ -283,6 +364,9 @@ impl SyncController {
                 endpoint,
                 username,
                 wire_room,
+                shared_wire_room,
+                None,
+                false,
                 password,
                 host_only,
                 network_opts,
@@ -550,6 +634,39 @@ impl SyncController {
         });
     }
 
+    pub fn send_chat(
+        &self,
+        id: String,
+        text: String,
+        avatar_id: String,
+        reply_to_id: Option<String>,
+    ) {
+        self.try_send(SyncCommand::SendChat {
+            id,
+            text,
+            avatar_id,
+            reply_to_id,
+        });
+    }
+
+    pub fn send_chat_edit(&self, target_msg_id: String, text: String) {
+        self.try_send(SyncCommand::SendChatEdit {
+            target_msg_id,
+            text,
+        });
+    }
+
+    pub fn send_chat_react(&self, target_msg_id: String, emoji: String) {
+        self.try_send(SyncCommand::SendChatReact {
+            target_msg_id,
+            emoji,
+        });
+    }
+
+    pub fn send_typing(&self, is_typing: bool) {
+        self.try_send(SyncCommand::SendTyping { is_typing });
+    }
+
     pub fn send_command(&self, cmd: SyncCommand) {
         self.try_send(cmd);
     }
@@ -642,7 +759,10 @@ async fn run_sync_loop(
     mpv: Arc<MpvController>,
     endpoint: String,
     username: String,
-    wire_room: String,
+    initial_wire_room: String,
+    shared_wire_room: Arc<Mutex<String>>,
+    mut active_room_code: Option<String>,
+    claim_empty: bool,
     password: Option<String>,
     host_only: bool,
     network_opts: LocalPathOptions,
@@ -657,6 +777,9 @@ async fn run_sync_loop(
     persisted_host: Arc<Mutex<Option<PersistedHostAuthority>>>,
 ) {
     let mut policy = ReconnectPolicy::new();
+    let mut wire_room = initial_wire_room;
+    let mut remaining_claim_rerolls = if claim_empty { MAX_CLAIM_REROLLS } else { 0 };
+    let mut was_rerolled = false;
 
     loop {
         let attempt_num = policy.attempt + 1;
@@ -669,11 +792,18 @@ async fn run_sync_loop(
             }),
         );
 
+        let claim_this_attempt = remaining_claim_rerolls > 0;
+        let rerolled_code = if was_rerolled {
+            active_room_code.as_deref()
+        } else {
+            None
+        };
+
         match establish_connection(&endpoint).await {
             Ok((wire, tls_active)) => {
                 policy.on_connected();
                 let snapshot = mpv.snapshot();
-                let session_res = match wire {
+                let session_exit = match wire {
                     WireStream::Plain(tcp) => {
                         let (r, w) = tokio::io::split(tcp);
                         drive_authenticated_session(
@@ -684,6 +814,8 @@ async fn run_sync_loop(
                             &wire_room,
                             password.as_deref(),
                             host_only,
+                            claim_this_attempt,
+                            rerolled_code,
                             network_opts,
                             tls_active,
                             snapshot,
@@ -711,6 +843,8 @@ async fn run_sync_loop(
                             &wire_room,
                             password.as_deref(),
                             host_only,
+                            claim_this_attempt,
+                            rerolled_code,
                             network_opts,
                             tls_active,
                             snapshot,
@@ -730,8 +864,36 @@ async fn run_sync_loop(
                     }
                 };
 
-                if let Err(err_msg) = session_res {
-                    let _ = app.emit("sync://error", serde_json::json!({ "message": err_msg }));
+                match session_exit {
+                    SessionExit::Clean => return,
+                    SessionExit::RoomOccupiedCollision => {
+                        remaining_claim_rerolls = remaining_claim_rerolls.saturating_sub(1);
+                        if let Some((next_code, next_wire)) =
+                            reroll_distinct_six_digit_code(active_room_code.as_deref())
+                        {
+                            active_room_code = Some(next_code);
+                            wire_room = next_wire.clone();
+                            if let Ok(mut guard) = shared_wire_room.lock() {
+                                *guard = next_wire;
+                            }
+                            if let Ok(mut guard) = persisted_host.lock() {
+                                *guard = None;
+                            }
+                            was_rerolled = true;
+                        } else {
+                            remaining_claim_rerolls = 0;
+                        }
+                        continue;
+                    }
+                    SessionExit::Error {
+                        message,
+                        room_claimed,
+                    } => {
+                        if room_claimed {
+                            remaining_claim_rerolls = 0;
+                        }
+                        let _ = app.emit("sync://error", serde_json::json!({ "message": message }));
+                    }
                 }
             }
             Err(err_msg) => {
@@ -1012,6 +1174,92 @@ fn build_p2p_media_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn finalize_post_hello_setup<W>(
+    app: &AppHandle,
+    mpv: &Arc<MpvController>,
+    endpoint: &str,
+    tls_active: bool,
+    active_username: &str,
+    rerolled_room_code: Option<&str>,
+    rerolled_emitted: &mut bool,
+    connected_emitted: &mut bool,
+    ctrl_broadcast_dirty: &mut bool,
+    room_control: &RoomControlSession,
+    local_file: &Arc<Mutex<Option<LocalFileMeta>>>,
+    local_media_path: &Arc<Mutex<Option<PathBuf>>>,
+    local_ready: &Arc<Mutex<bool>>,
+    has_user_alignment: &Arc<Mutex<bool>>,
+    sm: &mut SyncStateMachine,
+    p2p: &P2pSessionHandle,
+    start_instant: Instant,
+    writer: &mut W,
+) where
+    W: AsyncWrite + Unpin,
+{
+    emit_room_control(app, room_control);
+    if room_control.is_local_host() {
+        *ctrl_broadcast_dirty = true;
+    }
+    if !*rerolled_emitted {
+        if let Some(code) = rerolled_room_code {
+            *rerolled_emitted = true;
+            let _ = app.emit(
+                "sync://room-rerolled",
+                serde_json::json!({ "roomCode": code }),
+            );
+        }
+    }
+    *connected_emitted = true;
+
+    let _ = app.emit(
+        "sync://status",
+        serde_json::json!({
+            "state": "connected",
+            "endpoint": endpoint,
+            "tls": tls_active,
+            "username": active_username,
+        }),
+    );
+
+    // Fix 08: Emit initial file and readiness accurately on connect / reconnect
+    let current_file = local_file.lock().ok().and_then(|g| g.clone());
+    if current_file.is_some() {
+        if let Ok(mut guard) = local_ready.lock() {
+            *guard = true;
+        }
+    }
+    if let Some(ref f) = current_file {
+        sm.set_local_duration(Some(f.duration_secs));
+        let file_msg = encode_set_file(&f.name, f.size_bytes, f.duration_secs, f.hash_identity);
+        let _ = writer.write_all(file_msg.as_bytes()).await;
+    }
+    p2p.try_send(P2pControlCmd::UpdateLocalMedia(build_p2p_media_snapshot(
+        local_file,
+        local_media_path,
+        has_user_alignment,
+    )));
+
+    let is_ready = local_ready.lock().map(|g| *g).unwrap_or(false);
+    let ready_msg = encode_set_ready(is_ready, false);
+    let _ = writer.write_all(ready_msg.as_bytes()).await;
+
+    let snap = mpv.snapshot();
+    if !snap.paused {
+        if let Ok(mut guard) = local_ready.lock() {
+            *guard = true;
+        }
+        let ready_true = encode_set_ready(true, false);
+        let _ = writer.write_all(ready_true.as_bytes()).await;
+        sm.on_user_play(snap.position);
+        if snap.position > 0.5 {
+            sm.on_user_seek(snap.position);
+        }
+        let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
+        let _ = writer.write_all(hb.as_bytes()).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn drive_authenticated_session<R, W>(
     app: &AppHandle,
     mpv: &Arc<MpvController>,
@@ -1020,6 +1268,8 @@ async fn drive_authenticated_session<R, W>(
     wire_room: &str,
     password: Option<&str>,
     host_only: bool,
+    claim_empty: bool,
+    rerolled_room_code: Option<&str>,
     network_opts: LocalPathOptions,
     tls_active: bool,
     initial_snapshot: PlayerSnapshot,
@@ -1034,16 +1284,18 @@ async fn drive_authenticated_session<R, W>(
     persisted_host: &Arc<Mutex<Option<PersistedHostAuthority>>>,
     reader: R,
     mut writer: W,
-) -> Result<(), String>
+) -> SessionExit
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let hello = encode_hello(username, wire_room, password);
-    writer
-        .write_all(hello.as_bytes())
-        .await
-        .map_err(|e| format!("Failed sending Hello handshake: {e}"))?;
+    if let Err(e) = writer.write_all(hello.as_bytes()).await {
+        return SessionExit::Error {
+            message: format!("Failed sending Hello handshake: {e}"),
+            room_claimed: !claim_empty,
+        };
+    }
 
     let start_instant = Instant::now();
     let mut sm = SyncStateMachine::with_initial_state(initial_snapshot);
@@ -1077,6 +1329,9 @@ where
     let mut manually_not_ready_peers: HashSet<String> = HashSet::new();
     let mut lines = BufReader::new(reader).lines();
     let mut connected_emitted = false;
+    let mut awaiting_empty_claim = claim_empty;
+    let mut rerolled_emitted = false;
+    let mut claim_deadline: Option<tokio::time::Instant> = None;
     let mut is_scrubbing = false;
     let mut ctrl_broadcast_dirty = false;
     let mut last_ctrl_broadcast_at: Option<Instant> = None;
@@ -1092,10 +1347,19 @@ where
     let mut pending_epr_bursts: VecDeque<ReactionFallbackPacket> = VecDeque::new();
     let mut peer_epr_rx_window: HashMap<String, (Instant, u32)> = HashMap::new();
 
+    let mut ept_flush_tick = tokio::time::interval(Duration::from_millis(240));
+    ept_flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending_ept_lines: VecDeque<String> = VecDeque::new();
+    let mut ept_reassembler = EptChatReassembler::default();
+    let mut peer_ept_rx_window: HashMap<String, (Instant, u32)> = HashMap::new();
+
     let (p2p_beacon_tx, mut p2p_beacon_rx) = mpsc::channel::<String>(16);
     let (p2p_align_tx, mut p2p_align_rx) = mpsc::channel::<P2pAutoAlignment>(8);
     let (p2p_reaction_fallback_tx, mut p2p_reaction_fallback_rx) =
         mpsc::channel::<ReactionFallbackPacket>(64);
+    let (p2p_chat_fallback_tx, mut p2p_chat_fallback_rx) = mpsc::channel::<ChatFallbackPacket>(32);
+    let (p2p_chat_react_fallback_tx, mut p2p_chat_react_fallback_rx) =
+        mpsc::channel::<ChatReactFallbackPacket>(32);
     let p2p = P2pSessionHandle::spawn(
         app.clone(),
         username.to_string(),
@@ -1103,10 +1367,41 @@ where
         p2p_beacon_tx,
         p2p_align_tx,
         p2p_reaction_fallback_tx,
+        p2p_chat_fallback_tx,
+        p2p_chat_react_fallback_tx,
     );
 
-    let result: Result<(), String> = loop {
+    let result: Result<LoopExit, String> = loop {
         tokio::select! {
+            _ = async {
+                if let Some(deadline) = claim_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                }
+            }, if awaiting_empty_claim && claim_deadline.is_some() => {
+                awaiting_empty_claim = false;
+                claim_deadline = None;
+                finalize_post_hello_setup(
+                    app,
+                    mpv,
+                    endpoint,
+                    tls_active,
+                    &active_username,
+                    rerolled_room_code,
+                    &mut rerolled_emitted,
+                    &mut connected_emitted,
+                    &mut ctrl_broadcast_dirty,
+                    &room_control,
+                    local_file,
+                    local_media_path,
+                    local_ready,
+                    has_user_alignment,
+                    &mut sm,
+                    &p2p,
+                    start_instant,
+                    &mut writer,
+                )
+                .await;
+            }
             maybe_line = lines.next_line() => {
                 let line = match maybe_line {
                     Ok(Some(l)) => l,
@@ -1127,68 +1422,65 @@ where
                                 *guard = room_control.export_persisted_host();
                             }
                         }
-                        emit_room_control(app, &room_control);
-                        if room_control.is_local_host() {
-                            ctrl_broadcast_dirty = true;
-                        }
-                        connected_emitted = true;
 
-                        let _ = app.emit(
-                            "sync://status",
-                            serde_json::json!({
-                                "state": "connected",
-                                "endpoint": endpoint,
-                                "tls": tls_active,
-                                "username": active_username,
-                            }),
-                        );
-
-                        // Fix 08: Emit initial file and readiness accurately on connect / reconnect
-                        let current_file = local_file.lock().ok().and_then(|g| g.clone());
-                        if current_file.is_some() {
-                            if let Ok(mut guard) = local_ready.lock() {
-                                *guard = true;
-                            }
-                        }
-                        if let Some(ref f) = current_file {
-                            sm.set_local_duration(Some(f.duration_secs));
-                            let file_msg = encode_set_file(
-                                &f.name,
-                                f.size_bytes,
-                                f.duration_secs,
-                                f.hash_identity,
-                            );
-                            let _ = writer.write_all(file_msg.as_bytes()).await;
-                        }
-                        p2p.try_send(P2pControlCmd::UpdateLocalMedia(build_p2p_media_snapshot(
-                            local_file,
-                            local_media_path,
-                            has_user_alignment,
-                        )));
-
-                        let is_ready = local_ready.lock().map(|g| *g).unwrap_or(false);
-                        let ready_msg = encode_set_ready(is_ready, false);
-                        let _ = writer.write_all(ready_msg.as_bytes()).await;
-
-                        let snap = mpv.snapshot();
-                        if !snap.paused {
-                            if let Ok(mut guard) = local_ready.lock() {
-                                *guard = true;
-                            }
-                            let ready_true = encode_set_ready(true, false);
-                            let _ = writer.write_all(ready_true.as_bytes()).await;
-                            sm.on_user_play(snap.position);
-                            if snap.position > 0.5 {
-                                sm.on_user_seek(snap.position);
-                            }
-                            let hb = sm.on_heartbeat_tick(start_instant.elapsed().as_secs_f64());
-                            let _ = writer.write_all(hb.as_bytes()).await;
+                        if awaiting_empty_claim {
+                            claim_deadline = Some(tokio::time::Instant::now() + CLAIM_LIST_TIMEOUT);
+                        } else {
+                            finalize_post_hello_setup(
+                                app,
+                                mpv,
+                                endpoint,
+                                tls_active,
+                                &active_username,
+                                rerolled_room_code,
+                                &mut rerolled_emitted,
+                                &mut connected_emitted,
+                                &mut ctrl_broadcast_dirty,
+                                &room_control,
+                                local_file,
+                                local_media_path,
+                                local_ready,
+                                has_user_alignment,
+                                &mut sm,
+                                &p2p,
+                                start_instant,
+                                &mut writer,
+                            )
+                            .await;
                         }
 
                         let list_req = "{\"List\":null}\r\n";
                         let _ = writer.write_all(list_req.as_bytes()).await;
                     }
                     Ok(ServerMessage::List(items)) => {
+                        if awaiting_empty_claim {
+                            awaiting_empty_claim = false;
+                            claim_deadline = None;
+                            if is_room_occupied_by_others(&items, &active_username) {
+                                break Ok(LoopExit::RoomOccupiedCollision);
+                            }
+                            finalize_post_hello_setup(
+                                app,
+                                mpv,
+                                endpoint,
+                                tls_active,
+                                &active_username,
+                                rerolled_room_code,
+                                &mut rerolled_emitted,
+                                &mut connected_emitted,
+                                &mut ctrl_broadcast_dirty,
+                                &room_control,
+                                local_file,
+                                local_media_path,
+                                local_ready,
+                                has_user_alignment,
+                                &mut sm,
+                                &p2p,
+                                start_instant,
+                                &mut writer,
+                            )
+                            .await;
+                        }
                         participants.clear();
                         for item in items {
                             participants.insert(item.username.clone(), item);
@@ -1227,6 +1519,9 @@ where
                         }
                     }
                     Ok(ServerMessage::Set(updates)) => {
+                        if awaiting_empty_claim {
+                            continue;
+                        }
                         let mut changed = false;
                         let mut refresh_list = false;
                         let mut peer_not_ready_events: Vec<(String, bool)> = Vec::new();
@@ -1366,6 +1661,9 @@ where
                         }
                     }
                     Ok(ServerMessage::State(st)) => {
+                        if awaiting_empty_claim {
+                            continue;
+                        }
                         let now_secs = start_instant.elapsed().as_secs_f64();
                         if !is_scrubbing {
                             let snap = mpv.snapshot();
@@ -1590,6 +1888,9 @@ where
                         }
                     }
                     Ok(ServerMessage::Chat { username: sender, message }) => {
+                        if awaiting_empty_claim {
+                            continue;
+                        }
                         let trimmed = message.trim();
                         if trimmed.starts_with(EP2_CHAT_PREFIX) {
                             p2p.try_send(P2pControlCmd::RemoteBeacon {
@@ -1623,6 +1924,72 @@ where
                                             }),
                                         );
                                     }
+                                }
+                            }
+                        } else if trimmed.starts_with(EP_CHAT_TEXT_PREFIX)
+                            && !sender.eq_ignore_ascii_case(&active_username)
+                        {
+                            if let Some(chunk) = decode_ept_chat_chunk(trimmed) {
+                                let sender_key = sender.to_ascii_lowercase();
+                                let now = Instant::now();
+                                let entry = peer_ept_rx_window
+                                    .entry(sender_key)
+                                    .or_insert((now, 0));
+                                if now.duration_since(entry.0) >= Duration::from_secs(5) {
+                                    *entry = (now, 0);
+                                }
+                                if entry.1 < 48 {
+                                    entry.1 += 1;
+                                    if let Some(pkt) = ept_reassembler.push_chunk(&sender, chunk) {
+                                        if pkt.is_edit {
+                                            let _ = app.emit(
+                                                "sync://chat-edit",
+                                                serde_json::json!({
+                                                    "targetMsgId": pkt.msg_id,
+                                                    "username": sender,
+                                                    "text": pkt.text,
+                                                    "via": "syncplay",
+                                                }),
+                                            );
+                                        } else {
+                                            let _ = app.emit(
+                                                "sync://chat",
+                                                serde_json::json!({
+                                                    "id": pkt.msg_id,
+                                                    "username": sender,
+                                                    "avatarId": pkt.avatar_id,
+                                                    "text": pkt.text,
+                                                    "replyToId": pkt.reply_to_id,
+                                                    "via": "syncplay",
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else if trimmed.starts_with(EP_CHAT_REACT_PREFIX)
+                            && !sender.eq_ignore_ascii_case(&active_username)
+                        {
+                            if let Some(pkt) = decode_epcr_chat_react(trimmed) {
+                                let sender_key = sender.to_ascii_lowercase();
+                                let now = Instant::now();
+                                let entry = peer_ept_rx_window
+                                    .entry(sender_key)
+                                    .or_insert((now, 0));
+                                if now.duration_since(entry.0) >= Duration::from_secs(5) {
+                                    *entry = (now, 0);
+                                }
+                                if entry.1 < 48 {
+                                    entry.1 += 1;
+                                    let _ = app.emit(
+                                        "sync://chat-react",
+                                        serde_json::json!({
+                                            "targetMsgId": pkt.msg_id,
+                                            "username": sender,
+                                            "emoji": pkt.emoji,
+                                            "via": "syncplay",
+                                        }),
+                                    );
                                 }
                             }
                         } else if trimmed.starts_with(EPC_CHAT_PREFIX)
@@ -1745,6 +2112,34 @@ where
                     }
                 }
             }
+            Some(chat_pkt) = p2p_chat_fallback_rx.recv() => {
+                if connected_emitted {
+                    if let Some(lines_to_send) = encode_ept_chat_chunks(&chat_pkt) {
+                        for line in lines_to_send {
+                            if pending_ept_lines.len() < 48 {
+                                pending_ept_lines.push_back(line);
+                            }
+                        }
+                    }
+                }
+            }
+            Some(react_pkt) = p2p_chat_react_fallback_rx.recv() => {
+                if connected_emitted {
+                    if let Some(line) = encode_epcr_chat_react(&react_pkt) {
+                        if pending_ept_lines.len() < 48 {
+                            pending_ept_lines.push_back(line);
+                        }
+                    }
+                }
+            }
+            _ = ept_flush_tick.tick(), if connected_emitted && !pending_ept_lines.is_empty() => {
+                if let Some(encoded) = pending_ept_lines.pop_front() {
+                    let wire = encode_chat(&encoded);
+                    if writer.write_all(wire.as_bytes()).await.is_err() {
+                        break Err("Failed sending fallback party chat.".to_string());
+                    }
+                }
+            }
             Some(auto_align) = p2p_align_rx.recv() => {
                 let current_sig = build_p2p_media_snapshot(
                     local_file,
@@ -1840,7 +2235,7 @@ where
             }
             maybe_cmd = rx.recv() => {
                 let Some(cmd) = maybe_cmd else {
-                    break Ok(());
+                    break Ok(LoopExit::Clean);
                 };
                 match cmd {
                     SyncCommand::SetFile(Some(meta)) => {
@@ -2261,7 +2656,7 @@ where
                             *guard = None;
                         }
                         let _ = reply.send(());
-                        break Ok(());
+                        break Ok(LoopExit::Clean);
                     }
                     SyncCommand::SendReaction {
                         emoji,
@@ -2279,13 +2674,74 @@ where
                             });
                         }
                     }
+                    SyncCommand::SendChat {
+                        id,
+                        text,
+                        avatar_id,
+                        reply_to_id,
+                    } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendChat {
+                                id,
+                                text,
+                                avatar_id,
+                                reply_to_id,
+                            });
+                        }
+                    }
+                    SyncCommand::SendChatEdit {
+                        target_msg_id,
+                        text,
+                    } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendChatEdit {
+                                target_msg_id,
+                                text,
+                            });
+                        }
+                    }
+                    SyncCommand::SendChatReact {
+                        target_msg_id,
+                        emoji,
+                    } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendChatReact {
+                                target_msg_id,
+                                emoji,
+                            });
+                        }
+                    }
+                    SyncCommand::SendTyping { is_typing } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendTyping { is_typing });
+                        }
+                    }
                     SyncCommand::ManualRetry => {}
                 }
             }
         }
     };
     p2p.try_send(P2pControlCmd::Shutdown);
-    result
+    match result {
+        Ok(LoopExit::Clean) => SessionExit::Clean,
+        Ok(LoopExit::RoomOccupiedCollision) => SessionExit::RoomOccupiedCollision,
+        Err(message) => SessionExit::Error {
+            message,
+            room_claimed: !awaiting_empty_claim,
+        },
+    }
 }
 
 fn is_peer_effective_controller(
@@ -2744,5 +3200,29 @@ mod tests {
             "Bob",
             &bob
         ));
+    }
+
+    #[test]
+    fn detects_occupied_room_only_when_other_users_present() {
+        assert!(!is_room_occupied_by_others(&[], "Alice"));
+
+        let only_self = vec![peer("alice", Some(false), false)];
+        assert!(!is_room_occupied_by_others(&only_self, "Alice"));
+
+        let with_stranger = vec![
+            peer("Alice", Some(false), false),
+            peer("Bob", Some(true), true),
+        ];
+        assert!(is_room_occupied_by_others(&with_stranger, "Alice"));
+    }
+
+    #[test]
+    fn reroll_distinct_six_digit_code_returns_new_valid_code_and_wire_room() {
+        let (code, wire) = reroll_distinct_six_digit_code(Some("482915")).unwrap();
+        assert_ne!(code, "482915");
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        assert!(wire.starts_with("ep-"));
+        assert_eq!(wire, resolve_syncplay_room(&code, false).unwrap());
     }
 }

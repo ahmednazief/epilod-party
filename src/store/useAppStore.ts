@@ -20,6 +20,7 @@ import { useIntroStore } from "./useIntroStore";
 import { usePlayerStore } from "./usePlayerStore";
 import { usePlaylistStore } from "./usePlaylistStore";
 import { clearReactions } from "./useReactionStore";
+import { clearPartyChat } from "./useChatStore";
 import { useSubtitleStore } from "./useSubtitleStore";
 import { useSyncStore } from "./useSyncStore";
 
@@ -50,6 +51,42 @@ function applyReducedMotionAttribute(enabled: boolean): void {
   }
 }
 
+export const DEFAULT_PLAY_BAR_OPACITY = 60;
+
+export function clampPlayBarOpacity(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_PLAY_BAR_OPACITY;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function interpolatePlayBarAlpha(opacity: number, atZero: number, atDefault: number, atSolid: number): string {
+  const clamped = clampPlayBarOpacity(opacity);
+  const val =
+    clamped <= DEFAULT_PLAY_BAR_OPACITY
+      ? atZero + (atDefault - atZero) * (clamped / DEFAULT_PLAY_BAR_OPACITY)
+      : atDefault + (atSolid - atDefault) * ((clamped - DEFAULT_PLAY_BAR_OPACITY) / (100 - DEFAULT_PLAY_BAR_OPACITY));
+  return val.toFixed(3);
+}
+
+export function computePlayBarCssVars(opacity: number): Record<string, string> {
+  return {
+    "--ep-playbar-capsule-bg": interpolatePlayBarAlpha(opacity, 0.04, 0.58, 0.98),
+    "--ep-playbar-capsule-top": interpolatePlayBarAlpha(opacity, 0.03, 0.16, 0.24),
+    "--ep-playbar-capsule-mid": interpolatePlayBarAlpha(opacity, 0.04, 0.24, 0.36),
+    "--ep-playbar-capsule-bot": interpolatePlayBarAlpha(opacity, 0.06, 0.34, 0.52),
+    "--ep-playbar-bar-bg": interpolatePlayBarAlpha(opacity, 0.05, 0.64, 0.98),
+    "--ep-playbar-bar-top": interpolatePlayBarAlpha(opacity, 0.03, 0.18, 0.26),
+    "--ep-playbar-bar-bot": interpolatePlayBarAlpha(opacity, 0.06, 0.38, 0.54),
+  };
+}
+
+function applyPlayBarOpacityVariables(opacity: number): void {
+  if (typeof document === "undefined") return;
+  const rootStyle = document.documentElement.style;
+  for (const [key, val] of Object.entries(computePlayBarCssVars(opacity))) {
+    rootStyle.setProperty(key, val);
+  }
+}
+
 export type AppScreen = "home" | "room";
 export type SettingsTab =
   | "profile"
@@ -61,6 +98,7 @@ export type SettingsTab =
   | "logs";
 export type SkipIntroMode = "off" | "manual" | "auto";
 export type AutoFetchSubtitleMode = "missing" | "language" | "off";
+export type ChatTriggerPlacement = "playbar" | "edge";
 
 interface AppState {
   screen: AppScreen;
@@ -69,6 +107,7 @@ interface AppState {
   roomCode: string;
   literalRoom: boolean;
   hostOnlyRoom: boolean;
+  creatingRoom: boolean;
   serverEndpoint: string;
   // Fix 05: kept strictly in RAM for the current session (never persisted to localStorage)
   serverPassword: string;
@@ -83,8 +122,11 @@ interface AppState {
   preferredSubtitleLangs: string;
   openSubtitlesApiKey: string;
   reactionsEnabled: boolean;
+  chatPeeksEnabled: boolean;
+  chatTriggerPlacement: ChatTriggerPlacement;
   recentEmojis: string[];
   fullWidthPlayBar: boolean;
+  playBarOpacity: number;
   autoCheckUpdates: boolean;
   autoDownloadUpdates: boolean;
   settingsOpen: boolean;
@@ -97,6 +139,8 @@ interface AppState {
   setRoomCode: (code: string) => void;
   setLiteralRoom: (literal: boolean) => void;
   setHostOnlyRoom: (hostOnly: boolean) => void;
+  setCreatingRoom: (creating: boolean) => void;
+  applyRerolledRoomCode: (code: string) => void;
   setServerEndpoint: (endpoint: string) => void;
   setServerPassword: (password: string) => void;
   setAllowNetworkShares: (allow: boolean) => void;
@@ -110,8 +154,11 @@ interface AppState {
   setPreferredSubtitleLangs: (langs: string) => void;
   setOpenSubtitlesApiKey: (apiKey: string) => void;
   setReactionsEnabled: (enabled: boolean) => void;
+  setChatPeeksEnabled: (enabled: boolean) => void;
+  setChatTriggerPlacement: (placement: ChatTriggerPlacement) => void;
   pushRecentEmoji: (emoji: string) => void;
   setFullWidthPlayBar: (fullWidth: boolean) => void;
+  setPlayBarOpacity: (opacity: number) => void;
   setAutoCheckUpdates: (autoCheck: boolean) => void;
   setAutoDownloadUpdates: (autoDownload: boolean) => void;
   openSettings: (tab?: SettingsTab | "prefs") => void;
@@ -119,7 +166,12 @@ interface AppState {
   closeSettings: () => void;
   openShortcuts: () => void;
   closeShortcuts: () => void;
-  enterRoom: (code: string, literalRoom?: boolean, hostOnlyRoom?: boolean) => void;
+  enterRoom: (
+    code: string,
+    literalRoom?: boolean,
+    hostOnlyRoom?: boolean,
+    creatingRoom?: boolean,
+  ) => void;
   leaveRoom: () => void;
   setSelectedFile: (path: string | null, name: string | null) => void;
 }
@@ -157,6 +209,9 @@ const initialAutoFetchSubtitles: AutoFetchSubtitleMode = (() => {
 const initialPreferredSubtitleLangs = readStorage("ep.preferredSubLangs", "eng") || "eng";
 const initialOpenSubtitlesApiKey = readStorage("ep.osApiKey", "");
 const initialReactionsEnabled = readStorage("ep.reactionsEnabled", "true") !== "false";
+const initialChatPeeksEnabled = readStorage("ep.chatPeeksEnabled", "true") !== "false";
+const initialChatTriggerPlacement: ChatTriggerPlacement =
+  readStorage("ep.chatTriggerPlacement", "playbar") === "edge" ? "edge" : "playbar";
 const initialRecentEmojis: string[] = (() => {
   try {
     const parsed = JSON.parse(readStorage("ep.recentEmojis", "[]"));
@@ -170,11 +225,17 @@ const initialRecentEmojis: string[] = (() => {
   }
   return [];
 })();
-const initialFullWidthPlayBar = readStorage("ep.fullWidthPlayBar", "false") === "true";
+const initialFullWidthPlayBar = readStorage("ep.fullWidthPlayBar", "true") !== "false";
+const initialPlayBarOpacity = (() => {
+  const raw = readStorage("ep.playBarOpacity", String(DEFAULT_PLAY_BAR_OPACITY));
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? clampPlayBarOpacity(parsed) : DEFAULT_PLAY_BAR_OPACITY;
+})();
 const initialAutoCheckUpdates = readStorage("ep.autoCheckUpdates", "true") !== "false";
 const initialAutoDownloadUpdates = readStorage("ep.autoDownloadUpdates", "true") !== "false";
 
 applyReducedMotionAttribute(initialReducedMotion);
+applyPlayBarOpacityVariables(initialPlayBarOpacity);
 
 export const useAppStore = create<AppState>((set) => ({
   screen: "home",
@@ -183,6 +244,7 @@ export const useAppStore = create<AppState>((set) => ({
   roomCode: "",
   literalRoom: false,
   hostOnlyRoom: false,
+  creatingRoom: false,
   serverEndpoint: initialServer,
   serverPassword: "",
   allowNetworkShares: initialAllowShares,
@@ -196,8 +258,11 @@ export const useAppStore = create<AppState>((set) => ({
   preferredSubtitleLangs: initialPreferredSubtitleLangs,
   openSubtitlesApiKey: initialOpenSubtitlesApiKey,
   reactionsEnabled: initialReactionsEnabled,
+  chatPeeksEnabled: initialChatPeeksEnabled,
+  chatTriggerPlacement: initialChatTriggerPlacement,
   recentEmojis: initialRecentEmojis,
   fullWidthPlayBar: initialFullWidthPlayBar,
+  playBarOpacity: initialPlayBarOpacity,
   autoCheckUpdates: initialAutoCheckUpdates,
   autoDownloadUpdates: initialAutoDownloadUpdates,
   settingsOpen: false,
@@ -218,13 +283,25 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   setRoomCode: (code) =>
-    set((s) => ({
-      roomCode: sanitizeRoomCodeInput(code, s.literalRoom),
-    })),
+    set((s) => {
+      const cleaned = sanitizeRoomCodeInput(code, s.literalRoom);
+      return {
+        roomCode: cleaned,
+        creatingRoom: cleaned ? s.creatingRoom : false,
+      };
+    }),
 
   setLiteralRoom: (literalRoom) => set({ literalRoom }),
 
   setHostOnlyRoom: (hostOnlyRoom) => set({ hostOnlyRoom }),
+
+  setCreatingRoom: (creatingRoom) => set({ creatingRoom }),
+
+  applyRerolledRoomCode: (code) =>
+    set({
+      roomCode: sanitizeRoomCodeInput(code, false),
+      creatingRoom: false,
+    }),
 
   setServerEndpoint: (endpoint) => {
     const clean = sanitizeCustomServerEndpoint(endpoint) || DEFAULT_ENDPOINT;
@@ -291,6 +368,16 @@ export const useAppStore = create<AppState>((set) => ({
     set({ reactionsEnabled });
   },
 
+  setChatPeeksEnabled: (chatPeeksEnabled) => {
+    writeStorage("ep.chatPeeksEnabled", chatPeeksEnabled ? "true" : "false");
+    set({ chatPeeksEnabled });
+  },
+
+  setChatTriggerPlacement: (chatTriggerPlacement) => {
+    writeStorage("ep.chatTriggerPlacement", chatTriggerPlacement);
+    set({ chatTriggerPlacement });
+  },
+
   pushRecentEmoji: (emoji) =>
     set((s) => {
       const clean = emoji.trim();
@@ -303,6 +390,13 @@ export const useAppStore = create<AppState>((set) => ({
   setFullWidthPlayBar: (fullWidthPlayBar) => {
     writeStorage("ep.fullWidthPlayBar", fullWidthPlayBar ? "true" : "false");
     set({ fullWidthPlayBar });
+  },
+
+  setPlayBarOpacity: (opacity) => {
+    const next = clampPlayBarOpacity(opacity);
+    writeStorage("ep.playBarOpacity", String(next));
+    applyPlayBarOpacityVariables(next);
+    set({ playBarOpacity: next });
   },
 
   setAutoCheckUpdates: (autoCheckUpdates) => {
@@ -336,14 +430,16 @@ export const useAppStore = create<AppState>((set) => ({
   openShortcuts: () => set({ shortcutsOpen: true, settingsOpen: false }),
   closeShortcuts: () => set({ shortcutsOpen: false }),
 
-  enterRoom: (code, literalRoom, hostOnlyRoom) =>
+  enterRoom: (code, literalRoom, hostOnlyRoom, creatingRoom) =>
     set((s) => {
       const lit = literalRoom ?? s.literalRoom;
+      const cleaned = sanitizeRoomCodeInput(code, lit);
       return {
         screen: "room",
-        roomCode: sanitizeRoomCodeInput(code, lit),
+        roomCode: cleaned,
         literalRoom: lit,
         hostOnlyRoom: hostOnlyRoom ?? false,
+        creatingRoom: Boolean(creatingRoom && !lit && cleaned),
         settingsOpen: false,
         shortcutsOpen: false,
       };
@@ -351,6 +447,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   leaveRoom: () => {
     clearReactions();
+    clearPartyChat();
     usePlayerStore.getState().reset();
     useIntroStore.getState().resetForVideo(null);
     useSyncStore.getState().reset();
@@ -364,6 +461,7 @@ export const useAppStore = create<AppState>((set) => ({
       screen: "home",
       roomCode: "",
       hostOnlyRoom: false,
+      creatingRoom: false,
       selectedFilePath: null,
       selectedFileName: null,
       settingsOpen: false,

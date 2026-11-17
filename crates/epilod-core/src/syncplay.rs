@@ -2545,9 +2545,7 @@ mod tests {
         let ack_actions = sm.handle_server_state(&ack, 1.2);
         assert_eq!(sm.ignoring_client, 0);
         assert!(
-            !ack_actions
-                .iter()
-                .any(|a| matches!(a, SyncAction::Seek(_))),
+            !ack_actions.iter().any(|a| matches!(a, SyncAction::Seek(_))),
             "acknowledged self-seek must stay at 900s: {ack_actions:?}"
         );
     }

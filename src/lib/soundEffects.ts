@@ -9,7 +9,8 @@ export type SoundCue =
   | "peerReady"
   | "allReady"
   | "codeCopied"
-  | "reactionPop";
+  | "reactionPop"
+  | "chatMessage";
 
 export interface PlaySoundOptions {
   /** Quiets and softens cues automatically when video is actively playing. */
@@ -132,6 +133,26 @@ const CUE_RECIPES: Record<SoundCue, CueRecipe> = {
         delayMs: 0,
         durationMs: 70,
         gain: 0.026,
+      },
+    ],
+  },
+  // Whisper-soft crystalline droplet (E4 -> B4) for incoming room chat when panel is closed
+  chatMessage: {
+    cutoffHz: 1050,
+    notes: [
+      {
+        freqHz: 329.63,
+        harmonicFreqHz: 493.88,
+        harmonicRatio: 0.14,
+        delayMs: 0,
+        durationMs: 95,
+        gain: 0.028,
+      },
+      {
+        freqHz: 493.88,
+        delayMs: 42,
+        durationMs: 130,
+        gain: 0.022,
       },
     ],
   },

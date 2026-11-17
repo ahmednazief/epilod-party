@@ -941,13 +941,13 @@ export function App() {
               <p className="mt-1 text-xs text-white/60">{readySubtitle}</p>
 
               {runningProcesses.length > 0 && !defaults?.autoStart ? (
-                <div className="ep-glass-well mt-3.5 flex items-center gap-2.5 rounded-full px-3.5 py-1.5 text-xs">
+                <div className="ep-glass-well mt-3.5 flex items-center gap-2 rounded-full pl-3.5 pr-1 py-1 text-xs">
                   <span className="truncate text-white/75">Epilod Party is running</span>
                   <button
                     type="button"
                     disabled={isClosingProcesses}
                     onClick={() => void handleCloseProcesses()}
-                    className="shrink-0 cursor-pointer font-medium text-[#C4B5FD] hover:text-white disabled:opacity-45"
+                    className="ep-glass-pill shrink-0 cursor-pointer rounded-full px-3 py-1 text-[11px] font-medium text-white disabled:opacity-45"
                   >
                     {isClosingProcesses ? "Closing…" : "Close & Continue"}
                   </button>

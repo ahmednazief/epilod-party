@@ -8,10 +8,11 @@ use epilod_core::p2p::{
     build_ssdp_msearch, build_stun_binding_request, build_upnp_add_port_mapping_soap,
     build_upnp_delete_port_mapping_soap, decode_ep2_beacon, encode_ep2_beacon, fill_random_bytes,
     parse_http_url_host_port_path, parse_igd_control_url, parse_ssdp_location,
-    parse_stun_binding_response, sanitize_avatar_id, sanitize_reaction_emoji, P2pBeacon,
-    P2pCandidate, P2pCandidateKind, P2pCryptoSession, P2pIdentity, P2pWireFrame,
-    ReactionFallbackPacket, ReliableChannel, MAX_P2P_DATAGRAM_BYTES, MAX_REACTION_BURST_COUNT,
-    SSDP_MULTICAST_ADDR, STUN_SERVERS,
+    parse_stun_binding_response, sanitize_avatar_id, sanitize_chat_id, sanitize_chat_text,
+    sanitize_reaction_emoji, ChatFallbackPacket, ChatReactFallbackPacket, P2pBeacon, P2pCandidate,
+    P2pCandidateKind, P2pCryptoSession, P2pIdentity, P2pWireFrame, ReactionFallbackPacket,
+    ReliableChannel, MAX_P2P_DATAGRAM_BYTES, MAX_REACTION_BURST_COUNT, SSDP_MULTICAST_ADDR,
+    STUN_SERVERS,
 };
 use epilod_core::syncplay::{
     RoomParticipantUpdate, TimelineSegment, TimelineTransform, WireFileInfo,
@@ -85,6 +86,23 @@ pub enum P2pControlCmd {
         avatar_id: String,
         count: u8,
     },
+    SendChat {
+        id: String,
+        text: String,
+        avatar_id: String,
+        reply_to_id: Option<String>,
+    },
+    SendChatEdit {
+        target_msg_id: String,
+        text: String,
+    },
+    SendChatReact {
+        target_msg_id: String,
+        emoji: String,
+    },
+    SendTyping {
+        is_typing: bool,
+    },
     PeerJoined(String),
     Shutdown,
 }
@@ -102,6 +120,10 @@ enum P2pDatagramMessage {
         relay_targets: Vec<String>,
         #[serde(default)]
         ttl: u8,
+    },
+    ChatTyping {
+        sender: String,
+        is_typing: bool,
     },
     RelayUnavailable {
         targets: Vec<String>,
@@ -130,6 +152,36 @@ enum P2pAppMessage {
         probes: Vec<SparseAudioProbeWire>,
     },
     OfferRequest,
+    ChatMessage {
+        id: String,
+        sender: String,
+        avatar_id: String,
+        text: String,
+        #[serde(default)]
+        reply_to_id: Option<String>,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    ChatEdit {
+        target_msg_id: String,
+        sender: String,
+        text: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    ChatReact {
+        target_msg_id: String,
+        sender: String,
+        emoji: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +276,8 @@ impl P2pSessionHandle {
         beacon_tx: mpsc::Sender<String>,
         align_tx: mpsc::Sender<P2pAutoAlignment>,
         reaction_fallback_tx: mpsc::Sender<ReactionFallbackPacket>,
+        chat_fallback_tx: mpsc::Sender<ChatFallbackPacket>,
+        chat_react_fallback_tx: mpsc::Sender<ChatReactFallbackPacket>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<P2pControlCmd>(128);
         tokio::spawn(run_p2p_actor(
@@ -234,6 +288,8 @@ impl P2pSessionHandle {
             beacon_tx,
             align_tx,
             reaction_fallback_tx,
+            chat_fallback_tx,
+            chat_react_fallback_tx,
         ));
         Self { cmd_tx }
     }
@@ -517,6 +573,8 @@ async fn run_p2p_actor(
     beacon_tx: mpsc::Sender<String>,
     align_tx: mpsc::Sender<P2pAutoAlignment>,
     reaction_fallback_tx: mpsc::Sender<ReactionFallbackPacket>,
+    chat_fallback_tx: mpsc::Sender<ChatFallbackPacket>,
+    chat_react_fallback_tx: mpsc::Sender<ChatReactFallbackPacket>,
 ) {
     let Ok(sock_v4) = UdpSocket::bind("0.0.0.0:0").await.map(Arc::new) else {
         return;
@@ -623,6 +681,7 @@ async fn run_p2p_actor(
     let mut force_realign_pending = false;
     let mut reaction_seq: u32 = 1;
     let mut seen_reactions: VecDeque<((String, u32), Instant)> = VecDeque::new();
+    let mut seen_chat_msgs: VecDeque<((String, String), Instant)> = VecDeque::new();
 
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -927,6 +986,233 @@ async fn run_p2p_actor(
                             });
                         }
                     }
+                    P2pControlCmd::SendChat {
+                        id,
+                        text,
+                        avatar_id,
+                        reply_to_id,
+                    } => {
+                        let clean_id = sanitize_chat_id(&id);
+                        let Some(clean_text) = sanitize_chat_text(&text) else {
+                            continue;
+                        };
+                        if clean_id.is_empty() {
+                            continue;
+                        }
+                        let clean_avatar = sanitize_avatar_id(&avatar_id);
+                        let clean_reply = reply_to_id
+                            .as_deref()
+                            .map(sanitize_chat_id)
+                            .filter(|s| !s.is_empty());
+
+                        let direct_keys: Vec<String> = peers
+                            .iter()
+                            .filter(|(_, p)| {
+                                matches!(
+                                    p.state,
+                                    LinkTransportState::DirectLan | LinkTransportState::DirectWan
+                                ) && p.active_addr.is_some()
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
+
+                        let mut non_direct_keys: Vec<String> = Vec::new();
+                        for item in participants.values() {
+                            if item.username.eq_ignore_ascii_case(&local_username) {
+                                continue;
+                            }
+                            let key = item.username.to_ascii_lowercase();
+                            if !direct_keys.contains(&key) && !non_direct_keys.contains(&key) {
+                                non_direct_keys.push(key);
+                            }
+                        }
+
+                        if direct_keys.is_empty() && non_direct_keys.is_empty() {
+                            continue;
+                        }
+
+                        record_seen_chat_msg(
+                            &mut seen_chat_msgs,
+                            &local_username.to_ascii_lowercase(),
+                            &clean_id,
+                        );
+
+                        let relay_targets: Vec<String> = non_direct_keys
+                            .iter()
+                            .filter(|target| {
+                                direct_keys.iter().any(|dk| {
+                                    peers
+                                        .get(dk)
+                                        .is_some_and(|p| !p.cant_relay_to.contains(*target))
+                                })
+                            })
+                            .take(16)
+                            .cloned()
+                            .collect();
+
+                        let fallback_needed = !non_direct_keys.is_empty()
+                            && (direct_keys.is_empty()
+                                || non_direct_keys
+                                    .iter()
+                                    .any(|t| !relay_targets.contains(t)));
+
+                        if !direct_keys.is_empty() {
+                            let app_msg = P2pAppMessage::ChatMessage {
+                                id: clean_id.clone(),
+                                sender: local_username.clone(),
+                                avatar_id: clean_avatar.clone(),
+                                text: clean_text.clone(),
+                                reply_to_id: clean_reply.clone(),
+                                relay_targets,
+                                ttl: 1,
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&app_msg) {
+                                let now_ms = epoch_ms(start_instant);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload(
+                                            peer,
+                                            &payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+
+                        if fallback_needed {
+                            let _ = chat_fallback_tx.try_send(ChatFallbackPacket {
+                                msg_id: clean_id,
+                                avatar_id: clean_avatar,
+                                reply_to_id: clean_reply,
+                                text: clean_text,
+                                is_edit: false,
+                            });
+                        }
+                    }
+                    P2pControlCmd::SendChatEdit {
+                        target_msg_id,
+                        text,
+                    } => {
+                        let clean_id = sanitize_chat_id(&target_msg_id);
+                        let Some(clean_text) = sanitize_chat_text(&text) else {
+                            continue;
+                        };
+                        if clean_id.is_empty() {
+                            continue;
+                        }
+                        let (direct_keys, relay_targets, fallback_needed) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if !direct_keys.is_empty() {
+                            let app_msg = P2pAppMessage::ChatEdit {
+                                target_msg_id: clean_id.clone(),
+                                sender: local_username.clone(),
+                                text: clean_text.clone(),
+                                relay_targets,
+                                ttl: 1,
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&app_msg) {
+                                let now_ms = epoch_ms(start_instant);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload(
+                                            peer,
+                                            &payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                        if fallback_needed {
+                            let _ = chat_fallback_tx.try_send(ChatFallbackPacket {
+                                msg_id: clean_id,
+                                avatar_id: String::new(),
+                                reply_to_id: None,
+                                text: clean_text,
+                                is_edit: true,
+                            });
+                        }
+                    }
+                    P2pControlCmd::SendChatReact {
+                        target_msg_id,
+                        emoji,
+                    } => {
+                        let clean_id = sanitize_chat_id(&target_msg_id);
+                        let Some(clean_emoji) = sanitize_reaction_emoji(&emoji) else {
+                            continue;
+                        };
+                        if clean_id.is_empty() {
+                            continue;
+                        }
+                        let (direct_keys, relay_targets, fallback_needed) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if !direct_keys.is_empty() {
+                            let app_msg = P2pAppMessage::ChatReact {
+                                target_msg_id: clean_id.clone(),
+                                sender: local_username.clone(),
+                                emoji: clean_emoji.clone(),
+                                relay_targets,
+                                ttl: 1,
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&app_msg) {
+                                let now_ms = epoch_ms(start_instant);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload(
+                                            peer,
+                                            &payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                        if fallback_needed {
+                            let _ = chat_react_fallback_tx.try_send(ChatReactFallbackPacket {
+                                msg_id: clean_id,
+                                emoji: clean_emoji,
+                            });
+                        }
+                    }
+                    P2pControlCmd::SendTyping { is_typing } => {
+                        let direct_keys: Vec<String> = peers
+                            .iter()
+                            .filter(|(_, p)| {
+                                matches!(
+                                    p.state,
+                                    LinkTransportState::DirectLan | LinkTransportState::DirectWan
+                                ) && p.active_addr.is_some()
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        if !direct_keys.is_empty() {
+                            let dmsg = P2pDatagramMessage::ChatTyping {
+                                sender: local_username.clone(),
+                                is_typing,
+                            };
+                            for dk in &direct_keys {
+                                if let Some(peer) = peers.get_mut(dk) {
+                                    let _ = send_datagram_message(
+                                        peer,
+                                        &dmsg,
+                                        &sock_v4,
+                                        sock_v6.as_ref(),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             evt = internal_rx.recv() => {
@@ -1148,6 +1434,7 @@ async fn run_p2p_actor(
                         &internal_tx,
                         &mut force_realign_pending,
                         &mut seen_reactions,
+                        &mut seen_chat_msgs,
                         &nat_mode,
                     ).await;
                 }
@@ -1184,6 +1471,7 @@ async fn run_p2p_actor(
                             &internal_tx,
                             &mut force_realign_pending,
                             &mut seen_reactions,
+                            &mut seen_chat_msgs,
                             &nat_mode,
                         ).await;
                     }
@@ -1298,6 +1586,111 @@ fn record_seen_reaction(
     true
 }
 
+fn record_seen_chat_msg(
+    seen: &mut VecDeque<((String, String), Instant)>,
+    sender_key: &str,
+    msg_id: &str,
+) -> bool {
+    let now = Instant::now();
+    while let Some((_, ts)) = seen.front() {
+        if now.duration_since(*ts) >= Duration::from_secs(120) || seen.len() >= 256 {
+            seen.pop_front();
+        } else {
+            break;
+        }
+    }
+    if seen
+        .iter()
+        .any(|((s, id), _)| s == sender_key && id == msg_id)
+    {
+        return false;
+    }
+    seen.push_back(((sender_key.to_string(), msg_id.to_string()), now));
+    true
+}
+
+fn compute_chat_routing(
+    peers: &HashMap<String, PeerSession>,
+    participants: &HashMap<String, RoomParticipantUpdate>,
+    local_username: &str,
+) -> (Vec<String>, Vec<String>, bool) {
+    let direct_keys: Vec<String> = peers
+        .iter()
+        .filter(|(_, p)| {
+            matches!(
+                p.state,
+                LinkTransportState::DirectLan | LinkTransportState::DirectWan
+            ) && p.active_addr.is_some()
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    let mut non_direct_keys: Vec<String> = Vec::new();
+    for item in participants.values() {
+        if item.username.eq_ignore_ascii_case(local_username) {
+            continue;
+        }
+        let key = item.username.to_ascii_lowercase();
+        if !direct_keys.contains(&key) && !non_direct_keys.contains(&key) {
+            non_direct_keys.push(key);
+        }
+    }
+
+    let relay_targets: Vec<String> = non_direct_keys
+        .iter()
+        .filter(|target| {
+            direct_keys.iter().any(|dk| {
+                peers
+                    .get(dk)
+                    .is_some_and(|p| !p.cant_relay_to.contains(*target))
+            })
+        })
+        .take(16)
+        .cloned()
+        .collect();
+
+    let fallback_needed = !non_direct_keys.is_empty()
+        && (direct_keys.is_empty() || non_direct_keys.iter().any(|t| !relay_targets.contains(t)));
+
+    (direct_keys, relay_targets, fallback_needed)
+}
+
+async fn forward_chat_relay(
+    peers: &mut HashMap<String, PeerSession>,
+    relay_targets: Vec<String>,
+    peer_key: &str,
+    sender_key: &str,
+    local_username: &str,
+    fwd: &P2pAppMessage,
+    sock_v4: &UdpSocket,
+    sock_v6: Option<&Arc<UdpSocket>>,
+    start_instant: Instant,
+) {
+    let Ok(payload) = serde_json::to_vec(fwd) else {
+        return;
+    };
+    let now_ms = epoch_ms(start_instant);
+    for raw_target in relay_targets.into_iter().take(16) {
+        let target_key = raw_target.to_ascii_lowercase();
+        if target_key == peer_key
+            || target_key == sender_key
+            || target_key == local_username.to_ascii_lowercase()
+        {
+            continue;
+        }
+        if let Some(target_peer) = peers.get_mut(&target_key) {
+            if matches!(
+                target_peer.state,
+                LinkTransportState::DirectLan | LinkTransportState::DirectWan
+            ) && target_peer.active_addr.is_some()
+            {
+                let _ =
+                    send_reliable_payload(target_peer, &payload, sock_v4, sock_v6, now_ms).await;
+            }
+        }
+    }
+}
+
 async fn send_datagram_message(
     peer: &mut PeerSession,
     msg: &P2pDatagramMessage,
@@ -1340,6 +1733,7 @@ async fn dispatch_udp_event(
     internal_tx: &mpsc::Sender<InternalEvent>,
     force_realign_pending: &mut bool,
     seen_reactions: &mut VecDeque<((String, u32), Instant)>,
+    seen_chat_msgs: &mut VecDeque<((String, String), Instant)>,
     nat_mode: &str,
 ) {
     match evt {
@@ -1362,11 +1756,39 @@ async fn dispatch_udp_event(
                 completed_sigs,
                 internal_tx,
                 std::mem::take(force_realign_pending),
+                seen_chat_msgs,
             )
             .await;
             emit_p2p_status(app, nat_mode, peers, align_job.as_ref());
         }
         UdpPacketEvent::Datagram(from_key, dmsg) => match dmsg {
+            P2pDatagramMessage::ChatTyping { sender, is_typing } => {
+                let sender_display: String = if sender.trim().is_empty() {
+                    peers
+                        .get(&from_key)
+                        .map(|p| p.username.clone())
+                        .unwrap_or_else(|| from_key.clone())
+                } else {
+                    sender.trim().chars().take(32).collect()
+                };
+                if sender_display.eq_ignore_ascii_case(local_username) {
+                    return;
+                }
+                let sender_known = sender_display.to_ascii_lowercase() == from_key
+                    || participants
+                        .values()
+                        .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
+                if !sender_known {
+                    return;
+                }
+                let _ = app.emit(
+                    "sync://chat-typing",
+                    serde_json::json!({
+                        "username": sender_display,
+                        "isTyping": is_typing,
+                    }),
+                );
+            }
             P2pDatagramMessage::RelayUnavailable { targets } => {
                 if let Some(peer) = peers.get_mut(&from_key) {
                     for target in targets.into_iter().take(16) {
@@ -1813,7 +2235,225 @@ async fn handle_peer_app_msg(
     completed_sigs: &HashSet<String>,
     internal_tx: &mpsc::Sender<InternalEvent>,
     force_bypass_user_align: bool,
+    seen_chat_msgs: &mut VecDeque<((String, String), Instant)>,
 ) {
+    if let P2pAppMessage::ChatMessage {
+        id,
+        sender,
+        avatar_id,
+        text,
+        reply_to_id,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&id);
+        let Some(clean_text) = sanitize_chat_text(&text) else {
+            return;
+        };
+        if clean_id.is_empty() {
+            return;
+        }
+        let clean_avatar = sanitize_avatar_id(&avatar_id);
+        let clean_reply = reply_to_id
+            .as_deref()
+            .map(sanitize_chat_id)
+            .filter(|s| !s.is_empty());
+
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if sender_display.eq_ignore_ascii_case(local_username) {
+            return;
+        }
+        let sender_known = sender_key == peer_key
+            || participants
+                .values()
+                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
+        if !sender_known {
+            return;
+        }
+
+        if record_seen_chat_msg(seen_chat_msgs, &sender_key, &clean_id) {
+            let _ = app.emit(
+                "sync://chat",
+                serde_json::json!({
+                    "id": clean_id,
+                    "username": sender_display,
+                    "avatarId": clean_avatar,
+                    "text": clean_text,
+                    "replyToId": clean_reply,
+                    "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+                }),
+            );
+        }
+
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::ChatMessage {
+                id: clean_id,
+                sender: sender_display,
+                avatar_id: clean_avatar,
+                text: clean_text,
+                reply_to_id: clean_reply,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::ChatEdit {
+        target_msg_id,
+        sender,
+        text,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&target_msg_id);
+        let Some(clean_text) = sanitize_chat_text(&text) else {
+            return;
+        };
+        if clean_id.is_empty() {
+            return;
+        }
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if sender_display.eq_ignore_ascii_case(local_username) {
+            return;
+        }
+        let sender_known = sender_key == peer_key
+            || participants
+                .values()
+                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
+        if !sender_known {
+            return;
+        }
+        let _ = app.emit(
+            "sync://chat-edit",
+            serde_json::json!({
+                "targetMsgId": clean_id,
+                "username": sender_display,
+                "text": clean_text,
+                "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+            }),
+        );
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::ChatEdit {
+                target_msg_id: clean_id,
+                sender: sender_display,
+                text: clean_text,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::ChatReact {
+        target_msg_id,
+        sender,
+        emoji,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&target_msg_id);
+        let Some(clean_emoji) = sanitize_reaction_emoji(&emoji) else {
+            return;
+        };
+        if clean_id.is_empty() {
+            return;
+        }
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if sender_display.eq_ignore_ascii_case(local_username) {
+            return;
+        }
+        let sender_known = sender_key == peer_key
+            || participants
+                .values()
+                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
+        if !sender_known {
+            return;
+        }
+        let _ = app.emit(
+            "sync://chat-react",
+            serde_json::json!({
+                "targetMsgId": clean_id,
+                "username": sender_display,
+                "emoji": clean_emoji,
+                "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+            }),
+        );
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::ChatReact {
+                target_msg_id: clean_id,
+                sender: sender_display,
+                emoji: clean_emoji,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
     let Some(lm) = local_media else {
         return;
     };
@@ -1832,6 +2472,9 @@ async fn handle_peer_app_msg(
     };
 
     match msg {
+        P2pAppMessage::ChatMessage { .. }
+        | P2pAppMessage::ChatEdit { .. }
+        | P2pAppMessage::ChatReact { .. } => {}
         P2pAppMessage::OfferRequest => {
             if let Some(peer) = peers.get_mut(peer_key) {
                 peer.offered_file_sig = None;

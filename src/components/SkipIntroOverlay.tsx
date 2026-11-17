@@ -138,7 +138,14 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
 
   return (
     <div
-      className={`fixed inset-x-0 z-40 pointer-events-none flex justify-center transition-[bottom] duration-300 ease-out ${
+      style={
+        chromeVisible
+          ? {
+              bottom: `var(--ep-playbar-clearance, ${fullWidthPlayBar ? "124px" : "140px"})`,
+            }
+          : undefined
+      }
+      className={`absolute inset-x-0 z-40 pointer-events-none flex justify-center transition-[bottom] duration-300 ease-out ${
         fullWidthPlayBar ? "px-4 sm:px-6" : "px-4"
       } ${
         chromeVisible

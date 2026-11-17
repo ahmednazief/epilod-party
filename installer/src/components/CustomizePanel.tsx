@@ -65,7 +65,7 @@ export function CustomizePanel({
       : null);
 
   return (
-    <div className="ep-view-enter w-full max-w-[376px] space-y-2">
+    <div className="ep-view-enter w-full max-w-[376px] space-y-2.5">
       <div className="ep-glass-well rounded-2xl px-3.5 py-2 space-y-1">
         <div className="flex items-center justify-between gap-2 text-xs">
           <label htmlFor="ep-install-dir" className="text-white/55">
@@ -106,7 +106,7 @@ export function CustomizePanel({
           onKeyDown={(e) => {
             if (e.key === "Enter") onDirBlurOrEnter();
           }}
-          className="ep-glass-input h-7.5 w-full rounded-xl px-2.5 text-xs text-white/90 focus:outline-none disabled:opacity-50"
+          className="ep-glass-input h-7 w-full rounded-xl px-2.5 text-xs text-white/90 focus:outline-none disabled:opacity-50"
         />
 
         {folderWarning ? (
@@ -120,7 +120,7 @@ export function CustomizePanel({
         ) : null}
       </div>
 
-      <div className="ep-glass-well divide-y divide-white/[0.06] rounded-2xl px-3.5 py-0.5">
+      <div className="ep-glass-well rounded-2xl px-2 py-1 space-y-0.5">
         {toggles.map((item) => (
           <button
             key={item.key}
@@ -134,7 +134,7 @@ export function CustomizePanel({
                 [item.key]: !prev[item.key],
               }))
             }
-            className="flex w-full cursor-pointer items-center justify-between py-1 text-left text-xs text-white/85 hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+            className="flex w-full cursor-pointer items-center justify-between rounded-xl px-2 py-1 text-left text-xs text-white/85 hover:bg-white/[0.04] hover:text-white disabled:cursor-not-allowed disabled:opacity-45 transition-colors"
           >
             <span>{item.label}</span>
             <GlassSwitchTrack checked={options[item.key]} />
@@ -142,14 +142,16 @@ export function CustomizePanel({
         ))}
       </div>
 
-      <button
-        type="button"
-        disabled={installBlocked || disabled}
-        onClick={onSaveAndInstall}
-        className="ep-glass-primary-pill h-8.5 w-full cursor-pointer rounded-full text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
-      >
-        {ctaLabel}
-      </button>
+      <div className="flex justify-center pt-0.5">
+        <button
+          type="button"
+          disabled={installBlocked || disabled}
+          onClick={onSaveAndInstall}
+          className="ep-glass-primary-pill h-9 cursor-pointer rounded-full px-8 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {ctaLabel}
+        </button>
+      </div>
     </div>
   );
 }

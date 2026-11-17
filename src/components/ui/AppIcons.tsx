@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useState } from "react";
 
 interface AppIconProps {
   size?: number;
@@ -951,6 +951,104 @@ export function AppPartyPrivacyCategoryIcon({ size = 15, active = false, classNa
         strokeWidth="1.05"
         strokeLinecap="round"
       />
+    </svg>
+  );
+}
+
+let cachedPillRefractionUrl: string | null = null;
+
+function buildPillRefractionMapDataUrl(): string {
+  if (cachedPillRefractionUrl) return cachedPillRefractionUrl;
+  if (typeof document === "undefined") return "";
+  const w = 144;
+  const h = 90;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
+  const rx = w * 0.5;
+  const ry = h * 0.5;
+  const r = ry;
+  const boxHalfX = rx - r;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = x + 0.5 - rx;
+      const dy = y + 0.5 - ry;
+      const qx = Math.abs(dx) - boxHalfX;
+      const ex = qx > 0 ? qx : 0;
+      const ey = Math.abs(dy);
+      const dist = Math.hypot(ex, ey);
+      const t = Math.min(1, dist / r);
+      const invDist = dist > 1e-4 ? 1 / dist : 0;
+      const nx = ex > 0 ? (dx >= 0 ? 1 : -1) * ex * invDist : 0;
+      const ny = (dy >= 0 ? 1 : -1) * ey * invDist;
+      // Continuous C1 convex dome + steeper peripheral meniscus refraction
+      const mag = -0.28 * t + 0.92 * Math.pow(t, 4);
+      const sx = Math.max(-1, Math.min(1, nx * mag));
+      const sy = Math.max(-1, Math.min(1, ny * mag));
+      const idx = (y * w + x) * 4;
+      d[idx] = Math.round(128 + sx * 127);
+      d[idx + 1] = Math.round(128 + sy * 127);
+      d[idx + 2] = 128;
+      d[idx + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+  cachedPillRefractionUrl = canvas.toDataURL("image/png");
+  return cachedPillRefractionUrl;
+}
+
+/**
+ * Shared SVG refraction filter mounted once at the app root so dragged Liquid Glass
+ * slider droplets optically magnify and bend the track and layers beneath them.
+ */
+export function AppLiquidGlassDefs() {
+  const [mapHref, setMapHref] = useState<string>("");
+
+  useEffect(() => {
+    const url = buildPillRefractionMapDataUrl();
+    if (url) setMapHref(url);
+  }, []);
+
+  if (!mapHref) return null;
+
+  return (
+    <svg
+      width="0"
+      height="0"
+      aria-hidden="true"
+      className="pointer-events-none fixed -top-[9999px] -left-[9999px] h-0 w-0"
+    >
+      <defs>
+        <filter
+          id="ep-scrubber-liquid-lens"
+          x="-15%"
+          y="-15%"
+          width="130%"
+          height="130%"
+          colorInterpolationFilters="sRGB"
+        >
+          <feImage href={mapHref} result="map" preserveAspectRatio="none" />
+          <feDisplacementMap
+            in="SourceGraphic"
+            in2="map"
+            scale="20"
+            xChannelSelector="R"
+            yChannelSelector="G"
+            result="refracted"
+          />
+          <feColorMatrix in="refracted" type="saturate" values="1.38" result="saturated" />
+          <feGaussianBlur in="saturated" stdDeviation="0.22" result="smooth" />
+          <feMerge>
+            <feMergeNode in="smooth" />
+          </feMerge>
+        </filter>
+      </defs>
     </svg>
   );
 }

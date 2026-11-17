@@ -92,6 +92,34 @@ export interface ReactionEventPayload {
   via: "p2p" | "p2pRelay" | "syncplay";
 }
 
+export interface ChatMessageEventPayload {
+  id: string;
+  username: string;
+  avatarId: string;
+  text: string;
+  replyToId?: string | null;
+  via: "p2p" | "p2pRelay" | "syncplay";
+}
+
+export interface ChatEditEventPayload {
+  targetMsgId: string;
+  username: string;
+  text: string;
+  via: "p2p" | "p2pRelay" | "syncplay";
+}
+
+export interface ChatReactEventPayload {
+  targetMsgId: string;
+  username: string;
+  emoji: string;
+  via: "p2p" | "p2pRelay" | "syncplay";
+}
+
+export interface ChatTypingEventPayload {
+  username: string;
+  isTyping: boolean;
+}
+
 export interface PeerSeekPayload {
   username: string;
   deltaSecs: number;
@@ -126,6 +154,7 @@ export interface SyncConnectParams {
   literalRoom?: boolean;
   password?: string | null;
   hostOnly?: boolean;
+  claimEmpty?: boolean;
 }
 
 export async function syncConnect(params: SyncConnectParams): Promise<void> {
@@ -136,6 +165,7 @@ export async function syncConnect(params: SyncConnectParams): Promise<void> {
     literalRoom: params.literalRoom ?? false,
     password: params.password ?? null,
     hostOnly: params.hostOnly ?? false,
+    claimEmpty: params.claimEmpty ?? false,
   });
 }
 
@@ -242,6 +272,32 @@ export async function syncSendReaction(
   await safeInvoke("sync_send_reaction", { emoji, avatarId, count });
 }
 
+export async function syncSendChat(
+  id: string,
+  text: string,
+  avatarId: string,
+  replyToId?: string | null,
+): Promise<void> {
+  await safeInvoke("sync_send_chat", {
+    id,
+    text,
+    avatarId,
+    replyToId: replyToId ?? null,
+  });
+}
+
+export async function syncSendChatTyping(isTyping: boolean): Promise<void> {
+  await safeInvoke("sync_send_chat_typing", { isTyping });
+}
+
+export async function syncSendChatEdit(targetMsgId: string, text: string): Promise<void> {
+  await safeInvoke("sync_send_chat_edit", { targetMsgId, text });
+}
+
+export async function syncSendChatReact(targetMsgId: string, emoji: string): Promise<void> {
+  await safeInvoke("sync_send_chat_react", { targetMsgId, emoji });
+}
+
 function noopUnlisten(): UnlistenFn {
   return () => undefined;
 }
@@ -249,6 +305,13 @@ function noopUnlisten(): UnlistenFn {
 export async function onSyncStatus(cb: (status: SyncStatusPayload) => void): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<SyncStatusPayload>("sync://status", (e) => cb(e.payload));
+}
+
+export async function onSyncRoomRerolled(
+  cb: (payload: { roomCode: string }) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<{ roomCode: string }>("sync://room-rerolled", (e) => cb(e.payload));
 }
 
 export async function onSyncParticipants(cb: (list: Participant[]) => void): Promise<UnlistenFn> {
@@ -343,6 +406,34 @@ export async function onSyncReaction(
 ): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<ReactionEventPayload>("sync://reaction", (e) => cb(e.payload));
+}
+
+export async function onSyncChat(
+  cb: (message: ChatMessageEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatMessageEventPayload>("sync://chat", (e) => cb(e.payload));
+}
+
+export async function onSyncChatTyping(
+  cb: (typing: ChatTypingEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatTypingEventPayload>("sync://chat-typing", (e) => cb(e.payload));
+}
+
+export async function onSyncChatEdit(
+  cb: (edit: ChatEditEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatEditEventPayload>("sync://chat-edit", (e) => cb(e.payload));
+}
+
+export async function onSyncChatReact(
+  cb: (react: ChatReactEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatReactEventPayload>("sync://chat-react", (e) => cb(e.payload));
 }
 
 export async function onSyncPeerSeek(

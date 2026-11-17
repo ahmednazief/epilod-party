@@ -9,6 +9,7 @@ interface AnimatedCollapseProps {
   children: ReactNode;
   className?: string;
   innerClassName?: string;
+  durationMs?: number;
 }
 
 /**
@@ -20,8 +21,9 @@ export function AnimatedCollapse({
   children,
   className = "",
   innerClassName = "",
+  durationMs = 250,
 }: AnimatedCollapseProps) {
-  const { mounted } = useAnimatedPresence(open, 250);
+  const { mounted } = useAnimatedPresence(open, durationMs);
   const [revealed, setRevealed] = useState(open);
 
   useEffect(() => {

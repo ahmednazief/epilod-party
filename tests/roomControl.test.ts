@@ -141,8 +141,22 @@ test("useAppStore and useSyncStore manage hostOnlyRoom and roomControl lifecycle
 
   useAppStore.getState().leaveRoom();
   assert.equal(useAppStore.getState().hostOnlyRoom, false);
+  assert.equal(useAppStore.getState().creatingRoom, false);
   assert.equal(useAppStore.getState().screen, "home");
   assert.equal(useSyncStore.getState().roomControl.hostControlActive, false);
   assert.equal(useSyncStore.getState().roomControl.localIsHost, false);
   assert.deepEqual(useSyncStore.getState().roomControl.adminUsernames, []);
+
+  useAppStore.getState().enterRoom("482915", false, false, true);
+  assert.equal(useAppStore.getState().creatingRoom, true);
+  assert.equal(useAppStore.getState().roomCode, "482915");
+
+  useAppStore.getState().applyRerolledRoomCode("739204");
+  assert.equal(useAppStore.getState().roomCode, "739204");
+  assert.equal(useAppStore.getState().creatingRoom, false);
+  assert.equal(useAppStore.getState().screen, "room");
+
+  // Literal room names never enter claim-on-create mode
+  useAppStore.getState().enterRoom("MovieNight", true, false, true);
+  assert.equal(useAppStore.getState().creatingRoom, false);
 });

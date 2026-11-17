@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { MpvBackdropFrame } from "../lib/mpv";
 
 interface FrozenVideoFrameProps {
@@ -9,7 +9,7 @@ interface FrozenVideoFrameProps {
 export function FrozenVideoFrame({ frame }: FrozenVideoFrameProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !frame) return;
     if (canvas.width !== frame.width || canvas.height !== frame.height) {
@@ -18,9 +18,13 @@ export function FrozenVideoFrame({ frame }: FrozenVideoFrameProps) {
     }
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const pixels = new Uint8ClampedArray(frame.rgba);
-    const img = new ImageData(pixels, frame.width, frame.height);
-    ctx.putImageData(img, 0, 0);
+    if (frame.bitmap) {
+      ctx.drawImage(frame.bitmap, 0, 0, frame.width, frame.height);
+    } else if (frame.rgba) {
+      const pixels = new Uint8ClampedArray(frame.rgba);
+      const img = new ImageData(pixels, frame.width, frame.height);
+      ctx.putImageData(img, 0, 0);
+    }
   }, [frame]);
 
   if (!frame) return null;
@@ -29,7 +33,7 @@ export function FrozenVideoFrame({ frame }: FrozenVideoFrameProps) {
     <canvas
       ref={canvasRef}
       aria-hidden="true"
-      className="absolute inset-0 z-0 w-full h-full pointer-events-none"
+      className="absolute inset-0 z-0 w-full h-full object-contain bg-canvas pointer-events-none"
     />
   );
 }
