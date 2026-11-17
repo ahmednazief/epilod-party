@@ -24,7 +24,7 @@ interface CustomizePanelProps {
   onSaveAndInstall: () => void;
 }
 
-/** Compact frosted sheet for changing install folder and desktop/launch toggles. */
+/** Compact dark greyish liquid glass sheet for changing install folder and options. */
 export function CustomizePanel({
   options,
   defaultInstallDir,
@@ -65,18 +65,18 @@ export function CustomizePanel({
       : null);
 
   return (
-    <div className="ep-view-enter w-full max-w-[376px] space-y-2.5">
-      <div className="ep-glass-well rounded-2xl px-3.5 py-2 space-y-1">
-        <div className="flex items-center justify-between gap-2 text-xs">
-          <label htmlFor="ep-install-dir" className="text-white/55">
+    <div className="ep-view-enter w-full max-w-[364px] space-y-2">
+      <div className="ep-glass-well rounded-2xl px-3 py-1.5 space-y-1">
+        <div className="flex items-center justify-between gap-2 text-[11.5px]">
+          <label htmlFor="ep-install-dir" className="text-white/50">
             Install folder
           </label>
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             {showReset && (
               <button
                 type="button"
                 onClick={onResetDir}
-                className="inline-flex items-center gap-1 text-xs font-medium text-white/60 hover:text-white cursor-pointer"
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-white/55 hover:text-white cursor-pointer"
               >
                 <InstallerResetIcon size={11} />
                 <span>Reset</span>
@@ -87,7 +87,7 @@ export function CustomizePanel({
                 type="button"
                 disabled={disabled}
                 onClick={onBrowseDir}
-                className="inline-flex items-center gap-1 text-xs font-medium text-[#C4B5FD] hover:text-white disabled:opacity-45 cursor-pointer"
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-white/70 hover:text-white disabled:opacity-45 cursor-pointer"
               >
                 <InstallerFolderIcon size={11} />
                 <span>Browse</span>
@@ -114,13 +114,13 @@ export function CustomizePanel({
             {folderWarning}
           </p>
         ) : otherInstallDir ? (
-          <p className="truncate text-[11px] text-[#C4B5FD]" title={otherInstallDir}>
+          <p className="truncate text-[11px] text-white/60" title={otherInstallDir}>
             Replaces existing{otherInstallVersion ? ` v${otherInstallVersion}` : ""} copy on this PC
           </p>
         ) : null}
       </div>
 
-      <div className="ep-glass-well rounded-2xl px-2 py-1 space-y-0.5">
+      <div className="ep-glass-well rounded-2xl px-2 py-0.5 space-y-0.5">
         {toggles.map((item) => (
           <button
             key={item.key}
@@ -134,7 +134,7 @@ export function CustomizePanel({
                 [item.key]: !prev[item.key],
               }))
             }
-            className="flex w-full cursor-pointer items-center justify-between rounded-xl px-2 py-1 text-left text-xs text-white/85 hover:bg-white/[0.04] hover:text-white disabled:cursor-not-allowed disabled:opacity-45 transition-colors"
+            className="flex w-full cursor-pointer items-center justify-between rounded-xl px-2 py-1 text-left text-xs text-white/80 hover:bg-white/[0.04] hover:text-white disabled:cursor-not-allowed disabled:opacity-45 transition-colors"
           >
             <span>{item.label}</span>
             <GlassSwitchTrack checked={options[item.key]} />
@@ -147,7 +147,7 @@ export function CustomizePanel({
           type="button"
           disabled={installBlocked || disabled}
           onClick={onSaveAndInstall}
-          className="ep-glass-primary-pill h-9 cursor-pointer rounded-full px-8 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
+          className="ep-glass-primary-pill h-8.5 cursor-pointer rounded-full px-7 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
         >
           {ctaLabel}
         </button>

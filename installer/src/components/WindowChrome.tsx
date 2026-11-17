@@ -6,23 +6,23 @@ interface WindowChromeProps {
   leftSlot?: ReactNode;
 }
 
-/** Discreet draggable title bar matching the main app's crystal icon buttons. */
+/** Discreet draggable title bar with dark greyish liquid glass controls. */
 export function WindowChrome({ leftSlot }: WindowChromeProps) {
   return (
-    <header className="relative z-20 flex h-11 shrink-0 items-center justify-between px-4 pt-1 select-none">
-      <div className="flex items-center">{leftSlot}</div>
+    <header className="relative z-20 flex h-10 shrink-0 items-center justify-between px-3.5 pt-1 select-none">
+      <div className="flex items-center min-w-0">{leftSlot}</div>
 
-      <div data-tauri-drag-region className="h-full min-w-6 flex-1" aria-hidden="true" />
+      <div data-tauri-drag-region className="h-full min-w-4 flex-1 cursor-default" aria-hidden="true" />
 
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1.5 shrink-0">
         <button
           type="button"
           aria-label="Minimize installer"
           title="Minimize"
           onClick={() => void minimizeInstallerWindow()}
-          className="ep-bar-icon-btn inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full text-white/65 hover:text-white focus-visible:outline-2 focus-visible:outline-[#8B5CF6]"
+          className="ep-bar-icon-btn inline-flex h-6.5 w-6.5 cursor-pointer items-center justify-center rounded-full text-white/55 hover:text-white"
         >
-          <InstallerMinimizeIcon size={13} />
+          <InstallerMinimizeIcon size={12} />
         </button>
 
         <button
@@ -30,9 +30,9 @@ export function WindowChrome({ leftSlot }: WindowChromeProps) {
           aria-label="Close installer"
           title="Close"
           onClick={() => void closeInstallerWindow()}
-          className="ep-bar-icon-btn inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full text-white/65 hover:bg-red-500/75 hover:text-white focus-visible:outline-2 focus-visible:outline-[#8B5CF6]"
+          className="ep-bar-icon-btn inline-flex h-6.5 w-6.5 cursor-pointer items-center justify-center rounded-full text-white/55 hover:bg-red-500/75 hover:text-white"
         >
-          <InstallerCloseIcon size={13} />
+          <InstallerCloseIcon size={12} />
         </button>
       </div>
     </header>

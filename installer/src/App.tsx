@@ -563,20 +563,20 @@ export function App() {
     inspection?.otherInstallVersion ?? defaults?.otherInstallVersion ?? null;
 
   const readySubtitle = useMemo(() => {
-    if (isInitializing && !defaults) return "Getting things ready…";
+    if (isInitializing && !defaults) return "Preparing setup…";
     if (existingReport?.disposition === "updateAvailable") {
       return existingReport.installedVersion
-        ? `Update v${existingReport.installedVersion} → v${defaults?.packageVersion ?? "0.1.0"}`
+        ? `Update available: v${existingReport.installedVersion} → v${defaults?.packageVersion ?? "0.1.0"}.`
         : `Ready to update to v${defaults?.packageVersion ?? "0.1.0"}.`;
     }
     if (existingReport?.disposition === "repairNeeded") {
-      return "Ready to repair your installation.";
+      return "Ready to verify and repair installation.";
     }
     if (existingReport?.disposition === "downgradeWarning") {
       return `v${existingReport.installedVersion ?? "newer"} is already installed.`;
     }
     if (existingReport?.disposition === "upToDateVerified") {
-      return `v${existingReport.installedVersion ?? defaults?.packageVersion ?? "0.1.0"} is installed and ready.`;
+      return "Epilod Party is up to date and ready.";
     }
     return "Watch together, effortlessly.";
   }, [defaults, existingReport, isInitializing]);
@@ -585,13 +585,18 @@ export function App() {
     if (isRunning) {
       const label =
         isUninstallMode || effectiveMode === "uninstall"
-          ? "Uninstall"
+          ? "Uninstalling"
           : effectiveMode === "update"
             ? "Updating"
             : effectiveMode === "repair"
               ? "Repairing"
               : "Installing";
-      return <span className="px-1 text-xs font-medium text-white/45">{label}</span>;
+      return (
+        <span className="ep-status-pill inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium text-white/70">
+          <span className="h-1.5 w-1.5 rounded-full bg-white/45 animate-pulse" />
+          <span>{label}</span>
+        </span>
+      );
     }
     if (isComplete) {
       const label =
@@ -602,7 +607,12 @@ export function App() {
             : effectiveMode === "repair"
               ? "Repaired"
               : "Installed";
-      return <span className="px-1 text-xs font-medium text-[#4ADE80]/85">{label}</span>;
+      return (
+        <span className="ep-status-pill inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium text-white/80">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/80 shadow-[0_0_6px_rgba(52,211,153,0.4)]" />
+          <span>{label}</span>
+        </span>
+      );
     }
     if (isErrorOrCancelled) {
       const label =
@@ -613,19 +623,28 @@ export function App() {
           : effectiveMode === "update"
             ? "Update paused"
             : "Paused";
-      return <span className="px-1 text-xs font-medium text-white/45">{label}</span>;
+      return (
+        <span className="ep-status-pill inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium text-[#FCA5A5]">
+          <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+          <span>{label}</span>
+        </span>
+      );
     }
     if (isUninstallMode) {
-      return <span className="px-1 text-xs font-medium text-white/45">Uninstall</span>;
+      return (
+        <span className="ep-status-pill inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium text-white/60">
+          <span>Uninstall</span>
+        </span>
+      );
     }
     if (showCustomize) {
       return (
         <button
           type="button"
           onClick={() => setShowCustomize(false)}
-          className="ep-glass-pill inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-white/80 hover:text-white"
+          className="ep-glass-pill inline-flex cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11.5px] font-medium text-white/80 hover:text-white"
         >
-          <InstallerArrowIcon direction="left" size={13} />
+          <InstallerArrowIcon direction="left" size={12} />
           <span>Back</span>
         </button>
       );
@@ -634,9 +653,9 @@ export function App() {
       <button
         type="button"
         onClick={() => setShowCustomize(true)}
-        className="ep-glass-pill inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-white/75 hover:text-white"
+        className="ep-glass-pill inline-flex cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11.5px] font-medium text-white/75 hover:text-white"
       >
-        <InstallerSlidersIcon size={12} />
+        <InstallerSlidersIcon size={11} />
         <span>Customize</span>
       </button>
     );
@@ -645,26 +664,16 @@ export function App() {
   const versionLabel = `v${defaults?.packageVersion ?? defaults?.version ?? "0.1.0"}`;
 
   return (
-    <div className="flex h-full w-full items-center justify-center">
+    <div className="flex h-full w-full items-center justify-center overflow-hidden">
       <div
         data-tauri-drag-region
-        className="ep-installer-window ep-stage-in flex flex-col justify-between"
+        className="ep-installer-window ep-stage-in flex flex-col justify-between w-full h-full"
       >
-        {/* Subtle luminous orbs refracting behind frosted glass */}
-        <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
-          <div
-            className={`ep-ambient-orb-purple absolute -left-8 top-10 h-56 w-56 rounded-full ${
-              isRunning ? "ep-orb-active" : ""
-            }`}
-          />
-          <div className="ep-ambient-orb-silver absolute -right-10 bottom-2 h-52 w-52 rounded-full" />
-        </div>
-
         <WindowChrome leftSlot={topLeftSlot} />
 
         <main
-          className={`relative z-10 flex flex-1 min-h-0 flex-col items-center px-8 ${
-            showCustomize ? "justify-center overflow-y-auto pb-4" : "justify-center pb-6"
+          className={`relative z-10 flex flex-1 min-h-0 flex-col items-center px-6 ${
+            showCustomize ? "justify-center overflow-y-auto pb-3" : "justify-center pb-4"
           }`}
         >
           {isRunning ? (
@@ -676,16 +685,16 @@ export function App() {
             />
           ) : isComplete ? (
             isUninstallMode ? (
-              <div key="uninstall-complete" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
-                <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-white">
+              <div key="uninstall-complete" className="ep-view-enter flex w-full max-w-[320px] flex-col items-center text-center">
+                <h1 className="text-[19px] font-semibold tracking-tight text-white">
                   All cleaned up
                 </h1>
-                <p className="mt-1.5 text-xs text-white/60">
+                <p className="mt-1 text-xs text-white/60">
                   Epilod Party has been removed from this PC.
                 </p>
                 {uninstallSummary && uninstallSummary.warnings && uninstallSummary.warnings.length > 0 && (
                   <p
-                    className="mt-2 max-w-[320px] truncate text-[11.5px] text-[#FCA5A5]"
+                    className="mt-2 max-w-[310px] truncate text-[11px] text-[#FCA5A5]"
                     title={uninstallSummary.warnings.join(" | ")}
                   >
                     {uninstallSummary.warnings[0]}
@@ -694,23 +703,23 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => void closeInstallerWindow()}
-                  className="ep-glass-pill mt-6 h-10 cursor-pointer rounded-full px-7 text-xs font-medium text-white"
+                  className="ep-glass-pill mt-5 h-8.5 cursor-pointer rounded-full px-6 text-xs font-medium text-white"
                 >
                   Close
                 </button>
               </div>
             ) : (
-              <div key="install-complete" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
-                <div className="relative mb-4">
-                  <BrandMark size={66} className="ep-icon-rest" />
+              <div key="install-complete" className="ep-view-enter flex w-full max-w-[320px] flex-col items-center text-center">
+                <div className="relative mb-3">
+                  <BrandMark size={50} className="ep-icon-rest" />
                   <span
                     aria-hidden="true"
-                    className="absolute -bottom-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full bg-[#22C55E] text-[#052E16] shadow-lg ring-2 ring-[#0A0A0F]"
+                    className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#22C55E] text-[#052E16] shadow-md ring-2 ring-[#0c0d11]"
                   >
-                    <InstallerCheckIcon size={13} />
+                    <InstallerCheckIcon size={11} />
                   </span>
                 </div>
-                <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-white">
+                <h1 className="text-[18px] font-semibold tracking-tight text-white">
                   {effectiveMode === "update"
                     ? "Epilod Party updated"
                     : effectiveMode === "repair"
@@ -725,33 +734,33 @@ export function App() {
                       : "Epilod Party is ready for showtime."}
                 </p>
                 {launchError && (
-                  <p className="mt-2 max-w-[320px] truncate text-[11.5px] text-[#FCA5A5]" title={launchError}>
+                  <p className="mt-2 max-w-[310px] truncate text-[11px] text-[#FCA5A5]" title={launchError}>
                     {launchError}
                   </p>
                 )}
-                <div className="mt-6 flex items-center justify-center gap-2.5">
+                <div className="mt-4 flex items-center justify-center gap-2">
                   <button
                     type="button"
                     onClick={() => void closeInstallerWindow()}
-                    className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                    className="ep-glass-pill h-8.5 cursor-pointer rounded-full px-4 text-xs font-medium text-white/75 hover:text-white"
                   >
                     Close
                   </button>
                   <button
                     type="button"
                     onClick={() => void handleLaunch()}
-                    className="ep-glass-primary-pill inline-flex h-10 cursor-pointer items-center gap-1.5 rounded-full px-6 text-[13px] font-medium text-white"
+                    className="ep-glass-primary-pill inline-flex h-8.5 cursor-pointer items-center gap-1.5 rounded-full px-5 text-xs font-medium text-white"
                   >
-                    <InstallerLaunchIcon size={13} />
+                    <InstallerLaunchIcon size={12} />
                     <span>Launch Epilod Party</span>
                   </button>
                 </div>
               </div>
             )
           ) : isErrorOrCancelled ? (
-            <div key="error-view" className="ep-view-enter flex w-full max-w-[340px] flex-col items-center text-center">
-              <BrandMark size={58} className="ep-icon-rest mb-3.5 opacity-90" />
-              <h1 className="text-[19px] font-semibold tracking-[-0.02em] text-white">
+            <div key="error-view" className="ep-view-enter flex w-full max-w-[320px] flex-col items-center text-center">
+              <BrandMark size={46} className="ep-icon-rest mb-2.5 opacity-85" />
+              <h1 className="text-[17px] font-semibold tracking-tight text-white">
                 {telemetry.phase === "cancelled"
                   ? effectiveMode === "update"
                     ? "Update cancelled"
@@ -765,7 +774,7 @@ export function App() {
                         : "Something got in the way"}
               </h1>
               <p
-                className={`mt-1.5 line-clamp-2 text-xs leading-relaxed ${
+                className={`mt-1 line-clamp-2 text-xs leading-relaxed ${
                   telemetry.phase === "cancelled" ? "text-white/60" : "text-[#FCA5A5]"
                 }`}
                 title={cleanLiveError}
@@ -773,13 +782,13 @@ export function App() {
                 {cleanLiveError}
               </p>
 
-              <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
                 {hasLockedProcessError && runningProcesses.length > 0 && !isUninstallMode ? (
                   <>
                     <button
                       type="button"
                       onClick={handleResetToReady}
-                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                      className="ep-glass-pill h-8.5 cursor-pointer rounded-full px-4 text-xs font-medium text-white/75 hover:text-white"
                     >
                       Back
                     </button>
@@ -787,7 +796,7 @@ export function App() {
                       type="button"
                       disabled={isClosingProcesses}
                       onClick={() => void handleCloseProcesses()}
-                      className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white disabled:opacity-45"
+                      className="ep-glass-primary-pill h-8.5 cursor-pointer rounded-full px-5 text-xs font-medium text-white disabled:opacity-45"
                     >
                       {isClosingProcesses ? "Closing…" : "Close & Retry"}
                     </button>
@@ -796,7 +805,7 @@ export function App() {
                   <button
                     type="button"
                     onClick={() => void loadDefaults()}
-                    className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-7 text-[13px] font-medium text-white"
+                    className="ep-glass-primary-pill h-8.5 cursor-pointer rounded-full px-6 text-xs font-medium text-white"
                   >
                     Try Again
                   </button>
@@ -805,7 +814,7 @@ export function App() {
                     <button
                       type="button"
                       onClick={() => void handleLaunch()}
-                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-4 text-xs font-medium text-white/80 hover:text-white"
+                      className="ep-glass-pill h-8.5 cursor-pointer rounded-full px-3.5 text-xs font-medium text-white/80 hover:text-white"
                     >
                       Relaunch previous version
                     </button>
@@ -813,7 +822,7 @@ export function App() {
                       type="button"
                       disabled={installBlocked}
                       onClick={() => void handleStartInstall()}
-                      className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-5 text-[13px] font-medium text-white disabled:opacity-45"
+                      className="ep-glass-primary-pill h-8.5 cursor-pointer rounded-full px-4.5 text-xs font-medium text-white disabled:opacity-45"
                     >
                       Retry update
                     </button>
@@ -823,14 +832,14 @@ export function App() {
                     <button
                       type="button"
                       onClick={() => void closeInstallerWindow()}
-                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                      className="ep-glass-pill h-8.5 cursor-pointer rounded-full px-4 text-xs font-medium text-white/75 hover:text-white"
                     >
                       Close
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleStartUninstall()}
-                      className="ep-glass-danger-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white"
+                      className="ep-glass-danger-pill h-8.5 cursor-pointer rounded-full px-5 text-xs font-medium text-white"
                     >
                       Retry uninstall
                     </button>
@@ -840,7 +849,7 @@ export function App() {
                     <button
                       type="button"
                       onClick={handleResetToReady}
-                      className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                      className="ep-glass-pill h-8.5 cursor-pointer rounded-full px-4 text-xs font-medium text-white/75 hover:text-white"
                     >
                       Back
                     </button>
@@ -848,7 +857,7 @@ export function App() {
                       type="button"
                       disabled={installBlocked}
                       onClick={() => void handleStartInstall()}
-                      className="ep-glass-primary-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white disabled:opacity-45"
+                      className="ep-glass-primary-pill h-8.5 cursor-pointer rounded-full px-5 text-xs font-medium text-white disabled:opacity-45"
                     >
                       Try Again
                     </button>
@@ -857,9 +866,9 @@ export function App() {
               </div>
             </div>
           ) : isUninstallMode ? (
-            <div key="uninstall-ready" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
-              <BrandMark size={62} className="ep-icon-rest mb-3.5 opacity-85" />
-              <h1 className="text-[19px] font-semibold tracking-[-0.02em] text-white">
+            <div key="uninstall-ready" className="ep-view-enter flex w-full max-w-[320px] flex-col items-center text-center">
+              <BrandMark size={48} className="ep-icon-rest mb-2.5 opacity-85" />
+              <h1 className="text-[18px] font-semibold tracking-tight text-white">
                 Remove Epilod Party?
               </h1>
               <p className="mt-1 text-xs text-white/60">
@@ -871,24 +880,24 @@ export function App() {
                 role="switch"
                 aria-checked={removeUserData}
                 onClick={() => setRemoveUserData((v) => !v)}
-                className="ep-glass-well mt-4 flex w-full cursor-pointer items-center justify-between gap-3 rounded-2xl px-3.5 py-2 text-left text-xs text-white/80 hover:text-white"
+                className="ep-glass-well mt-3 flex w-full cursor-pointer items-center justify-between gap-3 rounded-2xl px-3 py-1.5 text-left text-xs text-white/80 hover:text-white"
               >
                 <span className="truncate">Also clear local logs &amp; cache</span>
                 <GlassSwitchTrack checked={removeUserData} />
               </button>
 
-              <div className="mt-4 flex items-center justify-center gap-2.5">
+              <div className="mt-3.5 flex items-center justify-center gap-2">
                 <button
                   type="button"
                   onClick={() => void closeInstallerWindow()}
-                  className="ep-glass-pill h-10 cursor-pointer rounded-full px-5 text-xs font-medium text-white/75 hover:text-white"
+                  className="ep-glass-pill h-8.5 cursor-pointer rounded-full px-4 text-xs font-medium text-white/75 hover:text-white"
                 >
                   Keep App
                 </button>
                 <button
                   type="button"
                   onClick={() => void handleStartUninstall()}
-                  className="ep-glass-danger-pill h-10 cursor-pointer rounded-full px-6 text-[13px] font-medium text-white"
+                  className="ep-glass-danger-pill h-8.5 cursor-pointer rounded-full px-5 text-xs font-medium text-white"
                 >
                   Uninstall
                 </button>
@@ -933,64 +942,64 @@ export function App() {
               onSaveAndInstall={() => void handleStartInstall()}
             />
           ) : (
-            <div key="install-ready" className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
-              <BrandMark size={68} className="ep-icon-rest mb-4" />
-              <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-white">
+            <div key="install-ready" className="ep-view-enter flex w-full max-w-[320px] flex-col items-center text-center">
+              <BrandMark size={50} className="ep-icon-rest mb-2.5" />
+              <h1 className="text-[18px] font-semibold tracking-tight text-white">
                 Epilod Party
               </h1>
-              <p className="mt-1 text-xs text-white/60">{readySubtitle}</p>
+              <p className="mt-1 text-xs text-white/60 font-normal">{readySubtitle}</p>
 
               {runningProcesses.length > 0 && !defaults?.autoStart ? (
-                <div className="ep-glass-well mt-3.5 flex items-center gap-2 rounded-full pl-3.5 pr-1 py-1 text-xs">
+                <div className="ep-glass-well mt-2.5 flex items-center gap-2 rounded-full pl-3 pr-1 py-0.5 text-xs">
                   <span className="truncate text-white/75">Epilod Party is running</span>
                   <button
                     type="button"
                     disabled={isClosingProcesses}
                     onClick={() => void handleCloseProcesses()}
-                    className="ep-glass-pill shrink-0 cursor-pointer rounded-full px-3 py-1 text-[11px] font-medium text-white disabled:opacity-45"
+                    className="ep-glass-pill shrink-0 cursor-pointer rounded-full px-2.5 py-0.5 text-[11px] font-medium text-white disabled:opacity-45"
                   >
                     {isClosingProcesses ? "Closing…" : "Close & Continue"}
                   </button>
                 </div>
               ) : payloadMissing ? (
-                <p className="mt-3 text-xs text-[#FCA5A5]">
+                <p className="mt-2 text-xs text-[#FCA5A5]">
                   Installer payload is missing.
                 </p>
               ) : pathError ? (
                 <button
                   type="button"
                   onClick={() => setShowCustomize(true)}
-                  className="mt-3 max-w-[320px] cursor-pointer truncate text-xs text-[#FCA5A5] hover:underline"
+                  className="mt-2 max-w-[300px] cursor-pointer truncate text-xs text-[#FCA5A5] hover:underline"
                   title={pathError}
                 >
                   {pathError}
                 </button>
               ) : insufficientDiskSpace && freeDiskBytes !== null ? (
-                <p className="mt-3 text-xs text-[#FCA5A5]">
+                <p className="mt-2 text-xs text-[#FCA5A5]">
                   Needs {formatBytes(peakRequiredBytes)} free ({formatBytes(freeDiskBytes)} left).
                 </p>
               ) : otherInstallDir ? (
                 <p
-                  className="mt-3 max-w-[320px] truncate text-xs text-[#C4B5FD]"
+                  className="mt-2 max-w-[300px] truncate text-xs text-white/65"
                   title={otherInstallDir}
                 >
                   Replaces existing{otherInstallVersion ? ` v${otherInstallVersion}` : ""} copy on this PC
                 </p>
               ) : null}
 
-              <div className="mt-6 flex items-center justify-center">
+              <div className="mt-4 flex items-center justify-center">
                 <button
                   type="button"
                   disabled={installBlocked}
                   onClick={() => void handleStartInstall()}
-                  className="ep-glass-primary-pill inline-flex h-10 cursor-pointer items-center gap-2 rounded-full px-8 text-[13px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
+                  className="ep-glass-primary-pill inline-flex h-9 cursor-pointer items-center gap-2 rounded-full px-7 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <span>{installCtaLabel}</span>
-                  <InstallerArrowIcon direction="right" size={14} />
+                  <InstallerArrowIcon direction="right" size={13} />
                 </button>
               </div>
 
-              <span className="num mt-3.5 text-xs text-white/35">
+              <span className="num mt-2.5 text-[11px] text-white/35 font-medium tracking-wide">
                 {versionLabel} · Windows
               </span>
             </div>

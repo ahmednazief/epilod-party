@@ -697,6 +697,25 @@ mod windows_app {
             .plugin(tauri_plugin_dialog::init())
             .manage(InstallerState::default())
             .manage(launch_ctx)
+            .setup(|app| {
+                if let Some(win) = app.get_webview_window("main") {
+                    if let Ok(hwnd) = win.hwnd() {
+                        use windows_sys::Win32::Graphics::Dwm::{
+                            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+                        };
+                        let preference = DWMWCP_ROUND;
+                        unsafe {
+                            DwmSetWindowAttribute(
+                                hwnd.0 as _,
+                                DWMWA_WINDOW_CORNER_PREFERENCE as _,
+                                &preference as *const _ as *const _,
+                                std::mem::size_of::<u32>() as u32,
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            })
             .invoke_handler(tauri::generate_handler![
                 get_installer_defaults,
                 check_install_dir,

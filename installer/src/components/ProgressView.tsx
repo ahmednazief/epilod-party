@@ -53,7 +53,7 @@ interface ProgressViewProps {
   onCancel: () => void;
 }
 
-/** Focused progress screen with continuously rotating warm titles and liquid percentage bar. */
+/** Focused progress screen with rotating status titles and dark greyish liquid glass progress bar. */
 export function ProgressView({
   mode,
   isUninstall,
@@ -83,19 +83,19 @@ export function ProgressView({
   const activePhrase = pctRounded >= 88 ? pool[pool.length - 1] : pool[stepIdx] ?? pool[0];
 
   return (
-    <div className="ep-view-enter flex w-full max-w-[330px] flex-col items-center text-center">
-      <BrandMark size={64} className="ep-icon-alive mb-5" />
+    <div className="ep-view-enter flex w-full max-w-[320px] flex-col items-center text-center">
+      <BrandMark size={50} className="ep-icon-rest mb-3.5" />
 
-      <div className="flex h-7 items-center justify-center">
+      <div className="flex h-6 items-center justify-center">
         <div
           key={activePhrase}
-          className="ep-phrase-swap text-[16px] font-medium tracking-[-0.015em] text-white"
+          className="ep-phrase-swap text-[15px] font-medium tracking-tight text-white"
         >
           {activePhrase}
         </div>
       </div>
 
-      <div className="mt-4 w-full space-y-2">
+      <div className="mt-3.5 w-full space-y-2">
         <div className="ep-scrubber-track h-1.5 w-full overflow-hidden rounded-full">
           <div
             className="ep-scrubber-fill h-full rounded-full transition-[width,opacity] duration-150 ease-out"
@@ -106,9 +106,9 @@ export function ProgressView({
           />
         </div>
 
-        <div className="flex items-center justify-between text-xs">
+        <div className="flex items-center justify-between text-[11.5px]">
           <span className="text-white/45">{getOperationFooterLabel(mode, isUninstall)}</span>
-          <span className="num font-medium text-white/75">{pctRounded}%</span>
+          <span className="num font-medium text-white/70">{pctRounded}%</span>
         </div>
       </div>
 
@@ -116,7 +116,7 @@ export function ProgressView({
         <button
           type="button"
           onClick={onCancel}
-          className="ep-glass-pill mt-5 h-8 cursor-pointer rounded-full px-4 text-xs font-medium text-white/65 hover:text-white"
+          className="ep-glass-pill mt-4 h-7.5 cursor-pointer rounded-full px-4 text-xs font-medium text-white/65 hover:text-white"
         >
           Cancel
         </button>

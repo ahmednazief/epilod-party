@@ -20,8 +20,8 @@
         "maximizable": false,
         "center": true,
         "decorations": false,
-        "transparent": true,
-        "shadow": false
+        "transparent": false,
+        "shadow": true
       }
     ],
     "security": {
