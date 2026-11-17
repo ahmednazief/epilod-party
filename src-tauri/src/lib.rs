@@ -9,6 +9,8 @@ pub mod p2p;
 #[cfg(windows)]
 pub mod sparse_align;
 #[cfg(windows)]
+pub mod subtitles;
+#[cfg(windows)]
 pub mod syncplay;
 #[cfg(windows)]
 pub mod updater;
@@ -173,7 +175,8 @@ pub fn resolve_update_target_dir(
 mod windows_app {
     use super::*;
     use crate::autosync::{
-        execute_auto_sync, execute_two_anchor_sync, AutoSyncController, AutoSyncResultDto,
+        detect_embedded_subtitle_languages_from_video, execute_auto_sync, execute_two_anchor_sync,
+        AutoSyncController, AutoSyncResultDto, DetectedSubtitleLangDto, SubtitleLangProbeTrackDto,
     };
     use crate::mpv::hwnd::PhysicalRect;
     use crate::mpv::MpvController;
@@ -652,6 +655,47 @@ mod windows_app {
     async fn subtitle_cancel_auto_sync(state: State<'_, AppState>) -> Result<(), String> {
         state.autosync.cancel();
         Ok(())
+    }
+
+    #[tauri::command]
+    async fn subtitle_search_online(
+        state: State<'_, AppState>,
+        req: crate::subtitles::SubtitleSearchRequest,
+    ) -> Result<crate::subtitles::SubtitleSearchResultDto, String> {
+        check_rate(&state, "sub_online_search", 16, Duration::from_secs(6))?;
+        let opts = state.network_policy.options();
+        crate::subtitles::search_online_subtitles_impl(req, opts).await
+    }
+
+    #[tauri::command]
+    async fn subtitle_download_online(
+        state: State<'_, AppState>,
+        req: crate::subtitles::SubtitleDownloadRequest,
+    ) -> Result<crate::subtitles::DownloadedSubtitleDto, String> {
+        check_rate(&state, "sub_online_download", 16, Duration::from_secs(6))?;
+        crate::subtitles::download_online_subtitle_impl(req).await
+    }
+
+    #[tauri::command]
+    async fn subtitle_auto_fetch_online(
+        state: State<'_, AppState>,
+        req: crate::subtitles::AutoFetchSubtitleRequest,
+    ) -> Result<crate::subtitles::AutoFetchSubtitleResultDto, String> {
+        check_rate(&state, "sub_online_autofetch", 12, Duration::from_secs(6))?;
+        let opts = state.network_policy.options();
+        crate::subtitles::auto_fetch_online_subtitle_impl(req, opts).await
+    }
+
+    #[tauri::command]
+    async fn detect_embedded_subtitle_languages(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        video_path: String,
+        tracks: Vec<SubtitleLangProbeTrackDto>,
+    ) -> Result<Vec<DetectedSubtitleLangDto>, String> {
+        check_rate(&state, "sub_lang_probe", 20, Duration::from_secs(4))?;
+        let opts = state.network_policy.options();
+        detect_embedded_subtitle_languages_from_video(&app, &video_path, &tracks, opts).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1427,6 +1471,10 @@ mod windows_app {
                 subtitle_auto_sync,
                 subtitle_two_anchor_sync,
                 subtitle_cancel_auto_sync,
+                subtitle_search_online,
+                subtitle_download_online,
+                subtitle_auto_fetch_online,
+                detect_embedded_subtitle_languages,
                 detect_video_intro,
                 intro_cancel_detect,
                 window_set_fullscreen,

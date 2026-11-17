@@ -11,9 +11,11 @@ import {
 import {
   MenuAddFileIcon,
   MenuBoldIcon,
+  MenuDownloadIcon,
   MenuEncodingIcon,
   MenuFontIcon,
   MenuOverrideFansubIcon,
+  MenuSearchIcon,
   MenuSubtitlesOffIcon,
 } from "./ui/MenuIcons";
 import { PlayerCaptionsIcon } from "./ui/PlayerIcons";
@@ -32,6 +34,10 @@ import {
   safeMpvCall,
   subtitleAutoSync,
   subtitleCancelAutoSync,
+  subtitleDownloadOnline,
+  subtitleSearchOnline,
+  type OnlineSubtitleCandidate,
+  type OnlineSubtitleSearchResult,
   type SubtitleEncodingHint,
 } from "../lib/mpv";
 import { runWithHiddenMpvSurface } from "../lib/playerActions";
@@ -39,7 +45,7 @@ import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
   buildSubTrackOptions,
   formatDelayLabel,
-  isBitmapSubtitleTrack,
+  formatSubtitleTrackDisplay,
   resolveEmbeddedSyncTarget,
   selectSubTrack,
 } from "../lib/tracks";
@@ -48,9 +54,11 @@ import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import {
   buildSubStyleParams,
+  deriveCleanSearchQuery,
   SUBTITLE_COLORS,
   SUBTITLE_ENCODING_OPTIONS,
   SUBTITLE_FONTS,
+  SUBTITLE_SEARCH_LANGUAGES,
   useSubtitleStore,
 } from "../store/useSubtitleStore";
 import { Scrubber } from "./ui/Scrubber";
@@ -73,9 +81,13 @@ function applyStyleNow(
 export const SubtitlePanel = memo(function SubtitlePanel() {
   const videoPath = useAppStore((s) => s.selectedFilePath);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
+  const preferredSubtitleLangs = useAppStore((s) => s.preferredSubtitleLangs);
+  const setPreferredSubtitleLangs = useAppStore((s) => s.setPreferredSubtitleLangs);
+  const openSubtitlesApiKey = useAppStore((s) => s.openSubtitlesApiKey);
 
   const loaded = usePlayerStore((s) => s.loaded);
   const tracks = usePlayerStore((s) => s.tracks);
+  const detectedSubLangs = usePlayerStore((s) => s.detectedSubLangs);
 
   const loadedFilePath = useSubtitleStore((s) => s.loadedFilePath);
   const originalFilePath = useSubtitleStore((s) => s.originalFilePath);
@@ -92,6 +104,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const autoSyncBusy = useSubtitleStore((s) => s.autoSyncBusy);
   const autoSyncOutcome = useSubtitleStore((s) => s.autoSyncOutcome);
   const autoSyncError = useSubtitleStore((s) => s.autoSyncError);
+  const autoFetchStatus = useSubtitleStore((s) => s.autoFetchStatus);
+  const autoFetchMessage = useSubtitleStore((s) => s.autoFetchMessage);
 
   const setFont = useSubtitleStore((s) => s.setFont);
   const setBold = useSubtitleStore((s) => s.setBold);
@@ -109,9 +123,28 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const setAutoSyncBusy = useSubtitleStore((s) => s.setAutoSyncBusy);
   const setAutoSyncResult = useSubtitleStore((s) => s.setAutoSyncResult);
   const setAutoSyncError = useSubtitleStore((s) => s.setAutoSyncError);
+  const setAutoFetchState = useSubtitleStore((s) => s.setAutoFetchState);
 
   const pushNote = useNotificationStore((s) => s.push);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showOnlineSearch, setShowOnlineSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(() => deriveCleanSearchQuery(videoPath));
+  const [searchLang, setSearchLang] = useState<string>(() => preferredSubtitleLangs || "all");
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchResult, setSearchResult] = useState<OnlineSubtitleSearchResult | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const searchGenRef = useRef(0);
+  const lastVideoQueryPathRef = useRef<string | null>(videoPath);
+
+  useEffect(() => {
+    if (lastVideoQueryPathRef.current !== videoPath) {
+      lastVideoQueryPathRef.current = videoPath;
+      setSearchQuery(deriveCleanSearchQuery(videoPath));
+      setSearchResult(null);
+      setSearchError(null);
+    }
+  }, [videoPath]);
 
   const throttledApplyStyle = useMemo(
     () => createLeadingTrailingThrottle(() => applyStyleNow(), 60),
@@ -131,7 +164,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
     isClosedCaption: subIsClosedCaption,
     ffIndex: embeddedSubFfIdx,
     embeddedSubIdx: resolvedEmbeddedSubIdx,
-  } = resolveEmbeddedSyncTarget(tracks);
+  } = resolveEmbeddedSyncTarget(tracks, detectedSubLangs);
   const currentSubVal = selectedSub ? String(selectedSub.id) : "none";
   const isEmbeddedSelected = Boolean(selectedSub && !selectedSub.external);
   const effectiveExternalSubPath = isEmbeddedSelected
@@ -161,10 +194,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       : resolvedEmbeddedSubIdx
     : null;
 
-  const canAutoSync =
-    loaded &&
-    Boolean(videoPath) &&
-    (hasExternalFile || (syncTargetEmbedded !== null && !isBitmapSubtitleTrack(syncTargetEmbedded)));
+  const canAutoSync = loaded && Boolean(videoPath) && (hasExternalFile || syncTargetEmbedded !== null);
 
   const handleLoadExternalSubtitle = async () => {
     if (!loaded) {
@@ -247,24 +277,36 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       ) {
         return;
       }
-      const activeSub = usePlayerStore
-        .getState()
-        .tracks.find((t) => t.type === "sub" && t.selected);
-      if (activeSub?.external) {
-        await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
+      if (result.bitmapInPlace || !result.syncedSubtitlePath) {
+        await mpvSetSubDelay(result.offsetSecs);
+        setDelaySecs(result.offsetSecs);
+        setAutoSyncResult(result);
+        pushNote(
+          "success",
+          result.driftApplied
+            ? `Image subtitles aligned (${formatDelayLabel(result.offsetSecs)}).`
+            : `Image subtitles matched cleanly to voice (${formatDelayLabel(result.offsetSecs)}).`,
+        );
+      } else {
+        const activeSub = usePlayerStore
+          .getState()
+          .tracks.find((t) => t.type === "sub" && t.selected);
+        if (activeSub?.external) {
+          await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
+        }
+        await mpvAddSubtitle(result.syncedSubtitlePath, "utf8");
+        await mpvSetSubDelay(0);
+        setDelaySecs(0);
+        setLoadedTrack(result.syncedSubtitlePath, result.sourceSubtitlePath);
+        setAutoSyncResult(result);
+        applyStyleNow();
+        pushNote(
+          "success",
+          result.segmentsApplied && result.segmentsApplied > 1
+            ? `Subtitles matched across ${result.segmentsApplied} timing segments.`
+            : "Subtitles matched cleanly to voice.",
+        );
       }
-      await mpvAddSubtitle(result.syncedSubtitlePath, "utf8");
-      await mpvSetSubDelay(0);
-      setDelaySecs(0);
-      setLoadedTrack(result.syncedSubtitlePath, result.sourceSubtitlePath);
-      setAutoSyncResult(result);
-      applyStyleNow();
-      pushNote(
-        "success",
-        result.segmentsApplied && result.segmentsApplied > 1
-          ? `Subtitles matched across ${result.segmentsApplied} timing segments.`
-          : "Subtitles matched cleanly to voice.",
-      );
     } catch (err) {
       if (
         useSubtitleStore.getState().sessionGen !== startGen ||
@@ -287,6 +329,93 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const handleNudge = (delta: number) => {
     const next = nudgeDelay(delta);
     safeMpvCall(mpvSetSubDelay(next), "mpvSetSubDelay");
+  };
+
+  const handleRunOnlineSearch = async (
+    overrideQuery?: string,
+    overrideLang?: string,
+  ) => {
+    if (!isDesktop()) {
+      setSearchError("Online subtitle search requires the Windows desktop app.");
+      return;
+    }
+    const q = (overrideQuery ?? searchQuery).trim();
+    const lang = overrideLang ?? searchLang;
+    if (!q && !videoPath) {
+      setSearchError("Type a movie or show title to search.");
+      return;
+    }
+    const gen = ++searchGenRef.current;
+    setSearchBusy(true);
+    setSearchError(null);
+    try {
+      const res = await subtitleSearchOnline({
+        query: q || null,
+        videoPath: videoPath ?? null,
+        languages: lang,
+        apiKey: openSubtitlesApiKey || null,
+      });
+      if (searchGenRef.current !== gen) return;
+      setSearchResult(res);
+      if (res.items.length === 0) {
+        setSearchError("No subtitles matched. Try another title or language.");
+      }
+    } catch (err) {
+      if (searchGenRef.current !== gen) return;
+      setSearchError(formatUserError(err, "Could not search online subtitles."));
+    } finally {
+      if (searchGenRef.current === gen) {
+        setSearchBusy(false);
+      }
+    }
+  };
+
+  const handleToggleOnlineSearch = () => {
+    const next = !showOnlineSearch;
+    setShowOnlineSearch(next);
+    if (next && !searchResult && !searchBusy && (searchQuery.trim() || videoPath)) {
+      void handleRunOnlineSearch();
+    }
+  };
+
+  const handleDownloadOnlineCandidate = async (item: OnlineSubtitleCandidate) => {
+    if (downloadingId) return;
+    if (!loaded) {
+      pushNote("info", "Open a movie or episode before loading a subtitle.");
+      return;
+    }
+    setDownloadingId(item.id);
+    setSearchError(null);
+    try {
+      const dl = await subtitleDownloadOnline({
+        downloadUrl: item.downloadUrl,
+        fileId: item.fileId,
+        fileName: item.fileName,
+        language: item.language,
+        matchKind: item.matchKind,
+        videoPath: videoPath ?? null,
+        apiKey: openSubtitlesApiKey || null,
+      });
+      const activeSub = usePlayerStore
+        .getState()
+        .tracks.find((t) => t.type === "sub" && t.selected);
+      if (activeSub?.external) {
+        await mpvRemoveSubtitle(activeSub.id).catch(() => undefined);
+      }
+      await mpvAddSubtitle(dl.subtitlePath, "utf8");
+      await mpvSetSubDelay(0);
+      setDelaySecs(0);
+      setLoadedTrack(dl.subtitlePath, dl.subtitlePath);
+      setAutoFetchState("loaded", `Loaded ${dl.languageLabel}`);
+      applyStyleNow({ visible: true });
+      pushNote("success", `Loaded ${dl.languageLabel} subtitle: ${item.releaseName}`);
+    } catch (err) {
+      const msg = formatUserError(err, "Failed downloading subtitle.");
+      setSearchError(msg);
+      pushNote("error", msg);
+    } finally {
+      setDownloadingId(null);
+    }
   };
 
   const nearestSizeLabel = QUICK_SIZES.reduce((best, cur) =>
@@ -324,8 +453,10 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 "selectSubTrack",
               );
             } else {
-              pushNote("info", "No subtitle tracks in this video yet — choose a subtitle file.");
-              void handleLoadExternalSubtitle();
+              setShowOnlineSearch(true);
+              if (!searchResult && !searchBusy && (searchQuery.trim() || videoPath)) {
+                void handleRunOnlineSearch();
+              }
             }
           }}
           className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
@@ -342,6 +473,149 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           </span>
           <GlassSwitchTrack checked={subsActive} size="sm" />
         </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          aria-expanded={showOnlineSearch}
+          onClick={handleToggleOnlineSearch}
+          className={`ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs cursor-pointer ${
+            showOnlineSearch ? "text-white font-medium" : "text-accent-soft hover:text-white"
+          }`}
+          data-active={showOnlineSearch}
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="w-4 h-4 flex items-center justify-center shrink-0">
+              <MenuSearchIcon size={14} />
+            </span>
+            <span className="truncate">
+              {autoFetchStatus === "searching" ? "Searching Online…" : "Search Subtitles Online"}
+            </span>
+          </span>
+          <AppChevronIcon
+            direction="right"
+            size={14}
+            className={`text-white/60 shrink-0 transition-transform duration-200 ${
+              showOnlineSearch ? "rotate-90" : ""
+            }`}
+          />
+        </button>
+
+        <AnimatedCollapse open={showOnlineSearch} innerClassName="pt-1.5 space-y-2.5">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleRunOnlineSearch();
+            }}
+            className="flex items-center gap-1.5 px-1"
+          >
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Movie or show (e.g. Inception)"
+              aria-label="Search subtitles query"
+              className="flex-1 min-w-0 h-8 px-2.5 rounded-xl bg-white/[0.05] border border-white/12 focus:border-accent-soft/70 focus:outline-none text-xs text-white placeholder:text-white/35"
+            />
+            <button
+              type="submit"
+              disabled={searchBusy}
+              className="ep-glass-pill ep-press h-8 px-3 rounded-xl text-xs font-medium text-white shrink-0 cursor-pointer disabled:opacity-45"
+            >
+              {searchBusy ? "…" : "Search"}
+            </button>
+          </form>
+
+          <div className="px-1">
+            <SelectMenu
+              ariaLabel="Subtitle Search Language"
+              placement="bottom"
+              triggerIcon={<MenuEncodingIcon size={13} />}
+              value={searchLang}
+              options={SUBTITLE_SEARCH_LANGUAGES}
+              onChange={(val) => {
+                setSearchLang(val);
+                if (val !== "all") {
+                  setPreferredSubtitleLangs(val);
+                }
+                if (searchQuery.trim() || videoPath) {
+                  void handleRunOnlineSearch(searchQuery, val);
+                }
+              }}
+            />
+          </div>
+
+          {searchBusy && (
+            <div className="px-3 py-1.5 text-[11px] text-secondary">
+              Searching OpenSubtitles &amp; matching file hash…
+            </div>
+          )}
+
+          {!searchBusy && searchResult?.resolvedTitle && (
+            <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] text-white/60">
+              <span className="truncate">
+                {searchResult.resolvedTitle}
+                {searchResult.resolvedYear ? ` (${searchResult.resolvedYear})` : ""}
+                {searchResult.parsedSeason && searchResult.parsedEpisode
+                  ? ` · S${String(searchResult.parsedSeason).padStart(2, "0")}E${String(
+                      searchResult.parsedEpisode,
+                    ).padStart(2, "0")}`
+                  : ""}
+              </span>
+              {searchResult.items.some((i) => i.matchKind === "hash") && (
+                <span className="text-ok font-medium shrink-0">Exact hash</span>
+              )}
+            </div>
+          )}
+
+          {searchError && (
+            <div className="px-3 text-[11px] text-warn leading-relaxed">{searchError}</div>
+          )}
+
+          {searchResult && searchResult.items.length > 0 && (
+            <div className="ep-menu-scroll max-h-48 overflow-y-auto overflow-x-hidden pr-1 space-y-1.5">
+              {searchResult.items.slice(0, 40).map((item) => {
+                const isDownloading = downloadingId === item.id;
+                const isExact = item.matchKind === "hash";
+                const isRelease = item.matchKind === "release";
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    disabled={Boolean(downloadingId) || !loaded}
+                    onClick={() => void handleDownloadOnlineCandidate(item)}
+                    title={!loaded ? "Open a video to load subtitles" : item.releaseName}
+                    className="ep-menu-row ep-press w-full flex items-center justify-between gap-2.5 px-2.5 py-2 text-left cursor-pointer disabled:opacity-45 disabled:pointer-events-none"
+                  >
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="text-[11.5px] font-medium text-primary/95 truncate">
+                        {item.releaseName}
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] text-white/50">
+                        <span className="uppercase font-semibold text-white/75">
+                          {item.languageLabel}
+                        </span>
+                        {isExact && <span className="text-ok font-medium">Exact Match</span>}
+                        {!isExact && isRelease && (
+                          <span className="text-accent-soft font-medium">Release Match</span>
+                        )}
+                        {item.fps && <span className="num">{item.fps.toFixed(2)} fps</span>}
+                        {item.hearingImpaired && <span>HI</span>}
+                      </div>
+                    </div>
+                    <span className="w-5 h-5 flex items-center justify-center shrink-0 text-accent-soft">
+                      {isDownloading ? (
+                        <span className="text-[10px] font-semibold">…</span>
+                      ) : (
+                        <MenuDownloadIcon size={13} />
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </AnimatedCollapse>
 
         <button
           type="button"
@@ -374,31 +648,19 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           </div>
         ) : subOptions.length === 0 ? (
           <div className="px-3 py-1.5 text-xs text-muted">
-            No embedded tracks — add a subtitle file
+            {autoFetchStatus === "searching"
+              ? autoFetchMessage ?? "Searching online subtitles automatically…"
+              : "No tracks yet — search online or add a file"}
           </div>
         ) : (
           <div className="ep-menu-scroll max-h-40 overflow-y-auto overflow-x-hidden pr-1 space-y-1.5">
             {subOptions.map((opt) => {
               const active = opt.value === currentSubVal;
               const t = opt.track!;
-              const primaryLabel =
-                t.title?.trim() ||
-                (t.external
-                  ? loadedFilePath
-                    ? getFileDisplayName(loadedFilePath)
-                    : "External Subtitles"
-                  : t.lang
-                    ? `${t.lang.trim().toUpperCase()} Subtitles`
-                    : `Subtitle ${t.id}`);
-              const metaTags: string[] = [];
-              if (t.title?.trim() && t.lang?.trim()) {
-                metaTags.push(t.lang.trim().toUpperCase());
-              }
-              if (t.external) {
-                metaTags.push("External");
-              } else if (t.codec?.trim()) {
-                metaTags.push(t.codec.trim().toUpperCase());
-              }
+              const { label: primaryLabel, metaTags } = formatSubtitleTrackDisplay(t, {
+                detectedLang: detectedSubLangs[t.id],
+                externalFileName: loadedFilePath ? getFileDisplayName(loadedFilePath) : null,
+              });
               return (
                 <button
                   key={opt.value}
@@ -440,17 +702,17 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           </div>
         )}
 
-        {(subIsBitmap || autoSyncError) && (
+        {((subIsBitmap && fallbackEmbeddedSub) || autoSyncError) && (
           <div className="px-3 pt-1 text-[10.5px] space-y-1">
-            {subIsBitmap && (
+            {subIsBitmap && fallbackEmbeddedSub && (
               <div className="flex items-start gap-1.5 text-warn">
                 <AppAlertIcon variant="info" size={12} className="shrink-0 mt-0.5" />
                 <span>
-                  {fallbackEmbeddedSub
-                    ? `Image subtitles (${selectedSub?.codec}) keep built-in timing; Magic Sync will align using ${
-                        fallbackEmbeddedSub.title?.trim() || `Subtitle ${fallbackEmbeddedSub.id}`
-                      }${fallbackEmbeddedSub.codec ? ` (${fallbackEmbeddedSub.codec.toUpperCase()})` : ""}.`
-                    : `Image subtitles (${selectedSub?.codec}) contain pictures rather than text and have no matching-language text track; add an external subtitle file to use Magic Sync.`}
+                  {`Image subtitles (${selectedSub?.codec}) keep built-in timing; Magic Sync will align using ${
+                    formatSubtitleTrackDisplay(fallbackEmbeddedSub, {
+                      detectedLang: detectedSubLangs[fallbackEmbeddedSub.id],
+                    }).label
+                  }${fallbackEmbeddedSub.codec ? ` (${fallbackEmbeddedSub.codec.toUpperCase()})` : ""}.`}
                 </span>
               </div>
             )}
@@ -495,9 +757,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               onClick={() => void handleAutoSync()}
               title={
                 !canAutoSync
-                  ? subIsBitmap
-                    ? "Image subtitles cannot be auto-synced without an external text file"
-                    : "Select a subtitle track above or add a subtitle file first"
+                  ? "Select a subtitle track above or add a subtitle file first"
                   : "Automatically align subtitles to speech"
               }
               className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-accent-soft hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
@@ -609,21 +869,18 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       </div>
 
       {/* Encoding & Advanced Options */}
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         {hasExternalFile && (
-          <div className="space-y-1.5">
-            <span className="px-3 inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
-              <span>Text Encoding</span>
-            </span>
-            <SelectMenu
-              ariaLabel="Subtitle Encoding"
-              placement="top"
-              triggerIcon={<MenuEncodingIcon size={13} />}
-              value={encodingHint}
-              options={SUBTITLE_ENCODING_OPTIONS}
-              onChange={(val) => void handleEncodingChange(val)}
-            />
-          </div>
+          <SelectMenu
+            variant="row"
+            label="Text Encoding"
+            ariaLabel="Subtitle Encoding"
+            placement="top"
+            triggerIcon={<MenuEncodingIcon size={14} />}
+            value={encodingHint}
+            options={SUBTITLE_ENCODING_OPTIONS}
+            onChange={(val) => void handleEncodingChange(val)}
+          />
         )}
 
         <button
@@ -648,23 +905,20 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           />
         </button>
 
-        <AnimatedCollapse open={showAdvanced} innerClassName="pt-2 space-y-3">
-          <div className="space-y-1.5">
-            <span className="px-3 inline-flex items-center text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
-              <span>Font Family</span>
-            </span>
-            <SelectMenu
-              ariaLabel="Subtitle Font Family"
-              placement="top"
-              triggerIcon={<MenuFontIcon size={13} />}
-              value={font}
-              options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
-              onChange={(val) => {
-                setFont(val);
-                applyStyleNow();
-              }}
-            />
-          </div>
+        <AnimatedCollapse open={showAdvanced} innerClassName="pt-1.5 space-y-2.5">
+          <SelectMenu
+            variant="row"
+            label="Font Family"
+            ariaLabel="Subtitle Font Family"
+            placement="top"
+            triggerIcon={<MenuFontIcon size={14} />}
+            value={font}
+            options={SUBTITLE_FONTS.map((f) => ({ value: f, label: f }))}
+            onChange={(val) => {
+              setFont(val);
+              applyStyleNow();
+            }}
+          />
 
           <div className="space-y-1.5">
             <button

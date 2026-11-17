@@ -104,6 +104,7 @@ export interface AutoSyncResult {
   correlation: number;
   driftApplied: boolean;
   segmentsApplied?: number;
+  bitmapInPlace?: boolean;
   syncedSubtitlePath: string;
   sourceSubtitlePath: string;
   audioDurationSecs: number;
@@ -371,6 +372,141 @@ export async function subtitleTwoAnchorSync(
 
 export async function subtitleCancelAutoSync(): Promise<void> {
   await safeInvoke("subtitle_cancel_auto_sync");
+}
+
+export interface SubtitleLangProbeTrack {
+  trackId: number;
+  ffIndex: number | null;
+  subStreamIdx: number;
+  codec: string | null;
+}
+
+export interface DetectedSubtitleLang {
+  trackId: number;
+  lang: string;
+}
+
+export async function detectEmbeddedSubtitleLanguages(
+  videoPath: string,
+  tracks: readonly SubtitleLangProbeTrack[],
+): Promise<DetectedSubtitleLang[]> {
+  if (!isDesktop() || !videoPath || tracks.length === 0) {
+    return [];
+  }
+  return safeInvoke<DetectedSubtitleLang[]>("detect_embedded_subtitle_languages", {
+    videoPath,
+    tracks,
+  });
+}
+
+export interface OnlineSubtitleCandidate {
+  id: string;
+  provider: string;
+  language: string;
+  languageLabel: string;
+  releaseName: string;
+  fileName: string;
+  downloadUrl: string | null;
+  fileId: number | null;
+  matchKind: string;
+  fps: number | null;
+  encoding: string | null;
+  downloadCount: number | null;
+  hearingImpaired: boolean;
+  score: number;
+}
+
+export interface OnlineSubtitleSearchResult {
+  resolvedTitle: string | null;
+  resolvedImdbId: string | null;
+  resolvedYear: number | null;
+  resolvedType: string | null;
+  parsedQuery: string;
+  parsedSeason: number | null;
+  parsedEpisode: number | null;
+  movieHash: string | null;
+  items: OnlineSubtitleCandidate[];
+}
+
+export interface DownloadedOnlineSubtitle {
+  subtitlePath: string;
+  fileName: string;
+  language: string;
+  languageLabel: string;
+  matchKind: string;
+}
+
+export interface AutoFetchSubtitleResult {
+  found: boolean;
+  downloaded: DownloadedOnlineSubtitle | null;
+  resolvedTitle: string | null;
+  totalFound: number;
+}
+
+export interface OnlineSubtitleSearchParams {
+  query?: string | null;
+  videoPath?: string | null;
+  languages?: string | null;
+  mediaType?: "auto" | "movie" | "series";
+  season?: number | null;
+  episode?: number | null;
+  apiKey?: string | null;
+}
+
+export async function subtitleSearchOnline(
+  params: OnlineSubtitleSearchParams,
+): Promise<OnlineSubtitleSearchResult> {
+  return safeInvoke<OnlineSubtitleSearchResult>("subtitle_search_online", {
+    req: {
+      query: params.query ?? null,
+      videoPath: params.videoPath ?? null,
+      languages: params.languages ?? "all",
+      mediaType: params.mediaType ?? "auto",
+      season: params.season ?? null,
+      episode: params.episode ?? null,
+      apiKey: params.apiKey ?? null,
+    },
+  });
+}
+
+export interface OnlineSubtitleDownloadParams {
+  downloadUrl?: string | null;
+  fileId?: number | null;
+  fileName?: string | null;
+  language?: string | null;
+  matchKind?: string | null;
+  videoPath?: string | null;
+  apiKey?: string | null;
+}
+
+export async function subtitleDownloadOnline(
+  params: OnlineSubtitleDownloadParams,
+): Promise<DownloadedOnlineSubtitle> {
+  return safeInvoke<DownloadedOnlineSubtitle>("subtitle_download_online", {
+    req: {
+      downloadUrl: params.downloadUrl ?? null,
+      fileId: params.fileId ?? null,
+      fileName: params.fileName ?? null,
+      language: params.language ?? null,
+      matchKind: params.matchKind ?? null,
+      videoPath: params.videoPath ?? null,
+      apiKey: params.apiKey ?? null,
+    },
+  });
+}
+
+export async function subtitleAutoFetchOnline(params: {
+  videoPath: string;
+  languages: string;
+  apiKey?: string | null;
+}): Promise<AutoFetchSubtitleResult> {
+  return safeInvoke<AutoFetchSubtitleResult>("subtitle_auto_fetch_online", {
+    req: {
+      videoPath: params.videoPath,
+      languages: params.languages,
+      apiKey: params.apiKey ?? null,
+    },
+  });
 }
 
 export async function windowSetFullscreen(fullscreen: boolean): Promise<void> {

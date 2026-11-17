@@ -1501,7 +1501,34 @@ where
                         } else {
                             st.clone()
                         };
+                        let prev_room_pos = sm.local_pos;
                         let actions = sm.handle_server_state(&effective_state, now_secs);
+                        if !is_scrubbing
+                            && actions.iter().any(|a| matches!(a, SyncAction::Seek(_)))
+                        {
+                            if let Some(ref ps) = effective_state.playstate {
+                                if ps.do_seek {
+                                    if let Some(peer_actor) = ps
+                                        .set_by
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&active_username))
+                                    {
+                                        let delta_secs = sm.local_pos - prev_room_pos;
+                                        if delta_secs.abs() >= 1.0 {
+                                            let _ = app.emit(
+                                                "sync://peer-seek",
+                                                serde_json::json!({
+                                                    "username": peer_actor,
+                                                    "deltaSecs": delta_secs,
+                                                    "positionSecs": sm.local_pos,
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if sm.align_mode {
                             emit_room_state(app, &sm, now_secs);
                         }

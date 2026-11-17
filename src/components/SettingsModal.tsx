@@ -14,6 +14,7 @@ import {
   AppWrenchIcon,
 } from "./ui/AppIcons";
 import { PlayerPauseIcon } from "./ui/PlayerIcons";
+import { MenuEncodingIcon } from "./ui/MenuIcons";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { mpvSetSubStyle, safeMpvCall, setAllowNetworkShares } from "../lib/mpv";
@@ -22,11 +23,20 @@ import { playSoundCue } from "../lib/soundEffects";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { formatBytesCompact, formatTransferSpeed } from "../lib/updater";
 import { validateServerEndpointInput } from "../lib/webviewHardening";
-import { useAppStore, type SettingsTab, type SkipIntroMode } from "../store/useAppStore";
+import {
+  useAppStore,
+  type AutoFetchSubtitleMode,
+  type SettingsTab,
+  type SkipIntroMode,
+} from "../store/useAppStore";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
-import { buildSubStyleParams, useSubtitleStore } from "../store/useSubtitleStore";
+import {
+  buildSubStyleParams,
+  PREFERRED_SUBTITLE_LANG_OPTIONS,
+  useSubtitleStore,
+} from "../store/useSubtitleStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { Button } from "./ui/Button";
@@ -34,6 +44,7 @@ import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
+import { SelectMenu } from "./ui/SelectMenu";
 import { TextField } from "./ui/TextField";
 
 interface SettingsModalProps {
@@ -128,6 +139,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const soundEffectsEnabled = useAppStore((s) => s.soundEffectsEnabled);
   const skipIntroMode = useAppStore((s) => s.skipIntroMode);
+  const autoFetchSubtitles = useAppStore((s) => s.autoFetchSubtitles);
+  const preferredSubtitleLangs = useAppStore((s) => s.preferredSubtitleLangs);
+  const openSubtitlesApiKey = useAppStore((s) => s.openSubtitlesApiKey);
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
@@ -144,6 +158,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setLowPowerMode = useAppStore((s) => s.setLowPowerMode);
   const setSoundEffectsEnabled = useAppStore((s) => s.setSoundEffectsEnabled);
   const setSkipIntroMode = useAppStore((s) => s.setSkipIntroMode);
+  const setAutoFetchSubtitles = useAppStore((s) => s.setAutoFetchSubtitles);
+  const setPreferredSubtitleLangs = useAppStore((s) => s.setPreferredSubtitleLangs);
+  const setOpenSubtitlesApiKey = useAppStore((s) => s.setOpenSubtitlesApiKey);
   const setReactionsEnabled = useAppStore((s) => s.setReactionsEnabled);
   const setFullWidthPlayBar = useAppStore((s) => s.setFullWidthPlayBar);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
@@ -591,6 +608,59 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       throttledApplySubStyle.call();
                     }}
                     onCommit={() => throttledApplySubStyle.flush()}
+                  />
+                </div>
+
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">
+                      Auto-Fetch Online Subtitles
+                    </div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Automatically find and load matching OpenSubtitles tracks when opening a movie or episode.
+                    </div>
+                  </div>
+                  <SegmentedTabs<AutoFetchSubtitleMode>
+                    ariaLabel="Auto-Fetch Subtitles mode"
+                    size="sm"
+                    fullWidth
+                    value={autoFetchSubtitles}
+                    onChange={setAutoFetchSubtitles}
+                    items={[
+                      { value: "off", label: "Off" },
+                      { value: "missing", label: "Missing Subs" },
+                      { value: "language", label: "Preferred Lang" },
+                    ]}
+                  />
+                </div>
+
+                <div className="px-3 py-3 space-y-2">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">
+                      Preferred Subtitle Language
+                    </div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Language prioritized for automatic subtitle fetching and online search.
+                    </div>
+                  </div>
+                  <SelectMenu
+                    ariaLabel="Preferred Subtitle Language"
+                    placement="top"
+                    triggerIcon={<MenuEncodingIcon size={13} />}
+                    value={preferredSubtitleLangs}
+                    options={PREFERRED_SUBTITLE_LANG_OPTIONS}
+                    onChange={setPreferredSubtitleLangs}
+                  />
+                </div>
+
+                <div className="px-3 py-3 space-y-2">
+                  <TextField
+                    label="OpenSubtitles API Key (Optional)"
+                    type="password"
+                    value={openSubtitlesApiKey}
+                    onChange={(e) => setOpenSubtitlesApiKey(e.target.value)}
+                    placeholder="Not required — built-in search works automatically"
+                    hint="Optional personal opensubtitles.com REST key for extra hash & query results."
                   />
                 </div>
               </div>

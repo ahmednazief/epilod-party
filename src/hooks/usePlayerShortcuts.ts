@@ -176,7 +176,10 @@ export function usePlayerShortcuts({
         const seekSeq = nextClientSeekSeq();
         player.setEndedAtEof(false);
         player.setPositionSecs(target);
-        player.flashFeedback(`${seekDelta > 0 ? "+" : ""}${seekDelta}s`);
+        player.flashSeekCue({
+          direction: seekDelta < 0 ? "back" : "forward",
+          deltaSecs: Math.abs(seekDelta),
+        });
         throttledSeek.call(target, syncConnected && !aligning, seekSeq);
         return;
       }
@@ -266,7 +269,13 @@ export function usePlayerShortcuts({
           }),
           "shortcut:selectSubTrack",
         );
-        player.flashFeedback(formatTrackAnnouncement(nextTrack, "sub"));
+        player.flashFeedback(
+          formatTrackAnnouncement(
+            nextTrack,
+            "sub",
+            nextTrack ? player.detectedSubLangs[nextTrack.id] : null,
+          ),
+        );
         return;
       }
 

@@ -78,6 +78,7 @@ test("Playback, Subtitles, Episodes, and Select menus render clean custom crysta
   const playerIcons = readRepoFile("src/components/ui/PlayerIcons.tsx");
   assert.match(playerIcons, /export function PlayerAutoNextIcon\(/);
   assert.match(playerIcons, /export function PlayerFollowIcon\(/);
+  assert.match(playerIcons, /export function PlayerCaptionsIcon[\s\S]*Stepped luminous subtitle bars inside screen frame/);
 
   const selectMenu = readRepoFile("src/components/ui/SelectMenu.tsx");
   assert.equal(selectMenu.includes("triggerIcon"), true);

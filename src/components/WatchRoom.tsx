@@ -16,13 +16,10 @@ import {
   MenuAddFileIcon,
   MenuAspectFrameIcon,
   MenuAutoNextIcon,
-  MenuControlsIcon,
-  MenuMediaDiscIcon,
   MenuPlayBarLayoutIcon,
   MenuScreenIcon,
   MenuSpeedIcon,
   MenuSubtitlesOffIcon,
-  MenuTrackListIcon,
 } from "./ui/MenuIcons";
 import {
   PartyAlignSceneIcon,
@@ -42,6 +39,7 @@ import {
   PlayerReadyIcon,
   PlayerSkipIntroIcon,
   PlayerResyncIcon,
+  PlayerSeekCueIcon,
   PlayerSeekIcon,
   PlayerSettingsIcon,
   PlayerSkipEpisodeIcon,
@@ -87,8 +85,10 @@ import {
   onMpvSurfaceClick,
   onMpvSurfaceDblClick,
   onMpvSurfaceState,
+  detectEmbeddedSubtitleLanguages,
   detectVideoIntro,
   introCancelDetect,
+  type DetectedSubtitleLang,
   onMpvChapters,
   onMpvSeekSettled,
   onMpvTime,
@@ -103,6 +103,7 @@ import {
   mpvSetMute,
   mpvSetSubTrack,
   mpvSetVolume,
+  subtitleAutoFetchOnline,
   subtitleCancelAutoSync,
   type AspectMode,
   windowIsFullscreen,
@@ -165,7 +166,13 @@ import {
   shouldAutoReadyOnFileLoad,
 } from "../lib/syncReady";
 import { shouldResetSpeedForSync, canChangePlaybackSpeed } from "../lib/syncSpeedGuard";
-import { buildAudioTrackOptions, buildSubTrackOptions, selectSubTrack } from "../lib/tracks";
+import {
+  buildAudioTrackOptions,
+  buildSubTrackOptions,
+  buildUntaggedSubtitleProbeList,
+  formatSubtitleTrackDisplay,
+  selectSubTrack,
+} from "../lib/tracks";
 import {
   buildAlignmentPairKey,
   formatSignedOffset,
@@ -183,6 +190,7 @@ import {
   onSyncP2pStatus,
   onSyncPeerLeft,
   onSyncPeerNotReady,
+  onSyncPeerSeek,
   onSyncPlayBlocked,
   onSyncReaction,
   onSyncRoomControl,
@@ -223,7 +231,11 @@ import {
   normalizeIntroVideoKey,
   useIntroStore,
 } from "../store/useIntroStore";
-import { buildSubStyleParams, useSubtitleStore } from "../store/useSubtitleStore";
+import {
+  buildSubStyleParams,
+  hasMatchingSubtitleTrack,
+  useSubtitleStore,
+} from "../store/useSubtitleStore";
 import { enqueueReactionBurst } from "../store/useReactionStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { EpisodesPanel } from "./EpisodesPanel";
@@ -338,6 +350,9 @@ export function WatchRoom() {
   const openSettings = useAppStore((s) => s.openSettings);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const skipIntroEnabled = useAppStore((s) => s.skipIntroMode !== "off");
+  const autoFetchSubtitles = useAppStore((s) => s.autoFetchSubtitles);
+  const preferredSubtitleLangs = useAppStore((s) => s.preferredSubtitleLangs);
+  const openSubtitlesApiKey = useAppStore((s) => s.openSubtitlesApiKey);
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const closeShortcuts = useAppStore((s) => s.closeShortcuts);
   const openShortcuts = useAppStore((s) => s.openShortcuts);
@@ -360,6 +375,7 @@ export function WatchRoom() {
   const setAspectMode = usePlayerStore((s) => s.setAspectMode);
   const playerError = usePlayerStore((s) => s.playerError);
   const feedback = usePlayerStore((s) => s.feedback);
+  const seekCue = usePlayerStore((s) => s.seekCue);
 
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
@@ -375,6 +391,7 @@ export function WatchRoom() {
   const clearSubLoadedTrack = useSubtitleStore((s) => s.clearLoadedTrack);
   const loadedSubPath = useSubtitleStore((s) => s.originalFilePath ?? s.loadedFilePath);
   const tracks = usePlayerStore((s) => s.tracks);
+  const detectedSubLangs = usePlayerStore((s) => s.detectedSubLangs);
   const introVideoKey = useIntroStore((s) => s.videoKey);
   const introChapters = useIntroStore((s) => s.chapters);
   const introSegments = useIntroStore((s) => s.segments);
@@ -441,6 +458,7 @@ export function WatchRoom() {
   const lastLoopSyncAtRef = useRef(0);
   const introDetectGenRef = useRef(0);
   const introCheckedSigRef = useRef("");
+  const autoSubFetchedKeyRef = useRef("");
   const autoLoadedPathRef = useRef<string | null>(null);
   const justAdvancedFromPathRef = useRef<string | null>(null);
   const pendingPairedSubRef = useRef<{ videoPath: string; subPath: string } | null>(null);
@@ -621,6 +639,7 @@ export function WatchRoom() {
         useIntroStore.getState().resetForVideo(path);
       }
       introCheckedSigRef.current = "";
+      autoSubFetchedKeyRef.current = "";
       resetAutoSubtitleState();
       pendingPairedSubRef.current = pairedSubPath
         ? { videoPath: path, subPath: pairedSubPath }
@@ -1155,6 +1174,141 @@ export function WatchRoom() {
     lowPowerMode,
   ]);
 
+  const subLangProbeCacheRef = useRef<Map<string, DetectedSubtitleLang[]>>(new Map());
+  const subLangProbePendingRef = useRef<Set<string>>(new Set());
+  const untaggedSubProbeTargets = useMemo(
+    () => buildUntaggedSubtitleProbeList(tracks),
+    [tracks],
+  );
+  const untaggedSubProbeSig = untaggedSubProbeTargets
+    .map((t) => `${t.trackId}:${t.ffIndex ?? "x"}:${t.subStreamIdx}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!loaded || !selectedFilePath || untaggedSubProbeTargets.length === 0) return;
+    const targetPath = selectedFilePath;
+    const probeKey = `${targetPath}::${untaggedSubProbeSig}`;
+    const cached = subLangProbeCacheRef.current.get(probeKey);
+    if (cached) {
+      if (cached.length > 0) {
+        usePlayerStore.getState().mergeDetectedSubLangs(cached);
+      }
+      return;
+    }
+    if (subLangProbePendingRef.current.has(probeKey)) return;
+    subLangProbePendingRef.current.add(probeKey);
+
+    let cancelled = false;
+    void detectEmbeddedSubtitleLanguages(targetPath, untaggedSubProbeTargets)
+      .then((detected) => {
+        subLangProbePendingRef.current.delete(probeKey);
+        if (subLangProbeCacheRef.current.size >= 64) {
+          const oldest = subLangProbeCacheRef.current.keys().next().value;
+          if (oldest !== undefined) subLangProbeCacheRef.current.delete(oldest);
+        }
+        subLangProbeCacheRef.current.set(probeKey, detected);
+        if (cancelled || useAppStore.getState().selectedFilePath !== targetPath) {
+          return;
+        }
+        if (detected.length > 0) {
+          usePlayerStore.getState().mergeDetectedSubLangs(detected);
+        }
+      })
+      .catch(() => {
+        subLangProbePendingRef.current.delete(probeKey);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded, selectedFilePath, untaggedSubProbeSig, untaggedSubProbeTargets]);
+
+  useEffect(() => {
+    if (!loaded || !selectedFilePath || !isDesktop() || autoFetchSubtitles === "off") {
+      return;
+    }
+    const targetPath = selectedFilePath;
+    const langs = preferredSubtitleLangs || "eng";
+    const mode = autoFetchSubtitles;
+    const fetchKey = `${loadGenRef.current}::${targetPath}::${mode}::${langs}`;
+    if (autoSubFetchedKeyRef.current === fetchKey) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled || useAppStore.getState().selectedFilePath !== targetPath) {
+        return;
+      }
+      const subNow = useSubtitleStore.getState();
+      if (subNow.loadedFilePath || pendingPairedSubRef.current?.videoPath.toLowerCase() === targetPath.toLowerCase()) {
+        autoSubFetchedKeyRef.current = fetchKey;
+        return;
+      }
+      const playerNow = usePlayerStore.getState();
+      const subTracksNow = playerNow.tracks.filter((t) => t.type === "sub");
+      if (mode === "missing" && subTracksNow.length > 0) {
+        autoSubFetchedKeyRef.current = fetchKey;
+        return;
+      }
+      if (
+        mode === "language" &&
+        hasMatchingSubtitleTrack(subTracksNow, langs, playerNow.detectedSubLangs)
+      ) {
+        autoSubFetchedKeyRef.current = fetchKey;
+        return;
+      }
+
+      autoSubFetchedKeyRef.current = fetchKey;
+      subNow.setAutoFetchState("searching", "Finding matching subtitles online…");
+
+      void subtitleAutoFetchOnline({
+        videoPath: targetPath,
+        languages: langs,
+        apiKey: openSubtitlesApiKey || null,
+      })
+        .then(async (res) => {
+          if (cancelled || !mountedRef.current || useAppStore.getState().selectedFilePath !== targetPath) {
+            return;
+          }
+          const latestSub = useSubtitleStore.getState();
+          if (latestSub.loadedFilePath) {
+            return;
+          }
+          if (res.found && res.downloaded) {
+            await mpvAddSubtitle(res.downloaded.subtitlePath, "utf8");
+            await mpvSetSubDelay(0);
+            latestSub.setDelaySecs(0);
+            latestSub.setLoadedTrack(res.downloaded.subtitlePath, res.downloaded.subtitlePath);
+            await mpvSetSubStyle(buildSubStyleParams(useSubtitleStore.getState(), { visible: true }));
+            const exactSuffix = res.downloaded.matchKind === "hash" ? " (Exact Match)" : "";
+            latestSub.setAutoFetchState(
+              "loaded",
+              `Auto-loaded ${res.downloaded.languageLabel}${exactSuffix}`,
+            );
+            pushNote(
+              "success",
+              `Auto-loaded ${res.downloaded.languageLabel} subtitle${exactSuffix}`,
+            );
+          } else {
+            latestSub.setAutoFetchState("none", "No automatic subtitle match found — try Search Online");
+          }
+        })
+        .catch(() => {
+          if (!cancelled && mountedRef.current && useAppStore.getState().selectedFilePath === targetPath) {
+            useSubtitleStore
+              .getState()
+              .setAutoFetchState("none", "Online auto-fetch unavailable — try Search Online");
+          }
+        });
+    }, 700);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [loaded, selectedFilePath, autoFetchSubtitles, preferredSubtitleLangs, openSubtitlesApiKey, pushNote]);
+
   useEffect(() => {
     const timer = roomCode
       ? window.setTimeout(() => {
@@ -1642,6 +1796,22 @@ export function WatchRoom() {
               isSelf: false,
             });
           }),
+          onSyncPeerSeek(({ username, deltaSecs }) => {
+            if (!active) return;
+            const rawAbs = Math.abs(deltaSecs);
+            if (!Number.isFinite(rawAbs) || rawAbs < 1) return;
+            const snapped =
+              Math.abs(rawAbs - 10) <= 1.2
+                ? 10
+                : Math.abs(rawAbs - 5) <= 0.9
+                  ? 5
+                  : Math.round(rawAbs);
+            usePlayerStore.getState().flashSeekCue({
+              direction: deltaSecs < 0 ? "back" : "forward",
+              deltaSecs: snapped,
+              actor: username,
+            });
+          }),
         ]);
 
         if (!active) {
@@ -2051,6 +2221,7 @@ export function WatchRoom() {
       ? { tab: sideTab, pos: popoverPos }
       : null;
   const popover = usePresencePayload(activePopover, 200);
+  const seekCuePresence = usePresencePayload(seekCue, 240);
   const syncConnectedNow = syncStatus.state === "connected";
   const effectiveUserNow = resolveEffectiveUsername(syncStatus, username);
   const ctrlLockNow = getControllerLockState(
@@ -2161,8 +2332,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "sub-lbl-seek",
-      text: "Seek & Skip",
-      icon: <PlayerSeekIcon direction="forward" size={12} />,
+      text: "Jump",
     },
     {
       id: "seek-back",
@@ -2183,8 +2353,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "sub-lbl-speed",
-      text: "Playback Speed",
-      icon: <MenuSpeedIcon size={12} />,
+      text: "Speed Rate",
     },
     ...([0.75, 1.0, 1.25, 1.5, 2.0] as const).map((preset) => {
       const active = Math.abs(speed - preset) < 0.01;
@@ -2232,8 +2401,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "sub-lbl-audio-tracks",
-      text: "Audio Tracks",
-      icon: <PlayerAudioIcon size={12} />,
+      text: "Available Tracks",
     },
     ...(!loaded
       ? ([
@@ -2300,8 +2468,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "sub-lbl-sub-tracks",
-      text: "Subtitle Tracks",
-      icon: <PlayerCaptionsIcon size={12} />,
+      text: "Available Tracks",
     },
     ...(!loaded
       ? ([
@@ -2317,13 +2484,11 @@ export function WatchRoom() {
           const active = opt.value === currentSubVal;
           const t = opt.track;
           const sid = opt.value === "none" ? null : Number(opt.value);
-          const label = t
-            ? t.title?.trim() ||
-              (t.lang ? `${t.lang.trim().toUpperCase()} Subtitles` : `Subtitle ${t.id}`)
-            : "Off";
-          const badge = t?.external
-            ? "External"
-            : t?.lang?.trim().toUpperCase() || t?.codec?.trim().toUpperCase();
+          const display = t
+            ? formatSubtitleTrackDisplay(t, { detectedLang: detectedSubLangs[t.id] })
+            : null;
+          const label = display ? display.label : "Off";
+          const badge = display && display.metaTags.length > 0 ? display.metaTags.join(" · ") : undefined;
           return {
             id: `ctx-sub-${opt.value}`,
             label,
@@ -2401,8 +2566,7 @@ export function WatchRoom() {
           {
             type: "label",
             id: "sub-lbl-ep-queue",
-            text: "Season Queue",
-            icon: <PlayerEpisodesIcon size={12} />,
+            text: "Up Next in Folder",
           },
           ...quickEpisodesSlice.map((item, offset) => {
             const idx = quickEpisodeWindowStart + offset;
@@ -2436,8 +2600,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "sub-lbl-aspect",
-      text: "Picture Frame",
-      icon: <MenuAspectFrameIcon size={12} />,
+      text: "Aspect Ratio",
     },
     ...(
       [
@@ -2462,8 +2625,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "sub-lbl-window",
-      text: "Window & Controls",
-      icon: <MenuScreenIcon size={12} />,
+      text: "Display",
     },
     {
       id: "toggle-fullscreen",
@@ -2499,8 +2661,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "ctx-lbl-playback",
-      text: "Playback",
-      icon: <MenuControlsIcon size={12} />,
+      text: "Player",
     },
     {
       id: "play-pause",
@@ -2528,7 +2689,7 @@ export function WatchRoom() {
     {
       type: "submenu",
       id: "sub-playback-opts",
-      label: "Playback Options",
+      label: "Controls & Speed",
       badge: loaded ? (looping ? `Loop · ${speedLabel}` : speedLabel) : undefined,
       icon: <MenuSpeedIcon size={14} />,
       children: playbackSubmenuEntries,
@@ -2537,8 +2698,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "ctx-lbl-tracks",
-      text: "Audio & Subtitles",
-      icon: <MenuTrackListIcon size={12} />,
+      text: "Tracks",
     },
     {
       type: "submenu",
@@ -2560,13 +2720,12 @@ export function WatchRoom() {
     {
       type: "label",
       id: "ctx-lbl-media",
-      text: "Media & Picture",
-      icon: <MenuMediaDiscIcon size={12} />,
+      text: "Library",
     },
     {
       type: "submenu",
       id: "sub-open-media",
-      label: "Open Media",
+      label: "Open File or Folder",
       icon: <AppFolderIcon size={14} />,
       children: mediaOpenSubmenuEntries,
     },
@@ -2598,8 +2757,7 @@ export function WatchRoom() {
     {
       type: "label",
       id: "ctx-lbl-party",
-      text: "Watch Party",
-      icon: <WatchPartyIcon bare size={12} />,
+      text: "Session",
     },
     ...(roomCode
       ? ([
@@ -2615,7 +2773,7 @@ export function WatchRoom() {
           {
             type: "submenu",
             id: "sub-party-controls",
-            label: "Party Controls",
+            label: "Watch Party Room",
             badge: syncConnectedNow ? "Live" : undefined,
             icon: <WatchPartyIcon bare size={14} />,
             children: [
@@ -2691,13 +2849,12 @@ export function WatchRoom() {
     {
       type: "label",
       id: "ctx-lbl-app",
-      text: "App",
-      icon: <PlayerSettingsIcon size={12} />,
+      text: "System",
     },
     {
       type: "submenu",
       id: "sub-prefs-help",
-      label: "Preferences & Help",
+      label: "Settings & Help",
       icon: <PlayerSettingsIcon size={14} />,
       children: [
         {
@@ -2763,9 +2920,64 @@ export function WatchRoom() {
         visible={backdropPresence.mounted}
         playing={!paused}
         viewportRef={viewportRef}
-        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${viewportTick}`}
+        layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${viewportTick}`}
         pausedRefreshKey={`${Math.round(positionSecs * 2)}:${seekSettledTick}:${viewportTick}`}
       />
+      {seekCuePresence.mounted && seekCuePresence.value && (
+        <div
+          key={`${seekCuePresence.value.direction}:${seekCuePresence.value.actor ?? ""}`}
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none fixed top-1/2 -translate-y-1/2 z-[45] select-none ${
+            seekCuePresence.value.direction === "back"
+              ? "left-[12%] sm:left-[18%]"
+              : "right-[12%] sm:right-[18%]"
+          }`}
+        >
+          <div
+            className={
+              seekCuePresence.exiting
+                ? seekCuePresence.value.direction === "back"
+                  ? "ep-seek-cue-back-out"
+                  : "ep-seek-cue-forward-out"
+                : seekCuePresence.value.direction === "back"
+                  ? "ep-seek-cue-back-in"
+                  : "ep-seek-cue-forward-in"
+            }
+          >
+            <div
+              data-glass-region="true"
+              className={`ep-glass-seek-bubble rounded-full px-4 py-2 inline-flex items-center gap-2 ${
+                seekCuePresence.value.step > 1
+                  ? seekCuePresence.value.step % 2 === 0
+                    ? "ep-seek-bubble-bounce-a"
+                    : "ep-seek-bubble-bounce-b"
+                  : ""
+              }`}
+            >
+              {seekCuePresence.value.direction === "back" && (
+                <PlayerSeekCueIcon direction="back" size={17} className="relative z-10 shrink-0" />
+              )}
+              <div className="relative z-10 flex items-center gap-1.5 whitespace-nowrap">
+                {seekCuePresence.value.actor && (
+                  <span className="text-[11.5px] font-medium text-accent-soft max-w-[110px] truncate">
+                    {seekCuePresence.value.actor}
+                  </span>
+                )}
+                <span className="text-[13.5px] font-semibold tracking-tight text-white/95 num">
+                  {seekCuePresence.value.direction === "back" ? "-" : "+"}
+                  {Math.round(seekCuePresence.value.deltaSecs) >= 60
+                    ? `${Math.floor(Math.round(seekCuePresence.value.deltaSecs) / 60)}m ${Math.round(seekCuePresence.value.deltaSecs) % 60}s`
+                    : `${Math.round(seekCuePresence.value.deltaSecs)}s`}
+                </span>
+              </div>
+              {seekCuePresence.value.direction === "forward" && (
+                <PlayerSeekCueIcon direction="forward" size={17} className="relative z-10 shrink-0" />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       <div
         className={`pointer-events-none fixed left-1/2 -translate-x-1/2 z-[45] flex flex-col items-center gap-2 max-w-[520px] w-[calc(100vw-2rem)] transition-[top] duration-300 ${
           showWindowBar ? "top-14" : "top-4"

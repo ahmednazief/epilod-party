@@ -6,6 +6,14 @@ export interface FeedbackBadge {
   text: string;
 }
 
+export interface SeekCueBadge {
+  id: number;
+  direction: "back" | "forward";
+  deltaSecs: number;
+  actor: string | null;
+  step: number;
+}
+
 interface PlayerState {
   paused: boolean;
   positionSecs: number;
@@ -22,7 +30,9 @@ interface PlayerState {
   isFullscreen: boolean;
   playerError: string | null;
   tracks: MpvTrack[];
+  detectedSubLangs: Record<number, string>;
   feedback: FeedbackBadge | null;
+  seekCue: SeekCueBadge | null;
   setPaused: (paused: boolean) => void;
   setPositionSecs: (pos: number) => void;
   setDurationSecs: (dur: number) => void;
@@ -38,14 +48,20 @@ interface PlayerState {
   setIsFullscreen: (fs: boolean) => void;
   setPlayerError: (err: string | null) => void;
   setTracks: (tracks: MpvTrack[]) => void;
+  mergeDetectedSubLangs: (entries: ReadonlyArray<{ trackId: number; lang: string }>) => void;
+  clearDetectedSubLangs: () => void;
   flashFeedback: (text: string) => void;
   clearFeedback: () => void;
+  flashSeekCue: (payload: { direction: "back" | "forward"; deltaSecs: number; actor?: string | null }) => void;
+  clearSeekCue: () => void;
   resetForNewFile: () => void;
   reset: () => void;
 }
 
 let feedbackSeq = 1;
 let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+let seekCueSeq = 1;
+let seekCueTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const usePlayerStore = create<PlayerState>((set) => ({
   paused: true,
@@ -63,7 +79,9 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   isFullscreen: false,
   playerError: null,
   tracks: [],
+  detectedSubLangs: {},
   feedback: null,
+  seekCue: null,
 
   setPaused: (paused) =>
     set((state) => ({
@@ -84,6 +102,20 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   setIsFullscreen: (isFullscreen) => set({ isFullscreen }),
   setPlayerError: (playerError) => set({ playerError }),
   setTracks: (tracks) => set({ tracks }),
+  mergeDetectedSubLangs: (entries) =>
+    set((state) => {
+      if (entries.length === 0) return state;
+      const next = { ...state.detectedSubLangs };
+      let changed = false;
+      for (const entry of entries) {
+        if (entry.lang && next[entry.trackId] !== entry.lang) {
+          next[entry.trackId] = entry.lang;
+          changed = true;
+        }
+      }
+      return changed ? { detectedSubLangs: next } : state;
+    }),
+  clearDetectedSubLangs: () => set({ detectedSubLangs: {} }),
 
   flashFeedback: (text) => {
     if (feedbackTimer) {
@@ -105,7 +137,49 @@ export const usePlayerStore = create<PlayerState>((set) => ({
     set({ feedback: null });
   },
 
-  resetForNewFile: () =>
+  flashSeekCue: ({ direction, deltaSecs, actor = null }) => {
+    if (seekCueTimer) {
+      clearTimeout(seekCueTimer);
+    }
+    const id = seekCueSeq++;
+    const normalizedActor = actor?.trim() ? actor.trim() : null;
+    set((s) => {
+      const sameRun =
+        s.seekCue &&
+        s.seekCue.direction === direction &&
+        s.seekCue.actor === normalizedActor;
+      const accumulated = sameRun && s.seekCue
+        ? s.seekCue.deltaSecs + deltaSecs
+        : deltaSecs;
+      return {
+        seekCue: {
+          id,
+          direction,
+          deltaSecs: accumulated,
+          actor: normalizedActor,
+          step: sameRun && s.seekCue ? s.seekCue.step + 1 : 1,
+        },
+      };
+    });
+    seekCueTimer = setTimeout(() => {
+      seekCueTimer = null;
+      set((s) => (s.seekCue?.id === id ? { seekCue: null } : {}));
+    }, 1250);
+  },
+
+  clearSeekCue: () => {
+    if (seekCueTimer) {
+      clearTimeout(seekCueTimer);
+      seekCueTimer = null;
+    }
+    set({ seekCue: null });
+  },
+
+  resetForNewFile: () => {
+    if (seekCueTimer) {
+      clearTimeout(seekCueTimer);
+      seekCueTimer = null;
+    }
     set({
       paused: true,
       positionSecs: 0,
@@ -119,9 +193,16 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       endedAtEof: false,
       playerError: null,
       tracks: [],
-    }),
+      detectedSubLangs: {},
+      seekCue: null,
+    });
+  },
 
-  reset: () =>
+  reset: () => {
+    if (seekCueTimer) {
+      clearTimeout(seekCueTimer);
+      seekCueTimer = null;
+    }
     set({
       paused: true,
       positionSecs: 0,
@@ -136,6 +217,9 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       isFullscreen: false,
       playerError: null,
       tracks: [],
+      detectedSubLangs: {},
       feedback: null,
-    }),
+      seekCue: null,
+    });
+  },
 }));

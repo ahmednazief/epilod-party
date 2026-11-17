@@ -311,7 +311,7 @@ function AvatarIllustration({ id }: { id: AvatarId }): ReactNode {
           <path d="M18 30 L24 23 L31 27 L38 22 L46 29 C45 19 19 19 18 30 Z" fill="#272038" />
           {/* Backwards baseball cap */}
           <path d="M16 25 C17 13 25 11 32 11 C39 11 47 13 48 25 Z" fill="#F59E0B" />
-          <path d="M44 21 L56 23 L55 27 L44 25 Z" fill="#D97706" />
+          <path d="M42 21.5 L50 23 L49.5 26.5 L42 25 Z" fill="#D97706" />
           <CuteEyes y={34.5} />
           <path d="M29 41 Q33 43.2 36.5 39.8" fill="none" stroke="#854E3E" strokeWidth="2" strokeLinecap="round" />
         </>
@@ -421,6 +421,7 @@ interface ProfileAvatarProps {
   avatarId: AvatarId;
   size?: number;
   className?: string;
+  title?: string;
 }
 
 export function AvatarSvg({
@@ -442,9 +443,15 @@ export function AvatarSvg({
   );
 }
 
-export function ProfileAvatar({ avatarId, size = 32, className = "" }: ProfileAvatarProps) {
+export function ProfileAvatar({
+  avatarId,
+  size = 32,
+  className = "",
+  title,
+}: ProfileAvatarProps) {
   return (
     <span
+      title={title}
       className={`inline-flex items-center justify-center rounded-full overflow-hidden shrink-0 ${className}`}
       style={{ width: size, height: size }}
     >

@@ -15,6 +15,8 @@ interface SelectMenuProps<T extends string = string> {
   options: readonly SelectMenuOption<T>[];
   onChange: (value: T) => void;
   ariaLabel: string;
+  label?: string;
+  variant?: "field" | "row";
   triggerIcon?: ReactNode;
   disabled?: boolean;
   placeholder?: string;
@@ -27,6 +29,8 @@ export function SelectMenu<T extends string = string>({
   options,
   onChange,
   ariaLabel,
+  label,
+  variant = "field",
   triggerIcon,
   disabled = false,
   placeholder = "Select…",
@@ -185,32 +189,69 @@ export function SelectMenu<T extends string = string>({
       </div>
     ) : null;
 
+  const selectedLabel = selectedOption ? selectedOption.label : placeholder;
+  const leadingIcon = selectedOption?.icon ?? triggerIcon ?? <MenuInterfaceIcon size={13} />;
+
   return (
     <div ref={rootRef} className={`relative w-full ${className}`}>
-      <button
-        type="button"
-        role="combobox"
-        aria-label={ariaLabel}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
-        className="ep-glass-select ep-press w-full h-9.5 px-3.5 flex items-center justify-between gap-2 text-left text-xs text-primary rounded-xl disabled:opacity-45 disabled:pointer-events-none cursor-pointer"
-      >
-        <span className="flex items-center gap-2 min-w-0">
-          <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-accent-soft/85">
-            {selectedOption?.icon ?? triggerIcon ?? <MenuInterfaceIcon size={13} />}
-          </span>
-          <span className="truncate">{selectedOption ? selectedOption.label : placeholder}</span>
-        </span>
-        <AppChevronIcon
-          direction="down"
-          size={14}
-          className={`text-muted shrink-0 transition-transform duration-200 ${
-            open ? "rotate-180" : ""
+      {variant === "row" ? (
+        <button
+          type="button"
+          role="combobox"
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          disabled={disabled}
+          onClick={() => setOpen((o) => !o)}
+          className={`ep-menu-row ep-press w-full px-3 py-2 flex items-center justify-between gap-3 text-left text-xs disabled:opacity-45 disabled:pointer-events-none cursor-pointer ${
+            open ? "bg-white/[0.085] text-white" : "text-secondary hover:text-white"
           }`}
-        />
-      </button>
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="w-4 h-4 flex items-center justify-center shrink-0">
+              {leadingIcon}
+            </span>
+            <span className="truncate">{label ?? ariaLabel}</span>
+          </span>
+          <span className="flex items-center gap-1.5 min-w-0 max-w-[54%] shrink-0">
+            <span className="truncate text-[11px] font-medium text-white/75">
+              {selectedLabel}
+            </span>
+            <AppChevronIcon
+              direction="down"
+              size={13}
+              className={`text-white/50 shrink-0 transition-transform duration-200 ${
+                open ? "rotate-180" : ""
+              }`}
+            />
+          </span>
+        </button>
+      ) : (
+        <button
+          type="button"
+          role="combobox"
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          disabled={disabled}
+          onClick={() => setOpen((o) => !o)}
+          className="ep-glass-select ep-press w-full h-9.5 px-3.5 flex items-center justify-between gap-2 text-left text-xs text-primary rounded-xl disabled:opacity-45 disabled:pointer-events-none cursor-pointer"
+        >
+          <span className="flex items-center gap-2 min-w-0">
+            <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-accent-soft/85">
+              {leadingIcon}
+            </span>
+            <span className="truncate">{selectedLabel}</span>
+          </span>
+          <AppChevronIcon
+            direction="down"
+            size={14}
+            className={`text-muted shrink-0 transition-transform duration-200 ${
+              open ? "rotate-180" : ""
+            }`}
+          />
+        </button>
+      )}
 
       {listbox && (typeof document !== "undefined" ? createPortal(listbox, document.body) : listbox)}
     </div>

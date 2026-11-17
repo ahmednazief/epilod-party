@@ -78,6 +78,7 @@ test("Animation and compositor performance invariants hold in UI primitives and 
   const scrubber = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"), "utf8");
   assert.equal(scrubber.includes("scaleX("), true);
   assert.equal(scrubber.includes("translateX("), true);
+  assert.doesNotMatch(scrubber, /ep-scrubber-fill[^"]*rounded-full/);
 
   const tabs = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/ui/SegmentedTabs.tsx"),
@@ -387,7 +388,8 @@ test("Hero play/pause button uses custom faceted crystal icons and purplish smok
     "utf8",
   );
   assert.match(transportSrc, /ep-orb-play[\s\S]*<PlayerPlayIcon[\s\S]*<PlayerPauseIcon/);
-  assert.equal(transportSrc.includes("ep-bar-icon-btn ep-transport-btn"), true);
+  assert.equal(transportSrc.includes("ep-transport-bubble"), true);
+  assert.equal(transportSrc.includes("ep-transport-btn"), true);
   assert.equal(transportSrc.includes("relative z-10 anim-icon-pop"), true);
 
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
@@ -588,7 +590,7 @@ test("Modal glass sheets keep unnested sibling backdrops and emit unprefixed bac
   );
   assert.match(
     fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/ContextMenu.tsx"), "utf8"),
-    /text-white\/70/,
+    /text-white\/45/,
   );
 
   // Expanded CC/Audio popover cushions + iOS Liquid Glass elastic sliding navigation + harmonious full-width rails
@@ -729,6 +731,11 @@ test("Non-context menus omit unnecessary separating strokes while right-click Co
     contextMenuSrc,
     /flex flex-col gap-1/,
     "ContextMenu submenus should space items comfortably apart",
+  );
+  assert.match(
+    contextMenuSrc,
+    /text-white\/45/,
+    "ContextMenu section labels should render as muted pure-text headers distinct from clickable rows",
   );
   const hairlineRule = /\.ep-hairline-divider\s*\{([^}]*)\}/.exec(globalsCss);
   assert.ok(hairlineRule, "Expected .ep-hairline-divider rule in globals.css");
@@ -912,15 +919,27 @@ test("SettingsModal uses smooth neutral Liquid Glass styling without horizontal 
   }
 });
 
-test("TransportBar party avatar dock aligns concentrically, reaction button renders pill-free laughing emoji, and volume icon morphs without key remount", () => {
+test("TransportBar party avatar dock aligns concentrically with custom chevron arrow, seek buttons show liquid glass bubbles & seek cues", () => {
   const transportSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/TransportBar.tsx"), "utf8");
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
   const iconsSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/ui/PlayerIcons.tsx"), "utf8");
+  const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
 
-  // Single viewer pill stays concentrically circular below xl without asymmetric trailing padding
-  assert.match(transportSrc, /visiblePeers\.length === 1\s*\?\s*"sm:w-7\.5 sm:p-0 xl:w-auto xl:pl-1 xl:pr-2\.5 xl:gap-1\.5"/);
+  // Users pill aligns avatar concentrically (pl-1 + 1px border - 2px ring = 3px margin) and displays custom chevron arrow
+  assert.match(transportSrc, /!hideParticipants && visiblePeers\.length > 0[\s\S]*?"sm:w-auto sm:pl-1 sm:pr-2 xl:pr-2\.5 gap-1\.5"/);
+  assert.match(transportSrc, /<PlayerPartyChevronIcon\s+open=\{activeTab === "room"\}/);
+  assert.equal(iconsSrc.includes("export function PlayerPartyChevronIcon"), true);
   assert.equal(transportSrc.includes("ep-reaction-icon-btn"), true);
   assert.equal(transportSrc.includes("ep-orb-reaction"), false);
+
+  // Seek relative buttons fire seek cue without showFeedback suppression & reveal clean frosted pills on hover
+  assert.equal(transportSrc.includes("showFeedback: false"), false);
+  assert.match(globalsCss, /\.ep-transport-bubble,\s*\.ep-bar-icon-btn\.ep-transport-btn\s*\{[^}]*background-color:\s*transparent[^}]*border:\s*1px solid transparent/);
+  assert.match(globalsCss, /\.ep-transport-bubble::before[\s\S]*opacity:\s*0;/);
+  assert.match(globalsCss, /\.ep-transport-bubble::after[\s\S]*opacity:\s*0;/);
+  assert.match(globalsCss, /\.ep-transport-bubble:hover:not\(:disabled\)[\s\S]*rgba\(255,\s*255,\s*255/);
+  assert.equal(watchSrc.includes("onSyncPeerSeek"), true);
+  assert.equal(watchSrc.includes("<PlayerSeekCueIcon"), true);
 
   // Volume icon keeps a stable SVG mount cleanly transitioning via data-muted
   const volBtnStart = transportSrc.indexOf('aria-label={muted ? "Unmute" : "Mute"}');
@@ -934,4 +953,73 @@ test("TransportBar party avatar dock aligns concentrically, reaction button rend
   assert.match(globalsCss, /\.ep-vol-icon\[data-muted="false"\] \.ep-vol-wave-2/);
   assert.match(globalsCss, /\.ep-vol-icon\[data-muted="true"\] \.ep-vol-slash-2/);
 });
+
+test("SubtitlePanel renders Font Family and Text Encoding as inline Liquid Glass menu rows", () => {
+  const selectMenuSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/SelectMenu.tsx"),
+    "utf8",
+  );
+  const subtitleSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+    "utf8",
+  );
+
+  assert.match(selectMenuSrc, /variant\?:\s*"field"\s*\|\s*"row"/);
+  assert.match(selectMenuSrc, /variant === "row"/);
+  assert.match(selectMenuSrc, /ep-menu-row ep-press/);
+
+  assert.match(
+    subtitleSrc,
+    /<SelectMenu[\s\S]*?variant="row"[\s\S]*?label="Text Encoding"/,
+  );
+  assert.match(
+    subtitleSrc,
+    /<SelectMenu[\s\S]*?variant="row"[\s\S]*?label="Font Family"/,
+  );
+});
+
+test("TransportBar party pill stays stationary without press scale or layer-promotion shift", () => {
+  const transportSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/TransportBar.tsx"),
+    "utf8",
+  );
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+
+  assert.match(
+    transportSrc,
+    /data-capsule-anchor="room"[\s\S]*?ep-bar-pill ep-party-pill[\s\S]*?activeTab === "room"\s*\?\s*"ep-droplet-indicator text-white font-semibold"/,
+  );
+  assert.match(
+    globalsCss,
+    /\.ep-bar-pill\.ep-party-pill:active:not\(:disabled\)\s*\{[^}]*transform:\s*none;/,
+  );
+  assert.match(
+    globalsCss,
+    /\.ep-bar-pill\.ep-party-pill\.ep-droplet-indicator\s*\{[^}]*will-change:\s*auto;/,
+  );
+});
+
+test("Seek cue renders a highly translucent iOS Liquid Glass bubble with bubbly enter, pulse, and exit animations", () => {
+  const watchSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
+
+  assert.match(watchSrc, /usePresencePayload\(seekCue,\s*240\)/);
+  assert.match(watchSrc, /ep-glass-seek-bubble/);
+  assert.match(watchSrc, /ep-seek-cue-back-out/);
+  assert.match(watchSrc, /ep-seek-cue-forward-out/);
+  assert.match(watchSrc, /ep-seek-bubble-bounce-a/);
+
+  assert.match(
+    globalsCss,
+    /\.ep-glass-seek-bubble\s*\{[^}]*rgba\(8,\s*8,\s*12,\s*0\.08\)[^}]*backdrop-filter:\s*blur\(/,
+  );
+  assert.match(globalsCss, /@keyframes ep-seek-cue-back-out/);
+  assert.match(globalsCss, /@keyframes ep-seek-cue-forward-out/);
+});
+
+
+
 

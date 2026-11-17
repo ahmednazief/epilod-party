@@ -92,6 +92,12 @@ export interface ReactionEventPayload {
   via: "p2p" | "p2pRelay" | "syncplay";
 }
 
+export interface PeerSeekPayload {
+  username: string;
+  deltaSecs: number;
+  positionSecs: number;
+}
+
 export type SyncStatusPayload =
   | { state: "disconnected" }
   | { state: "connecting"; endpoint: string; attempt: number }
@@ -337,4 +343,11 @@ export async function onSyncReaction(
 ): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<ReactionEventPayload>("sync://reaction", (e) => cb(e.payload));
+}
+
+export async function onSyncPeerSeek(
+  cb: (payload: PeerSeekPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<PeerSeekPayload>("sync://peer-seek", (e) => cb(e.payload));
 }

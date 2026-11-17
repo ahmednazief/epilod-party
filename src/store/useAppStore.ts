@@ -60,6 +60,7 @@ export type SettingsTab =
   | "server"
   | "logs";
 export type SkipIntroMode = "off" | "manual" | "auto";
+export type AutoFetchSubtitleMode = "missing" | "language" | "off";
 
 interface AppState {
   screen: AppScreen;
@@ -78,6 +79,9 @@ interface AppState {
   lowPowerMode: boolean;
   soundEffectsEnabled: boolean;
   skipIntroMode: SkipIntroMode;
+  autoFetchSubtitles: AutoFetchSubtitleMode;
+  preferredSubtitleLangs: string;
+  openSubtitlesApiKey: string;
   reactionsEnabled: boolean;
   recentEmojis: string[];
   fullWidthPlayBar: boolean;
@@ -102,6 +106,9 @@ interface AppState {
   setLowPowerMode: (lowPower: boolean) => void;
   setSoundEffectsEnabled: (enabled: boolean) => void;
   setSkipIntroMode: (mode: SkipIntroMode) => void;
+  setAutoFetchSubtitles: (mode: AutoFetchSubtitleMode) => void;
+  setPreferredSubtitleLangs: (langs: string) => void;
+  setOpenSubtitlesApiKey: (apiKey: string) => void;
   setReactionsEnabled: (enabled: boolean) => void;
   pushRecentEmoji: (emoji: string) => void;
   setFullWidthPlayBar: (fullWidth: boolean) => void;
@@ -142,6 +149,13 @@ function readInitialSkipIntroMode(): SkipIntroMode {
 
 const initialSoundEffectsEnabled = readStorage("ep.soundEffects", "true") !== "false";
 const initialSkipIntroMode = readInitialSkipIntroMode();
+const initialAutoFetchSubtitles: AutoFetchSubtitleMode = (() => {
+  const saved = readStorage("ep.autoFetchSubs", "missing");
+  if (saved === "missing" || saved === "language" || saved === "off") return saved;
+  return "missing";
+})();
+const initialPreferredSubtitleLangs = readStorage("ep.preferredSubLangs", "eng") || "eng";
+const initialOpenSubtitlesApiKey = readStorage("ep.osApiKey", "");
 const initialReactionsEnabled = readStorage("ep.reactionsEnabled", "true") !== "false";
 const initialRecentEmojis: string[] = (() => {
   try {
@@ -178,6 +192,9 @@ export const useAppStore = create<AppState>((set) => ({
   lowPowerMode: initialLowPowerMode,
   soundEffectsEnabled: initialSoundEffectsEnabled,
   skipIntroMode: initialSkipIntroMode,
+  autoFetchSubtitles: initialAutoFetchSubtitles,
+  preferredSubtitleLangs: initialPreferredSubtitleLangs,
+  openSubtitlesApiKey: initialOpenSubtitlesApiKey,
   reactionsEnabled: initialReactionsEnabled,
   recentEmojis: initialRecentEmojis,
   fullWidthPlayBar: initialFullWidthPlayBar,
@@ -250,6 +267,23 @@ export const useAppStore = create<AppState>((set) => ({
   setSkipIntroMode: (skipIntroMode) => {
     writeStorage("ep.skipIntroMode", skipIntroMode);
     set({ skipIntroMode });
+  },
+
+  setAutoFetchSubtitles: (autoFetchSubtitles) => {
+    writeStorage("ep.autoFetchSubs", autoFetchSubtitles);
+    set({ autoFetchSubtitles });
+  },
+
+  setPreferredSubtitleLangs: (langs) => {
+    const clean = langs.trim() || "eng";
+    writeStorage("ep.preferredSubLangs", clean);
+    set({ preferredSubtitleLangs: clean });
+  },
+
+  setOpenSubtitlesApiKey: (apiKey) => {
+    const clean = apiKey.trim();
+    writeStorage("ep.osApiKey", clean);
+    set({ openSubtitlesApiKey: clean });
   },
 
   setReactionsEnabled: (reactionsEnabled) => {

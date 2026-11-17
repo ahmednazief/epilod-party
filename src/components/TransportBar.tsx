@@ -43,6 +43,7 @@ import {
   PlayerCaptionsIcon,
   PlayerEpisodesIcon,
   PlayerFullscreenIcon,
+  PlayerPartyChevronIcon,
   PlayerPauseIcon,
   PlayerPlayIcon,
   PlayerReactionsIcon,
@@ -58,6 +59,7 @@ import { Scrubber } from "./ui/Scrubber";
 
 export type CapsuleTab = "room" | "episodes" | "playback" | "subtitles" | "reactions";
 type RightCapsuleTab = "episodes" | "subtitles" | "playback";
+type TransportControlKey = "prev" | "back" | "play" | "forward" | "next";
 
 export function formatClock(secs: number): string {
   if (!Number.isFinite(secs) || secs < 0) return "0:00";
@@ -477,13 +479,157 @@ export const TransportBar = memo(function TransportBar({
     playlistItems.length,
   ]);
 
+  const centerDockRef = useRef<HTMLDivElement | null>(null);
+  const centerBtnRefs = useRef<Partial<Record<TransportControlKey, HTMLButtonElement | null>>>({});
+  const prevTransportKeyRef = useRef<TransportControlKey | null>(null);
+  const transportMorphTimerRef = useRef<number | null>(null);
+  const [hoveredTransport, setHoveredTransport] = useState<TransportControlKey | null>(null);
+  const [transportMorphing, setTransportMorphing] = useState(false);
+  const [transportPressed, setTransportPressed] = useState(false);
+  const [transportLens, setTransportLens] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    visible: boolean;
+    animateSlide: boolean;
+  }>({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+    visible: false,
+    animateSlide: false,
+  });
+
+  useEffect(() => {
+    return () => {
+      if (transportMorphTimerRef.current !== null) {
+        window.clearTimeout(transportMorphTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!visible) {
+      setHoveredTransport(null);
+      setTransportPressed(false);
+      return;
+    }
+    if (!hoveredTransport) return;
+    const isEnabled =
+      hoveredTransport === "prev"
+        ? hasFolderEpisodes && playlistItems.length > 1 && hasPrevEpisode && !ctrlLock.lockedForLocalUser
+        : hoveredTransport === "next"
+          ? hasFolderEpisodes && playlistItems.length > 1 && hasNextEpisode && !ctrlLock.lockedForLocalUser
+          : loaded && !ctrlLock.lockedForLocalUser;
+    if (!isEnabled) {
+      setHoveredTransport(null);
+      setTransportPressed(false);
+    }
+  }, [
+    visible,
+    hoveredTransport,
+    hasFolderEpisodes,
+    playlistItems.length,
+    hasPrevEpisode,
+    hasNextEpisode,
+    loaded,
+    ctrlLock.lockedForLocalUser,
+  ]);
+
+  useLayoutEffect(() => {
+    const dock = centerDockRef.current;
+    if (!dock) return;
+
+    const prevKey = prevTransportKeyRef.current;
+    const switchedBetween =
+      prevKey !== null && hoveredTransport !== null && prevKey !== hoveredTransport;
+
+    if (!hoveredTransport) {
+      setTransportLens((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      setTransportMorphing(false);
+      if (transportMorphTimerRef.current !== null) {
+        window.clearTimeout(transportMorphTimerRef.current);
+        transportMorphTimerRef.current = null;
+      }
+    } else {
+      const btn = centerBtnRefs.current[hoveredTransport];
+      if (!btn) {
+        setTransportLens((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      } else {
+        const dockRect = dock.getBoundingClientRect();
+        const btnRect = btn.getBoundingClientRect();
+        const nextWidth = btn.offsetWidth;
+        const nextHeight = btn.offsetHeight;
+        const nextLeft = Math.round(((btnRect.left + btnRect.width / 2 - dockRect.left) - nextWidth / 2) * 100) / 100;
+        const nextTop = Math.round(((btnRect.top + btnRect.height / 2 - dockRect.top) - nextHeight / 2) * 100) / 100;
+        setTransportLens((prev) =>
+          prev.left === nextLeft &&
+          prev.top === nextTop &&
+          prev.width === nextWidth &&
+          prev.height === nextHeight &&
+          prev.visible &&
+          prev.animateSlide === switchedBetween
+            ? prev
+            : {
+                left: nextLeft,
+                top: nextTop,
+                width: nextWidth,
+                height: nextHeight,
+                visible: true,
+                animateSlide: switchedBetween,
+              },
+        );
+      }
+      if (switchedBetween) {
+        setTransportMorphing(true);
+        if (transportMorphTimerRef.current !== null) {
+          window.clearTimeout(transportMorphTimerRef.current);
+        }
+        transportMorphTimerRef.current = window.setTimeout(() => setTransportMorphing(false), 195);
+      }
+    }
+    prevTransportKeyRef.current = hoveredTransport;
+
+    const updateBounds = () => {
+      if (!hoveredTransport) return;
+      const btn = centerBtnRefs.current[hoveredTransport];
+      if (!btn) return;
+      const dockRect = dock.getBoundingClientRect();
+      const btnRect = btn.getBoundingClientRect();
+      const nextWidth = btn.offsetWidth;
+      const nextHeight = btn.offsetHeight;
+      const nextLeft = Math.round(((btnRect.left + btnRect.width / 2 - dockRect.left) - nextWidth / 2) * 100) / 100;
+      const nextTop = Math.round(((btnRect.top + btnRect.height / 2 - dockRect.top) - nextHeight / 2) * 100) / 100;
+      setTransportLens((prev) =>
+        prev.left === nextLeft &&
+        prev.top === nextTop &&
+        prev.width === nextWidth &&
+        prev.height === nextHeight
+          ? prev
+          : { ...prev, left: nextLeft, top: nextTop, width: nextWidth, height: nextHeight },
+      );
+    };
+
+    const ro =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateBounds) : null;
+    ro?.observe(dock);
+    for (const key of ["prev", "back", "play", "forward", "next"] as const) {
+      const b = centerBtnRefs.current[key];
+      if (b) ro?.observe(b);
+    }
+    return () => {
+      ro?.disconnect();
+    };
+  }, [hoveredTransport, hasFolderEpisodes, playlistItems.length]);
+
   const handlePlayPause = () => {
     togglePlayback();
   };
 
   const handleSeekRelative = (delta: number) => {
     seekPlaybackRelative(delta, {
-      showFeedback: false,
       lockReasonText: "Seeking is restricted to the room controller.",
     });
   };
@@ -619,18 +765,14 @@ export const TransportBar = memo(function TransportBar({
                         ? "Party lounge (profile icons hidden)"
                         : "Friends watching together"
                   }
-                  className={`h-7.5 w-7.5 rounded-full inline-flex items-center justify-center text-xs shrink-0 cursor-pointer ${
+                  className={`ep-bar-pill ep-party-pill h-7.5 w-7.5 rounded-full inline-flex items-center justify-center text-xs shrink-0 cursor-pointer ${
                     !hideParticipants && visiblePeers.length > 0
-                      ? mismatch
-                        ? "sm:w-auto sm:pl-1 sm:pr-2 xl:pr-2.5 gap-1.5"
-                        : visiblePeers.length === 1
-                          ? "sm:w-7.5 sm:p-0 xl:w-auto xl:pl-1 xl:pr-2.5 xl:gap-1.5"
-                          : "sm:w-auto sm:px-1 xl:pl-1 xl:pr-2.5 xl:gap-1.5"
+                      ? "sm:w-auto sm:pl-1 sm:pr-2 xl:pr-2.5 gap-1.5"
                       : "sm:w-auto sm:px-2.5 gap-1.5"
                   } ${
                     activeTab === "room"
-                      ? "ep-press ep-droplet-indicator text-white font-semibold border border-transparent"
-                      : "ep-bar-pill text-secondary hover:text-white"
+                      ? "ep-droplet-indicator text-white font-semibold"
+                      : "text-secondary hover:text-white"
                   }`}
                 >
                   {!hideParticipants && visiblePeers.length > 0 ? (
@@ -653,26 +795,23 @@ export const TransportBar = memo(function TransportBar({
                               ? "ring-ok/85"
                               : "ring-warn/80";
                           return (
-                            <span
+                            <ProfileAvatar
                               key={p.username}
+                              avatarId={resolvePeerAvatarId(
+                                p.username,
+                                effectiveUsername,
+                                avatarId,
+                              )}
+                              size={20}
                               title={`${p.username}${p.isReady ? " · Ready" : " · Not Ready"}${
                                 badge.isMismatch ? ` · ${badge.text}` : ""
                               }`}
-                              className={`h-5 w-5 rounded-full flex items-center justify-center ring-2 ${ringClass}`}
-                            >
-                              <ProfileAvatar
-                                avatarId={resolvePeerAvatarId(
-                                  p.username,
-                                  effectiveUsername,
-                                  avatarId,
-                                )}
-                                size={20}
-                              />
-                            </span>
+                              className={`ring-2 ${ringClass} shrink-0`}
+                            />
                           );
                         })}
                         {extraPeerCount > 0 && (
-                          <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90">
+                          <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90 shrink-0">
                             +{extraPeerCount}
                           </span>
                         )}
@@ -680,6 +819,17 @@ export const TransportBar = memo(function TransportBar({
                       <span className="hidden xl:inline text-[11px] font-medium leading-none num">
                         {participants.length}
                       </span>
+                      {mismatch && (
+                        <span
+                          className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <PlayerPartyChevronIcon
+                        open={activeTab === "room"}
+                        size={11}
+                        className="hidden sm:block shrink-0 opacity-80"
+                      />
                     </>
                   ) : (
                     <>
@@ -687,13 +837,18 @@ export const TransportBar = memo(function TransportBar({
                       {!hideParticipants && (
                         <span className="hidden xl:inline text-[11px]">Party</span>
                       )}
+                      {mismatch && (
+                        <span
+                          className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <PlayerPartyChevronIcon
+                        open={activeTab === "room"}
+                        size={11}
+                        className="hidden sm:block shrink-0 opacity-80"
+                      />
                     </>
-                  )}
-                  {mismatch && (
-                    <span
-                      className="h-1.5 w-1.5 rounded-full bg-warn shrink-0"
-                      aria-hidden="true"
-                    />
                   )}
                 </button>
 
@@ -723,10 +878,10 @@ export const TransportBar = memo(function TransportBar({
                 aria-label="Open party lounge"
                 aria-pressed={activeTab === "room"}
                 title="Start or join a Watch Party"
-                className={`h-7.5 w-7.5 sm:w-auto sm:px-3 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium cursor-pointer shrink-0 ${
+                className={`ep-bar-pill ep-party-pill h-7.5 w-7.5 sm:w-auto sm:px-3 rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium cursor-pointer shrink-0 ${
                   activeTab === "room"
-                    ? "ep-press ep-droplet-indicator text-white font-semibold border border-transparent"
-                    : "ep-bar-pill text-secondary hover:text-white"
+                    ? "ep-droplet-indicator text-white font-semibold"
+                    : "text-secondary hover:text-white"
                 }`}
               >
                 <WatchPartyIcon bare size={16} className="shrink-0" />
@@ -779,34 +934,107 @@ export const TransportBar = memo(function TransportBar({
           </div>
 
           {/* Center: Hero Transport Cluster */}
-          <div className="flex items-center gap-1.5 shrink-0 justify-self-center">
+          <div
+            ref={centerDockRef}
+            onMouseLeave={() => {
+              setHoveredTransport(null);
+              setTransportPressed(false);
+            }}
+            onPointerUp={() => setTransportPressed(false)}
+            onPointerCancel={() => setTransportPressed(false)}
+            className="relative flex items-center gap-1.5 sm:gap-2 shrink-0 justify-self-center"
+          >
+            <span
+              aria-hidden="true"
+              className={`pointer-events-none absolute top-0 left-0 z-0 ${
+                transportLens.animateSlide
+                  ? "transition-[transform,width,height] duration-[400ms] ease-[cubic-bezier(0.22,1.28,0.36,1)]"
+                  : ""
+              }`}
+              style={{
+                width: `${transportLens.width}px`,
+                height: `${transportLens.height}px`,
+                transform: `translate3d(${transportLens.left}px, ${transportLens.top}px, 0)`,
+              }}
+            >
+              <span
+                data-visible={transportLens.visible ? "true" : "false"}
+                data-morphing={transportMorphing ? "true" : undefined}
+                data-pressed={transportPressed ? "true" : undefined}
+                className="ep-droplet-indicator ep-droplet-core ep-transport-lens block h-full w-full rounded-full"
+              />
+            </span>
+
             {hasFolderEpisodes && playlistItems.length > 1 && onPrevEpisode && (
               <button
+                ref={(el) => {
+                  centerBtnRefs.current.prev = el;
+                }}
                 type="button"
                 disabled={!hasPrevEpisode || ctrlLock.lockedForLocalUser}
+                onMouseEnter={() => {
+                  if (hasPrevEpisode && !ctrlLock.lockedForLocalUser) {
+                    setHoveredTransport("prev");
+                  } else {
+                    setHoveredTransport(null);
+                  }
+                }}
+                onPointerDown={() => {
+                  if (hasPrevEpisode && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+                }}
                 onClick={onPrevEpisode}
                 aria-label="Previous episode"
-                title="Previous episode"
-                className="ep-bar-icon-btn ep-transport-btn h-8.5 w-8.5 rounded-full flex items-center justify-center text-white/85 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                title={
+                  hasPrevEpisode
+                    ? `Previous: ${playlistItems[playlistIndex - 1]?.episodeBadge || playlistItems[playlistIndex - 1]?.cleanTitle || "Episode"}`
+                    : "No previous episode"
+                }
+                className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-8 w-8 mr-0.5 rounded-full flex items-center justify-center text-white/62 hover:text-white disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
               >
                 <PlayerSkipEpisodeIcon direction="prev" size={18} />
               </button>
             )}
 
             <button
+              ref={(el) => {
+                centerBtnRefs.current.back = el;
+              }}
               type="button"
               disabled={!loaded || ctrlLock.lockedForLocalUser}
+              onMouseEnter={() => {
+                if (loaded && !ctrlLock.lockedForLocalUser) {
+                  setHoveredTransport("back");
+                } else {
+                  setHoveredTransport(null);
+                }
+              }}
+              onPointerDown={() => {
+                if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+              }}
               onClick={() => handleSeekRelative(-10)}
               aria-label="Seek back 10 seconds"
               title="Seek -10s (J)"
-              className="ep-bar-icon-btn ep-transport-btn h-9 w-9 rounded-full flex items-center justify-center text-white/90 hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-9 w-9 rounded-full flex items-center justify-center text-white/84 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
             >
-              <PlayerSeekIcon direction="back" size={22} />
+              <PlayerSeekIcon direction="back" size={24} />
             </button>
 
             <button
+              ref={(el) => {
+                centerBtnRefs.current.play = el;
+              }}
               type="button"
               disabled={!loaded || ctrlLock.lockedForLocalUser}
+              onMouseEnter={() => {
+                if (loaded && !ctrlLock.lockedForLocalUser) {
+                  setHoveredTransport("play");
+                } else {
+                  setHoveredTransport(null);
+                }
+              }}
+              onPointerDown={() => {
+                if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+              }}
               onClick={handlePlayPause}
               aria-label={paused ? "Play" : "Pause"}
               title={
@@ -818,34 +1046,64 @@ export const TransportBar = memo(function TransportBar({
                       ? "Play (Space)"
                       : "Pause (Space)"
               }
-              className="ep-orb-play h-11 w-11 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
+              className="ep-orb-play relative z-10 h-10.5 w-10.5 rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer"
             >
               {paused ? (
-                <PlayerPlayIcon key="play" size={23} className="relative z-10 anim-icon-pop" />
+                <PlayerPlayIcon key="play" size={24} className="relative z-10 anim-icon-pop" />
               ) : (
-                <PlayerPauseIcon key="pause" size={23} className="relative z-10 anim-icon-pop" />
+                <PlayerPauseIcon key="pause" size={24} className="relative z-10 anim-icon-pop" />
               )}
             </button>
 
             <button
+              ref={(el) => {
+                centerBtnRefs.current.forward = el;
+              }}
               type="button"
               disabled={!loaded || ctrlLock.lockedForLocalUser}
+              onMouseEnter={() => {
+                if (loaded && !ctrlLock.lockedForLocalUser) {
+                  setHoveredTransport("forward");
+                } else {
+                  setHoveredTransport(null);
+                }
+              }}
+              onPointerDown={() => {
+                if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+              }}
               onClick={() => handleSeekRelative(10)}
               aria-label="Seek forward 10 seconds"
               title="Seek +10s (L)"
-              className="ep-bar-icon-btn ep-transport-btn h-9 w-9 rounded-full flex items-center justify-center text-white/90 hover:text-white disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-9 w-9 rounded-full flex items-center justify-center text-white/84 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
             >
-              <PlayerSeekIcon direction="forward" size={22} />
+              <PlayerSeekIcon direction="forward" size={24} />
             </button>
 
             {hasFolderEpisodes && playlistItems.length > 1 && onNextEpisode && (
               <button
+                ref={(el) => {
+                  centerBtnRefs.current.next = el;
+                }}
                 type="button"
                 disabled={!hasNextEpisode || ctrlLock.lockedForLocalUser}
+                onMouseEnter={() => {
+                  if (hasNextEpisode && !ctrlLock.lockedForLocalUser) {
+                    setHoveredTransport("next");
+                  } else {
+                    setHoveredTransport(null);
+                  }
+                }}
+                onPointerDown={() => {
+                  if (hasNextEpisode && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+                }}
                 onClick={onNextEpisode}
                 aria-label="Next episode"
-                title="Next episode"
-                className="ep-bar-icon-btn ep-transport-btn h-8.5 w-8.5 rounded-full flex items-center justify-center text-white/85 hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                title={
+                  hasNextEpisode
+                    ? `Next: ${playlistItems[playlistIndex + 1]?.episodeBadge || playlistItems[playlistIndex + 1]?.cleanTitle || "Episode"}`
+                    : "No next episode"
+                }
+                className="ep-bar-icon-btn ep-transport-btn ep-transport-bubble relative z-10 h-8 w-8 ml-0.5 rounded-full flex items-center justify-center text-white/62 hover:text-white disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
               >
                 <PlayerSkipEpisodeIcon direction="next" size={18} />
               </button>

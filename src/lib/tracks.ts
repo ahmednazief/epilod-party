@@ -1,4 +1,4 @@
-import type { MpvTrack } from "./mpv";
+import type { MpvTrack, SubtitleLangProbeTrack } from "./mpv";
 
 export interface TrackOption {
   value: string;
@@ -6,7 +6,65 @@ export interface TrackOption {
   track: MpvTrack | null;
 }
 
-export function formatTrackLabel(track: MpvTrack): string {
+export interface SubtitleTrackDisplay {
+  label: string;
+  metaTags: string[];
+}
+
+/**
+ * Format a subtitle track's human-facing primary label and badge tags uniformly across
+ * the subtitle panel, right-click menu, and OSD feedback.
+ * Falls back to FFmpeg-detected language for untagged text tracks and `"Closed Captions"`
+ * for untagged EIA-608/CEA-708 streams.
+ */
+export function formatSubtitleTrackDisplay(
+  track: MpvTrack,
+  options?: { detectedLang?: string | null; externalFileName?: string | null },
+): SubtitleTrackDisplay {
+  const cleanTitle = track.title?.trim() || null;
+  const tagLang = normalizeSubtitleLang(track.lang);
+  const detectedLangCode =
+    !tagLang && !track.external && options?.detectedLang
+      ? normalizeSubtitleLang(options.detectedLang)
+      : null;
+  const displayLang = tagLang
+    ? track.lang!.trim().toUpperCase()
+    : detectedLangCode
+      ? detectedLangCode.toUpperCase()
+      : null;
+
+  const label =
+    cleanTitle ||
+    (track.external
+      ? options?.externalFileName || "External Subtitles"
+      : displayLang
+        ? `${displayLang} Subtitles`
+        : isClosedCaptionTrack(track)
+          ? "Closed Captions"
+          : `Subtitle ${track.id}`);
+
+  const metaTags: string[] = [];
+  if (cleanTitle && displayLang) {
+    metaTags.push(displayLang);
+  }
+  if (track.external) {
+    metaTags.push("External");
+  } else {
+    if (detectedLangCode) {
+      metaTags.push("Detected");
+    }
+    if (track.codec?.trim()) {
+      metaTags.push(track.codec.trim().toUpperCase());
+    }
+  }
+  return { label, metaTags };
+}
+
+export function formatTrackLabel(track: MpvTrack, detectedLang?: string | null): string {
+  if (track.type === "sub") {
+    const { label, metaTags } = formatSubtitleTrackDisplay(track, { detectedLang });
+    return metaTags.length > 0 ? `${label} · ${metaTags.join(" · ")}` : label;
+  }
   const parts: string[] = [];
   if (track.title && track.title.trim()) {
     parts.push(track.title.trim());
@@ -25,11 +83,15 @@ export function formatTrackLabel(track: MpvTrack): string {
   return parts.join(" · ");
 }
 
-export function formatTrackAnnouncement(track: MpvTrack | null, kind: "audio" | "sub"): string {
+export function formatTrackAnnouncement(
+  track: MpvTrack | null,
+  kind: "audio" | "sub",
+  detectedLang?: string | null,
+): string {
   if (!track) {
     return kind === "sub" ? "Subtitles off" : "Audio track auto";
   }
-  return `${kind === "sub" ? "Sub" : "Audio"}: ${formatTrackLabel(track)}`;
+  return `${kind === "sub" ? "Sub" : "Audio"}: ${formatTrackLabel(track, detectedLang)}`;
 }
 
 export function formatDelaySigned(delaySecs: number): string {
@@ -299,24 +361,60 @@ export function languagesMatch(a?: string | null, b?: string | null): boolean {
   return na !== null && nb !== null && na === nb;
 }
 
-function resolveTrackEffectiveLang(track: MpvTrack | null | undefined): string | null {
+function resolveTrackEffectiveLang(
+  track: MpvTrack | null | undefined,
+  detectedLang?: string | null,
+): string | null {
   if (!track) return null;
   const fromTag = normalizeSubtitleLang(track.lang);
   if (fromTag) return fromTag;
   const title = track.title?.trim().toLowerCase();
-  if (!title) return null;
-  for (const token of title.split(/[^a-z]+/)) {
-    if (token && SUB_LANG_FULL_NAMES[token]) {
-      return SUB_LANG_FULL_NAMES[token];
+  if (title) {
+    for (const token of title.split(/[^a-z]+/)) {
+      if (token && SUB_LANG_FULL_NAMES[token]) {
+        return SUB_LANG_FULL_NAMES[token];
+      }
     }
   }
-  return null;
+  return normalizeSubtitleLang(detectedLang);
 }
 
 function getValidFfIndex(track: MpvTrack | null | undefined): number | null {
   if (!track) return null;
   const raw = track["ff-index"];
   return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : null;
+}
+
+function getContainerEmbeddedSubs(tracks: readonly MpvTrack[]): MpvTrack[] {
+  return tracks.filter(
+    (t) =>
+      t.type === "sub" &&
+      !t.external &&
+      !(isClosedCaptionTrack(t) && getValidFfIndex(t) === null),
+  );
+}
+
+/**
+ * Build the list of untagged embedded text subtitle tracks that need background cue-based
+ * language detection (`SUBRIP`, `ASS`, `WEBVTT`, etc.). Skips image tracks and CC bitstreams.
+ */
+export function buildUntaggedSubtitleProbeList(
+  tracks: readonly MpvTrack[],
+): SubtitleLangProbeTrack[] {
+  const containerSubs = getContainerEmbeddedSubs(tracks);
+  const probes: SubtitleLangProbeTrack[] = [];
+  for (let subStreamIdx = 0; subStreamIdx < containerSubs.length; subStreamIdx++) {
+    const t = containerSubs[subStreamIdx];
+    if (isBitmapSubtitleTrack(t) || isClosedCaptionTrack(t)) continue;
+    if (resolveTrackEffectiveLang(t) !== null) continue;
+    probes.push({
+      trackId: t.id,
+      ffIndex: getValidFfIndex(t),
+      subStreamIdx,
+      codec: t.codec ?? null,
+    });
+  }
+  return probes;
 }
 
 export interface EmbeddedSyncTargetResolution {
@@ -334,7 +432,10 @@ export interface EmbeddedSyncTargetResolution {
  * Resolve which embedded subtitle track should be extracted for Magic Sync.
  * Never falls back from an image subtitle (PGS/DVD) to a different language's text track.
  */
-export function resolveEmbeddedSyncTarget(tracks: readonly MpvTrack[]): EmbeddedSyncTargetResolution {
+export function resolveEmbeddedSyncTarget(
+  tracks: readonly MpvTrack[],
+  detectedSubLangs?: Readonly<Record<number, string>>,
+): EmbeddedSyncTargetResolution {
   const selectedSub = tracks.find((t) => t.type === "sub" && t.selected) ?? null;
   const subIsBitmap = isBitmapSubtitleTrack(selectedSub);
 
@@ -358,13 +459,12 @@ export function resolveEmbeddedSyncTarget(tracks: readonly MpvTrack[]): Embedded
     const embeddedTextSubs = tracks.filter(
       (t) => t.type === "sub" && !t.external && !isBitmapSubtitleTrack(t),
     );
-    const selLang = resolveTrackEffectiveLang(selectedSub);
+    const trackLang = (t: MpvTrack) => resolveTrackEffectiveLang(t, detectedSubLangs?.[t.id]);
+    const selLang = trackLang(selectedSub);
     if (selLang) {
       fallbackEmbeddedSub =
-        embeddedTextSubs.find(
-          (t) => !isClosedCaptionTrack(t) && resolveTrackEffectiveLang(t) === selLang,
-        ) ??
-        embeddedTextSubs.find((t) => resolveTrackEffectiveLang(t) === selLang) ??
+        embeddedTextSubs.find((t) => !isClosedCaptionTrack(t) && trackLang(t) === selLang) ??
+        embeddedTextSubs.find((t) => trackLang(t) === selLang) ??
         null;
     } else {
       const selTitle = selectedSub.title?.trim().toLowerCase();
@@ -372,14 +472,17 @@ export function resolveEmbeddedSyncTarget(tracks: readonly MpvTrack[]): Embedded
         (selTitle
           ? embeddedTextSubs.find((t) => t.title?.trim().toLowerCase() === selTitle)
           : undefined) ??
-        (embeddedTextSubs.length === 1 && !resolveTrackEffectiveLang(embeddedTextSubs[0])
+        (embeddedTextSubs.length === 1 && !trackLang(embeddedTextSubs[0])
           ? embeddedTextSubs[0]
           : null);
     }
-    crossLangBlocked = fallbackEmbeddedSub === null;
+    // When no matching-language text track exists, Magic Sync falls through to align the bitmap
+    // subtitle stream directly via packet timestamps + in-place mpv delay instead of cross-language
+    // fallback.
+    crossLangBlocked = false;
   }
 
-  const syncTargetEmbedded = !subIsBitmap ? selectedSub : fallbackEmbeddedSub;
+  const syncTargetEmbedded = !subIsBitmap ? selectedSub : fallbackEmbeddedSub ?? selectedSub;
   const isClosedCaption = isClosedCaptionTrack(syncTargetEmbedded);
 
   let ffIndex: number | null = null;
@@ -389,12 +492,7 @@ export function resolveEmbeddedSyncTarget(tracks: readonly MpvTrack[]): Embedded
     if (isClosedCaption) {
       embeddedSubIdx = 0;
     } else {
-      const containerSubs = tracks.filter(
-        (t) =>
-          t.type === "sub" &&
-          !t.external &&
-          !(isClosedCaptionTrack(t) && getValidFfIndex(t) === null),
-      );
+      const containerSubs = getContainerEmbeddedSubs(tracks);
       const idx = containerSubs.findIndex((t) => t.id === syncTargetEmbedded.id);
       embeddedSubIdx = idx >= 0 ? idx : null;
     }

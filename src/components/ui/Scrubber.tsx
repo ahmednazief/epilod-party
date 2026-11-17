@@ -217,7 +217,7 @@ export function Scrubber({
         ))}
       <div className="relative w-full h-1.5 group-hover:h-2.5 bg-white/14 rounded-full overflow-hidden transition-[height] duration-200 ease-out">
         <div
-          className="ep-scrubber-fill absolute inset-0 origin-left will-change-transform rounded-full"
+          className="ep-scrubber-fill absolute inset-0 origin-left will-change-transform"
           style={{ transform: `scaleX(${ratio})` }}
         />
         {highlightSpan && (

@@ -6,167 +6,116 @@ interface PlayerIconProps {
 }
 
 /**
- * Custom faceted Smoked-Amethyst Crystal Play prism for the hero center orb.
+ * Custom sculpted crystal Play triangle for the hero center orb.
+ * Pure white, bold, optically centered rounded triangle with subtle amethyst refraction.
  */
 export function PlayerPlayIcon({ size = 24, className = "" }: PlayerIconProps) {
   const uid = useId().replace(/:/g, "");
-  const coreId = `ep-play-core-${uid}`;
   const sheenId = `ep-play-sheen-${uid}`;
-  const facetId = `ep-play-facet-${uid}`;
   const clipId = `ep-play-clip-${uid}`;
 
+  // Bold optically centered rounded play triangle (x=8.5..19.2, y=5.4..18.6)
   const corePath =
-    "M7.75 5.45Q7.75 4.05 8.95 4.82L18.85 11.2Q20.05 12 18.85 12.8L8.95 19.18Q7.75 19.95 7.75 18.55V5.45Z";
+    "M8.5 6.35Q8.5 5 9.65 5.71L18.65 11.29Q19.8 12 18.65 12.71L9.65 18.29Q8.5 19 8.5 17.65V6.35Z";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={coreId} x1="7.75" y1="4.5" x2="19.5" y2="19.5" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="58%" stopColor="#F5F3FF" />
-          <stop offset="100%" stopColor="#DDD6FE" />
-        </linearGradient>
-        <linearGradient id={sheenId} x1="8" y1="4" x2="16" y2="12" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.95" />
-          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
-        </linearGradient>
-        <linearGradient id={facetId} x1="8" y1="12" x2="19.5" y2="19.5" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#C4B5FD" stopOpacity="0.10" />
-          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.28" />
+        <linearGradient id={sheenId} x1="8.5" y1="5" x2="19.8" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.08" />
         </linearGradient>
         <clipPath id={clipId}>
           <path d={corePath} />
         </clipPath>
       </defs>
-      <path d={corePath} fill={`url(#${coreId})`} />
+      <path d={corePath} fill="#FFFFFF" />
       <g clipPath={`url(#${clipId})`}>
-        <polygon points="7,4 20.5,11.6 7,12.8" fill={`url(#${sheenId})`} />
-        <polygon points="7,14.2 20.5,10.8 20.5,20.5 7,20.5" fill={`url(#${facetId})`} />
-        <path
-          d={corePath}
-          stroke="#FFFFFF"
-          strokeOpacity="0.72"
-          strokeWidth="0.9"
-          strokeLinejoin="round"
-        />
+        <path d={corePath} fill={`url(#${sheenId})`} />
       </g>
     </svg>
   );
 }
 
 /**
- * Custom faceted Smoked-Amethyst Crystal Pause pillars for the hero center orb.
+ * Custom sculpted crystal Pause pillars for the hero center orb.
+ * Crisp integer-aligned pillars matched in height and weight to Play.
  */
 export function PlayerPauseIcon({ size = 24, className = "" }: PlayerIconProps) {
   const uid = useId().replace(/:/g, "");
-  const coreId = `ep-pause-core-${uid}`;
   const sheenId = `ep-pause-sheen-${uid}`;
-  const facetId = `ep-pause-facet-${uid}`;
   const clipId = `ep-pause-clip-${uid}`;
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={coreId} x1="6.25" y1="4.75" x2="17.75" y2="19.25" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="58%" stopColor="#F5F3FF" />
-          <stop offset="100%" stopColor="#DDD6FE" />
-        </linearGradient>
-        <linearGradient id={sheenId} x1="6" y1="4.5" x2="18" y2="12" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.92" />
-          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
-        </linearGradient>
-        <linearGradient id={facetId} x1="6" y1="12" x2="18" y2="19.5" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#C4B5FD" stopOpacity="0.10" />
-          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.28" />
+        <linearGradient id={sheenId} x1="6.8" y1="5.25" x2="17.2" y2="18.75" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.08" />
         </linearGradient>
         <clipPath id={clipId}>
-          <rect x="6.25" y="4.75" width="4" height="14.5" rx="1.45" />
-          <rect x="13.75" y="4.75" width="4" height="14.5" rx="1.45" />
+          <rect x="6.8" y="5.25" width="3.8" height="13.5" rx="1.25" />
+          <rect x="13.4" y="5.25" width="3.8" height="13.5" rx="1.25" />
         </clipPath>
       </defs>
-      <rect x="6.25" y="4.75" width="4" height="14.5" rx="1.45" fill={`url(#${coreId})`} />
-      <rect x="13.75" y="4.75" width="4" height="14.5" rx="1.45" fill={`url(#${coreId})`} />
+      <rect x="6.8" y="5.25" width="3.8" height="13.5" rx="1.25" fill="#FFFFFF" />
+      <rect x="13.4" y="5.25" width="3.8" height="13.5" rx="1.25" fill="#FFFFFF" />
       <g clipPath={`url(#${clipId})`}>
-        <polygon points="5,4 19,9.5 19,12.5 5,10" fill={`url(#${sheenId})`} />
-        <polygon points="5,14.5 19,10.5 19,20 5,20" fill={`url(#${facetId})`} />
-        <rect x="6.25" y="4.75" width="4" height="14.5" rx="1.45" stroke="#FFFFFF" strokeOpacity="0.68" strokeWidth="0.8" />
-        <rect x="13.75" y="4.75" width="4" height="14.5" rx="1.45" stroke="#FFFFFF" strokeOpacity="0.68" strokeWidth="0.8" />
+        <rect x="6.8" y="5.25" width="3.8" height="13.5" rx="1.25" fill={`url(#${sheenId})`} />
+        <rect x="13.4" y="5.25" width="3.8" height="13.5" rx="1.25" fill={`url(#${sheenId})`} />
       </g>
     </svg>
   );
 }
 
 /**
- * Custom Smoked-Amethyst 10s backward / forward jump icon with precision orbital arc & balanced badge.
+ * Crisp 1:1 10s backward / forward jump icon with uniform monochrome strokes,
+ * clean solid directional arrowhead, and balanced geometric "10" typography.
  */
 export function PlayerSeekIcon({
   direction,
-  size = 22,
+  size = 24,
   className = "",
 }: PlayerIconProps & { direction: "back" | "forward" }) {
-  const uid = useId().replace(/:/g, "");
-  const arcId = `ep-seek-arc-${uid}`;
   const isBack = direction === "back";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
-      <defs>
-        <linearGradient id={arcId} x1="4" y1="3.5" x2="20" y2="21" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="56%" stopColor="#EDE9FE" />
-          <stop offset="100%" stopColor="#C4B5FD" />
-        </linearGradient>
-      </defs>
       {isBack ? (
         <>
           <path
-            d="M5.12 9.9A7.65 7.65 0 1 0 12 5.6H10.1"
-            stroke={`url(#${arcId})`}
+            d="M5.52 9.33A7.15 7.15 0 1 0 11.75 5.20"
+            stroke="currentColor"
             strokeWidth="1.65"
             strokeLinecap="round"
-            strokeLinejoin="round"
           />
-          <path
-            d="M12.55 3.45L10.1 5.6L12.55 7.75"
-            stroke="#FFFFFF"
-            strokeWidth="1.65"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          <path d="M8.55 5.20L11.85 3.05V7.35Z" fill="currentColor" />
         </>
       ) : (
         <>
           <path
-            d="M18.88 9.9A7.65 7.65 0 1 1 12 5.6H13.9"
-            stroke={`url(#${arcId})`}
+            d="M18.48 9.33A7.15 7.15 0 1 1 12.25 5.20"
+            stroke="currentColor"
             strokeWidth="1.65"
             strokeLinecap="round"
-            strokeLinejoin="round"
           />
-          <path
-            d="M11.45 3.45L13.9 5.6L11.45 7.75"
-            stroke="#FFFFFF"
-            strokeWidth="1.65"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          <path d="M15.45 5.20L12.15 3.05V7.35Z" fill="currentColor" />
         </>
       )}
       <path
-        d="M8.9 11.75L10.05 10.75V15.95"
-        stroke="#FFFFFF"
+        d="M8.2 10.85L9.65 9.65V15.15"
+        stroke="currentColor"
         strokeWidth="1.55"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <rect
         x="11.95"
-        y="10.75"
-        width="3.35"
-        height="5.2"
-        rx="1.675"
-        stroke="#FFFFFF"
+        y="9.65"
+        width="3.5"
+        height="5.5"
+        rx="1.75"
+        stroke="currentColor"
         strokeWidth="1.55"
       />
     </svg>
@@ -174,7 +123,7 @@ export function PlayerSeekIcon({
 }
 
 /**
- * Custom faceted Smoked-Amethyst crystal episode step icon (previous / next).
+ * Crisp monochrome episode step icon (previous / next) with subtle crystal clip depth.
  */
 export function PlayerSkipEpisodeIcon({
   direction,
@@ -182,43 +131,31 @@ export function PlayerSkipEpisodeIcon({
   className = "",
 }: PlayerIconProps & { direction: "prev" | "next" }) {
   const uid = useId().replace(/:/g, "");
-  const gId = `ep-skip-grad-${uid}`;
-  const facetId = `ep-skip-facet-${uid}`;
+  const sheenId = `ep-skip-facet-${uid}`;
   const clipId = `ep-skip-clip-${uid}`;
   const isPrev = direction === "prev";
+
+  const barX = isPrev ? 5.5 : 16.3;
   const triPath = isPrev
-    ? "M19 6.55Q19 5.2 17.85 5.93L9.65 11.27Q8.5 12 9.65 12.73L17.85 18.07Q19 18.8 19 17.45V6.55Z"
-    : "M5 6.55Q5 5.2 6.15 5.93L14.35 11.27Q15.5 12 14.35 12.73L6.15 18.07Q5 18.8 5 17.45V6.55Z";
+    ? "M18.5 7.1Q18.5 6 17.55 6.6L9.9 11.4Q9.05 12 9.9 12.6L17.55 17.4Q18.5 18 18.5 16.9V7.1Z"
+    : "M5.5 7.1Q5.5 6 6.45 6.6L14.1 11.4Q14.95 12 14.1 12.6L6.45 17.4Q5.5 18 5.5 16.9V7.1Z";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={gId} x1="5" y1="5" x2="19" y2="19" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" />
-          <stop offset="65%" stopColor="#F5F3FF" />
-          <stop offset="100%" stopColor="#DDD6FE" />
-        </linearGradient>
-        <linearGradient id={facetId} x1="5" y1="12" x2="19" y2="19" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#C4B5FD" stopOpacity="0.08" />
-          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.24" />
+        <linearGradient id={sheenId} x1="5.5" y1="6" x2="18.5" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.03" />
         </linearGradient>
         <clipPath id={clipId}>
-          {isPrev ? (
-            <rect x="5" y="5.25" width="2.4" height="13.5" rx="1.2" />
-          ) : (
-            <rect x="16.6" y="5.25" width="2.4" height="13.5" rx="1.2" />
-          )}
+          <rect x={barX} y="6" width="2.2" height="12" rx="1.1" />
           <path d={triPath} />
         </clipPath>
       </defs>
-      {isPrev ? (
-        <rect x="5" y="5.25" width="2.4" height="13.5" rx="1.2" fill={`url(#${gId})`} />
-      ) : (
-        <rect x="16.6" y="5.25" width="2.4" height="13.5" rx="1.2" fill={`url(#${gId})`} />
-      )}
-      <path d={triPath} fill={`url(#${gId})`} />
+      <rect x={barX} y="6" width="2.2" height="12" rx="1.1" fill="currentColor" />
+      <path d={triPath} fill="currentColor" />
       <g clipPath={`url(#${clipId})`}>
-        <polygon points="4,13.8 20,10.6 20,20 4,20" fill={`url(#${facetId})`} />
+        <rect x="5" y="5.5" width="14" height="13" fill={`url(#${sheenId})`} />
       </g>
     </svg>
   );
@@ -399,7 +336,7 @@ export function PlayerCaptionsIcon({
 }
 
 /**
- * Custom sculpted acoustic waveform icon for Audio & Playback (pill-free).
+ * Custom sculpted acoustic waveform icon for Audio & Playback with golden-ratio symmetry.
  */
 export function PlayerAudioIcon({
   active = false,
@@ -422,11 +359,12 @@ export function PlayerAudioIcon({
           <stop offset="100%" stopColor={active ? "#C4B5FD" : "#CBD5E1"} />
         </linearGradient>
       </defs>
-      <rect x="3.6" y="9.6" width="2.2" height="4.8" rx="1.1" fill={active ? "#DDD6FE" : "#CBD5E1"} />
-      <rect x="7.25" y="6.2" width="2.2" height="11.6" rx="1.1" fill={`url(#${midId})`} />
-      <rect x="10.9" y="3.6" width="2.2" height="16.8" rx="1.1" fill={`url(#${centerId})`} />
-      <rect x="14.55" y="7" width="2.2" height="10" rx="1.1" fill={active ? "#DDD6FE" : "#E2E8F0"} />
-      <rect x="18.2" y="9.8" width="2.2" height="4.4" rx="1.1" fill={active ? "#A78BFA" : "#94A3B8"} />
+      {/* Harmonious 5-bar acoustic waveform */}
+      <rect x="3.5" y="9.4" width="2.2" height="5.2" rx="1.1" fill={active ? "#DDD6FE" : "#CBD5E1"} />
+      <rect x="7.2" y="6.4" width="2.2" height="11.2" rx="1.1" fill={`url(#${midId})`} />
+      <rect x="10.9" y="3.4" width="2.2" height="17.2" rx="1.1" fill={`url(#${centerId})`} />
+      <rect x="14.6" y="6.4" width="2.2" height="11.2" rx="1.1" fill={`url(#${midId})`} />
+      <rect x="18.3" y="9.4" width="2.2" height="5.2" rx="1.1" fill={active ? "#DDD6FE" : "#CBD5E1"} />
     </svg>
   );
 }
@@ -1237,6 +1175,107 @@ export function PartyAlignSceneIcon({ size = 12, className = "" }: PlayerIconPro
         strokeWidth="1.5"
       />
       <circle cx="12" cy="12" r="1.9" fill="#FFFFFF" />
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted crystal chevron arrow indicating expandable Watch Party users drawer.
+ */
+export function PlayerPartyChevronIcon({
+  open = false,
+  size = 11,
+  className = "",
+}: PlayerIconProps & { open?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const gradId = `ep-party-arrow-${uid}`;
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={`transition-transform duration-200 ${open ? "rotate-180" : ""} ${className}`}
+    >
+      <defs>
+        <linearGradient id={gradId} x1="6" y1="7" x2="18" y2="17" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" />
+          <stop offset="100%" stopColor="#C4B5FD" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M5.75 15.25L12 9L18.25 15.25"
+        stroke={`url(#${gradId})`}
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Custom double-chevron crystal directional burst for the floating seek cue overlay.
+ */
+export function PlayerSeekCueIcon({
+  direction,
+  size = 18,
+  className = "",
+}: PlayerIconProps & { direction: "back" | "forward" }) {
+  const uid = useId().replace(/:/g, "");
+  const leadId = `ep-cue-lead-${uid}`;
+  const trailId = `ep-cue-trail-${uid}`;
+  const isBack = direction === "back";
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={leadId} x1="4" y1="6" x2="20" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" />
+          <stop offset="100%" stopColor="#DDD6FE" />
+        </linearGradient>
+        <linearGradient id={trailId} x1="4" y1="6" x2="20" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#C4B5FD" stopOpacity="0.9" />
+          <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.72" />
+        </linearGradient>
+      </defs>
+      {isBack ? (
+        <>
+          <path
+            d="M11.6 6.4L6.2 12L11.6 17.6"
+            stroke={`url(#${leadId})`}
+            strokeWidth="2.35"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M17.8 6.4L12.4 12L17.8 17.6"
+            stroke={`url(#${trailId})`}
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      ) : (
+        <>
+          <path
+            d="M6.2 6.4L11.6 12L6.2 17.6"
+            stroke={`url(#${trailId})`}
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M12.4 6.4L17.8 12L12.4 17.6"
+            stroke={`url(#${leadId})`}
+            strokeWidth="2.35"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      )}
     </svg>
   );
 }

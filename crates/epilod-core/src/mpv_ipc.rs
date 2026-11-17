@@ -568,6 +568,17 @@ pub struct PendingSeekTracker {
 
 impl PendingSeekTracker {
     const TIMEOUT: Duration = Duration::from_millis(1200);
+    // Exact seeks on high-bitrate/remote streams can decode longer than 1.2s while mpv
+    // actively reports `seeking=true`; keep suppressing stale `time-pos` until restart.
+    const SEEKING_TIMEOUT: Duration = Duration::from_millis(4000);
+
+    fn effective_timeout(s: &PendingSeekState) -> Duration {
+        if s.saw_seeking_true && !s.restarted {
+            Self::SEEKING_TIMEOUT
+        } else {
+            Self::TIMEOUT
+        }
+    }
 
     pub fn new() -> Self {
         Self::default()
@@ -588,7 +599,7 @@ impl PendingSeekTracker {
             0.0
         };
         if let Some(ref mut s) = self.active {
-            if now.duration_since(s.started_at) < Self::TIMEOUT {
+            if now.duration_since(s.started_at) < Self::effective_timeout(s) {
                 s.target = safe;
                 s.started_at = now;
                 s.outstanding_seeks = s.outstanding_seeks.saturating_add(1);
@@ -702,7 +713,7 @@ impl PendingSeekTracker {
         let Some(ref s) = self.active else {
             return TimePosDecision::Accept(position);
         };
-        if now.duration_since(s.started_at) >= Self::TIMEOUT || s.restarted {
+        if now.duration_since(s.started_at) >= Self::effective_timeout(s) || s.restarted {
             self.active = None;
             return TimePosDecision::AcceptAfterSeek(position);
         }
@@ -868,6 +879,65 @@ pub fn autosync_extract_stream_args_ffmpeg(
         out_sub_path,
         format!("0:{ff_stream_idx}"),
     )
+}
+
+/// Extract packet timestamps (`pts`, `duration`, `size`) from an embedded bitmap subtitle stream
+/// (`dvd_subtitle`, `hdmv_pgs_subtitle`, `dvb_subtitle`, `xsub`) using FFmpeg's `framecrc` muxer
+/// with zero video/audio decoding so acoustic Magic Sync can align image subtitles directly.
+pub fn autosync_extract_bitmap_framecrc_args_ffmpeg(
+    video_path: &str,
+    out_crc_path: &str,
+    ff_stream_idx: Option<u64>,
+    sub_stream_idx: usize,
+) -> Vec<String> {
+    let map_spec = match ff_stream_idx {
+        Some(idx) => format!("0:{idx}"),
+        None => format!("0:s:{sub_stream_idx}"),
+    };
+    vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-y".to_string(),
+        "-i".to_string(),
+        video_path.to_string(),
+        "-vn".to_string(),
+        "-an".to_string(),
+        "-dn".to_string(),
+        "-map".to_string(),
+        map_spec,
+        "-c:s".to_string(),
+        "copy".to_string(),
+        "-f".to_string(),
+        "framecrc".to_string(),
+        out_crc_path.to_string(),
+    ]
+}
+
+/// Extract a bounded sample (first `max_secs` of media) of an embedded text subtitle stream
+/// for fast background language detection while skipping video, audio, and attachment streams.
+pub fn probe_extract_sub_sample_args_ffmpeg(
+    video_path: &str,
+    out_sub_path: &str,
+    ff_stream_idx: Option<u64>,
+    sub_stream_idx: usize,
+    max_secs: u64,
+) -> Vec<String> {
+    let map_spec = match ff_stream_idx {
+        Some(ff) => format!("0:{ff}"),
+        None => format!("0:s:{sub_stream_idx}"),
+    };
+    let mut args = autosync_extract_sub_with_map_args_ffmpeg(video_path, out_sub_path, map_spec);
+    let out = args.pop().expect("output path present");
+    args.push("-dn".to_string());
+    if max_secs > 0 {
+        args.push("-t".to_string());
+        args.push(max_secs.to_string());
+    }
+    args.push(out);
+    args
 }
 
 /// Escape a local filesystem path for use as an unquoted value inside FFmpeg's `lavfi` `movie=...`
@@ -1168,6 +1238,15 @@ mod tests {
         assert!(sub_ext.iter().any(|a| a == "0:s:0"));
         let stream_ext = autosync_extract_stream_args_ffmpeg("movie.mkv", "out.srt", 4);
         assert!(stream_ext.windows(2).any(|w| w == ["-map", "0:4"]));
+        let bmp_crc = autosync_extract_bitmap_framecrc_args_ffmpeg("movie.mkv", "crc.txt", Some(3), 0);
+        assert!(bmp_crc.windows(2).any(|w| w == ["-map", "0:3"]));
+        assert!(bmp_crc.windows(2).any(|w| w == ["-f", "framecrc"]));
+        assert!(bmp_crc.windows(2).any(|w| w == ["-c:s", "copy"]));
+        let sample_ext =
+            probe_extract_sub_sample_args_ffmpeg("movie.mkv", "sample.srt", Some(5), 1, 600);
+        assert!(sample_ext.windows(2).any(|w| w == ["-map", "0:5"]));
+        assert!(sample_ext.windows(2).any(|w| w == ["-t", "600"]));
+        assert!(sample_ext.iter().any(|a| a == "-dn"));
 
         let cc_ext = autosync_extract_cc_args_ffmpeg(
             r"C:\Dir [1080p]\Test's Show, #1.mp4",
@@ -1481,6 +1560,29 @@ mod tests {
         assert_eq!(
             tracker.filter_time_pos(720.02, t2 + Duration::from_millis(30)),
             TimePosDecision::AcceptAfterSeek(720.02)
+        );
+    }
+
+    #[test]
+    fn test_pending_seek_tracker_extends_window_while_seeking_true() {
+        let mut tracker = PendingSeekTracker::new();
+        let t0 = Instant::now();
+        tracker.note_dispatched_seek(900.0, Some(70), t0);
+        tracker.on_reply_success(70);
+        tracker.on_seek_event();
+        assert_eq!(tracker.on_seeking_prop(true), None);
+
+        // Slow exact seek still decoding past 1200ms must keep dropping stale pre-seek time-pos
+        assert_eq!(
+            tracker.filter_time_pos(120.0, t0 + Duration::from_millis(1800)),
+            TimePosDecision::Drop
+        );
+
+        // Once mpv finishes seeking and restarts at the clicked minute, emit the landed position
+        assert!(tracker.on_playback_restart());
+        assert_eq!(
+            tracker.filter_time_pos(900.04, t0 + Duration::from_millis(1850)),
+            TimePosDecision::AcceptAfterSeek(900.04)
         );
     }
 }

@@ -427,3 +427,63 @@ export function MenuInterfaceIcon({ size = 14, className = "" }: MenuIconProps) 
     </svg>
   );
 }
+
+/**
+ * Custom crystal magnifying lens icon for Online Subtitle Search.
+ */
+export function MenuSearchIcon({ size = 14, className = "" }: MenuIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle
+        cx="10.75"
+        cy="10.75"
+        r="6.25"
+        fill="#A78BFA"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.75"
+      />
+      <path
+        d="M15.4 15.4L19.8 19.8"
+        stroke="#DDD6FE"
+        strokeWidth="2.0"
+        strokeLinecap="round"
+      />
+      <path
+        d="M8.4 8.7C9.1 7.9 10.2 7.5 11.4 7.7"
+        stroke="#DDD6FE"
+        strokeWidth="1.35"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Custom crystal download tray glyph for downloading fetched subtitles.
+ */
+export function MenuDownloadIcon({ size = 14, className = "" }: MenuIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M12 4.5V14.5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+      <path
+        d="M8.2 11.2L12 15L15.8 11.2"
+        stroke="#DDD6FE"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4.8 16.5V18.2C4.8 19.1 5.5 19.8 6.4 19.8H17.6C18.5 19.8 19.2 19.1 19.2 18.2V16.5"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}

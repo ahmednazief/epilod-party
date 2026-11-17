@@ -1,7 +1,7 @@
 use epilod_core::subtitle_sync::{
-    decode_subtitle_bytes_with_hint, parse_subtitles, render_srt, render_vtt_with_transform,
-    rescale_ass_text_with_transform, rescale_cues_with_transform, SubtitleEncodingHint,
-    SubtitleTimingTransform,
+    decode_subtitle_bytes_with_hint, detect_subtitle_language, parse_subtitles, render_srt,
+    render_vtt_with_transform, rescale_ass_text_with_transform, rescale_cues_with_transform,
+    AutoSyncOutcome, SubtitleCue, SubtitleEncodingHint, SubtitleTimingTransform,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -24,6 +24,22 @@ const CLOSED_CAPTION_CODECS: &[&str] = &["eia_608", "cea_608", "cea_708", "cc_de
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SubtitleLangProbeTrackDto {
+    pub track_id: u64,
+    pub ff_index: Option<u64>,
+    pub sub_stream_idx: Option<usize>,
+    pub codec: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedSubtitleLangDto {
+    pub track_id: u64,
+    pub lang: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AutoSyncResultDto {
     pub offset_secs: f64,
     pub scale: f64,
@@ -31,6 +47,8 @@ pub struct AutoSyncResultDto {
     pub correlation: f64,
     pub drift_applied: bool,
     pub segments_applied: usize,
+    #[serde(default)]
+    pub bitmap_in_place: bool,
     pub synced_subtitle_path: String,
     pub source_subtitle_path: String,
     pub audio_duration_secs: f64,
@@ -202,14 +220,190 @@ pub fn write_rescaled_subtitle_file_with_transform(
     Ok(out_path)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BitmapPacketMeta {
+    pts_ms: u64,
+    dur_ms: u64,
+    size: usize,
+}
+
+fn parse_timebase_header(line: &str) -> Option<(u128, u128)> {
+    let rest = line.strip_prefix("#tb 0:")?.trim();
+    let (num_s, den_s) = rest.split_once('/')?;
+    let num = num_s.trim().parse::<u128>().ok()?;
+    let den = den_s.trim().parse::<u128>().ok()?;
+    if num > 0 && den > 0 {
+        Some((num, den))
+    } else {
+        None
+    }
+}
+
+/// Reconstruct dialogue-like `(start_ms, end_ms)` cues from `ffmpeg -c:s copy -f framecrc` output
+/// for bitmap subtitle streams (`dvd_subtitle`, `hdmv_pgs_subtitle`, `dvb_subtitle`, `xsub`).
+pub fn parse_bitmap_framecrc_cues(raw: &str, codec: Option<&str>) -> Result<Vec<SubtitleCue>, String> {
+    let mut tb_num: u128 = 1;
+    let mut tb_den: u128 = 1000;
+    let mut packets: Vec<BitmapPacketMeta> = Vec::new();
+
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((num, den)) = parse_timebase_header(line) {
+            tb_num = num;
+            tb_den = den;
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split(',');
+        let stream_ok = parts
+            .next()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(|s| s == 0);
+        if !stream_ok {
+            continue;
+        }
+        let dts = parts
+            .next()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|&v| v >= 0);
+        let pts = parts
+            .next()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|&v| v >= 0);
+        let Some(ts_ticks) = pts.or(dts) else {
+            continue;
+        };
+        let dur_ticks = parts
+            .next()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+            .max(0);
+        let size = parts
+            .next()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let pts_ms = ((ts_ticks as u128).saturating_mul(1000).saturating_mul(tb_num) / tb_den) as u64;
+        let dur_ms = ((dur_ticks as u128).saturating_mul(1000).saturating_mul(tb_num) / tb_den) as u64;
+        packets.push(BitmapPacketMeta {
+            pts_ms,
+            dur_ms,
+            size,
+        });
+    }
+
+    if packets.is_empty() {
+        return Err("Embedded image subtitle track contained no readable timing cues.".to_string());
+    }
+
+    packets.sort_by_key(|p| p.pts_ms);
+
+    let codec_lower = codec.unwrap_or("").trim().to_ascii_lowercase();
+    let is_pgs = codec_lower == "hdmv_pgs_subtitle" || codec_lower == "pgssub";
+    let has_large_pgs = is_pgs && packets.iter().any(|p| p.size > 48);
+    let clear_threshold = if has_large_pgs { 48 } else { 24 };
+
+    let mut cues: Vec<SubtitleCue> = Vec::new();
+    let mut open_start: Option<u64> = None;
+
+    for pkt in packets {
+        if pkt.dur_ms > 0 {
+            if let Some(prev_start) = open_start.take() {
+                if pkt.pts_ms >= prev_start + 100 {
+                    cues.push(SubtitleCue {
+                        index: cues.len() + 1,
+                        start_ms: prev_start,
+                        end_ms: pkt.pts_ms.min(prev_start + 5_000),
+                        text: "dialogue".to_string(),
+                    });
+                }
+            }
+            cues.push(SubtitleCue {
+                index: cues.len() + 1,
+                start_ms: pkt.pts_ms,
+                end_ms: pkt.pts_ms + pkt.dur_ms.clamp(200, 14_000),
+                text: "dialogue".to_string(),
+            });
+            continue;
+        }
+
+        let is_clear_pkt = if is_pgs {
+            has_large_pgs && pkt.size <= clear_threshold
+        } else {
+            pkt.size <= clear_threshold
+        };
+        if is_clear_pkt {
+            if let Some(start) = open_start.take() {
+                if pkt.pts_ms >= start + 100 {
+                    cues.push(SubtitleCue {
+                        index: cues.len() + 1,
+                        start_ms: start,
+                        end_ms: pkt.pts_ms.min(start + 14_000),
+                        text: "dialogue".to_string(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        if let Some(start) = open_start {
+            if pkt.pts_ms.saturating_sub(start) >= 150 {
+                cues.push(SubtitleCue {
+                    index: cues.len() + 1,
+                    start_ms: start,
+                    end_ms: pkt.pts_ms.min(start + 4_500),
+                    text: "dialogue".to_string(),
+                });
+                open_start = Some(pkt.pts_ms);
+            }
+        } else {
+            open_start = Some(pkt.pts_ms);
+        }
+    }
+
+    if let Some(start) = open_start.take() {
+        cues.push(SubtitleCue {
+            index: cues.len() + 1,
+            start_ms: start,
+            end_ms: start + 2_500,
+            text: "dialogue".to_string(),
+        });
+    }
+
+    if cues.is_empty() {
+        return Err("Embedded image subtitle track contained no readable timing cues.".to_string());
+    }
+    Ok(cues)
+}
+
+pub fn resolve_in_place_delay_ms(cues: &[SubtitleCue], outcome: &AutoSyncOutcome) -> i64 {
+    if !outcome.drift_applied && outcome.transform.segment_count() <= 1 {
+        return outcome.offset_ms;
+    }
+    if cues.is_empty() {
+        return outcome.offset_ms;
+    }
+    let mid = &cues[cues.len() / 2];
+    match outcome.transform.map_cue(mid.start_ms, mid.end_ms) {
+        Ok((mapped_start, _)) => (mapped_start as i64) - (mid.start_ms as i64),
+        Err(_) => outcome.offset_ms,
+    }
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use super::*;
     use crate::mpv::process::resolve_mpv_exe;
     use epilod_core::mpv_ipc::{
         autosync_extract_args_ffmpeg_dialogue, autosync_extract_args_mpv,
-        autosync_extract_cc_args_ffmpeg, autosync_extract_stream_args_ffmpeg,
-        autosync_extract_sub_args_ffmpeg, parse_ffmpeg_audio_stream_has_center,
+        autosync_extract_bitmap_framecrc_args_ffmpeg, autosync_extract_cc_args_ffmpeg,
+        autosync_extract_stream_args_ffmpeg, autosync_extract_sub_args_ffmpeg,
+        parse_ffmpeg_audio_stream_has_center, probe_extract_sub_sample_args_ffmpeg,
     };
     use epilod_core::subtitle_sync::{
         auto_align_subtitles, fit_two_anchor_transform, AudioEnvelopeBuilder, AutoSyncConfig,
@@ -524,6 +718,54 @@ mod windows_impl {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn extract_bitmap_subtitle_cues(
+        ffmpeg_exe: Option<&PathBuf>,
+        video_pb: &Path,
+        work_dir: &Path,
+        sub_idx: Option<usize>,
+        embedded_sub_ff_idx: Option<u64>,
+        embedded_sub_codec: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+        low_power: bool,
+        pid: u32,
+        job_seq: u64,
+    ) -> Result<Vec<SubtitleCue>, String> {
+        let Some(ff) = ffmpeg_exe else {
+            return Err(
+                "Syncing embedded image subtitles requires ffmpeg.exe alongside mpv.exe, or load an external subtitle file."
+                    .to_string(),
+            );
+        };
+        if embedded_sub_ff_idx.is_none() && sub_idx.is_none() {
+            return Err("No subtitle track index available for bitmap timing extraction.".to_string());
+        }
+        let out_crc = work_dir.join(format!("bitmap_{pid}_{job_seq}.framecrc.txt"));
+        let args = autosync_extract_bitmap_framecrc_args_ffmpeg(
+            video_pb.to_string_lossy().as_ref(),
+            out_crc.to_string_lossy().as_ref(),
+            embedded_sub_ff_idx,
+            sub_idx.unwrap_or(0),
+        );
+        if let Err(e) = run_command_with_watchdog(
+            ff,
+            &args,
+            &out_crc,
+            cancel,
+            low_power,
+            Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
+        )
+        .await
+        {
+            let _ = fs::remove_file(&out_crc);
+            return Err(e);
+        }
+        let raw = fs::read_to_string(&out_crc)
+            .map_err(|e| format!("Failed reading extracted bitmap timing data: {e}"));
+        let _ = fs::remove_file(&out_crc);
+        parse_bitmap_framecrc_cues(&raw?, embedded_sub_codec)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_auto_sync(
         app: &AppHandle,
         controller: &AutoSyncController,
@@ -568,10 +810,29 @@ mod windows_impl {
             .map_err(|e| format!("Auto-sync preparation failed: {e}"))??;
 
         let mut temp_extracted_sub: Option<PathBuf> = None;
+        let mut pre_parsed_cues: Option<Vec<SubtitleCue>> = None;
+        let mut sub_pb: Option<PathBuf> = None;
 
-        // Resolve external or embedded subtitle source
-        let sub_pb = if let Some(sp) = external_sub_pb {
-            sp
+        // Resolve external text file, embedded bitmap stream timing, or embedded text/CC extraction
+        if let Some(sp) = external_sub_pb {
+            sub_pb = Some(sp);
+        } else if (embedded_sub_ff_idx.is_some() || embedded_sub_idx.is_some())
+            && is_bitmap_subtitle_codec(embedded_sub_codec)
+        {
+            let cues = extract_bitmap_subtitle_cues(
+                ffmpeg_exe.as_ref(),
+                &video_pb,
+                &work_dir,
+                embedded_sub_idx,
+                embedded_sub_ff_idx,
+                embedded_sub_codec,
+                &cancel,
+                low_power,
+                pid,
+                job_seq,
+            )
+            .await?;
+            pre_parsed_cues = Some(cues);
         } else if embedded_sub_ff_idx.is_some() || embedded_sub_idx.is_some() {
             let out_sub = extract_embedded_subtitle(
                 ffmpeg_exe.as_ref(),
@@ -587,10 +848,10 @@ mod windows_impl {
             )
             .await?;
             temp_extracted_sub = Some(out_sub.clone());
-            out_sub
+            sub_pb = Some(out_sub);
         } else {
             return Err("No subtitle track or file selected for auto-sync.".to_string());
-        };
+        }
 
         let pcm_path = work_dir.join(format!("audio_{pid}_{job_seq}.pcm"));
         let _ = tokio::fs::remove_file(&pcm_path).await;
@@ -666,87 +927,115 @@ mod windows_impl {
         } else {
             encoding_hint
         };
-        let (outcome, audio_duration_secs, synced_pb) = tokio::task::spawn_blocking(move || {
-            let sub_bytes = match fs::read(&sub_pb_clone) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = fs::remove_file(&pcm_path_clone);
-                    return Err(format!("Failed reading subtitle file: {e}"));
-                }
-            };
-            let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, effective_hint) {
-                Ok(d) => d,
-                Err(e) => {
-                    let _ = fs::remove_file(&pcm_path_clone);
-                    return Err(e.to_string());
-                }
-            };
-            let cues = match parse_subtitles(&decoded) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = fs::remove_file(&pcm_path_clone);
-                    return Err(e.to_string());
-                }
-            };
-
-            let mut pcm_file = match fs::File::open(&pcm_path_clone) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = fs::remove_file(&pcm_path_clone);
-                    return Err(format!("Failed opening extracted audio PCM: {e}"));
-                }
-            };
-            let mut builder = AudioEnvelopeBuilder::new();
-            let mut buf = vec![0u8; 65_536];
-            loop {
-                if cancel_clone.load(Ordering::SeqCst) {
-                    let _ = fs::remove_file(&pcm_path_clone);
-                    return Err("Auto-sync cancelled.".to_string());
-                }
-                let n = match pcm_file.read(&mut buf) {
-                    Ok(n) => n,
-                    Err(e) => {
+        let (outcome, audio_duration_secs, synced_pb, applied_offset_ms) =
+            tokio::task::spawn_blocking(move || {
+                let cues = if let Some(bitmap_cues) = pre_parsed_cues {
+                    bitmap_cues
+                } else {
+                    let Some(ref target_pb) = sub_pb_clone else {
                         let _ = fs::remove_file(&pcm_path_clone);
-                        return Err(format!("Failed reading extracted PCM: {e}"));
+                        return Err("Missing subtitle path for auto-sync.".to_string());
+                    };
+                    let sub_bytes = match fs::read(target_pb) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = fs::remove_file(&pcm_path_clone);
+                            return Err(format!("Failed reading subtitle file: {e}"));
+                        }
+                    };
+                    let decoded = match decode_subtitle_bytes_with_hint(&sub_bytes, effective_hint) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            let _ = fs::remove_file(&pcm_path_clone);
+                            return Err(e.to_string());
+                        }
+                    };
+                    match parse_subtitles(&decoded) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = fs::remove_file(&pcm_path_clone);
+                            return Err(e.to_string());
+                        }
                     }
                 };
-                if n == 0 {
-                    break;
+
+                let mut pcm_file = match fs::File::open(&pcm_path_clone) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = fs::remove_file(&pcm_path_clone);
+                        return Err(format!("Failed opening extracted audio PCM: {e}"));
+                    }
+                };
+                let mut builder = AudioEnvelopeBuilder::new();
+                let mut buf = vec![0u8; 65_536];
+                loop {
+                    if cancel_clone.load(Ordering::SeqCst) {
+                        let _ = fs::remove_file(&pcm_path_clone);
+                        return Err("Auto-sync cancelled.".to_string());
+                    }
+                    let n = match pcm_file.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let _ = fs::remove_file(&pcm_path_clone);
+                            return Err(format!("Failed reading extracted PCM: {e}"));
+                        }
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    builder.push_pcm_s16le_bytes(&buf[..n]);
                 }
-                builder.push_pcm_s16le_bytes(&buf[..n]);
-            }
-            let _ = fs::remove_file(&pcm_path_clone);
+                let _ = fs::remove_file(&pcm_path_clone);
 
-            let envelope = builder.finish().map_err(|e| e.to_string())?;
-            let audio_duration_secs = envelope.len() as f64 / 100.0;
-            let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
-                .map_err(|e| e.to_string())?;
+                let envelope = builder.finish().map_err(|e| e.to_string())?;
+                let audio_duration_secs = envelope.len() as f64 / 100.0;
+                let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
+                    .map_err(|e| e.to_string())?;
 
-            let synced_pb = write_rescaled_subtitle_file_with_transform(
-                &sub_pb_clone,
-                &work_dir_clone,
-                &outcome.transform,
-                effective_hint,
-            )?;
-            Ok((outcome, audio_duration_secs, synced_pb))
-        })
-        .await
-        .map_err(|e| format!("Auto-sync worker failed: {e}"))??;
+                if let Some(ref target_pb) = sub_pb_clone {
+                    let synced_pb = write_rescaled_subtitle_file_with_transform(
+                        target_pb,
+                        &work_dir_clone,
+                        &outcome.transform,
+                        effective_hint,
+                    )?;
+                    let offset_ms = outcome.offset_ms;
+                    Ok((outcome, audio_duration_secs, Some(synced_pb), offset_ms))
+                } else {
+                    let delay_ms = resolve_in_place_delay_ms(&cues, &outcome);
+                    Ok((outcome, audio_duration_secs, None, delay_ms))
+                }
+            })
+            .await
+            .map_err(|e| format!("Auto-sync worker failed: {e}"))??;
 
         let segments_applied = outcome.transform.segment_count();
+        let bitmap_in_place = synced_pb.is_none();
         Ok(AutoSyncResultDto {
-            offset_secs: outcome.offset_ms as f64 / 1000.0,
+            offset_secs: if bitmap_in_place {
+                applied_offset_ms as f64 / 1000.0
+            } else {
+                outcome.offset_ms as f64 / 1000.0
+            },
             scale: outcome.scale,
             confidence_z: outcome.confidence_z,
             correlation: outcome.correlation,
             drift_applied: outcome.drift_applied,
             segments_applied,
-            synced_subtitle_path: synced_pb.to_string_lossy().into_owned(),
-            source_subtitle_path: temp_extracted_sub
+            bitmap_in_place,
+            synced_subtitle_path: synced_pb
                 .as_ref()
-                .unwrap_or(&sub_pb)
-                .to_string_lossy()
-                .into_owned(),
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            source_subtitle_path: if bitmap_in_place {
+                String::new()
+            } else {
+                temp_extracted_sub
+                    .as_ref()
+                    .or(sub_pb.as_ref())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            },
             audio_duration_secs,
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
@@ -863,11 +1152,126 @@ mod windows_impl {
             correlation: 1.0,
             drift_applied: (scale - 1.0).abs() > 1e-4,
             segments_applied: 1,
+            bitmap_in_place: false,
             synced_subtitle_path: synced_pb.to_string_lossy().into_owned(),
             source_subtitle_path: sub_pb.to_string_lossy().into_owned(),
             audio_duration_secs: 0.0,
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    async fn run_ffmpeg_sample_extract(
+        ffmpeg_exe: &Path,
+        args: &[String],
+    ) -> Result<(), String> {
+        let mut child = Command::new(ffmpeg_exe)
+            .args(args)
+            .kill_on_drop(true)
+            .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed starting {}: {e}", ffmpeg_exe.display()))?;
+        match tokio::time::timeout(Duration::from_secs(6), child.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(format!("ffmpeg sample exited with status {status}")),
+            Ok(Err(e)) => Err(format!("ffmpeg sample wait failed: {e}")),
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                Err("ffmpeg subtitle language probe timed out".to_string())
+            }
+        }
+    }
+
+    /// Detect languages for untagged embedded text subtitle tracks by extracting bounded samples
+    /// with FFmpeg and scoring script + dialogue cues. Bitmap and CC tracks are skipped cleanly.
+    pub async fn detect_embedded_subtitle_languages_from_video(
+        app: &AppHandle,
+        video_path: &str,
+        tracks: &[SubtitleLangProbeTrackDto],
+        path_opts: LocalPathOptions,
+    ) -> Result<Vec<DetectedSubtitleLangDto>, String> {
+        if tracks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let app_clone = app.clone();
+        let video_owned = video_path.to_string();
+        let (video_pb, work_dir, ffmpeg_exe) = tokio::task::spawn_blocking(move || {
+            let video_pb = validate_existing_local_file_with_options(&video_owned, path_opts)
+                .map_err(|e| e.to_string())?;
+            let work_dir = temp_work_dir();
+            fs::create_dir_all(&work_dir)
+                .map_err(|e| format!("Failed creating probe directory: {e}"))?;
+            let ffmpeg_exe = resolve_ffmpeg_exe(&app_clone);
+            Ok::<_, String>((video_pb, work_dir, ffmpeg_exe))
+        })
+        .await
+        .map_err(|e| format!("Subtitle language probe setup failed: {e}"))??;
+
+        let Some(ff) = ffmpeg_exe else {
+            return Ok(Vec::new());
+        };
+        let pid = std::process::id();
+        let mut results = Vec::new();
+
+        for track in tracks.iter().take(8) {
+            if is_bitmap_subtitle_codec(track.codec.as_deref())
+                || is_closed_caption_codec(track.codec.as_deref())
+            {
+                continue;
+            }
+            if track.ff_index.is_none() && track.sub_stream_idx.is_none() {
+                continue;
+            }
+            let sub_idx = track.sub_stream_idx.unwrap_or(0);
+            let ext = infer_sub_extension_from_codec(track.codec.as_deref());
+            let job_seq = AUTOSYNC_JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+            let sample_path = work_dir.join(format!("lang_probe_{pid}_{job_seq}.{ext}"));
+
+            let mut detected: Option<&'static str> = None;
+            for max_secs in [900u64, 0u64] {
+                let args = probe_extract_sub_sample_args_ffmpeg(
+                    video_pb.to_string_lossy().as_ref(),
+                    sample_path.to_string_lossy().as_ref(),
+                    track.ff_index,
+                    sub_idx,
+                    max_secs,
+                );
+                let ok = run_ffmpeg_sample_extract(&ff, &args).await.is_ok();
+                let bytes = if ok {
+                    let path_clone = sample_path.clone();
+                    tokio::task::spawn_blocking(move || fs::read(&path_clone).ok())
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let _ = fs::remove_file(&sample_path);
+                if !bytes.is_empty() {
+                    let slice = &bytes[..bytes.len().min(256 * 1024)];
+                    if let Ok(decoded) =
+                        decode_subtitle_bytes_with_hint(slice, SubtitleEncodingHint::Auto)
+                    {
+                        detected = detect_subtitle_language(&decoded);
+                        if detected.is_some() || bytes.len() >= 256 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(lang) = detected {
+                results.push(DetectedSubtitleLangDto {
+                    track_id: track.track_id,
+                    lang: lang.to_string(),
+                });
+            }
+        }
+
+        Ok(results)
     }
 }
 
@@ -887,6 +1291,96 @@ mod tests {
         assert_eq!(infer_sub_extension_from_codec(Some("ass")), "ass");
         assert_eq!(infer_sub_extension_from_codec(Some("webvtt")), "vtt");
         assert_eq!(infer_sub_extension_from_codec(Some("subrip")), "srt");
+    }
+
+    #[test]
+    fn test_parse_bitmap_framecrc_cues_and_aligns_dvd_and_pgs() {
+        use epilod_core::subtitle_sync::{
+            auto_align_subtitles, AudioEnvelopeBuilder, AutoSyncConfig,
+        };
+
+        // 1. DVD_SUBTITLE with 90kHz timebase + AV_NOPTS_VALUE + explicit durations
+        let dvd_crc = "\
+#tb 0: 1/90000
+#media_type 0: subtitle
+#codec_id 0: dvd_subtitle
+0, -9223372036854775808, -9223372036854775808, 0, 120, 0x00000001
+0, 180000, 180000, 180000, 1420, 0x11111111
+0, 630000, 630000, 225000, 1580, 0x22222222
+";
+        let dvd_cues = parse_bitmap_framecrc_cues(dvd_crc, Some("dvd_subtitle")).unwrap();
+        assert_eq!(dvd_cues.len(), 2);
+        assert_eq!(dvd_cues[0].start_ms, 2_000);
+        assert_eq!(dvd_cues[0].end_ms, 4_000);
+        assert_eq!(dvd_cues[1].start_ms, 7_000);
+        assert_eq!(dvd_cues[1].end_ms, 9_500);
+
+        // 2. HDMV_PGS_SUBTITLE with 1/1000 timebase, multi-packet display set debounce, and clear packets
+        let mut pgs_crc = String::from(
+            "#tb 0: 1/1000\n#media_type 0: subtitle\n#codec_id 0: hdmv_pgs_subtitle\n",
+        );
+        // Non-periodic dialogue cadence prevents artificial correlation sidelobes in synthetic PCM.
+        let speech_windows: [(u64, u64); 10] = [
+            (2_000, 3_600),
+            (5_100, 8_400),
+            (12_800, 14_100),
+            (15_400, 18_900),
+            (24_200, 25_600),
+            (27_000, 31_100),
+            (37_500, 39_200),
+            (41_000, 44_700),
+            (48_200, 49_800),
+            (51_500, 55_400),
+        ];
+        // PGS cues shifted early by 2.40s relative to audio
+        let shift_early_ms: u64 = 2_400;
+        for (idx, &(audio_start, audio_end)) in speech_windows.iter().enumerate() {
+            let sub_start = audio_start + shift_early_ms;
+            let sub_end = audio_end + shift_early_ms;
+            pgs_crc.push_str(&format!("0, {sub_start}, {sub_start}, 0, 1850, 0xaaa{idx}\n"));
+            // Split packet 30ms later for the same cue must not duplicate cue
+            let split_t = sub_start + 30;
+            pgs_crc.push_str(&format!("0, {split_t}, {split_t}, 0, 420, 0xbbb{idx}\n"));
+            // Clear packet closes the open cue
+            pgs_crc.push_str(&format!("0, {sub_end}, {sub_end}, 0, 19, 0xccc{idx}\n"));
+        }
+
+        let pgs_cues = parse_bitmap_framecrc_cues(&pgs_crc, Some("hdmv_pgs_subtitle")).unwrap();
+        assert_eq!(pgs_cues.len(), 10);
+        assert_eq!(pgs_cues[0].start_ms, 4_400);
+        assert_eq!(pgs_cues[0].end_ms, 6_000);
+
+        // Synthetic 60s speech envelope matching speech_windows
+        let total_samples = 60 * 16_000;
+        let mut pcm = Vec::with_capacity(total_samples * 2);
+        for s in 0..total_samples {
+            let t_ms = (s as u64 * 1000) / 16_000;
+            let in_speech = speech_windows
+                .iter()
+                .any(|&(st, en)| t_ms >= st && t_ms <= en);
+            let amp: i16 = if in_speech {
+                if (s / 24) % 2 == 0 {
+                    9_000
+                } else {
+                    -9_000
+                }
+            } else {
+                0
+            };
+            pcm.extend_from_slice(&amp.to_le_bytes());
+        }
+        let mut builder = AudioEnvelopeBuilder::new();
+        builder.push_pcm_s16le_bytes(&pcm);
+        let env = builder.finish().unwrap();
+
+        let outcome =
+            auto_align_subtitles(&pgs_cues, &env, &AutoSyncConfig::default()).expect("PGS align");
+        let applied_ms = resolve_in_place_delay_ms(&pgs_cues, &outcome);
+        assert!(
+            (applied_ms + shift_early_ms as i64).abs() <= 80,
+            "applied_ms={applied_ms} expected ~-{}",
+            shift_early_ms
+        );
     }
 
     #[test]
@@ -2213,6 +2707,97 @@ mod tests {
         assert_eq!(cues.len(), 1);
         assert!(cues[0].text.contains("Hello English world"));
         assert!(!text.contains("مرحبا"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_real_mkv_detects_untagged_subtitle_languages() {
+        use epilod_core::mpv_ipc::probe_extract_sub_sample_args_ffmpeg;
+        use epilod_core::subtitle_sync::{
+            decode_subtitle_bytes_with_hint, detect_subtitle_language, SubtitleEncodingHint,
+        };
+        use std::fs;
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("resources/mpv/ffmpeg.exe");
+        if !ffmpeg.is_file() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("epilod_lang_probe_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let ara_srt = dir.join("untagged_ara.srt");
+        fs::write(
+            &ara_srt,
+            "1\r\n00:00:01,000 --> 00:00:03,000\r\nأين كنت طوال هذا الوقت يا صديقي؟\r\n\r\n2\r\n00:00:04,000 --> 00:00:06,000\r\nكنت أبحث عنك في كل مكان.\r\n\r\n",
+        )
+        .unwrap();
+        let eng_srt = dir.join("untagged_eng.srt");
+        fs::write(
+            &eng_srt,
+            "1\r\n00:00:01,000 --> 00:00:03,000\r\nWhat are you doing here right now?\r\n\r\n2\r\n00:00:04,000 --> 00:00:06,000\r\nI don't think that we have time for this.\r\n\r\n",
+        )
+        .unwrap();
+
+        let mkv = dir.join("untagged.mkv");
+        let mux = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=128x72:rate=10:duration=10",
+                "-i",
+            ])
+            .arg(&ara_srt)
+            .arg("-i")
+            .arg(&eng_srt)
+            .args([
+                "-map", "0:v", "-map", "1:s", "-map", "2:s", "-c:v", "mpeg4", "-c:s", "subrip",
+            ])
+            .arg(&mkv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("mux untagged mkv");
+        assert!(mux.status.success());
+
+        let mkv_str = mkv.to_string_lossy().into_owned();
+        let sample_0 = dir.join("sample_0.srt");
+        let sample_1 = dir.join("sample_1.srt");
+
+        for (ff_idx, sub_idx, out_path, expected) in [
+            (Some(1u64), 0usize, &sample_0, Some("ara")),
+            (Some(2u64), 1usize, &sample_1, Some("eng")),
+        ] {
+            let args = probe_extract_sub_sample_args_ffmpeg(
+                &mkv_str,
+                &out_path.to_string_lossy(),
+                ff_idx,
+                sub_idx,
+                900,
+            );
+            let out = Command::new(&ffmpeg)
+                .args(&args)
+                .stdin(Stdio::null())
+                .output()
+                .expect("extract sample");
+            assert!(out.status.success());
+            let raw = fs::read(out_path).unwrap();
+            let decoded =
+                decode_subtitle_bytes_with_hint(&raw, SubtitleEncodingHint::Auto).unwrap();
+            assert_eq!(detect_subtitle_language(&decoded), expected);
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

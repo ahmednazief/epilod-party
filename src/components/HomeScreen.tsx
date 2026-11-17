@@ -18,7 +18,6 @@ import {
   PartyHostIcon,
   PartyPasteIcon,
   PlayerEpisodesIcon,
-  PlayerPlayIcon,
   PlayerSettingsIcon,
 } from "./ui/PlayerIcons";
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -387,13 +386,12 @@ export function HomeScreen() {
     {
       type: "label",
       id: "lobby-lbl-watch",
-      text: "Watch & Open",
-      icon: <MenuMediaDiscIcon size={12} />,
+      text: "Quick Start",
     },
     {
       id: "open-media",
       label: "Open Media File(s)…",
-      icon: <PlayerPlayIcon size={14} className="text-accent-soft" />,
+      icon: <MenuMediaDiscIcon size={14} className="text-accent-soft" />,
       accent: true,
       onSelect: () => void handleOpenMediaSolo(),
     },
@@ -413,8 +411,7 @@ export function HomeScreen() {
     {
       type: "label",
       id: "lobby-lbl-app",
-      text: "Profile & App",
-      icon: <PlayerSettingsIcon size={12} />,
+      text: "System",
     },
     {
       id: "edit-profile",
@@ -425,7 +422,7 @@ export function HomeScreen() {
     {
       type: "submenu",
       id: "lobby-sub-prefs",
-      label: "Preferences & Help",
+      label: "Settings & Help",
       icon: <PlayerSettingsIcon size={14} />,
       children: [
         {
@@ -490,7 +487,7 @@ export function HomeScreen() {
               onClick={() => setEditingName((v) => !v)}
               title="Edit your display name and profile avatar"
               aria-expanded={editingName}
-              className={`ep-glass-pill ep-press inline-flex items-center gap-2.5 p-1 pr-3 rounded-full cursor-pointer ${
+              className={`ep-glass-pill ep-press h-8 inline-flex items-center gap-2.5 pl-[3px] pr-3 rounded-full cursor-pointer ${
                 editingName ? "ring-1 ring-accent/65" : ""
               }`}
             >

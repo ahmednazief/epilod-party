@@ -36,7 +36,6 @@ export type ContextMenuEntry =
       type: "label";
       id: string;
       text: string;
-      icon?: ReactNode;
     }
   | ContextMenuItemEntry
   | ContextMenuSubmenuEntry;
@@ -263,7 +262,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
     }, 150);
   };
 
-  const renderEntry = (entry: ContextMenuEntry, isRoot: boolean) => {
+  const renderEntry = (entry: ContextMenuEntry, isRoot: boolean, isFirst: boolean) => {
     if (entry.type === "divider") {
       return (
         <div
@@ -278,14 +277,11 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
         <div
           key={entry.id}
           onPointerEnter={isRoot ? scheduleCloseSubmenu : undefined}
-          className="px-2.5 pt-2 pb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-white/70"
+          className={`px-2.5 pb-0.5 text-[10px] font-semibold uppercase tracking-[0.09em] text-white/45 select-none ${
+            isFirst ? "pt-1" : "pt-2.5"
+          }`}
         >
-          {entry.icon && (
-            <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0 text-accent-soft/85">
-              {entry.icon}
-            </span>
-          )}
-          <span className="truncate">{entry.text}</span>
+          <span className="block truncate">{entry.text}</span>
         </div>
       );
     }
@@ -416,7 +412,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
           ref={menuScrollRef}
           className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1.5 flex flex-col gap-0.5"
         >
-          {renderedMenu.entries.map((entry) => renderEntry(entry, true))}
+          {renderedMenu.entries.map((entry, idx) => renderEntry(entry, true, idx === 0))}
         </div>
       </div>
 
@@ -441,7 +437,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
             ref={subScrollRef}
             className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1.5 flex flex-col gap-1"
           >
-            {subPresence.value.entries.map((entry) => renderEntry(entry, false))}
+            {subPresence.value.entries.map((entry, idx) => renderEntry(entry, false, idx === 0))}
           </div>
         </div>
       )}

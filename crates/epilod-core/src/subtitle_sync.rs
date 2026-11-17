@@ -2348,6 +2348,412 @@ pub fn auto_align_subtitles(
     ))
 }
 
+fn clean_text_for_language_detection(raw: &str) -> String {
+    let no_ass = strip_delimiters(raw, '{', '}');
+    let no_html = strip_delimiters(&no_ass, '<', '>');
+    let no_brackets = strip_delimiters(&no_html, '[', ']');
+    let no_parens = strip_delimiters(&no_brackets, '(', ')');
+    no_parens
+        .replace("\\N", " ")
+        .replace("\\n", " ")
+        .replace("\\h", " ")
+        .replace(['♪', '♫', '’', '‘'], "'")
+}
+
+fn is_arabic_char(ch: char) -> bool {
+    matches!(ch, '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}')
+}
+
+fn is_hebrew_char(ch: char) -> bool {
+    matches!(ch, '\u{0590}'..='\u{05FF}')
+}
+
+fn is_cyrillic_char(ch: char) -> bool {
+    matches!(ch, '\u{0400}'..='\u{04FF}')
+}
+
+fn is_hangul_char(ch: char) -> bool {
+    matches!(ch, '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}')
+}
+
+fn is_kana_char(ch: char) -> bool {
+    matches!(ch, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}')
+}
+
+fn is_cjk_ideograph(ch: char) -> bool {
+    matches!(ch, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+}
+
+fn is_greek_char(ch: char) -> bool {
+    matches!(ch, '\u{0370}'..='\u{03FF}')
+}
+
+fn is_thai_char(ch: char) -> bool {
+    matches!(ch, '\u{0E00}'..='\u{0E7F}')
+}
+
+fn is_devanagari_char(ch: char) -> bool {
+    matches!(ch, '\u{0900}'..='\u{097F}')
+}
+
+fn is_bengali_char(ch: char) -> bool {
+    matches!(ch, '\u{0980}'..='\u{09FF}')
+}
+
+fn is_tamil_char(ch: char) -> bool {
+    matches!(ch, '\u{0B80}'..='\u{0BFF}')
+}
+
+fn is_telugu_char(ch: char) -> bool {
+    matches!(ch, '\u{0C00}'..='\u{0C7F}')
+}
+
+fn is_latin_alpha(ch: char) -> bool {
+    ch.is_alphabetic()
+        && matches!(
+            ch,
+            'A'..='Z'
+                | 'a'..='z'
+                | '\u{00C0}'..='\u{024F}'
+                | '\u{1E00}'..='\u{1EFF}'
+        )
+}
+
+/// Detect the dominant spoken language of a decoded subtitle file/snippet using script analysis
+/// and stopword/diacritic scoring across dialogue cues. Returns an ISO 639-2 lowercase code
+/// (e.g. `"eng"`, `"ara"`, `"spa"`) or `None` when insufficient or ambiguous.
+pub fn detect_subtitle_language(raw_sub_text: &str) -> Option<&'static str> {
+    let sample_lines: Vec<String> = match parse_subtitles(raw_sub_text) {
+        Ok(cues) if !cues.is_empty() => {
+            let spoken: Vec<String> = cues
+                .iter()
+                .filter(|c| is_spoken_dialogue_text(&c.text))
+                .take(120)
+                .map(|c| clean_text_for_language_detection(&c.text))
+                .collect();
+            if spoken.len() >= 3 {
+                spoken
+            } else {
+                cues.iter()
+                    .take(120)
+                    .map(|c| clean_text_for_language_detection(&c.text))
+                    .collect()
+            }
+        }
+        _ => raw_sub_text
+            .lines()
+            .filter(|l| !l.contains("-->") && !l.trim().chars().all(|c| c.is_ascii_digit()))
+            .take(160)
+            .map(clean_text_for_language_detection)
+            .collect(),
+    };
+
+    let mut total_alpha = 0usize;
+    let mut latin = 0usize;
+    let mut arabic = 0usize;
+    let mut persian_markers = 0usize;
+    let mut arabic_markers = 0usize;
+    let mut hebrew = 0usize;
+    let mut cyrillic = 0usize;
+    let mut ukrainian_markers = 0usize;
+    let mut hangul = 0usize;
+    let mut kana = 0usize;
+    let mut cjk = 0usize;
+    let mut greek = 0usize;
+    let mut thai = 0usize;
+    let mut devanagari = 0usize;
+    let mut bengali = 0usize;
+    let mut tamil = 0usize;
+    let mut telugu = 0usize;
+
+    let mut tokens: Vec<String> = Vec::new();
+    for line in &sample_lines {
+        let mut current = String::new();
+        for ch in line.chars() {
+            if ch.is_alphabetic() {
+                total_alpha += 1;
+                if is_latin_alpha(ch) {
+                    latin += 1;
+                } else if is_arabic_char(ch) {
+                    arabic += 1;
+                    if matches!(ch, 'پ' | 'چ' | 'ژ' | 'گ' | 'ک' | 'ی') {
+                        persian_markers += 1;
+                    } else if matches!(ch, 'ة' | 'ى' | 'ؤ' | 'ئ' | 'أ' | 'إ' | 'آ' | 'ك' | 'ي')
+                    {
+                        arabic_markers += 1;
+                    }
+                } else if is_hebrew_char(ch) {
+                    hebrew += 1;
+                } else if is_cyrillic_char(ch) {
+                    cyrillic += 1;
+                    if matches!(ch, 'і' | 'І' | 'ї' | 'Ї' | 'є' | 'Є' | 'ґ' | 'Ґ') {
+                        ukrainian_markers += 1;
+                    }
+                } else if is_hangul_char(ch) {
+                    hangul += 1;
+                } else if is_kana_char(ch) {
+                    kana += 1;
+                } else if is_cjk_ideograph(ch) {
+                    cjk += 1;
+                } else if is_greek_char(ch) {
+                    greek += 1;
+                } else if is_thai_char(ch) {
+                    thai += 1;
+                } else if is_devanagari_char(ch) {
+                    devanagari += 1;
+                } else if is_bengali_char(ch) {
+                    bengali += 1;
+                } else if is_tamil_char(ch) {
+                    tamil += 1;
+                } else if is_telugu_char(ch) {
+                    telugu += 1;
+                }
+                for lc in ch.to_lowercase() {
+                    current.push(lc);
+                }
+            } else if ch == '\'' && !current.is_empty() {
+                current.push('\'');
+            } else if !current.is_empty() {
+                let word = current.trim_matches('\'');
+                if !word.is_empty() {
+                    tokens.push(word.to_string());
+                }
+                current.clear();
+            }
+        }
+        if !current.is_empty() {
+            let word = current.trim_matches('\'');
+            if !word.is_empty() {
+                tokens.push(word.to_string());
+            }
+        }
+    }
+
+    if total_alpha < 20 {
+        return None;
+    }
+
+    let min_script = (total_alpha * 35) / 100;
+    if arabic >= 12 && arabic >= min_script {
+        return Some(
+            if persian_markers >= 3 && persian_markers > arabic_markers * 2 {
+                "fas"
+            } else {
+                "ara"
+            },
+        );
+    }
+    if hebrew >= 12 && hebrew >= min_script {
+        return Some("heb");
+    }
+    if hangul >= 10 && hangul >= min_script {
+        return Some("kor");
+    }
+    if (kana + cjk) >= 10 && (kana + cjk) >= min_script {
+        return Some(if kana >= 3 && kana * 12 >= (kana + cjk) {
+            "jpn"
+        } else {
+            "zho"
+        });
+    }
+    if cyrillic >= 12 && cyrillic >= min_script {
+        return Some(if ukrainian_markers >= 2 { "ukr" } else { "rus" });
+    }
+    if greek >= 12 && greek >= min_script {
+        return Some("ell");
+    }
+    if thai >= 12 && thai >= min_script {
+        return Some("tha");
+    }
+    if devanagari >= 12 && devanagari >= min_script {
+        return Some("hin");
+    }
+    if bengali >= 12 && bengali >= min_script {
+        return Some("ben");
+    }
+    if tamil >= 12 && tamil >= min_script {
+        return Some("tam");
+    }
+    if telugu >= 12 && telugu >= min_script {
+        return Some("tel");
+    }
+
+    if latin * 10 < total_alpha * 6 || tokens.len() < 4 {
+        return None;
+    }
+
+    struct LatinProfile {
+        code: &'static str,
+        words: &'static [&'static str],
+        diacritics: &'static [char],
+    }
+
+    const LATIN_PROFILES: &[LatinProfile] = &[
+        LatinProfile {
+            code: "eng",
+            words: &[
+                "the", "you", "and", "that", "this", "have", "are", "not", "what", "for", "with",
+                "was", "don't", "i'm", "it's", "you're", "we're", "they", "here", "there", "know",
+                "just", "can", "your", "my", "is", "of", "to", "what's", "didn't", "going",
+                "think", "because", "would", "could", "should", "where",
+            ],
+            diacritics: &[],
+        },
+        LatinProfile {
+            code: "spa",
+            words: &[
+                "que", "los", "las", "una", "por", "para", "con", "pero", "como", "está", "esto",
+                "eso", "qué", "sí", "más", "bien", "aquí", "todo", "tú", "él", "del", "estoy",
+                "tienes", "vamos", "nada", "algo", "cuando", "porque", "esta", "ese", "muy", "hay",
+            ],
+            diacritics: &['ñ', '¿', '¡', 'á', 'í', 'ó', 'ú'],
+        },
+        LatinProfile {
+            code: "fra",
+            words: &[
+                "je", "tu", "il", "elle", "nous", "vous", "les", "des", "une", "est", "pas", "que",
+                "qui", "dans", "pour", "avec", "mais", "sur", "c'est", "qu'il", "j'ai", "n'est",
+                "s'il", "suis", "fait", "tout", "rien", "quoi", "bien", "où", "très", "être",
+            ],
+            diacritics: &['ç', 'ê', 'è', 'à', 'œ', 'ù', 'î', 'ô'],
+        },
+        LatinProfile {
+            code: "deu",
+            words: &[
+                "ich", "du", "wir", "sie", "das", "ist", "nicht", "und", "der", "die", "den",
+                "ein", "eine", "mit", "auf", "für", "was", "wie", "haben", "sind", "auch", "noch",
+                "aber", "mir", "dich", "mich", "wenn", "schon", "jetzt", "hier", "bist", "kann",
+            ],
+            diacritics: &['ß', 'ä', 'ö', 'ü'],
+        },
+        LatinProfile {
+            code: "por",
+            words: &[
+                "que", "não", "com", "uma", "para", "por", "isso", "mas", "como", "você", "está",
+                "eu", "ele", "ela", "nós", "dos", "das", "mais", "muito", "bem", "aqui", "tudo",
+                "nada", "quando", "estou", "tem", "foi", "meu", "sua", "então", "agora",
+            ],
+            diacritics: &['ã', 'õ', 'ç', 'ê'],
+        },
+        LatinProfile {
+            code: "ita",
+            words: &[
+                "che", "non", "per", "con", "una", "sono", "sei", "questo", "quello", "come",
+                "anche", "più", "bene", "qui", "io", "tu", "lui", "lei", "gli", "delle", "cosa",
+                "ciao", "perché", "tutto", "niente", "stai", "abbiamo", "questi", "fatto", "molto",
+            ],
+            diacritics: &['à', 'è', 'ì', 'ò', 'ù'],
+        },
+        LatinProfile {
+            code: "nld",
+            words: &[
+                "ik", "je", "jij", "hij", "wij", "het", "een", "van", "en", "dat", "niet", "met",
+                "voor", "maar", "wat", "zijn", "hebben", "aan", "dit", "naar", "ook", "wel", "ben",
+                "heb", "mijn", "hier", "als", "waar", "nooit",
+            ],
+            diacritics: &['ë', 'ï'],
+        },
+        LatinProfile {
+            code: "tur",
+            words: &[
+                "bir", "bu", "ve", "ne", "için", "ama", "ben", "sen", "biz", "var", "yok", "çok",
+                "daha", "gibi", "değil", "evet", "hayır", "nasıl", "neden", "şimdi", "burada",
+                "beni", "sana", "oldu",
+            ],
+            diacritics: &['ğ', 'ş', 'ı', 'ç', 'ö', 'ü'],
+        },
+        LatinProfile {
+            code: "pol",
+            words: &[
+                "nie", "się", "tak", "to", "jest", "co", "jak", "ale", "dla", "czy", "już",
+                "tylko", "mogę", "może", "mam", "masz", "mnie", "cię", "tutaj", "dlaczego",
+                "teraz", "gdzie", "wiem", "dobrze",
+            ],
+            diacritics: &['ł', 'ą', 'ę', 'ś', 'ć', 'ź', 'ż', 'ń'],
+        },
+        LatinProfile {
+            code: "ind",
+            words: &[
+                "yang", "dan", "ini", "itu", "tidak", "saya", "kamu", "aku", "dia", "kita",
+                "untuk", "dengan", "apa", "ada", "bisa", "dari", "bukan", "tapi", "kalau", "sudah",
+                "akan", "kenapa", "mereka",
+            ],
+            diacritics: &[],
+        },
+        LatinProfile {
+            code: "ron",
+            words: &[
+                "este", "sunt", "pentru", "care", "nu", "cu", "dar", "aici", "acum", "bine",
+                "ceva", "nimic", "poate", "vreau", "știu", "meu", "tău", "când", "unde",
+            ],
+            diacritics: &['ă', 'ș', 'ş', 'ț', 'ţ'],
+        },
+        LatinProfile {
+            code: "hun",
+            words: &[
+                "hogy", "nem", "vagy", "van", "egy", "ez", "az", "csak", "már", "mit", "miért",
+                "igen", "most", "itt", "nagyon", "lesz", "volt", "neked",
+            ],
+            diacritics: &['ő', 'ű'],
+        },
+        LatinProfile {
+            code: "ces",
+            words: &[
+                "jsem", "jsi", "není", "jsou", "ale", "pro", "jak", "tady", "teď", "proč", "dobře",
+                "něco", "nic", "mám", "může", "chci", "vím", "byl",
+            ],
+            diacritics: &['č', 'ř', 'ě', 'ů', 'š', 'ž'],
+        },
+        LatinProfile {
+            code: "swe",
+            words: &[
+                "jag", "och", "det", "att", "inte", "är", "som", "för", "med", "här", "vad",
+                "varför", "har", "kan", "vill", "du", "vi", "dig", "mig",
+            ],
+            diacritics: &['å', 'ä', 'ö'],
+        },
+        LatinProfile {
+            code: "dan",
+            words: &[
+                "jeg", "ikke", "det", "og", "har", "er", "for", "med", "her", "hvad", "hvorfor",
+                "kan", "vil", "dig", "mig", "hvordan", "noget", "aldrig",
+            ],
+            diacritics: &['æ', 'ø', 'å'],
+        },
+    ];
+
+    let mut scores: Vec<(&'static str, usize, usize)> = LATIN_PROFILES
+        .iter()
+        .map(|profile| {
+            let word_hits = tokens
+                .iter()
+                .filter(|tok| profile.words.contains(&tok.as_str()))
+                .count();
+            let diacritic_hits = if profile.diacritics.is_empty() {
+                0
+            } else {
+                sample_lines
+                    .iter()
+                    .flat_map(|l| l.chars())
+                    .filter(|ch| ch.to_lowercase().any(|lc| profile.diacritics.contains(&lc)))
+                    .count()
+                    .min(10)
+            };
+            let score = word_hits * 4 + diacritic_hits;
+            (profile.code, score, word_hits)
+        })
+        .collect();
+
+    scores.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+    let (best_code, best_score, best_words) = scores[0];
+    let second_score = scores.get(1).map(|s| s.1).unwrap_or(0);
+    if best_words >= 2 && best_score >= 8 && best_score >= second_score + 4 {
+        Some(best_code)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3199,5 +3605,33 @@ mod tests {
             auto_align_subtitles(&wrong_cues, &env, &AutoSyncConfig::default()),
             Err(SubtitleSyncError::LowConfidence(_))
         ));
+    }
+
+    #[test]
+    fn test_detect_subtitle_language_scripts_and_latin_languages() {
+        let eng = "1\n00:00:01,000 --> 00:00:03,000\nWhat are you doing here?\n\n2\n00:00:04,000 --> 00:00:06,000\nI don't think that this is going to work.\n\n3\n00:00:07,000 --> 00:00:09,000\nWait for me, I know where they are.\n";
+        assert_eq!(detect_subtitle_language(eng), Some("eng"));
+
+        let eng_with_wm = "1\n00:00:00,500 --> 00:00:02,000\nSubtitles by OpenSubtitles.org\n\n2\n00:00:03,000 --> 00:00:05,000\n¿Por qué estás aquí conmigo?\n\n3\n00:00:06,000 --> 00:00:08,000\nPero no tienes nada que hacer para eso.\n";
+        assert_eq!(detect_subtitle_language(eng_with_wm), Some("spa"));
+
+        let fra = "1\n00:00:01,000 --> 00:00:03,000\nQu'est-ce que tu fais ici avec nous?\n\n2\n00:00:04,000 --> 00:00:06,000\nJe ne suis pas sûr, mais c'est très bien.\n";
+        assert_eq!(detect_subtitle_language(fra), Some("fra"));
+
+        let deu = "1\n00:00:01,000 --> 00:00:03,000\nWas machst du hier mit uns?\n\n2\n00:00:04,000 --> 00:00:06,000\nIch weiß nicht, ob das gut ist oder nicht.\n";
+        assert_eq!(detect_subtitle_language(deu), Some("deu"));
+
+        let ara = "1\n00:00:01,000 --> 00:00:03,000\nأين كنت طوال هذا الوقت يا صديقي؟\n\n2\n00:00:04,000 --> 00:00:06,000\nكنت أبحث عنك في كل مكان.\n";
+        assert_eq!(detect_subtitle_language(ara), Some("ara"));
+
+        let jpn = "1\n00:00:01,000 --> 00:00:03,000\nここで何をしているのですか？\n\n2\n00:00:04,000 --> 00:00:06,000\n早く行かないと間に合わないよ。\n";
+        assert_eq!(detect_subtitle_language(jpn), Some("jpn"));
+
+        let rus = "1\n00:00:01,000 --> 00:00:03,000\nЧто ты здесь делаешь сейчас?\n\n2\n00:00:04,000 --> 00:00:06,000\nЯ не знаю, куда они ушли.\n";
+        assert_eq!(detect_subtitle_language(rus), Some("rus"));
+
+        let sdh_only =
+            "1\n00:00:01,000 --> 00:00:03,000\n[Music]\n\n2\n00:00:04,000 --> 00:00:06,000\n♪♪\n";
+        assert_eq!(detect_subtitle_language(sdh_only), None);
     }
 }

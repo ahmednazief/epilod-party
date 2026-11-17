@@ -359,7 +359,7 @@ test("Solo open-media StrictMode auto-load, immediate loaded/unpause, ViewportPl
   // Full-width scrubber row, symmetric centered transport cluster, frosted glass TitleBar pill, translucent crystal play orb, and custom right-click ContextMenu
   assert.match(transportSrc, /<div className="w-full px-0\.5">\s*<PlaybackScrubber/);
   assert.match(transportSrc, /grid-cols-\[minmax\(0,1fr\)_auto_minmax\(0,1fr\)\]/);
-  assert.match(transportSrc, /\{\/\* Center: Hero Transport Cluster \*\/\}\s*<div className="flex items-center gap-1\.5 shrink-0 justify-self-center">/);
+  assert.match(transportSrc, /\{\/\* Center: Hero Transport Cluster \*\/\}\s*<div[\s\S]*?className="relative flex items-center gap-1\.5(?:\s+sm:gap-2)? shrink-0 justify-self-center"/);
   assert.match(transportSrc, /ep-bar-pill/);
   assert.match(transportSrc, /ep-bar-icon-btn/);
   assert.equal(transportSrc.includes("max-w-[1140px]"), true);

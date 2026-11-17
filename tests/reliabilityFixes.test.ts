@@ -491,6 +491,11 @@ test("Responsiveness invariants: lazy mpvStart, throttled playback/subtitle tick
   const mainSrc = fs.readFileSync(path.join(REPO_ROOT, "src/main.tsx"), "utf8");
   assert.match(mainSrc, /<ErrorBoundary>/);
   assert.match(mainSrc, /window\.addEventListener\("unhandledrejection"/);
+
+  const errBoundarySrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/ErrorBoundary.tsx"), "utf8");
+  assert.match(errBoundarySrc, /items-center text-center/);
+  assert.match(errBoundarySrc, /justify-center/);
+  assert.match(errBoundarySrc, /<AppAlertIcon/);
 });
 
 
@@ -832,13 +837,28 @@ test("Sudden seek coalescing: monotonic clientSeekSeq rejects stale mpv://time a
       mod.resetSharedRelativeSeek();
 
       mod.seekPlaybackRelative(10);
+      assert.equal(mod.usePlayerStore.getState().seekCue?.direction, "forward");
+      assert.equal(mod.usePlayerStore.getState().seekCue?.deltaSecs, 10);
       mod.seekPlaybackRelative(10);
+      assert.equal(mod.usePlayerStore.getState().seekCue?.direction, "forward");
+      assert.equal(mod.usePlayerStore.getState().seekCue?.deltaSecs, 20);
+      assert.equal(mod.usePlayerStore.getState().seekCue?.step, 2);
+
+      // Opposite direction & peer actor reset accumulation cleanly
+      mod.seekPlaybackRelative(-10);
+      assert.equal(mod.usePlayerStore.getState().seekCue?.direction, "back");
+      assert.equal(mod.usePlayerStore.getState().seekCue?.deltaSecs, 10);
+      mod.usePlayerStore.getState().flashSeekCue({ direction: "forward", deltaSecs: 10, actor: "Ali" });
+      assert.equal(mod.usePlayerStore.getState().seekCue?.actor, "Ali");
+      assert.equal(mod.usePlayerStore.getState().seekCue?.deltaSecs, 10);
+      mod.usePlayerStore.getState().clearSeekCue();
       await Promise.resolve();
 
       const seekCalls = ipcCalls.filter((c) => c.cmd === "mpv_seek");
-      assert.equal(seekCalls.length, 2);
+      assert.equal(seekCalls.length, 3);
       assert.equal(seekCalls[0].args?.seconds, 110);
       assert.equal(seekCalls[1].args?.seconds, 120);
+      assert.equal(seekCalls[2].args?.seconds, 110);
       assert.equal(seekCalls[0].args?.preview, false);
       assert.ok(
         Number(seekCalls[1].args?.clientSeekSeq) > Number(seekCalls[0].args?.clientSeekSeq),
@@ -876,17 +896,18 @@ test("Magic Sync embedded track resolution never crosses languages and uses exac
   assert.equal(tr.languagesMatch("und", "und"), false);
   assert.equal(tr.languagesMatch("eng", "ara"), false);
 
-  // 2. Embedded English bitmap sub with ONLY a foreign (Arabic) text track must NOT fall back to Arabic
+  // 2. Embedded English bitmap sub with ONLY a foreign (Arabic) text track must NOT fall back to Arabic,
+  //    and instead targets the selected bitmap track directly for in-place timing sync.
   const bitmapOnlyForeign = tr.resolveEmbeddedSyncTarget([
     { id: 1, type: "sub", lang: "ara", codec: "subrip", selected: false, external: false, "ff-index": 2 },
     { id: 2, type: "sub", lang: "eng", codec: "hdmv_pgs_subtitle", selected: true, external: false, "ff-index": 3 },
   ]);
   assert.equal(bitmapOnlyForeign.subIsBitmap, true);
   assert.equal(bitmapOnlyForeign.fallbackEmbeddedSub, null);
-  assert.equal(bitmapOnlyForeign.syncTargetEmbedded, null);
-  assert.equal(bitmapOnlyForeign.embeddedSubIdx, null);
-  assert.equal(bitmapOnlyForeign.ffIndex, null);
-  assert.equal(bitmapOnlyForeign.crossLangBlocked, true);
+  assert.equal(bitmapOnlyForeign.syncTargetEmbedded?.id, 2);
+  assert.equal(bitmapOnlyForeign.embeddedSubIdx, 1);
+  assert.equal(bitmapOnlyForeign.ffIndex, 3);
+  assert.equal(bitmapOnlyForeign.crossLangBlocked, false);
 
   // 3. Embedded English bitmap sub falls back ONLY to a same-language English text track
   const bitmapWithEnMatch = tr.resolveEmbeddedSyncTarget([
@@ -999,5 +1020,70 @@ test("Scrubber pointer handling guards secondary clicks, fast taps via draggingR
   assert.match(transportSrc, /scrubbingRef\.current = false;[\s\S]*void syncUserSeek\(val\);/);
   assert.doesNotMatch(syncplayRs, /\|\|\s*server_ignored\s*\);/);
   assert.match(syncplayRs, /server_ignored && ps\.set_by\.is_none\(\)/);
+  assert.match(syncplayRs, /server_forced_action\s*=\s*ps\.do_seek \|\| ps\.paused != self\.local_paused;/);
+  assert.match(syncplayRs, /&& server_forced_action/);
+  const mpvIpcRs = fs.readFileSync(path.join(REPO_ROOT, "crates/epilod-core/src/mpv_ipc.rs"), "utf8");
+  assert.match(mpvIpcRs, /SEEKING_TIMEOUT:\s*Duration/);
+  assert.match(mpvIpcRs, /effective_timeout\(s\)/);
   assert.match(syncplayModRs, /SyncCommand::UserSeek\(pos\)[\s\S]{0,360}is_scrubbing = false;/);
+});
+
+test("Untagged subtitle detection probes only untagged text tracks, labels CCs clearly, and matches bitmap fallback", async () => {
+  const tr = await loadModules<typeof import("../src/lib/tracks")>("src/lib/tracks.ts");
+  const playerStoreMod = await loadModules<typeof import("../src/store/usePlayerStore")>(
+    "src/store/usePlayerStore.ts",
+  );
+
+  const sampleTracks = [
+    { id: 1, type: "sub", lang: "eng", codec: "dvd_subtitle", selected: true, external: false, "ff-index": 2 },
+    { id: 2, type: "sub", lang: null, codec: "subrip", selected: false, external: false, "ff-index": 3 },
+    { id: 3, type: "sub", lang: null, codec: "eia_608", selected: false, external: false },
+    { id: 4, type: "sub", lang: "und", codec: "ass", selected: false, external: false, "ff-index": 4 },
+  ];
+
+  // Probe list skips bitmap (id=1) and virtual CC (id=3), includes untagged text (id=2) & und (id=4)
+  const probes = tr.buildUntaggedSubtitleProbeList(sampleTracks);
+  assert.deepEqual(
+    probes.map((p) => ({ trackId: p.trackId, ffIndex: p.ffIndex, subStreamIdx: p.subStreamIdx })),
+    [
+      { trackId: 2, ffIndex: 3, subStreamIdx: 1 },
+      { trackId: 4, ffIndex: 4, subStreamIdx: 2 },
+    ],
+  );
+
+  // Display formatting shows detected language + Closed Captions clearly
+  assert.deepEqual(tr.formatSubtitleTrackDisplay(sampleTracks[0]), {
+    label: "ENG Subtitles",
+    metaTags: ["DVD_SUBTITLE"],
+  });
+  assert.deepEqual(tr.formatSubtitleTrackDisplay(sampleTracks[1], { detectedLang: "eng" }), {
+    label: "ENG Subtitles",
+    metaTags: ["Detected", "SUBRIP"],
+  });
+  assert.deepEqual(tr.formatSubtitleTrackDisplay(sampleTracks[2]), {
+    label: "Closed Captions",
+    metaTags: ["EIA_608"],
+  });
+  assert.deepEqual(tr.formatSubtitleTrackDisplay(sampleTracks[3]), {
+    label: "Subtitle 4",
+    metaTags: ["ASS"],
+  });
+
+  // Bitmap ENG subtitle falls back to untagged SUBRIP once detected as English, never if detected as Spanish
+  const matchedEng = tr.resolveEmbeddedSyncTarget(sampleTracks, { 2: "eng", 4: "ara" });
+  assert.equal(matchedEng.fallbackEmbeddedSub?.id, 2);
+  assert.equal(matchedEng.syncTargetEmbedded?.id, 2);
+  assert.equal(matchedEng.ffIndex, 3);
+
+  const foreignOnly = tr.resolveEmbeddedSyncTarget(sampleTracks, { 2: "spa", 4: "ara" });
+  assert.equal(foreignOnly.fallbackEmbeddedSub, null);
+  assert.equal(foreignOnly.syncTargetEmbedded?.id, 1);
+
+  // usePlayerStore merges & clears detectedSubLangs cleanly on resetForNewFile
+  const store = playerStoreMod.usePlayerStore.getState();
+  store.reset();
+  store.mergeDetectedSubLangs([{ trackId: 2, lang: "eng" }]);
+  assert.deepEqual(playerStoreMod.usePlayerStore.getState().detectedSubLangs, { 2: "eng" });
+  store.resetForNewFile();
+  assert.deepEqual(playerStoreMod.usePlayerStore.getState().detectedSubLangs, {});
 });

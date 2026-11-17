@@ -380,7 +380,10 @@ export function seekPlaybackRelative(
   player.setEndedAtEof(false);
   player.setPositionSecs(next);
   if (options?.showFeedback !== false) {
-    player.flashFeedback(`${deltaSecs > 0 ? "+" : ""}${deltaSecs}s`);
+    player.flashSeekCue({
+      direction: deltaSecs < 0 ? "back" : "forward",
+      deltaSecs: Math.abs(deltaSecs),
+    });
   }
   safeMpvCall(mpvSeek(next, { clientSeekSeq: seq }));
   if (connected && !aligning) {
@@ -521,7 +524,13 @@ export function cycleSubtitleTrack(): void {
       clearExternalTrackState: sub.clearLoadedTrack,
     }),
   );
-  player.flashFeedback(formatTrackAnnouncement(nextTrack, "sub"));
+  player.flashFeedback(
+    formatTrackAnnouncement(
+      nextTrack,
+      "sub",
+      nextTrack ? player.detectedSubLangs[nextTrack.id] : null,
+    ),
+  );
 }
 
 export function cycleAudioTrack(): void {

@@ -1261,9 +1261,15 @@ impl SyncStateMachine {
                 .as_ref()
                 .and_then(|i| i.client)
                 .is_some();
+            // A routine pre-seek server tick (doSeek=false and matching paused state) can carry
+            // ignoringOnTheFly.server while another peer was the last `setBy`. Treat it as a real
+            // override only when it carries an explicit seek or pause/play state change; otherwise
+            // it would snap an in-flight user click-seek back to the previous position after 1 frame.
+            let server_forced_action = ps.do_seek || ps.paused != self.local_paused;
             if self.ignoring_client > 0
                 && !acknowledged_client
                 && server_ignored
+                && server_forced_action
                 && (from_other_or_server || (ps.set_by.is_none() && !has_client_ack_token))
             {
                 server_override = true;
@@ -2474,6 +2480,75 @@ mod tests {
                 SyncAction::SetSpeed(1.0),
                 SyncAction::Seek(2065.5),
             ]
+        );
+    }
+
+    #[test]
+    fn test_inflight_server_tick_without_action_does_not_snap_back_user_seek() {
+        let mut sm = SyncStateMachine::new();
+        sm.set_local_username("Me".into());
+
+        // Establish initial room state where Bob was last actor at t=300s
+        let initial = ServerState {
+            playstate: Some(Playstate {
+                position: 300.0,
+                paused: false,
+                do_seek: false,
+                set_by: Some("Bob".into()),
+            }),
+            ..Default::default()
+        };
+        let _ = sm.handle_server_state(&initial, 1.0);
+
+        // User clicks a new minute on the timeline (900s) -> jumps mpv locally & increments ignoring_client
+        sm.on_user_seek(900.0);
+        assert_eq!(sm.ignoring_client, 1);
+
+        // Pre-seek in-flight server state packet arrives with ignoringOnTheFly.server set and Bob still in setBy,
+        // or setBy=None, while doSeek=false and paused unchanged -> must NOT trigger ServerOverride snap-back!
+        for set_by in [Some("Bob".into()), None] {
+            let inflight = ServerState {
+                playstate: Some(Playstate {
+                    position: 300.0,
+                    paused: false,
+                    do_seek: false,
+                    set_by,
+                }),
+                ignoring_on_the_fly: Some(IgnoringOnTheFly {
+                    server: Some(7),
+                    client: None,
+                }),
+                ..Default::default()
+            };
+            let actions = sm.handle_server_state(&inflight, 1.1);
+            assert!(
+                actions.is_empty(),
+                "stale server tick must not snap user click-seek back: {actions:?}"
+            );
+            assert_eq!(sm.ignoring_client, 1);
+        }
+
+        // Server finally acknowledges client's seek to 900s
+        let ack = ServerState {
+            playstate: Some(Playstate {
+                position: 900.0,
+                paused: false,
+                do_seek: true,
+                set_by: Some("Me".into()),
+            }),
+            ignoring_on_the_fly: Some(IgnoringOnTheFly {
+                server: Some(8),
+                client: Some(1),
+            }),
+            ..Default::default()
+        };
+        let ack_actions = sm.handle_server_state(&ack, 1.2);
+        assert_eq!(sm.ignoring_client, 0);
+        assert!(
+            !ack_actions
+                .iter()
+                .any(|a| matches!(a, SyncAction::Seek(_))),
+            "acknowledged self-seek must stay at 900s: {ack_actions:?}"
         );
     }
 }
