@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub type PendingReplyMap = Arc<Mutex<HashMap<u64, oneshot::Sender<MpvReply>>>>;
 
+#[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_and_run_ipc<F>(
     pipe_name: String,
@@ -29,6 +30,7 @@ pub async fn connect_and_run_ipc<F>(
     pending_seek: Arc<Mutex<PendingSeekTracker>>,
     pending_replies: PendingReplyMap,
     client_seek_seq: Arc<AtomicU64>,
+    volume_reassert_cb: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     check_child_exited: F,
 ) -> String
 where
@@ -80,6 +82,13 @@ where
             }
         }
     });
+    if let Some(cb) = volume_reassert_cb
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        cb();
+    }
 
     let mut ui_time_throttle = TimePosThrottle::ui_default();
     let mut eof_emitted = false;
@@ -207,6 +216,13 @@ where
                         .clear();
                     ui_time_throttle.reset();
                     let _ = app.emit("mpv://file-loaded", ());
+                    if let Some(cb) = volume_reassert_cb
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                    {
+                        cb();
+                    }
                     if let Some(target) = deferred_seek {
                         pending_seek
                             .lock()

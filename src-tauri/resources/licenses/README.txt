@@ -17,5 +17,8 @@ Epilod Party — Third-Party Licenses & Notices
    Copyright (C) The Inter Project Authors & Google LLC.
    Licensed under the SIL Open Font License 1.1 (OFL-1.1).
 
-5. Tauri, React, Zustand, Lucide, Tokio, Serde
+5. Tauri, React, Zustand, Lucide, Tokio, Serde, cpal, wasapi, rubato, ringbuf
    Licensed under MIT / Apache-2.0.
+
+6. libopus / audiopus & nnnoiseless (RNNoise port)
+   Licensed under BSD-3-Clause.

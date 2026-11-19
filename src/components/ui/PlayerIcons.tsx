@@ -668,19 +668,45 @@ export function PartyViewersIcon({ size = 15, className = "" }: PlayerIconProps)
 }
 
 /**
- * Custom miniature amethyst host crest icon.
+ * Custom faceted golden-pearl & amethyst crystal Host crown icon.
  */
-export function PartyHostIcon({ size = 12, className = "" }: PlayerIconProps) {
+export function PartyHostIcon({ size = 14, className = "" }: PlayerIconProps) {
+  const uid = useId().replace(/:/g, "");
+  const crownGradId = `ep-host-crown-${uid}`;
+  const bandGradId = `ep-host-band-${uid}`;
+
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={crownGradId} x1="4" y1="6" x2="20" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FEF3C7" stopOpacity="0.92" />
+          <stop offset="52%" stopColor="#FCD34D" stopOpacity="0.88" />
+          <stop offset="100%" stopColor="#C4B5FD" stopOpacity="0.85" />
+        </linearGradient>
+        <linearGradient id={bandGradId} x1="5" y1="17" x2="19" y2="19.5" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FDE68A" />
+          <stop offset="100%" stopColor="#A78BFA" />
+        </linearGradient>
+      </defs>
       <path
-        d="M4.2 17.5L5.6 7.8L10.1 11.6L12 5.6L13.9 11.6L18.4 7.8L19.8 17.5H4.2Z"
-        fill="#A78BFA"
+        d="M4.3 16.3L3.6 8.6L8.7 12.1L12 6.2L15.3 12.1L20.4 8.6L19.7 16.3H4.3Z"
+        fill={`url(#${crownGradId})`}
         fillOpacity="0.28"
-        stroke="#DDD6FE"
-        strokeWidth="1.65"
+        stroke={`url(#${crownGradId})`}
+        strokeWidth="1.55"
         strokeLinejoin="round"
       />
+      <path
+        d="M8.7 12.1L12 16.3L15.3 12.1"
+        stroke="#FEF3C7"
+        strokeOpacity="0.55"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
+      />
+      <rect x="4.5" y="17.3" width="15" height="2.4" rx="1.2" fill={`url(#${bandGradId})`} fillOpacity="0.85" />
+      <circle cx="12" cy="5.2" r="1.25" fill="#FEF3C7" />
+      <circle cx="3.6" cy="7.9" r="1.05" fill="#FDE68A" />
+      <circle cx="20.4" cy="7.9" r="1.05" fill="#DDD6FE" />
     </svg>
   );
 }
@@ -1071,7 +1097,11 @@ export function PlayerReactionPickerIcon({ size = 14, className = "" }: PlayerIc
 /**
  * Custom faceted Smoked-Amethyst crystal Admin shield-star crest (distinct from Host crown).
  */
-export function PartyAdminIcon({ size = 12, className = "" }: PlayerIconProps) {
+export function PartyAdminIcon({
+  size = 12,
+  revoke = false,
+  className = "",
+}: PlayerIconProps & { revoke?: boolean }) {
   const uid = useId().replace(/:/g, "");
   const fillId = `ep-admin-fill-${uid}`;
 
@@ -1079,21 +1109,31 @@ export function PartyAdminIcon({ size = 12, className = "" }: PlayerIconProps) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
         <linearGradient id={fillId} x1="5" y1="4" x2="19" y2="20" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#EDE9FE" stopOpacity="0.34" />
-          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.32" />
+          <stop offset="0%" stopColor={revoke ? "#FECDD3" : "#EDE9FE"} stopOpacity="0.34" />
+          <stop offset="100%" stopColor={revoke ? "#E11D48" : "#7C3AED"} stopOpacity="0.32" />
         </linearGradient>
       </defs>
       <path
         d="M12 3.4L18.8 6.1V11.6C18.8 15.8 15.9 19.2 12 20.6C8.1 19.2 5.2 15.8 5.2 11.6V6.1L12 3.4Z"
         fill={`url(#${fillId})`}
-        stroke="#DDD6FE"
+        stroke={revoke ? "#FDA4AF" : "#DDD6FE"}
         strokeWidth="1.6"
         strokeLinejoin="round"
+        strokeOpacity={revoke ? "0.75" : "1"}
       />
       <path
         d="M12 7.8L13.1 10.6L16 11.7L13.1 12.8L12 15.6L10.9 12.8L8 11.7L10.9 10.6L12 7.8Z"
         fill="#FFFFFF"
+        fillOpacity={revoke ? "0.65" : "1"}
       />
+      {revoke && (
+        <path
+          d="M5.2 18.8L18.8 5.2"
+          stroke="#FB7185"
+          strokeWidth="2"
+          strokeLinecap="round"
+        />
+      )}
     </svg>
   );
 }

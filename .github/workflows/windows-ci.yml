@@ -11,6 +11,8 @@ jobs:
   windows-verify:
     name: Windows MSVC Build & Test
     runs-on: windows-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,4 +51,5 @@ jobs:
       - name: Verify release compilation of Tauri Windows app & custom installer
         run: |
           cargo check --manifest-path src-tauri/Cargo.toml --release
+          cargo check --manifest-path src-tauri/Cargo.toml --release --features aec
           cargo check --manifest-path src-installer/Cargo.toml --release

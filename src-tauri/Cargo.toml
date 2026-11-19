@@ -13,6 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # window loads devUrl (http://localhost:1420) instead of the bundled UI. `tauri build` enables this
 # automatically; plain `cargo build --release` (scripts/build-installer.ps1) must pass it explicitly.
 custom-protocol = ["tauri/custom-protocol"]
+# Feature gate for v1.1 acoustic echo cancellation (checked in CI alongside default build).
+aec = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -27,9 +29,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader",
+  "Win32_System_Power",
   "Win32_Storage_FileSystem",
   "Win32_System_Registry",
   "Win32_System_Threading",
@@ -38,6 +42,11 @@ windows-sys = { version = "0.59", features = [
 ] }
 native-tls = "0.2"
 tokio-native-tls = "0.3"
+audiopus = "0.3.0-rc.0"
+cpal = "0.15"
+ringbuf = "0.4"
+rubato = "0.16"
+wasapi = "0.27"
 
 [target.'cfg(windows)'.build-dependencies]
 tauri-build = { version = "2", features = [] }

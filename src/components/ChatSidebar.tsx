@@ -9,6 +9,7 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   computeMessageGroupPosition,
   formatChatClock,
@@ -28,7 +29,14 @@ import {
 } from "../lib/chat";
 import { filterEmojiCatalog, PRESET_REACTIONS } from "../lib/reactions";
 import { resolveEffectiveUsername } from "../lib/syncController";
-import { useAnimatedPresence } from "../lib/useAnimatedPresence";
+import { useAnimatedPresence, usePresencePayload } from "../lib/useAnimatedPresence";
+import {
+  getActiveVoiceSpeakerNames,
+  isCaptureHealthy,
+  isLocalVoiceSpeaking,
+  isParticipantSpeaking,
+  toggleVoiceSession,
+} from "../lib/voiceActions";
 import { useAppStore } from "../store/useAppStore";
 import {
   MAX_CHAT_SIDEBAR_WIDTH,
@@ -38,8 +46,18 @@ import {
 } from "../store/useChatStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
-import { AppCloseIcon, AppSearchIcon } from "./ui/AppIcons";
+import { useVoiceStore } from "../store/useVoiceStore";
+import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import {
+  AppCloseIcon,
+  AppSearchIcon,
+  AppVoiceTuneIcon,
+  AppVoiceWaveIcon,
+} from "./ui/AppIcons";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
+import { VoiceMicDeafenPills } from "./ui/VoiceQuickControls";
+import {
+  PartyLeaveIcon,
   PlayerChatIcon,
   PlayerClockIcon,
   PlayerCollapseRightIcon,
@@ -50,11 +68,13 @@ import {
   PlayerSmileIcon,
 } from "./ui/PlayerIcons";
 import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
+import { VoiceQuickSettingsTray } from "./ui/VoiceQuickSettingsTray";
 
 interface ChatSidebarProps {
   docked: boolean;
   exiting: boolean;
   topChromeOffset: boolean;
+  roomPanelOpen?: boolean;
   onClose: () => void;
   onSeekToTimestamp: (secs: number) => void;
   onResizingChange?: (resizing: boolean) => void;
@@ -95,6 +115,7 @@ export const ChatSidebar = memo(function ChatSidebar({
   docked,
   exiting,
   topChromeOffset,
+  roomPanelOpen = false,
   onClose,
   onSeekToTimestamp,
   onResizingChange,
@@ -120,18 +141,45 @@ export const ChatSidebar = memo(function ChatSidebar({
   const setChatPeeksEnabled = useAppStore((s) => s.setChatPeeksEnabled);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
   const setChatTriggerPlacement = useAppStore((s) => s.setChatTriggerPlacement);
+  const openSettings = useAppStore((s) => s.openSettings);
 
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
   const roomControl = useSyncStore((s) => s.roomControl);
 
+  const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
+  const voiceJoined = useVoiceStore((s) => s.joined);
+  const voiceJoining = useVoiceStore((s) => s.joining);
+  const voiceMuted = useVoiceStore((s) => s.muted);
+  const voiceDeafened = useVoiceStore((s) => s.deafened);
+  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
+  const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
+  const voiceSpeakingPeers = useVoiceStore((s) => s.speakingPeers);
+  const voiceRoster = useVoiceStore((s) => s.roster);
+  const voicePeerOverrides = useVoiceStore((s) => s.peerOverrides);
+
   const mediaLoaded = usePlayerStore((s) => s.loaded);
   const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
+
+  const voiceCheckInput = {
+    joined: voiceJoined,
+    muted: voiceMuted,
+    deafened: voiceDeafened,
+    localGateOpen: voiceGateOpen,
+    streamStatus: voiceStreamStatus,
+    speakingPeers: voiceSpeakingPeers,
+    roster: voiceRoster,
+    peerOverrides: voicePeerOverrides,
+  };
+  const localVoiceSpeaking = isLocalVoiceSpeaking(voiceCheckInput);
+  const voicePeersInCall = voiceRoster.filter((r) => r.inVoice);
+  const activeVoiceSpeakers = getActiveVoiceSpeakerNames(effectiveUsername, voiceCheckInput);
 
   const [draft, setDraft] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiQuery, setEmojiQuery] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [voiceAudioOpen, setVoiceAudioOpen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(0);
   const [pulsingMsgId, setPulsingMsgId] = useState<string | null>(null);
@@ -171,6 +219,15 @@ export const ChatSidebar = memo(function ChatSidebar({
 
   const optionsPresence = useAnimatedPresence(optionsOpen, 170);
   const optionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const voiceAudioRef = useRef<HTMLDivElement | null>(null);
+  const voiceAudioPortalRef = useRef<HTMLDivElement | null>(null);
+  const [voiceAudioCoords, setVoiceAudioCoords] = useState<{ left: number; top: number } | null>(
+    null,
+  );
+  const voiceAudioPresence = usePresencePayload(
+    voiceAudioOpen && voiceAudioCoords ? voiceAudioCoords : null,
+    170,
+  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const msgRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -203,17 +260,55 @@ export const ChatSidebar = memo(function ChatSidebar({
     }
   }, [editTarget]);
 
-  // Close options popover on outside click
+  // Position & outside-click handling for quick voice audio portal popover
+  useLayoutEffect(() => {
+    if (!voiceAudioOpen) {
+      setVoiceAudioCoords(null);
+      return;
+    }
+    const update = () => {
+      const anchor = voiceAudioRef.current;
+      if (!anchor) return;
+      const r = anchor.getBoundingClientRect();
+      const vw = window.innerWidth || 1280;
+      const width = 264;
+      setVoiceAudioCoords({
+        left: Math.max(12, Math.min(r.right - width, vw - width - 12)),
+        top: r.bottom + 6,
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [voiceAudioOpen]);
+
+  // Close options / quick voice setup popovers on outside click
   useEffect(() => {
-    if (!optionsOpen) return;
+    if (!optionsOpen && !voiceAudioOpen) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (optionsMenuRef.current && !optionsMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (target instanceof Element && target.closest('[role="listbox"]')) {
+        return;
+      }
+      if (optionsOpen && optionsMenuRef.current && !optionsMenuRef.current.contains(target)) {
         setOptionsOpen(false);
+      }
+      if (
+        voiceAudioOpen &&
+        voiceAudioRef.current &&
+        !voiceAudioRef.current.contains(target) &&
+        (!voiceAudioPortalRef.current || !voiceAudioPortalRef.current.contains(target))
+      ) {
+        setVoiceAudioOpen(false);
       }
     };
     window.addEventListener("pointerdown", onPointerDown);
     return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [optionsOpen]);
+  }, [optionsOpen, voiceAudioOpen]);
 
   const activeTypingNames = useMemo(() => {
     const now = Date.now();
@@ -447,6 +542,12 @@ export const ChatSidebar = memo(function ChatSidebar({
     }
 
     if (e.key === "Escape") {
+      if (voiceAudioOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setVoiceAudioOpen(false);
+        return;
+      }
       if (optionsOpen) {
         e.preventDefault();
         e.stopPropagation();
@@ -652,14 +753,25 @@ export const ChatSidebar = memo(function ChatSidebar({
                       p.username.trim().toLowerCase() !== effectiveUsername.trim().toLowerCase(),
                   )
                   .slice(0, 3)
-                  .map((p) => (
-                    <ProfileAvatar
-                      key={p.username}
-                      avatarId={resolvePeerAvatarId(p.username, effectiveUsername)}
-                      size={15}
-                      className="ring-1 ring-[#08080d]"
-                    />
-                  ))}
+                  .map((p) => {
+                    const speaking = isParticipantSpeaking(
+                      p.username,
+                      effectiveUsername,
+                      voiceCheckInput,
+                    );
+                    return (
+                      <ProfileAvatar
+                        key={p.username}
+                        avatarId={resolvePeerAvatarId(p.username, effectiveUsername)}
+                        size={15}
+                        className={
+                          speaking
+                            ? "ring-[1.5px] ring-[#38BDF8] ep-speaking-ring"
+                            : "ring-1 ring-[#08080d]"
+                        }
+                      />
+                    );
+                  })}
               </div>
             )}
             <p className="text-[11px] text-secondary/80 truncate">
@@ -673,6 +785,23 @@ export const ChatSidebar = memo(function ChatSidebar({
         </div>
 
         <div ref={optionsMenuRef} className="relative flex items-center gap-1 shrink-0">
+          {syncStatus.state === "connected" &&
+            voiceEnabled &&
+            !voiceJoined &&
+            voicePeersInCall.length === 0 && (
+              <GlassHoverTip label="Join voice" detail="Start room voice">
+                <button
+                  type="button"
+                  disabled={voiceJoining}
+                  onClick={() => void toggleVoiceSession({ skipBtCheck: true })}
+                  aria-label="Join voice chat"
+                  className="ep-bar-icon-btn ep-press h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer disabled:opacity-50"
+                >
+                  <AppVoiceWaveIcon active={false} speaking={false} size={14} />
+                </button>
+              </GlassHoverTip>
+            )}
+
           <button
             type="button"
             onClick={() => setOptionsOpen((v) => !v)}
@@ -750,6 +879,157 @@ export const ChatSidebar = memo(function ChatSidebar({
           )}
         </div>
       </div>
+
+      {/* Compact Social Voice Strip (hidden while Watch Party popover is open) */}
+      <AnimatedCollapse
+        open={
+          !roomPanelOpen &&
+          syncStatus.state === "connected" &&
+          voiceEnabled &&
+          (voiceJoined || voicePeersInCall.length > 0)
+        }
+        innerClassName="px-4 pb-2"
+      >
+        <div
+          ref={voiceAudioRef}
+          className="relative py-1 flex items-center justify-between gap-2"
+        >
+          {voiceJoined ? (
+            <>
+              <div className="flex items-center gap-2 min-w-0">
+                <AppVoiceWaveIcon
+                  active
+                  speaking={activeVoiceSpeakers.length > 0}
+                  size={13}
+                  className="shrink-0"
+                />
+                <div className="min-w-0">
+                  <div
+                    className={`text-[11px] font-medium truncate ${
+                      activeVoiceSpeakers.length > 0 ? "text-[#38BDF8]" : "text-white/90"
+                    }`}
+                  >
+                    {activeVoiceSpeakers.length > 0
+                      ? activeVoiceSpeakers.length === 1
+                        ? `${activeVoiceSpeakers[0]} speaking`
+                        : `${activeVoiceSpeakers.slice(0, 2).join(", ")} speaking`
+                      : `Voice · ${voicePeersInCall.length + 1}`}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <VoiceMicDeafenPills
+                  muted={voiceMuted}
+                  deafened={voiceDeafened}
+                  speaking={localVoiceSpeaking}
+                  captureHealthy={isCaptureHealthy(voiceStreamStatus)}
+                />
+
+                <GlassHoverTip
+                  label="Audio & Devices"
+                  detail="Mic, output & ducking"
+                >
+                  <button
+                    type="button"
+                    aria-label="Chat voice audio settings"
+                    aria-expanded={voiceAudioOpen}
+                    onClick={() => setVoiceAudioOpen((o) => !o)}
+                    className={`ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer ${
+                      voiceAudioOpen
+                        ? "bg-white/15 text-white border-white/30"
+                        : "text-secondary hover:text-white"
+                    }`}
+                  >
+                    <AppVoiceTuneIcon active={voiceAudioOpen} size={14} />
+                  </button>
+                </GlassHoverTip>
+
+                <GlassHoverTip
+                  label="Leave voice"
+                  accent="bad"
+                >
+                  <button
+                    type="button"
+                    aria-label="Leave voice chat"
+                    data-tone="leave"
+                    onClick={() => void toggleVoiceSession()}
+                    className="ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer"
+                  >
+                    <PartyLeaveIcon size={13} />
+                  </button>
+                </GlassHoverTip>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center -space-x-1 shrink-0">
+                  {voicePeersInCall.slice(0, 3).map((peer) => {
+                    const speaking = isParticipantSpeaking(
+                      peer.username,
+                      effectiveUsername,
+                      voiceCheckInput,
+                    );
+                    return (
+                      <ProfileAvatar
+                        key={peer.username}
+                        avatarId={resolvePeerAvatarId(peer.username, effectiveUsername)}
+                        size={17}
+                        className={
+                          speaking
+                            ? "ring-[1.5px] ring-[#38BDF8] ep-speaking-ring"
+                            : "ring-1 ring-[#08080d]"
+                        }
+                      />
+                    );
+                  })}
+                </div>
+                <span className="text-[11px] font-medium text-secondary truncate">
+                  {voicePeersInCall.length} in voice
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={voiceJoining}
+                onClick={() => void toggleVoiceSession({ skipBtCheck: true })}
+                className="ep-glass-primary-pill ep-press h-6 px-2.5 rounded-full text-[10.5px] font-medium text-white shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                {voiceJoining ? "Joining…" : "Join"}
+              </button>
+            </>
+          )}
+
+          {voiceAudioPresence.mounted &&
+            voiceAudioPresence.value &&
+            typeof document !== "undefined" &&
+            createPortal(
+              <div
+                ref={voiceAudioPortalRef}
+                data-glass-region="true"
+                style={{
+                  left: `${voiceAudioPresence.value.left}px`,
+                  top: `${voiceAudioPresence.value.top}px`,
+                }}
+                className={`ep-glass-submenu fixed z-[75] w-[264px] rounded-2xl p-1 ${
+                  voiceAudioPresence.exiting
+                    ? "anim-pop-out pointer-events-none"
+                    : "anim-pop-in"
+                }`}
+              >
+                <VoiceQuickSettingsTray
+                  open={voiceAudioOpen}
+                  className="bg-transparent border-0 p-1.5"
+                  onOpenFullSettings={() => {
+                    setVoiceAudioOpen(false);
+                    openSettings("voice");
+                  }}
+                />
+              </div>,
+              document.body,
+            )}
+        </div>
+      </AnimatedCollapse>
 
       {/* Messages Feed */}
       <div className="relative flex-1 min-h-0 flex flex-col">

@@ -136,7 +136,10 @@ pub fn screenshot_to_file_cmd(request_id: u64, path: &str, include_subtitles: bo
     } else {
         "video"
     };
-    encode_command(request_id, &[json!("screenshot-to-file"), json!(path), json!(mode)])
+    encode_command(
+        request_id,
+        &[json!("screenshot-to-file"), json!(path), json!(mode)],
+    )
 }
 
 pub fn set_property_cmd(request_id: u64, name: &str, value: Value) -> String {
@@ -1655,7 +1658,11 @@ mod tests {
         assert_eq!(parsed["request_id"], 55);
         assert_eq!(
             parsed["command"],
-            json!(["screenshot-to-file", r"C:\Temp\epilod_freeze.jpg", "subtitles"])
+            json!([
+                "screenshot-to-file",
+                r"C:\Temp\epilod_freeze.jpg",
+                "subtitles"
+            ])
         );
 
         let video_only = screenshot_to_file_cmd(56, "/tmp/out.jpg", false);

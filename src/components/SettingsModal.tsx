@@ -4,13 +4,18 @@ import {
   AppChevronIcon,
   AppCloseIcon,
   AppDownloadIcon,
+  AppHeadphonesIcon,
   AppLogsIcon,
+  AppMicIcon,
   AppPartyPrivacyCategoryIcon,
   AppPlaybackCategoryIcon,
   AppProfileCategoryIcon,
   AppResetIcon,
   AppShieldIcon,
   AppSlidersIcon,
+  AppSpeakerVolumeIcon,
+  AppVoiceCategoryIcon,
+  AppVoiceWaveIcon,
   AppWrenchIcon,
 } from "./ui/AppIcons";
 import { PlayerPauseIcon } from "./ui/PlayerIcons";
@@ -43,6 +48,26 @@ import {
   useSubtitleStore,
 } from "../store/useSubtitleStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
+import {
+  domEventModifiersMask,
+  domEventToWindowsVk,
+  formatVoiceHotkey,
+  onVoiceCalibration,
+  onVoiceDevicesChanged,
+  onVoiceLevel,
+  validateVoiceHotkey,
+  voiceGetDiagnostics,
+  voiceGetReport,
+  voiceListDevices,
+  voiceStartCalibration,
+  voiceStartMicMonitor,
+  voiceStopMicMonitor,
+  type VoiceDiagnosticsDto,
+  type VoiceDuckingMode,
+  type VoiceInputMode,
+  type VoiceNoiseMode,
+} from "../lib/voice";
+import { useVoiceStore } from "../store/useVoiceStore";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { Button } from "./ui/Button";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
@@ -63,6 +88,7 @@ const PRIMARY_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
   { value: "appearance", label: "Appearance" },
   { value: "playback", label: "Playback" },
   { value: "party", label: "Party & Privacy" },
+  { value: "voice", label: "Voice & Audio" },
   { value: "updates", label: "Updates" },
 ];
 
@@ -76,6 +102,7 @@ const NAV_HEADINGS: Record<SettingsTab, string> = {
   appearance: "Appearance & Motion",
   playback: "Playback & Subtitles",
   party: "Watch Party & Privacy",
+  voice: "Voice & Audio",
   updates: "App Updates",
   server: "Connection & Shared Folders",
   logs: "Session Diagnostics",
@@ -91,6 +118,8 @@ function renderCategoryIcon(tabValue: SettingsTab, active: boolean) {
       return <AppPlaybackCategoryIcon size={16} active={active} className="shrink-0" />;
     case "party":
       return <AppPartyPrivacyCategoryIcon size={16} active={active} className="shrink-0" />;
+    case "voice":
+      return <AppVoiceCategoryIcon size={16} active={active} className="shrink-0" />;
     case "updates":
       return <AppDownloadIcon size={16} active={active} className="shrink-0" />;
     case "server":
@@ -217,6 +246,50 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsPath, setLogsPath] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+
+  const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
+  const voiceInputDevice = useVoiceStore((s) => s.inputDevice);
+  const voiceOutputDevice = useVoiceStore((s) => s.outputDevice);
+  const voiceInputMode = useVoiceStore((s) => s.inputMode);
+  const voicePttVk = useVoiceStore((s) => s.pttVk);
+  const voicePttMod = useVoiceStore((s) => s.pttMod);
+  const voiceMuteVk = useVoiceStore((s) => s.muteVk);
+  const voiceMuteMod = useVoiceStore((s) => s.muteMod);
+  const voiceDeafenVk = useVoiceStore((s) => s.deafenVk);
+  const voiceDeafenMod = useVoiceStore((s) => s.deafenMod);
+  const voiceHotkeyScope = useVoiceStore((s) => s.hotkeyScope);
+  const voiceSensitivityDb = useVoiceStore((s) => s.sensitivityDb);
+  const voiceAutoSensitivity = useVoiceStore((s) => s.autoSensitivity);
+  const voiceNoiseMode = useVoiceStore((s) => s.noiseMode);
+  const voiceCompression = useVoiceStore((s) => s.compressionEnabled);
+  const voiceDuckingMode = useVoiceStore((s) => s.duckingMode);
+  const voiceCinemaTightGate = useVoiceStore((s) => s.cinemaTightGate);
+  const voiceSpatialPan = useVoiceStore((s) => s.spatialPan);
+  const voiceEchoGuard = useVoiceStore((s) => s.echoGuardEnabled);
+  const voiceAecEnabled = useVoiceStore((s) => s.aecEnabled);
+  const voiceAllowRelayForOthers = useVoiceStore((s) => s.allowRelayForOthers);
+  const voiceAllowRelayedVoice = useVoiceStore((s) => s.allowRelayedVoice);
+  const voiceMasterVolume = useVoiceStore((s) => s.masterVolume);
+  const voiceDevices = useVoiceStore((s) => s.devices);
+  const voiceJoined = useVoiceStore((s) => s.joined);
+  const voiceMicTestActive = useVoiceStore((s) => s.micTestActive);
+  const voiceCalibration = useVoiceStore((s) => s.calibration);
+  const setVoiceCalibration = useVoiceStore((s) => s.setCalibration);
+  const voiceSpeakerLeak = useVoiceStore((s) => s.speakerLeakDetected);
+  const voiceBtHfpDropped = useVoiceStore((s) => s.bluetoothHfpDropped);
+  const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
+  const voiceStreamError = useVoiceStore((s) => s.streamError);
+  const voiceLevelDb = useVoiceStore((s) => s.localLevelDb);
+  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
+  const updateVoiceConfig = useVoiceStore((s) => s.updateConfig);
+  const setVoiceDevices = useVoiceStore((s) => s.setDevices);
+  const setVoiceMicTestActive = useVoiceStore((s) => s.setMicTestActive);
+  const [capturingBind, setCapturingBind] = useState<"ptt" | "mute" | "deafen" | null>(null);
+  const [hotkeyMessage, setHotkeyMessage] = useState<{ kind: "error" | "warn"; text: string } | null>(
+    null,
+  );
+  const [voiceDiag, setVoiceDiag] = useState<VoiceDiagnosticsDto | null>(null);
+  const [voiceAdvancedOpen, setVoiceAdvancedOpen] = useState(false);
   const navTrackRef = useRef<HTMLDivElement | null>(null);
   const navButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const prevNavTabRef = useRef<SettingsTab>(tab);
@@ -282,6 +355,150 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       void initUpdater();
     }
   }, [open, serverEndpoint, serverPassword, initUpdater, tab]);
+
+  useEffect(() => {
+    if (open && tab === "voice") {
+      let active = true;
+      let unlistenLevel: (() => void) | null = null;
+      let unlistenCal: (() => void) | null = null;
+      let unlistenDev: (() => void) | null = null;
+      void onVoiceLevel((lvl) => {
+        if (active) {
+          useVoiceStore.getState().setLocalLevel(lvl.db, lvl.speechProb, lvl.gateOpen);
+        }
+      }).then((fn) => {
+        if (active) unlistenLevel = fn;
+        else fn();
+      });
+      void onVoiceDevicesChanged(() => {
+        if (!active) return;
+        const s = useVoiceStore.getState();
+        void voiceListDevices(s.inputDevice, s.outputDevice)
+          .then((d) => {
+            if (active) setVoiceDevices(d);
+          })
+          .catch(() => undefined);
+      }).then((fn) => {
+        if (active) unlistenDev = fn;
+        else fn();
+      });
+      void onVoiceCalibration((cal) => {
+        if (!active) return;
+        setVoiceCalibration(cal);
+        if (cal.phase === "done" && typeof cal.recommendedDb === "number") {
+          updateVoiceConfig({ sensitivityDb: Math.round(cal.recommendedDb), autoSensitivity: false });
+          pushNote(
+            "success",
+            `Mic calibrated: threshold set to ${Math.round(cal.recommendedDb)} dB.`,
+          );
+        }
+      }).then((fn) => {
+        if (active) unlistenCal = fn;
+        else fn();
+      });
+      void voiceListDevices(voiceInputDevice, voiceOutputDevice)
+        .then((d) => {
+          if (active) setVoiceDevices(d);
+        })
+        .catch(() => undefined);
+      if (voiceEnabled) {
+        void voiceStartMicMonitor(voiceMicTestActive).catch(() => undefined);
+      }
+      void voiceGetDiagnostics()
+        .then((diag) => {
+          if (active) setVoiceDiag(diag);
+        })
+        .catch(() => undefined);
+      const iv = window.setInterval(() => {
+        void voiceGetDiagnostics()
+          .then((diag) => {
+            if (active) setVoiceDiag(diag);
+          })
+          .catch(() => undefined);
+      }, 1000);
+      return () => {
+        active = false;
+        unlistenLevel?.();
+        unlistenCal?.();
+        unlistenDev?.();
+        window.clearInterval(iv);
+      };
+    } else {
+      setCapturingBind(null);
+      setHotkeyMessage(null);
+      if (voiceMicTestActive) {
+        setVoiceMicTestActive(false);
+      }
+      void voiceStopMicMonitor().catch(() => undefined);
+    }
+  }, [
+    open,
+    tab,
+    voiceEnabled,
+    voiceInputDevice,
+    voiceOutputDevice,
+    voiceMicTestActive,
+    setVoiceDevices,
+    setVoiceMicTestActive,
+    setVoiceCalibration,
+    updateVoiceConfig,
+    pushNote,
+  ]);
+
+  useEffect(() => {
+    if (!capturingBind) return;
+    const applyBind = (vk: number, mod: number) => {
+      const check = validateVoiceHotkey(vk, mod, voiceHotkeyScope);
+      if (!check.valid) {
+        setHotkeyMessage({ kind: "error", text: check.reason ?? "Invalid hotkey." });
+        return;
+      }
+      setHotkeyMessage(
+        check.warning ? { kind: "warn", text: check.warning } : null,
+      );
+      if (capturingBind === "ptt") updateVoiceConfig({ pttVk: vk, pttMod: mod });
+      else if (capturingBind === "mute") updateVoiceConfig({ muteVk: vk, muteMod: mod });
+      else updateVoiceConfig({ deafenVk: vk, deafenMod: mod });
+      setCapturingBind(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setCapturingBind(null);
+        setHotkeyMessage(null);
+        return;
+      }
+      if (e.key === "Control" || e.key === "Alt" || e.key === "Shift" || e.key === "Meta") {
+        return; // Wait for primary key after modifier press
+      }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        setHotkeyMessage(null);
+        if (capturingBind === "ptt") updateVoiceConfig({ pttVk: 0, pttMod: 0 });
+        else if (capturingBind === "mute") updateVoiceConfig({ muteVk: 0, muteMod: 0 });
+        else updateVoiceConfig({ deafenVk: 0, deafenMod: 0 });
+        setCapturingBind(null);
+        return;
+      }
+      const vk = domEventToWindowsVk(e);
+      if (vk) {
+        applyBind(vk, domEventModifiersMask(e));
+      }
+    };
+    const onMouse = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+        const vk = e.button === 3 ? 0x05 : 0x06;
+        applyBind(vk, domEventModifiersMask(e));
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("mousedown", onMouse, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("mousedown", onMouse, true);
+    };
+  }, [capturingBind, voiceHotkeyScope, updateVoiceConfig]);
 
   const loadLogs = async () => {
     setLogsLoading(true);
@@ -783,6 +1000,519 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   checked={hashFilenames}
                   onChange={setHashFilenames}
                 />
+              </div>
+            )}
+
+            {tab === "voice" && (
+              <div className="anim-tab-in space-y-2.5">
+                <ComfortSwitchRow
+                  title="Enable Voice Chat"
+                  description="Master switch for P2P voice chat in watch parties. Disable to turn off all voice controls and audio workers."
+                  checked={voiceEnabled}
+                  onChange={(v) => updateVoiceConfig({ voiceEnabled: v })}
+                />
+
+                {voiceDevices?.permissionDenied && (
+                  <div className="ep-glass-tray rounded-xl px-3 py-2.5 flex items-center justify-between gap-2 text-xs">
+                    <span className="text-bad font-medium">
+                      Microphone permission blocked by Windows Privacy Settings.
+                    </span>
+                    <a
+                      href="ms-settings:privacy-microphone"
+                      className="ep-bar-pill px-2.5 py-1 rounded-full text-[11px] font-medium text-white shrink-0"
+                    >
+                      Open Privacy
+                    </a>
+                  </div>
+                )}
+
+                {(voiceStreamStatus === "micBusy" ||
+                  voiceStreamStatus === "reconnecting" ||
+                  voiceBtHfpDropped ||
+                  voiceSpeakerLeak) && (
+                  <div className="ep-glass-tray rounded-xl px-3 py-2 space-y-1 text-xs">
+                    {voiceStreamStatus === "micBusy" && (
+                      <div className="text-bad font-medium">
+                        {voiceStreamError ?? "Mic in use by another app."}
+                      </div>
+                    )}
+                    {voiceStreamStatus === "reconnecting" && (
+                      <div className="text-warn font-medium">
+                        {voiceStreamError ?? "Mic lost, reconnecting…"}
+                      </div>
+                    )}
+                    {voiceBtHfpDropped && (
+                      <div className="text-warn">
+                        Your headset switched to call quality (HFP). Select a wired/USB mic for HD stereo playback.
+                      </div>
+                    )}
+                    {voiceSpeakerLeak && (
+                      <div className="text-warn">
+                        It looks like you&apos;re on speakers. Use headphones or switch to push-to-talk.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {voiceDevices?.bluetoothSplitNotice && (
+                  <div className="ep-glass-tray rounded-xl px-3 py-2 text-xs text-accent-soft leading-relaxed">
+                    {voiceDevices.bluetoothSplitNotice}
+                  </div>
+                )}
+
+                {voiceDevices?.activeInputIsBluetooth && (
+                  <div className="ep-glass-tray rounded-xl px-3 py-2 text-xs text-warn leading-relaxed">
+                    Bluetooth mics switch headsets into low-quality call mode on Windows and degrade movie audio. Use a built-in or USB mic for HD movie sound.
+                  </div>
+                )}
+
+                <div className="px-3 py-2 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[13px] font-medium text-white">Audio Devices</div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        void voiceListDevices(voiceInputDevice, voiceOutputDevice)
+                          .then((d) => setVoiceDevices(d))
+                          .catch(() => undefined)
+                      }
+                    >
+                      <AppResetIcon size={13} />
+                      Refresh
+                    </Button>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] text-secondary">Microphone (Input)</div>
+                    <SelectMenu
+                      ariaLabel="Voice Input Device"
+                      triggerIcon={<AppMicIcon size={13} />}
+                      value={voiceInputDevice}
+                      options={[
+                        {
+                          value: "default",
+                          label: voiceDevices?.defaultCommInput
+                            ? `Default (Communications · ${voiceDevices.defaultCommInput})`
+                            : "Default (Communications)",
+                        },
+                        ...(voiceDevices?.inputs ?? []).map((d) => ({
+                          value: d.id,
+                          label: d.isBluetooth ? `${d.label} (Bluetooth)` : d.label,
+                        })),
+                      ]}
+                      onChange={(val) => updateVoiceConfig({ inputDevice: val })}
+                    />
+                  </div>
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] text-secondary">Headphones / Speakers (Output)</div>
+                    <SelectMenu
+                      ariaLabel="Voice Output Device"
+                      triggerIcon={<AppHeadphonesIcon size={13} />}
+                      value={voiceOutputDevice}
+                      options={[
+                        {
+                          value: "default",
+                          label: voiceDevices?.defaultCommOutput
+                            ? `Default (Communications · ${voiceDevices.defaultCommOutput})`
+                            : "Default (Communications)",
+                        },
+                        ...(voiceDevices?.outputs ?? []).map((d) => ({
+                          value: d.id,
+                          label: d.isBluetooth ? `${d.label} (Bluetooth)` : d.label,
+                        })),
+                      ]}
+                      onChange={(val) => updateVoiceConfig({ outputDevice: val })}
+                    />
+                  </div>
+                  <div className="space-y-1.5 pt-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="inline-flex items-center gap-1.5 text-secondary">
+                        <AppSpeakerVolumeIcon muted={voiceMasterVolume === 0} size={13} />
+                        <span>Master Voice Volume</span>
+                      </span>
+                      <span className="num font-medium text-white">
+                        {Math.round(voiceMasterVolume * 100)}%
+                      </span>
+                    </div>
+                    <Scrubber
+                      ariaLabel="Master Voice Volume"
+                      min={0}
+                      max={200}
+                      step={5}
+                      value={Math.round(voiceMasterVolume * 100)}
+                      alwaysShowThumb
+                      formatTooltip={(v) => `${Math.round(v)}%`}
+                      onChange={(v) => updateVoiceConfig({ masterVolume: v / 100 })}
+                    />
+                  </div>
+                </div>
+
+                <div className="px-3 py-2 space-y-2.5">
+                  <div className="text-[13px] font-medium text-white">Input Mode</div>
+                  <SegmentedTabs<VoiceInputMode>
+                    ariaLabel="Voice Input Mode"
+                    size="sm"
+                    fullWidth
+                    value={voiceInputMode}
+                    onChange={(m) => updateVoiceConfig({ inputMode: m })}
+                    items={[
+                      { value: "vad", label: "Voice Activity" },
+                      { value: "ptt", label: "Push-to-Talk" },
+                    ]}
+                  />
+
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    {([
+                      {
+                        key: "ptt" as const,
+                        label: "PTT Key",
+                        vk: voicePttVk,
+                        mod: voicePttMod,
+                        clear: () => updateVoiceConfig({ pttVk: 0, pttMod: 0 }),
+                      },
+                      {
+                        key: "mute" as const,
+                        label: "Toggle Mute",
+                        vk: voiceMuteVk,
+                        mod: voiceMuteMod,
+                        clear: () => updateVoiceConfig({ muteVk: 0, muteMod: 0 }),
+                      },
+                      {
+                        key: "deafen" as const,
+                        label: "Toggle Deafen",
+                        vk: voiceDeafenVk,
+                        mod: voiceDeafenMod,
+                        clear: () => updateVoiceConfig({ deafenVk: 0, deafenMod: 0 }),
+                      },
+                    ] as const).map((slot) => {
+                      const activeCap = capturingBind === slot.key;
+                      return (
+                        <div key={slot.key} className="relative">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setHotkeyMessage(null);
+                              setCapturingBind(activeCap ? null : slot.key);
+                            }}
+                            className={`ep-menu-row ep-press w-full px-2.5 py-2 pr-6 rounded-xl text-left cursor-pointer ${
+                              activeCap ? "ring-1 ring-accent-soft" : ""
+                            }`}
+                          >
+                            <div className="text-[10.5px] text-muted">{slot.label}</div>
+                            <div className="text-xs font-medium text-white truncate">
+                              {activeCap ? "Press key…" : formatVoiceHotkey(slot.vk, slot.mod)}
+                            </div>
+                          </button>
+                          {slot.vk > 0 && !activeCap && (
+                            <button
+                              type="button"
+                              aria-label={`Clear ${slot.label}`}
+                              title="Unbind hotkey"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setHotkeyMessage(null);
+                                slot.clear();
+                              }}
+                              className="ep-bar-icon-btn absolute top-1.5 right-1.5 h-4.5 w-4.5 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
+                            >
+                              <AppCloseIcon size={10} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="text-[10.5px] text-muted">
+                    Supports Ctrl/Alt/Shift combos, F-keys, or Mouse 4/5 · Esc cancels binding
+                  </div>
+                  {hotkeyMessage && (
+                    <div
+                      className={`text-[11px] leading-snug ${
+                        hotkeyMessage.kind === "error" ? "text-bad" : "text-warn"
+                      }`}
+                    >
+                      {hotkeyMessage.text}
+                    </div>
+                  )}
+                </div>
+
+                <ComfortSwitchRow
+                  title="Only When Epilod Is Focused"
+                  description="Restrict voice hotkeys (PTT, mute, deafen) to when Epilod Party is the active foreground window."
+                  checked={voiceHotkeyScope === "focused"}
+                  onChange={(v) => updateVoiceConfig({ hotkeyScope: v ? "focused" : "global" })}
+                />
+
+                <div className="px-3 py-2 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[13px] font-medium text-white">Input Sensitivity &amp; Mic Test</div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={!voiceEnabled || (voiceCalibration !== null && voiceCalibration.phase !== "done" && voiceCalibration.phase !== "error")}
+                        onClick={() => {
+                          setVoiceCalibration({ phase: "quiet", progress: 0 });
+                          void voiceStartCalibration().catch(() => undefined);
+                        }}
+                      >
+                        {voiceCalibration && voiceCalibration.phase !== "done" && voiceCalibration.phase !== "error"
+                          ? voiceCalibration.phase === "quiet"
+                            ? "Stay quiet…"
+                            : "Speak now…"
+                          : "Calibrate (3s)"}
+                      </Button>
+                      <Button
+                        variant={voiceMicTestActive ? "primary" : "secondary"}
+                        size="sm"
+                        disabled={!voiceEnabled}
+                        onClick={() => {
+                          const next = !voiceMicTestActive;
+                          setVoiceMicTestActive(next);
+                          void voiceStartMicMonitor(next).catch(() => undefined);
+                        }}
+                      >
+                        <AppVoiceWaveIcon active={voiceMicTestActive} size={13} />
+                        {voiceMicTestActive ? "Stop Test" : "Let's Check"}
+                      </Button>
+                    </div>
+                  </div>
+                  {voiceJoined && voiceMicTestActive && (
+                    <div className="text-[11px] text-warn leading-snug">
+                      Local mic test active — friends won&apos;t hear you until you stop testing.
+                    </div>
+                  )}
+
+                  {/* Live dBFS meter with sensitivity marker */}
+                  <div className="relative h-2.5 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className={`h-full transition-[width] duration-75 ${
+                        voiceGateOpen ? "bg-ok" : "bg-white/35"
+                      }`}
+                      style={{
+                        width: `${Math.max(0, Math.min(100, ((voiceLevelDb + 75) / 75) * 100))}%`,
+                      }}
+                    />
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-accent-soft"
+                      style={{
+                        left: `${Math.max(0, Math.min(100, ((voiceSensitivityDb + 75) / 75) * 100))}%`,
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] text-secondary">
+                    <span>Threshold: {voiceSensitivityDb} dB</span>
+                    <span className={voiceGateOpen ? "text-ok font-medium" : "text-muted"}>
+                      {voiceGateOpen ? "Speaking" : "Gated"} ({Math.round(voiceLevelDb)} dB)
+                    </span>
+                  </div>
+
+                  <Scrubber
+                    ariaLabel="Voice Input Sensitivity"
+                    min={-75}
+                    max={0}
+                    step={1}
+                    value={voiceSensitivityDb}
+                    alwaysShowThumb
+                    formatTooltip={(v) => `${Math.round(v)} dB`}
+                    onChange={(val) =>
+                      updateVoiceConfig({ sensitivityDb: Math.round(val), autoSensitivity: false })
+                    }
+                  />
+                  <ComfortSwitchRow
+                    title="Auto-Sensitivity"
+                    description="Continuously adapts threshold to steady room noise."
+                    checked={voiceAutoSensitivity}
+                    onChange={(v) => updateVoiceConfig({ autoSensitivity: v })}
+                  />
+                </div>
+
+                <div className="px-3 py-2 space-y-2">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">AI Noise Cancellation</div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Off preserves raw mic and music bit-for-bit; Balanced removes fans &amp; clicks with natural vocal warmth; Strong applies deep background silence.
+                    </div>
+                  </div>
+                  <SegmentedTabs<VoiceNoiseMode>
+                    ariaLabel="Noise Cancellation Mode"
+                    size="sm"
+                    fullWidth
+                    value={voiceNoiseMode}
+                    onChange={(m) => updateVoiceConfig({ noiseMode: m })}
+                    items={[
+                      { value: "off", label: "Off" },
+                      { value: "balanced", label: "Balanced" },
+                      { value: "strong", label: "Strong" },
+                    ]}
+                  />
+                </div>
+
+                <div className="px-3 py-2 space-y-2">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">Movie Auto-Ducking</div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Smoothly lowers movie volume while friends speak without moving your player slider.
+                    </div>
+                  </div>
+                  <SegmentedTabs<VoiceDuckingMode>
+                    ariaLabel="Movie Auto-Ducking"
+                    size="sm"
+                    fullWidth
+                    value={voiceDuckingMode}
+                    onChange={(m) => updateVoiceConfig({ duckingMode: m })}
+                    items={[
+                      { value: "off", label: "Off" },
+                      { value: "subtle", label: "Subtle (-25%)" },
+                      { value: "strong", label: "Strong (-40%)" },
+                    ]}
+                  />
+                </div>
+
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    aria-expanded={voiceAdvancedOpen}
+                    onClick={() => setVoiceAdvancedOpen((o) => !o)}
+                    className="ep-menu-row ep-press w-full px-3 py-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[12.5px] font-medium text-white">
+                        Advanced Audio &amp; Network
+                      </div>
+                      <div className="text-[11px] text-muted">
+                        Compression, echo protection, P2P relay &amp; Voice Health
+                      </div>
+                    </div>
+                    <AppChevronIcon
+                      direction="right"
+                      size={14}
+                      className={`text-muted shrink-0 transition-transform duration-200 ${
+                        voiceAdvancedOpen ? "rotate-90" : ""
+                      }`}
+                    />
+                  </button>
+
+                  <AnimatedCollapse open={voiceAdvancedOpen} innerClassName="pt-2 space-y-2.5">
+                    <ComfortSwitchRow
+                      title="Dynamic Compression & Loudness Leveling"
+                      description="Evens quiet whispers and sudden laughs toward -18 dBFS without clipping."
+                      checked={voiceCompression}
+                      onChange={(v) => updateVoiceConfig({ compressionEnabled: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Cinema Mode Tight Gate"
+                      description="Tightens mic sensitivity by +3 dB while the movie is playing to block snacking/breathing."
+                      checked={voiceCinemaTightGate}
+                      onChange={(v) => updateVoiceConfig({ cinemaTightGate: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Subtle Spatial Separation"
+                      description="Gently pans multiple speakers slightly left/right so voices stand apart from center dialogue."
+                      checked={voiceSpatialPan}
+                      onChange={(v) => updateVoiceConfig({ spatialPan: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Speaker Half-Duplex Echo Guard"
+                      description="Detects speaker playback leaking into your mic and softens capture while friends speak."
+                      checked={voiceEchoGuard}
+                      onChange={(v) => updateVoiceConfig({ echoGuardEnabled: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Adaptive Echo Canceller (NLMS)"
+                      description="Experimental pure-Rust adaptive echo cancellation when Windows communications AEC is unavailable."
+                      checked={voiceAecEnabled}
+                      onChange={(v) => updateVoiceConfig({ aecEnabled: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Relay Voice for Strict-NAT Friends"
+                      description="Allow your open network to forward encrypted voice for up to 2 blocked peers (decrypted per hop in RAM)."
+                      checked={voiceAllowRelayForOthers}
+                      onChange={(v) => updateVoiceConfig({ allowRelayForOthers: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Allow My Voice to Be Relayed"
+                      description="Permit a room peer to forward your voice if direct UDP between you and another friend is blocked."
+                      checked={voiceAllowRelayedVoice}
+                      onChange={(v) => updateVoiceConfig({ allowRelayedVoice: v })}
+                    />
+
+                    <div className="ep-glass-tray rounded-xl px-3 py-2.5 space-y-2 text-[11px]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-white text-xs">Voice Health</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            void voiceGetReport()
+                              .then((rep) => navigator.clipboard?.writeText(rep))
+                              .then(() => pushNote("success", "Copied local voice health report."))
+                              .catch(() => pushNote("error", "Could not copy voice report."));
+                          }}
+                        >
+                          Copy Voice Report
+                        </Button>
+                      </div>
+                      {voiceDiag ? (
+                        <div className="space-y-1.5">
+                          <div className="text-secondary num">
+                            NAT: {voiceDiag.natMode} · Stream: {voiceDiag.streamStatus} · AEC:{" "}
+                            {voiceDiag.aecBackend} · Bitrate: {voiceDiag.bitrateKbps} kbps · Relays:{" "}
+                            {voiceDiag.activeRelayStreams}/{voiceDiag.relayCapacityStreams}
+                          </div>
+                          <div className="text-secondary num">
+                            Targets: {voiceDiag.txTargetCount} · Avg Loss: {voiceDiag.avgLossPct.toFixed(1)}% ·
+                            Jitter: {voiceDiag.avgJitterMs} ms · Duck: {Math.round(voiceDiag.duckFactor * 100)}%
+                          </div>
+                          {voiceDiag.streamError && (
+                            <div className="text-bad">{voiceDiag.streamError}</div>
+                          )}
+                          {voiceDiag.peers.length > 0 && (
+                            <div className="space-y-1 pt-1">
+                              {voiceDiag.peers.map((peer) => (
+                                <div
+                                  key={peer.username}
+                                  className="rounded-lg bg-white/[0.04] px-2.5 py-1.5 space-y-0.5"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-medium text-white truncate">
+                                      {peer.username}
+                                    </span>
+                                    <span className="text-secondary num">
+                                      {peer.transport === "relayed" && peer.relayVia
+                                        ? `Relayed via ${peer.relayVia}`
+                                        : peer.transport}{" "}
+                                      · {peer.rttMs ?? "—"} ms · {peer.lossPct.toFixed(1)}% loss ·{" "}
+                                      {peer.jitterMs} ms jitter · {peer.bitrateKbps} kbps ·{" "}
+                                      {peer.qualityBars}/4 bars
+                                    </span>
+                                  </div>
+                                  {peer.healthReason && (
+                                    <div className="text-warn">{peer.healthReason}</div>
+                                  )}
+                                  {peer.healthFix && (
+                                    <div className="text-muted">Fix: {peer.healthFix}</div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-muted">
+                          Voice diagnostics ready once connected or mic monitor starts.
+                        </div>
+                      )}
+                    </div>
+                  </AnimatedCollapse>
+                </div>
               </div>
             )}
 

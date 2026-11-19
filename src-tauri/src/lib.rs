@@ -14,6 +14,8 @@ pub mod subtitles;
 pub mod syncplay;
 #[cfg(windows)]
 pub mod updater;
+#[cfg(windows)]
+pub mod voice;
 
 use epilod_core::rate_limit::CommandRateGuard;
 use epilod_core::validation::LocalPathOptions;
@@ -202,12 +204,17 @@ mod windows_app {
     static DECODED_SUB_SEQ: AtomicU64 = AtomicU64::new(1);
 
     use crate::intro::{execute_detect_intro, IntroDetectController, IntroDetectRequest};
+    use crate::voice::{
+        list_voice_devices, VoiceConfigDto, VoiceController, VoiceDeviceListDto,
+        VoiceDiagnosticsDto,
+    };
     use epilod_core::intro_detect::IntroDetectionOutcome;
     use epilod_core::mpv_ipc::MpvChapter;
 
     pub struct AppState {
         pub mpv: Arc<MpvController>,
         pub sync: Arc<SyncController>,
+        pub voice: Arc<VoiceController>,
         pub autosync: Arc<AutoSyncController>,
         pub intro_detect: Arc<IntroDetectController>,
         pub logger: Arc<Mutex<RingLogger>>,
@@ -415,8 +422,9 @@ mod windows_app {
     #[tauri::command]
     async fn mpv_set_volume(state: State<'_, AppState>, volume: f64) -> Result<(), String> {
         check_rate(&state, "mpv_volume", 60, Duration::from_secs(2))?;
+        let effective = state.voice.duck().set_user_volume(volume);
         let req = state.mpv.next_request_id();
-        state.mpv.send_command(set_volume_cmd(req, volume))
+        state.mpv.send_command(set_volume_cmd(req, effective))
     }
 
     #[tauri::command]
@@ -447,7 +455,10 @@ mod windows_app {
     }
 
     #[tauri::command]
-    async fn mpv_set_video_margin_right(state: State<'_, AppState>, ratio: f64) -> Result<(), String> {
+    async fn mpv_set_video_margin_right(
+        state: State<'_, AppState>,
+        ratio: f64,
+    ) -> Result<(), String> {
         let req = state.mpv.next_request_id();
         state
             .mpv
@@ -976,6 +987,7 @@ mod windows_app {
 
     #[tauri::command]
     async fn sync_disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+        state.voice.leave_voice();
         state.sync.disconnect().await;
         let _ = app.emit(
             "sync://status",
@@ -1398,6 +1410,7 @@ mod windows_app {
 
         state.autosync.cancel();
         state.intro_detect.cancel();
+        state.voice.shutdown();
         state.mpv.stop_and_clear().await;
         state.sync.disconnect().await;
 
@@ -1407,6 +1420,121 @@ mod windows_app {
             app.exit(0);
         });
         Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_list_devices(
+        selected_input: Option<String>,
+        selected_output: Option<String>,
+    ) -> Result<VoiceDeviceListDto, String> {
+        let sel_in = selected_input.unwrap_or_else(|| "default".to_string());
+        let sel_out = selected_output.unwrap_or_else(|| "default".to_string());
+        tokio::task::spawn_blocking(move || list_voice_devices(&sel_in, &sel_out))
+            .await
+            .map_err(|e| format!("Failed listing audio devices: {e}"))
+    }
+
+    #[tauri::command]
+    async fn voice_set_config(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        config: VoiceConfigDto,
+    ) -> Result<(), String> {
+        state.voice.set_config(app, config);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_set_movie_playing(
+        state: State<'_, AppState>,
+        playing: bool,
+    ) -> Result<(), String> {
+        state.voice.set_movie_playing(playing);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_join(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        start_muted: Option<bool>,
+    ) -> Result<(), String> {
+        state.voice.join_voice(app, start_muted)
+    }
+
+    #[tauri::command]
+    async fn voice_leave(state: State<'_, AppState>) -> Result<(), String> {
+        state.voice.leave_voice();
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_set_mute(state: State<'_, AppState>, muted: bool) -> Result<(), String> {
+        state.voice.set_mute(muted);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_set_deafen(state: State<'_, AppState>, deafened: bool) -> Result<(), String> {
+        state.voice.set_deafen(deafened);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_set_peer_volume(
+        state: State<'_, AppState>,
+        username: String,
+        volume: f32,
+        muted: bool,
+    ) -> Result<(), String> {
+        state.voice.set_peer_volume(&username, volume, muted);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_start_mic_monitor(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        loopback: bool,
+    ) -> Result<(), String> {
+        state.voice.start_mic_monitor(app, loopback);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_stop_mic_monitor(state: State<'_, AppState>) -> Result<(), String> {
+        state.voice.stop_mic_monitor();
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_get_diagnostics(
+        state: State<'_, AppState>,
+    ) -> Result<VoiceDiagnosticsDto, String> {
+        Ok(state.voice.diagnostics())
+    }
+
+    #[tauri::command]
+    async fn voice_start_calibration(
+        app: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.voice.start_calibration(app);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn voice_get_report(
+        app: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<String, String> {
+        let entries = state
+            .logger
+            .lock()
+            .map(|g| g.snapshot(400).entries)
+            .unwrap_or_default();
+        let ver = app.package_info().version.to_string();
+        Ok(state.voice.build_voice_report(&ver, &entries))
     }
 
     pub fn run() {
@@ -1444,9 +1572,16 @@ mod windows_app {
         let transitions_for_event = Arc::clone(&transitions);
         let logger_for_watchdog = Arc::clone(&logger);
 
+        let mpv = Arc::new(MpvController::new());
+        let voice = Arc::new(VoiceController::new(Arc::clone(&mpv)));
+        let sync = Arc::new(SyncController::new());
+        sync.set_voice_controller(Arc::clone(&voice));
+        let voice_for_destroy = Arc::clone(&voice);
+
         let app_state = AppState {
-            mpv: Arc::new(MpvController::new()),
-            sync: Arc::new(SyncController::new()),
+            mpv,
+            sync,
+            voice,
             autosync: Arc::new(AutoSyncController::new()),
             intro_detect: Arc::new(IntroDetectController::new()),
             logger,
@@ -1487,6 +1622,7 @@ mod windows_app {
                 }
                 tauri::WindowEvent::Destroyed => {
                     watchdog_stop_for_event.store(true, Ordering::Release);
+                    voice_for_destroy.shutdown();
                 }
                 _ => {}
             })
@@ -1634,6 +1770,19 @@ mod windows_app {
                 update_download,
                 update_cancel_download,
                 update_apply_and_restart,
+                voice_list_devices,
+                voice_set_config,
+                voice_set_movie_playing,
+                voice_join,
+                voice_leave,
+                voice_set_mute,
+                voice_set_deafen,
+                voice_set_peer_volume,
+                voice_start_mic_monitor,
+                voice_stop_mic_monitor,
+                voice_get_diagnostics,
+                voice_start_calibration,
+                voice_get_report,
             ])
             .run(tauri::generate_context!())
             .expect("error while running Epilod Party");

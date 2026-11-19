@@ -10,7 +10,13 @@ export type SoundCue =
   | "allReady"
   | "codeCopied"
   | "reactionPop"
-  | "chatMessage";
+  | "chatMessage"
+  | "voiceJoined"
+  | "voiceLeft"
+  | "peerVoiceJoined"
+  | "peerVoiceLeft"
+  | "micMuted"
+  | "micUnmuted";
 
 export interface PlaySoundOptions {
   /** Quiets and softens cues automatically when video is actively playing. */
@@ -154,6 +160,55 @@ const CUE_RECIPES: Record<SoundCue, CueRecipe> = {
         durationMs: 130,
         gain: 0.022,
       },
+    ],
+  },
+  // Crisp upward glass chime (E4 -> A4 -> E5) on joining room voice
+  voiceJoined: {
+    cutoffHz: 1300,
+    notes: [
+      { freqHz: 329.63, delayMs: 0, durationMs: 95, gain: 0.036 },
+      { freqHz: 440.0, delayMs: 45, durationMs: 120, gain: 0.04 },
+      { freqHz: 659.25, delayMs: 95, durationMs: 170, gain: 0.036 },
+    ],
+  },
+  // Soft descending glass chime (E5 -> A4) on leaving voice
+  voiceLeft: {
+    cutoffHz: 950,
+    notes: [
+      { freqHz: 523.25, delayMs: 0, durationMs: 90, gain: 0.032 },
+      { freqHz: 392.0, delayMs: 48, durationMs: 140, gain: 0.028 },
+    ],
+  },
+  // Gentle whisper chime when a friend joins voice
+  peerVoiceJoined: {
+    cutoffHz: 1150,
+    notes: [
+      { freqHz: 392.0, delayMs: 0, durationMs: 85, gain: 0.026 },
+      { freqHz: 523.25, delayMs: 42, durationMs: 135, gain: 0.028 },
+    ],
+  },
+  // Soft low droplet when a friend leaves voice
+  peerVoiceLeft: {
+    cutoffHz: 850,
+    notes: [
+      { freqHz: 440.0, delayMs: 0, durationMs: 75, gain: 0.022 },
+      { freqHz: 329.63, delayMs: 38, durationMs: 115, gain: 0.02 },
+    ],
+  },
+  // Subtle muted low tap (D4 -> A3)
+  micMuted: {
+    cutoffHz: 800,
+    notes: [
+      { freqHz: 293.66, delayMs: 0, durationMs: 65, gain: 0.028 },
+      { freqHz: 220.0, delayMs: 32, durationMs: 90, gain: 0.026 },
+    ],
+  },
+  // Subtle crisp unmute tap (A3 -> D4)
+  micUnmuted: {
+    cutoffHz: 1050,
+    notes: [
+      { freqHz: 246.94, delayMs: 0, durationMs: 60, gain: 0.026 },
+      { freqHz: 329.63, delayMs: 30, durationMs: 95, gain: 0.03 },
     ],
   },
 };

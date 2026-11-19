@@ -8,6 +8,9 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Push-Location $RepoRoot
 
 try {
+    if (-not (Get-Command cmake -ErrorAction SilentlyContinue) -and (Test-Path "C:\Program Files\CMake\bin\cmake.exe")) {
+        $env:PATH = "C:\Program Files\CMake\bin;$env:PATH"
+    }
     Write-Host "==> Checking Windows build prerequisites..."
     cargo --version
     node --version

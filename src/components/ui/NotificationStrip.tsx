@@ -96,14 +96,29 @@ export function NotificationStrip({
           } ep-glass-pill flex items-center justify-between gap-3 px-4 py-2 text-xs rounded-full ${KIND_STYLES[item.kind]}`}
         >
           <span className="truncate">{item.message}</span>
-          <button
-            type="button"
-            onClick={() => dismiss(item.id)}
-            aria-label="Dismiss notification"
-            className="ep-bar-icon-btn ep-press h-5 w-5 -mr-1 rounded-full inline-flex items-center justify-center text-muted hover:text-primary shrink-0 cursor-pointer"
-          >
-            <AppCloseIcon size={12} />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {item.action && (
+              <button
+                type="button"
+                onClick={() => {
+                  const fn = item.action?.onClick;
+                  dismiss(item.id);
+                  fn?.();
+                }}
+                className="ep-bar-pill ep-press h-5.5 px-2.5 rounded-full text-[11px] font-semibold text-white cursor-pointer"
+              >
+                {item.action.label}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => dismiss(item.id)}
+              aria-label="Dismiss notification"
+              className="ep-bar-icon-btn ep-press h-5 w-5 -mr-1 rounded-full inline-flex items-center justify-center text-muted hover:text-primary shrink-0 cursor-pointer"
+            >
+              <AppCloseIcon size={12} />
+            </button>
+          </div>
         </div>
       ))}
     </div>

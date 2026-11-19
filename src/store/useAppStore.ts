@@ -23,6 +23,7 @@ import { clearReactions } from "./useReactionStore";
 import { clearPartyChat } from "./useChatStore";
 import { useSubtitleStore } from "./useSubtitleStore";
 import { useSyncStore } from "./useSyncStore";
+import { useVoiceStore } from "./useVoiceStore";
 
 function readStorage(key: string, fallback: string): string {
   try {
@@ -93,6 +94,7 @@ export type SettingsTab =
   | "appearance"
   | "playback"
   | "party"
+  | "voice"
   | "updates"
   | "server"
   | "logs";
@@ -457,6 +459,7 @@ export const useAppStore = create<AppState>((set) => ({
     noteStore.dismissByTag(LOCAL_DISCONNECT_TAG);
     useSubtitleStore.getState().clearLoadedTrack();
     usePlaylistStore.getState().clearPlaylist();
+    useVoiceStore.getState().resetSession();
     set({
       screen: "home",
       roomCode: "",

@@ -69,6 +69,7 @@ pub struct MpvController {
     last_app: Arc<Mutex<Option<AppHandle>>>,
     capture_busy: Arc<AtomicBool>,
     freeze_capture_busy: Arc<AtomicBool>,
+    volume_reassert_cb: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl Default for MpvController {
@@ -97,7 +98,15 @@ impl MpvController {
             last_app: Arc::new(Mutex::new(None)),
             capture_busy: Arc::new(AtomicBool::new(false)),
             freeze_capture_busy: Arc::new(AtomicBool::new(false)),
+            volume_reassert_cb: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_volume_reassert_callback(&self, cb: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .volume_reassert_cb
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(cb);
     }
 
     pub fn surface_state(&self) -> MpvSurfaceState {
@@ -405,6 +414,7 @@ impl MpvController {
         let shutdown_flag = Arc::clone(&self.shutting_down);
         let has_media_clone = Arc::clone(&self.has_media);
         let ui_visible_clone = Arc::clone(&self.ui_visible);
+        let volume_reassert_clone = Arc::clone(&self.volume_reassert_cb);
         tokio::spawn(async move {
             let reason = ipc::connect_and_run_ipc(
                 pipe_name,
@@ -417,6 +427,7 @@ impl MpvController {
                 Arc::clone(&pending_seek_clone),
                 Arc::clone(&pending_replies_clone),
                 Arc::clone(&client_seek_seq_clone),
+                Arc::clone(&volume_reassert_clone),
                 move || {
                     if let Ok(mut guard) = runtime_for_probe.try_lock() {
                         if let Some(rt) = guard.as_mut() {

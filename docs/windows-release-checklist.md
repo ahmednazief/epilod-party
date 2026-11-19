@@ -8,6 +8,7 @@ Because this repository is authored with native Win32 (`HWND` embedding, named p
 - **Node.js 22+ LTS** (`npm ci`)
 - **Microsoft Edge WebView2 Runtime** (preinstalled on Windows 10/11)
 - **Visual Studio Build Tools** (Desktop development with C++)
+- **CMake 3.15+** (`cmake` on `PATH` or installed at `C:\Program Files\CMake\bin\cmake.exe`, with `CMAKE_POLICY_VERSION_MINIMUM=3.5` configured in `.cargo/config.toml` for CMake 4+ builds of static `libopus`)
 - **7-Zip** (`7z` on `PATH` or installed at `C:\Program Files\7-Zip\7z.exe`) for extracting `mpv.exe` archives
 
 ## 2. Fetch Pinned Media Engine Binaries (`mpv.exe` & `ffmpeg.exe`)

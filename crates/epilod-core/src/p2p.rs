@@ -20,13 +20,22 @@ pub const MAX_CHAT_MESSAGE_CHARS: usize = 500;
 pub const MAX_CHAT_ID_LEN: usize = 24;
 pub const MAX_EPT_CHUNKS: usize = 24;
 pub const MAX_P2P_DATAGRAM_BYTES: usize = 1024;
+pub const MAX_VOICE_OPUS_BYTES: usize = 400;
+pub const VOICE_FLAG_END_OF_TALK: u8 = 0b0000_0001;
+pub const VOICE_FLAG_RELAYED: u8 = 0b0000_0010;
 pub const MAX_REACTION_EMOJI_BYTES: usize = 48;
 pub const MAX_REACTION_BURST_COUNT: u8 = 25;
 pub const P2P_CHUNK_PAYLOAD_BYTES: usize = 920;
 pub const MAX_RELIABLE_CHUNKS: u16 = 512;
 pub const MAX_RELIABLE_MSG_BYTES: usize = 256 * 1024;
-pub const STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
+pub const STUN_SERVERS: [&str; 4] = [
+    "stun.l.google.com:19302",
+    "stun.cloudflare.com:3478",
+    "stun1.l.google.com:19302",
+    "stun.stunprotocol.org:3478",
+];
 pub const SSDP_MULTICAST_ADDR: &str = "239.255.255.250:1900";
+pub const NATPMP_PCP_PORT: u16 = 5351;
 
 const B64_URL_ALPHA: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -101,6 +110,29 @@ pub enum P2pCandidateKind {
     Lan,
     Wan,
     Ipv6,
+}
+
+/// Preferred path rank: IPv6 direct > LAN direct > mapped/STUN WAN.
+pub fn candidate_priority(kind: P2pCandidateKind) -> u8 {
+    match kind {
+        P2pCandidateKind::Ipv6 => 3,
+        P2pCandidateKind::Lan => 2,
+        P2pCandidateKind::Wan => 1,
+    }
+}
+
+pub fn infer_candidate_kind(addr: SocketAddr) -> P2pCandidateKind {
+    match addr {
+        SocketAddr::V6(_) => P2pCandidateKind::Ipv6,
+        SocketAddr::V4(v4) => {
+            let ip = v4.ip();
+            if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                P2pCandidateKind::Lan
+            } else {
+                P2pCandidateKind::Wan
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -905,6 +937,122 @@ pub fn build_upnp_delete_port_mapping_soap(service_type: &str, external_port: u1
     )
 }
 
+/// Builds a RFC 6886 NAT-PMP UDP mapping request (12 bytes).
+pub fn build_natpmp_map_request(
+    internal_port: u16,
+    suggested_external_port: u16,
+    lifetime_secs: u32,
+) -> [u8; 12] {
+    let mut pkt = [0u8; 12];
+    pkt[0] = 0; // Version 0
+    pkt[1] = 1; // Opcode 1 = Map UDP
+    pkt[4..6].copy_from_slice(&internal_port.to_be_bytes());
+    pkt[6..8].copy_from_slice(&suggested_external_port.to_be_bytes());
+    pkt[8..12].copy_from_slice(&lifetime_secs.to_be_bytes());
+    pkt
+}
+
+/// Parses a RFC 6886 NAT-PMP UDP mapping response -> `(internal_port, external_port, lifetime_secs)`.
+pub fn parse_natpmp_map_response(buf: &[u8]) -> Option<(u16, u16, u32)> {
+    if buf.len() < 16 || buf[0] != 0 || buf[1] != 129 {
+        return None;
+    }
+    let result_code = u16::from_be_bytes([buf[2], buf[3]]);
+    if result_code != 0 {
+        return None;
+    }
+    let internal = u16::from_be_bytes([buf[8], buf[9]]);
+    let external = u16::from_be_bytes([buf[10], buf[11]]);
+    let lifetime = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    (external > 0).then_some((internal, external, lifetime))
+}
+
+/// Builds a RFC 6887 PCP MAP UDP request (60 bytes: 24-byte header + 36-byte MAP payload).
+pub fn build_pcp_map_request(
+    client_ip: Ipv4Addr,
+    internal_port: u16,
+    suggested_external_port: u16,
+    lifetime_secs: u32,
+    nonce: [u8; 12],
+) -> [u8; 60] {
+    let mut pkt = [0u8; 60];
+    pkt[0] = 2; // PCP version 2
+    pkt[1] = 1; // MAP opcode (request R=0)
+    pkt[4..8].copy_from_slice(&lifetime_secs.to_be_bytes());
+    // IPv4-mapped IPv6 address (::ffff:a.b.c.d) in bytes 8..24
+    pkt[18] = 0xFF;
+    pkt[19] = 0xFF;
+    pkt[20..24].copy_from_slice(&client_ip.octets());
+    // MAP opcode payload (bytes 24..60)
+    pkt[24..36].copy_from_slice(&nonce);
+    pkt[36] = 17; // Protocol UDP
+    pkt[40..42].copy_from_slice(&internal_port.to_be_bytes());
+    pkt[42..44].copy_from_slice(&suggested_external_port.to_be_bytes());
+    // Suggested external IPv6 ::ffff:0.0.0.0
+    pkt[54] = 0xFF;
+    pkt[55] = 0xFF;
+    pkt
+}
+
+/// Parses a RFC 6887 PCP MAP UDP response -> `(external_addr_v4, external_port, lifetime_secs)`.
+pub fn parse_pcp_map_response(
+    buf: &[u8],
+    expected_nonce: [u8; 12],
+) -> Option<(Option<Ipv4Addr>, u16, u32)> {
+    if buf.len() < 60 || buf[0] != 2 || buf[1] != 0x81 {
+        return None;
+    }
+    let result_code = buf[3];
+    if result_code != 0 || buf[24..36] != expected_nonce {
+        return None;
+    }
+    let lifetime = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let ext_port = u16::from_be_bytes([buf[42], buf[43]]);
+    if ext_port == 0 {
+        return None;
+    }
+    let v4 = if buf[44..54].iter().all(|&b| b == 0) && buf[54] == 0xFF && buf[55] == 0xFF {
+        let ip = Ipv4Addr::new(buf[56], buf[57], buf[58], buf[59]);
+        (!ip.is_unspecified()).then_some(ip)
+    } else {
+        None
+    };
+    Some((v4, ext_port, lifetime))
+}
+
+/// Generates deterministic predictable-offset + birthday probe ports around a NAT-mapped port.
+pub fn compute_birthday_probe_ports(base_port: u16, count: usize, seed: u32) -> Vec<u16> {
+    if base_port < 1024 || count == 0 {
+        return Vec::new();
+    }
+    let mut ports = Vec::with_capacity(count);
+    // Include adjacent sequential NAT allocations first (+/-1, +/-2) then deterministic birthday offsets
+    for delta in [1i32, -1, 2, -2, 3, 4] {
+        if ports.len() >= count {
+            break;
+        }
+        let cand = (base_port as i32) + delta;
+        if (1024..=65535).contains(&cand) {
+            let p = cand as u16;
+            if p != base_port && !ports.contains(&p) {
+                ports.push(p);
+            }
+        }
+    }
+    let mut state = seed ^ ((base_port as u32) << 16) ^ 0x9E37_79B9;
+    let mut attempts = 0;
+    while ports.len() < count && attempts < 32 {
+        attempts += 1;
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let offset = ((state >> 16) % 64) as u16 + 5;
+        let p = base_port.wrapping_add(offset).max(1024);
+        if p != base_port && !ports.contains(&p) {
+            ports.push(p);
+        }
+    }
+    ports
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum P2pWireFrame {
@@ -930,6 +1078,14 @@ pub enum P2pWireFrame {
     },
     Datagram {
         data: Vec<u8>,
+    },
+    Voice {
+        voice_id: u8,
+        epoch: u8,
+        seq: u16,
+        ts_48k: u32,
+        flags: u8,
+        opus: Vec<u8>,
     },
 }
 
@@ -977,6 +1133,24 @@ impl P2pWireFrame {
                 out.push(6);
                 out.extend_from_slice(&(len as u16).to_be_bytes());
                 out.extend_from_slice(&data[..len]);
+            }
+            Self::Voice {
+                voice_id,
+                epoch,
+                seq,
+                ts_48k,
+                flags,
+                opus,
+            } => {
+                let len = opus.len().min(MAX_VOICE_OPUS_BYTES);
+                out.push(7);
+                out.push(*voice_id);
+                out.push(*epoch);
+                out.extend_from_slice(&seq.to_be_bytes());
+                out.extend_from_slice(&ts_48k.to_be_bytes());
+                out.push(*flags);
+                out.extend_from_slice(&(len as u16).to_be_bytes());
+                out.extend_from_slice(&opus[..len]);
             }
         }
         out
@@ -1028,8 +1202,64 @@ impl P2pWireFrame {
                     data: rest[2..].to_vec(),
                 })
             }
+            7 if rest.len() >= 11 => {
+                let voice_id = rest[0];
+                let epoch = rest[1];
+                let seq = u16::from_be_bytes([rest[2], rest[3]]);
+                let ts_48k = u32::from_be_bytes(rest[4..8].try_into().ok()?);
+                let flags = rest[8];
+                let len = u16::from_be_bytes([rest[9], rest[10]]) as usize;
+                let end_of_talk = (flags & VOICE_FLAG_END_OF_TALK) != 0;
+                if len > MAX_VOICE_OPUS_BYTES
+                    || (len == 0 && !end_of_talk)
+                    || rest.len() != 11 + len
+                {
+                    return None;
+                }
+                Some(Self::Voice {
+                    voice_id,
+                    epoch,
+                    seq,
+                    ts_48k,
+                    flags,
+                    opus: rest[11..].to_vec(),
+                })
+            }
             _ => None,
         }
+    }
+}
+
+pub struct VoiceTxCrypto {
+    send_cipher: ChaCha20Poly1305,
+    pub tx_tag: [u8; 4],
+    tx_seq: u64,
+}
+
+pub struct VoiceRxCrypto {
+    recv_cipher: ChaCha20Poly1305,
+    pub rx_tag: [u8; 4],
+    rx_highest_seq: u64,
+    rx_window_mask: u64,
+    rx_seen_any: bool,
+}
+
+impl VoiceTxCrypto {
+    pub fn seal(&mut self, frame: &P2pWireFrame) -> Option<Vec<u8>> {
+        seal_frame_with_cipher(&mut self.send_cipher, &self.tx_tag, &mut self.tx_seq, frame)
+    }
+}
+
+impl VoiceRxCrypto {
+    pub fn open(&mut self, packet: &[u8]) -> Option<P2pWireFrame> {
+        open_frame_with_cipher(
+            &self.recv_cipher,
+            &self.rx_tag,
+            &mut self.rx_highest_seq,
+            &mut self.rx_window_mask,
+            &mut self.rx_seen_any,
+            packet,
+        )
     }
 }
 
@@ -1075,10 +1305,186 @@ impl P2pIdentity {
             peer_session_id,
         )
     }
+
+    pub fn establish_voice_with(
+        &self,
+        peer_pubkey: [u8; 32],
+        peer_session_id: u32,
+    ) -> (VoiceTxCrypto, VoiceRxCrypto) {
+        let (send_cipher, recv_cipher, tx_tag, rx_tag) = derive_directional_ciphers(
+            b"epilod-voice-v1:",
+            b"epilod-voice-tag-v1:",
+            &self.secret,
+            self.pubkey,
+            self.session_id,
+            peer_pubkey,
+            peer_session_id,
+        );
+        (
+            VoiceTxCrypto {
+                send_cipher,
+                tx_tag,
+                tx_seq: 1,
+            },
+            VoiceRxCrypto {
+                recv_cipher,
+                rx_tag,
+                rx_highest_seq: 0,
+                rx_window_mask: 0,
+                rx_seen_any: false,
+            },
+        )
+    }
 }
 
 pub fn fill_random_bytes(dst: &mut [u8]) {
     let _ = getrandom::getrandom(dst);
+}
+
+fn derive_directional_ciphers(
+    key_domain: &[u8],
+    tag_domain: &[u8],
+    local_secret: &StaticSecret,
+    local_pubkey: [u8; 32],
+    local_session_id: u32,
+    peer_pubkey: [u8; 32],
+    peer_session_id: u32,
+) -> (ChaCha20Poly1305, ChaCha20Poly1305, [u8; 4], [u8; 4]) {
+    let shared = local_secret.diffie_hellman(&PublicKey::from(peer_pubkey));
+    let local_id = (local_pubkey, local_session_id);
+    let peer_id = (peer_pubkey, peer_session_id);
+    let is_initiator = local_id < peer_id;
+
+    let (min_pub, min_sid, max_pub, max_sid) = if is_initiator {
+        (local_pubkey, local_session_id, peer_pubkey, peer_session_id)
+    } else {
+        (peer_pubkey, peer_session_id, local_pubkey, local_session_id)
+    };
+
+    let derive_key = |label: &[u8]| -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(key_domain);
+        h.update(label);
+        h.update(shared.as_bytes());
+        h.update(min_pub);
+        h.update(min_sid.to_be_bytes());
+        h.update(max_pub);
+        h.update(max_sid.to_be_bytes());
+        h.finalize().into()
+    };
+
+    let derive_tag = |sender_pub: &[u8; 32], sender_sid: u32| -> [u8; 4] {
+        let mut h = Sha256::new();
+        h.update(tag_domain);
+        h.update(shared.as_bytes());
+        h.update(sender_pub);
+        h.update(sender_sid.to_be_bytes());
+        let d: [u8; 32] = h.finalize().into();
+        [d[0], d[1], d[2], d[3]]
+    };
+
+    let (send_key, recv_key) = if is_initiator {
+        (derive_key(b"init->resp"), derive_key(b"resp->init"))
+    } else {
+        (derive_key(b"resp->init"), derive_key(b"init->resp"))
+    };
+
+    (
+        ChaCha20Poly1305::new((&send_key).into()),
+        ChaCha20Poly1305::new((&recv_key).into()),
+        derive_tag(&local_pubkey, local_session_id),
+        derive_tag(&peer_pubkey, peer_session_id),
+    )
+}
+
+fn seal_frame_with_cipher(
+    send_cipher: &mut ChaCha20Poly1305,
+    tx_tag: &[u8; 4],
+    tx_seq: &mut u64,
+    frame: &P2pWireFrame,
+) -> Option<Vec<u8>> {
+    let seq = *tx_seq;
+    *tx_seq = tx_seq.checked_add(1)?;
+    let mut header = [0u8; 12];
+    header[..4].copy_from_slice(tx_tag);
+    header[4..12].copy_from_slice(&seq.to_le_bytes());
+
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+    let plaintext = frame.encode_binary();
+    let ciphertext = send_cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: &plaintext,
+                aad: &header,
+            },
+        )
+        .ok()?;
+
+    let mut pkt = Vec::with_capacity(12 + ciphertext.len());
+    pkt.extend_from_slice(&header);
+    pkt.extend_from_slice(&ciphertext);
+    Some(pkt)
+}
+
+fn open_frame_with_cipher(
+    recv_cipher: &ChaCha20Poly1305,
+    rx_tag: &[u8; 4],
+    rx_highest_seq: &mut u64,
+    rx_window_mask: &mut u64,
+    rx_seen_any: &mut bool,
+    packet: &[u8],
+) -> Option<P2pWireFrame> {
+    if packet.len() < 12 + 16 {
+        return None;
+    }
+    if packet[..4] != *rx_tag {
+        return None;
+    }
+    let seq = u64::from_le_bytes(packet[4..12].try_into().ok()?);
+    if seq == 0 {
+        return None;
+    }
+    if *rx_seen_any && seq <= *rx_highest_seq {
+        let diff = *rx_highest_seq - seq;
+        if diff >= 64 || ((*rx_window_mask >> diff) & 1) != 0 {
+            return None;
+        }
+    }
+
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+    let plaintext = recv_cipher
+        .decrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: &packet[12..],
+                aad: &packet[..12],
+            },
+        )
+        .ok()?;
+
+    let frame = P2pWireFrame::decode_binary(&plaintext)?;
+
+    if !*rx_seen_any {
+        *rx_seen_any = true;
+        *rx_highest_seq = seq;
+        *rx_window_mask = 1;
+    } else if seq > *rx_highest_seq {
+        let shift = seq - *rx_highest_seq;
+        *rx_window_mask = if shift >= 64 {
+            1
+        } else {
+            (*rx_window_mask << shift) | 1
+        };
+        *rx_highest_seq = seq;
+    } else {
+        let diff = *rx_highest_seq - seq;
+        *rx_window_mask |= 1u64 << diff;
+    }
+
+    Some(frame)
 }
 
 impl P2pCryptoSession {
@@ -1089,50 +1495,21 @@ impl P2pCryptoSession {
         peer_pubkey: [u8; 32],
         peer_session_id: u32,
     ) -> Self {
-        let shared = local_secret.diffie_hellman(&PublicKey::from(peer_pubkey));
-        let local_id = (local_pubkey, local_session_id);
-        let peer_id = (peer_pubkey, peer_session_id);
-        let is_initiator = local_id < peer_id;
-
-        let (min_pub, min_sid, max_pub, max_sid) = if is_initiator {
-            (local_pubkey, local_session_id, peer_pubkey, peer_session_id)
-        } else {
-            (peer_pubkey, peer_session_id, local_pubkey, local_session_id)
-        };
-
-        let derive_key = |label: &[u8]| -> [u8; 32] {
-            let mut h = Sha256::new();
-            h.update(b"epilod-p2p-v1:");
-            h.update(label);
-            h.update(shared.as_bytes());
-            h.update(min_pub);
-            h.update(min_sid.to_be_bytes());
-            h.update(max_pub);
-            h.update(max_sid.to_be_bytes());
-            h.finalize().into()
-        };
-
-        let derive_tag = |sender_pub: &[u8; 32], sender_sid: u32| -> [u8; 4] {
-            let mut h = Sha256::new();
-            h.update(b"epilod-p2p-tag-v1:");
-            h.update(shared.as_bytes());
-            h.update(sender_pub);
-            h.update(sender_sid.to_be_bytes());
-            let d: [u8; 32] = h.finalize().into();
-            [d[0], d[1], d[2], d[3]]
-        };
-
-        let (send_key, recv_key) = if is_initiator {
-            (derive_key(b"init->resp"), derive_key(b"resp->init"))
-        } else {
-            (derive_key(b"resp->init"), derive_key(b"init->resp"))
-        };
+        let (send_cipher, recv_cipher, tx_tag, rx_tag) = derive_directional_ciphers(
+            b"epilod-p2p-v1:",
+            b"epilod-p2p-tag-v1:",
+            local_secret,
+            local_pubkey,
+            local_session_id,
+            peer_pubkey,
+            peer_session_id,
+        );
 
         Self {
-            send_cipher: ChaCha20Poly1305::new((&send_key).into()),
-            recv_cipher: ChaCha20Poly1305::new((&recv_key).into()),
-            tx_tag: derive_tag(&local_pubkey, local_session_id),
-            rx_tag: derive_tag(&peer_pubkey, peer_session_id),
+            send_cipher,
+            recv_cipher,
+            tx_tag,
+            rx_tag,
             tx_seq: 1,
             rx_highest_seq: 0,
             rx_window_mask: 0,
@@ -1141,83 +1518,18 @@ impl P2pCryptoSession {
     }
 
     pub fn seal(&mut self, frame: &P2pWireFrame) -> Option<Vec<u8>> {
-        let seq = self.tx_seq;
-        self.tx_seq = self.tx_seq.checked_add(1)?;
-        let mut header = [0u8; 12];
-        header[..4].copy_from_slice(&self.tx_tag);
-        header[4..12].copy_from_slice(&seq.to_le_bytes());
-
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
-        let plaintext = frame.encode_binary();
-        let ciphertext = self
-            .send_cipher
-            .encrypt(
-                Nonce::from_slice(&nonce_bytes),
-                Payload {
-                    msg: &plaintext,
-                    aad: &header,
-                },
-            )
-            .ok()?;
-
-        let mut pkt = Vec::with_capacity(12 + ciphertext.len());
-        pkt.extend_from_slice(&header);
-        pkt.extend_from_slice(&ciphertext);
-        Some(pkt)
+        seal_frame_with_cipher(&mut self.send_cipher, &self.tx_tag, &mut self.tx_seq, frame)
     }
 
     pub fn open(&mut self, packet: &[u8]) -> Option<P2pWireFrame> {
-        if packet.len() < 12 + 16 {
-            return None;
-        }
-        if packet[..4] != self.rx_tag {
-            return None;
-        }
-        let seq = u64::from_le_bytes(packet[4..12].try_into().ok()?);
-        if seq == 0 {
-            return None;
-        }
-        if self.rx_seen_any && seq <= self.rx_highest_seq {
-            let diff = self.rx_highest_seq - seq;
-            if diff >= 64 || ((self.rx_window_mask >> diff) & 1) != 0 {
-                return None;
-            }
-        }
-
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
-        let plaintext = self
-            .recv_cipher
-            .decrypt(
-                Nonce::from_slice(&nonce_bytes),
-                Payload {
-                    msg: &packet[12..],
-                    aad: &packet[..12],
-                },
-            )
-            .ok()?;
-
-        let frame = P2pWireFrame::decode_binary(&plaintext)?;
-
-        if !self.rx_seen_any {
-            self.rx_seen_any = true;
-            self.rx_highest_seq = seq;
-            self.rx_window_mask = 1;
-        } else if seq > self.rx_highest_seq {
-            let shift = seq - self.rx_highest_seq;
-            self.rx_window_mask = if shift >= 64 {
-                1
-            } else {
-                (self.rx_window_mask << shift) | 1
-            };
-            self.rx_highest_seq = seq;
-        } else {
-            let diff = self.rx_highest_seq - seq;
-            self.rx_window_mask |= 1u64 << diff;
-        }
-
-        Some(frame)
+        open_frame_with_cipher(
+            &self.recv_cipher,
+            &self.rx_tag,
+            &mut self.rx_highest_seq,
+            &mut self.rx_window_mask,
+            &mut self.rx_seen_any,
+            packet,
+        )
     }
 }
 
@@ -1412,8 +1724,9 @@ impl ReliableChannel {
         for msg in self.outgoing.values_mut() {
             let total = msg.chunks.len() as u16;
             for idx in 0..msg.chunks.len() {
-                if !msg.acked[idx] && now_ms.saturating_sub(msg.last_sent_ms[idx]) >= rto_ms {
-                    msg.last_sent_ms[idx] = now_ms;
+                let last = msg.last_sent_ms[idx];
+                if !msg.acked[idx] && (last == 0 || now_ms.saturating_sub(last) >= rto_ms) {
+                    msg.last_sent_ms[idx] = now_ms.max(1);
                     out.push(P2pWireFrame::Chunk {
                         msg_id: msg.msg_id,
                         idx: idx as u16,
@@ -1431,8 +1744,18 @@ impl ReliableChannel {
 
     pub fn mark_sent(&mut self, msg_id: u32, now_ms: u64) {
         if let Some(msg) = self.outgoing.get_mut(&msg_id) {
+            let stamped = now_ms.max(1);
             for ts in &mut msg.last_sent_ms {
-                *ts = now_ms;
+                *ts = stamped;
+            }
+        }
+    }
+
+    pub fn mark_sent_prefix(&mut self, msg_id: u32, count: usize, now_ms: u64) {
+        if let Some(msg) = self.outgoing.get_mut(&msg_id) {
+            let stamped = now_ms.max(1);
+            for ts in msg.last_sent_ms.iter_mut().take(count) {
+                *ts = stamped;
             }
         }
     }
@@ -1691,5 +2014,119 @@ mod tests {
             sanitize_chat_text(&huge).unwrap().chars().count(),
             MAX_CHAT_MESSAGE_CHARS
         );
+    }
+
+    #[test]
+    fn voice_frame_roundtrips_and_enforces_size_limit() {
+        let frame = P2pWireFrame::Voice {
+            voice_id: 3,
+            epoch: 2,
+            seq: 512,
+            ts_48k: 960 * 512,
+            flags: 0,
+            opus: vec![0xAA; 120],
+        };
+        let encoded = frame.encode_binary();
+        assert_eq!(P2pWireFrame::decode_binary(&encoded), Some(frame));
+
+        let eot_empty = P2pWireFrame::Voice {
+            voice_id: 3,
+            epoch: 2,
+            seq: 513,
+            ts_48k: 960 * 513,
+            flags: VOICE_FLAG_END_OF_TALK,
+            opus: Vec::new(),
+        };
+        let eot_bytes = eot_empty.encode_binary();
+        assert_eq!(P2pWireFrame::decode_binary(&eot_bytes), Some(eot_empty));
+
+        let empty_non_eot = P2pWireFrame::Voice {
+            voice_id: 3,
+            epoch: 2,
+            seq: 514,
+            ts_48k: 960 * 514,
+            flags: 0,
+            opus: Vec::new(),
+        }
+        .encode_binary();
+        assert_eq!(P2pWireFrame::decode_binary(&empty_non_eot), None);
+
+        let mut oversized = vec![7u8, 3, 2, 0, 1, 0, 0, 0, 0, 0];
+        oversized.extend_from_slice(&((MAX_VOICE_OPUS_BYTES as u16) + 1).to_be_bytes());
+        oversized.resize(12 + MAX_VOICE_OPUS_BYTES + 1, 0x55);
+        assert_eq!(P2pWireFrame::decode_binary(&oversized), None);
+    }
+
+    #[test]
+    fn voice_crypto_isolates_tags_and_blocks_replays_alongside_chunk_bursts() {
+        let a = P2pIdentity::generate();
+        let b = P2pIdentity::generate();
+        let mut a_ctrl = a.establish_with(b.pubkey, b.session_id);
+        let mut b_ctrl = b.establish_with(a.pubkey, a.session_id);
+        let (mut a_vtx, _a_vrx) = a.establish_voice_with(b.pubkey, b.session_id);
+        let (_b_vtx, mut b_vrx) = b.establish_voice_with(a.pubkey, a.session_id);
+
+        assert_ne!(a_ctrl.tx_tag, a_vtx.tx_tag);
+        assert_eq!(a_vtx.tx_tag, b_vrx.rx_tag);
+
+        // Interleave a 100-packet reliable chunk burst with 50 pps voice packets
+        for i in 0..100u16 {
+            let chunk_pkt = a_ctrl
+                .seal(&P2pWireFrame::KeepAlive { ts_ms: i as u64 })
+                .unwrap();
+            assert!(b_ctrl.open(&chunk_pkt).is_some());
+            assert!(b_vrx.open(&chunk_pkt).is_none());
+
+            let voice_pkt = a_vtx
+                .seal(&P2pWireFrame::Voice {
+                    voice_id: 1,
+                    epoch: 1,
+                    seq: i,
+                    ts_48k: (i as u32) * 960,
+                    flags: 0,
+                    opus: vec![0x77; 80],
+                })
+                .unwrap();
+            assert!(b_ctrl.open(&voice_pkt).is_none());
+            assert!(b_vrx.open(&voice_pkt).is_some());
+            assert!(b_vrx.open(&voice_pkt).is_none()); // Replay blocked
+        }
+    }
+
+    #[test]
+    fn natpmp_pcp_candidate_priority_and_birthday_probes_behave_cleanly() {
+        assert!(
+            candidate_priority(P2pCandidateKind::Ipv6) > candidate_priority(P2pCandidateKind::Lan)
+        );
+        assert!(
+            candidate_priority(P2pCandidateKind::Lan) > candidate_priority(P2pCandidateKind::Wan)
+        );
+
+        let req = build_natpmp_map_request(50000, 50000, 3600);
+        assert_eq!(req[0], 0);
+        assert_eq!(req[1], 1);
+        let mut resp = [0u8; 16];
+        resp[0] = 0;
+        resp[1] = 129;
+        resp[8..10].copy_from_slice(&50000u16.to_be_bytes());
+        resp[10..12].copy_from_slice(&50123u16.to_be_bytes());
+        resp[12..16].copy_from_slice(&3600u32.to_be_bytes());
+        assert_eq!(parse_natpmp_map_response(&resp), Some((50000, 50123, 3600)));
+
+        let nonce = [7u8; 12];
+        let mut pcp_resp =
+            build_pcp_map_request(Ipv4Addr::new(192, 168, 1, 20), 50000, 50000, 3600, nonce);
+        pcp_resp[1] = 0x81;
+        pcp_resp[42..44].copy_from_slice(&54321u16.to_be_bytes());
+        pcp_resp[56..60].copy_from_slice(&[203, 0, 113, 9]);
+        assert_eq!(
+            parse_pcp_map_response(&pcp_resp, nonce),
+            Some((Some(Ipv4Addr::new(203, 0, 113, 9)), 54321, 3600))
+        );
+
+        let probes = compute_birthday_probe_ports(40000, 6, 42);
+        assert_eq!(probes.len(), 6);
+        assert!(!probes.contains(&40000));
+        assert!(probes.contains(&40001));
     }
 }

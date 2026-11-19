@@ -1,4 +1,7 @@
-import { AppCloseIcon } from "./ui/AppIcons";
+import {
+  AppCloseIcon,
+  AppVoiceWaveIcon,
+} from "./ui/AppIcons";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
 import { formatUserError } from "../lib/errors";
@@ -31,6 +34,7 @@ import {
   getPlayBlockState,
 } from "../lib/syncReady";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
+import { isParticipantSpeaking } from "../lib/voiceActions";
 import { useAppStore } from "../store/useAppStore";
 import { useChatStore } from "../store/useChatStore";
 import { getEffectiveIntroSegments, useIntroStore } from "../store/useIntroStore";
@@ -38,6 +42,8 @@ import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { useVoiceStore } from "../store/useVoiceStore";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { OpenMediaIcon, WatchPartyIcon } from "./ui/LobbyIcons";
 import {
   PlayerAudioIcon,
@@ -471,7 +477,43 @@ export const TransportBar = memo(function TransportBar({
   const openSettings = useAppStore((s) => s.openSettings);
   const unreadChatCount = useChatStore((s) => s.unreadCount);
   const chatTypingCount = useChatStore((s) => Object.keys(s.typingPeers).length);
+  const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
+  const voiceJoined = useVoiceStore((s) => s.joined);
+  const voiceMuted = useVoiceStore((s) => s.muted);
+  const voiceDeafened = useVoiceStore((s) => s.deafened);
+  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
+  const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
+  const voiceSpeakingPeers = useVoiceStore((s) => s.speakingPeers);
+  const voiceRoster = useVoiceStore((s) => s.roster);
+  const voicePeerOverrides = useVoiceStore((s) => s.peerOverrides);
+  const voiceDuckingMode = useVoiceStore((s) => s.duckingMode);
   const { mismatch } = usePartyFileMismatch();
+
+  const voiceCheckInput = {
+    joined: voiceJoined,
+    muted: voiceMuted,
+    deafened: voiceDeafened,
+    localGateOpen: voiceGateOpen,
+    streamStatus: voiceStreamStatus,
+    speakingPeers: voiceSpeakingPeers,
+    roster: voiceRoster,
+    peerOverrides: voicePeerOverrides,
+  };
+  const voicePeersInCall = voiceRoster.filter((r) => r.inVoice);
+  const remoteSpeakingCount = voiceSpeakingPeers.filter(
+    (s) =>
+      s.trim().toLowerCase() !== resolveEffectiveUsername(syncStatus, username).trim().toLowerCase() &&
+      !voicePeerOverrides[s.trim().toLowerCase()]?.muted,
+  ).length;
+  const duckingActive =
+    Boolean(roomCode) &&
+    voiceEnabled &&
+    voiceJoined &&
+    !voiceDeafened &&
+    voiceDuckingMode !== "off" &&
+    remoteSpeakingCount > 0 &&
+    !muted &&
+    volume > 0;
 
   const playlistItems = usePlaylistStore((s) => s.items);
   const playlistIndex = usePlaylistStore((s) => s.currentIndex);
@@ -909,9 +951,11 @@ export const TransportBar = memo(function TransportBar({
         title={
           mismatch
             ? `${mismatch.title} — Click to open Watch Party`
-            : hideParticipants
-              ? "Party lounge (profile icons hidden)"
-              : "Friends watching together"
+            : !voiceJoined && voicePeersInCall.length > 0
+              ? `${voicePeersInCall.length} in voice chat — Click to join`
+              : hideParticipants
+                ? "Party lounge (profile icons hidden)"
+                : "Friends watching together"
         }
         className={`ep-bar-pill ep-party-pill ${
           !hideParticipants && visiblePeers.length > 0
@@ -939,11 +983,18 @@ export const TransportBar = memo(function TransportBar({
                   aligned,
                   scaleCalibrated,
                 });
-                const ringClass = badge.isMismatch
-                  ? "ring-warn/90"
-                  : p.isReady
-                    ? "ring-ok/85"
-                    : "ring-warn/80";
+                const peerSpeaking = isParticipantSpeaking(
+                  p.username,
+                  effectiveUsername,
+                  voiceCheckInput,
+                );
+                const ringClass = peerSpeaking
+                  ? "ring-[#38BDF8] ep-speaking-ring"
+                  : badge.isMismatch
+                    ? "ring-warn/90"
+                    : p.isReady
+                      ? "ring-ok/85"
+                      : "ring-warn/80";
                 return (
                   <ProfileAvatar
                     key={p.username}
@@ -953,10 +1004,10 @@ export const TransportBar = memo(function TransportBar({
                       avatarId,
                     )}
                     size={20}
-                    title={`${p.username}${p.isReady ? " · Ready" : " · Not Ready"}${
+                    title={`${p.username}${peerSpeaking ? " · Speaking" : p.isReady ? " · Ready" : " · Not Ready"}${
                       badge.isMismatch ? ` · ${badge.text}` : ""
                     }`}
-                    className={`ring-2 ${ringClass} shrink-0`}
+                    className={`ring-2 ${ringClass} shrink-0 transition-shadow duration-150`}
                   />
                 );
               })}
@@ -970,6 +1021,14 @@ export const TransportBar = memo(function TransportBar({
               <span className="text-[11px] font-medium leading-none num">
                 {participants.length}
               </span>
+            )}
+            {voiceEnabled && !voiceJoined && voicePeersInCall.length > 0 && (
+              <AppVoiceWaveIcon
+                active
+                speaking={remoteSpeakingCount > 0}
+                size={11}
+                className="shrink-0"
+              />
             )}
             {mismatch && (
               <span
@@ -1117,25 +1176,38 @@ export const TransportBar = memo(function TransportBar({
         }
       }}
     >
-      <button
-        type="button"
-        onClick={() => toggleMutePlayback()}
-        aria-label={muted ? "Unmute" : "Mute"}
-        title={
-          barLayout.volumeSliderWidth === "none"
-            ? `Mute (M) · Volume ${muted ? 0 : Math.round(volume)}% (scroll wheel or open Audio menu to adjust)`
-            : "Mute (M)"
-        }
-        data-muted={muted || volume === 0 ? "true" : "false"}
-        className={`ep-bar-icon-btn ep-vol-btn ${
-          isMini ? "h-7 w-7" : "h-7 w-7"
-        } rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0`}
+      <GlassHoverTip
+        label="Auto-ducking movie"
+        detail="Lowering volume while friends speak"
+        accent="speaking"
+        disabled={!duckingActive}
       >
-        <PlayerVolumeIcon
-          muted={muted || volume === 0}
-          size={isMini ? 16 : 18}
-        />
-      </button>
+        <button
+          type="button"
+          onClick={() => toggleMutePlayback()}
+          aria-label={muted ? "Unmute" : "Mute"}
+          data-muted={muted || volume === 0 ? "true" : "false"}
+          className="ep-bar-icon-btn ep-vol-btn relative h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
+          title={
+            duckingActive
+              ? undefined
+              : barLayout.volumeSliderWidth === "none"
+                ? `Mute (M) · Volume ${muted ? 0 : Math.round(volume)}% (scroll wheel or open Audio menu to adjust)`
+                : "Mute (M)"
+          }
+        >
+          <PlayerVolumeIcon
+            muted={muted || volume === 0}
+            size={isMini ? 16 : 18}
+          />
+          {duckingActive && (
+            <span
+              aria-hidden="true"
+              className="anim-pop-in absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-[#38BDF8] ep-speaking-ring"
+            />
+          )}
+        </button>
+      </GlassHoverTip>
       {barLayout.volumeSliderWidth !== "none" && (
         <div className={`${VOLUME_WIDTH_CLASSES[barLayout.volumeSliderWidth]} shrink-0`}>
           <Scrubber

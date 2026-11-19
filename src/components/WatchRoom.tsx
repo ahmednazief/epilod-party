@@ -251,6 +251,26 @@ import {
 import { enqueueReactionBurst } from "../store/useReactionStore";
 import { useChatStore } from "../store/useChatStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { useVoiceStore } from "../store/useVoiceStore";
+import {
+  onVoiceDevicesChanged,
+  onVoiceLevel,
+  onVoiceLocalState,
+  onVoiceRoster,
+  onVoiceSpeaking,
+  onVoiceStatus,
+  voiceListDevices,
+  voiceSetConfig,
+  voiceSetMoviePlaying,
+} from "../lib/voice";
+import {
+  diffVoiceRosterPeers,
+  joinVoiceSession,
+  VOICE_HEALTH_NOTE_TAG,
+  VOICE_PEER_BLOCKED_NOTE_TAG,
+} from "../lib/voiceActions";
+import { StageSpeakerOverlay } from "./ui/StageSpeakerOverlay";
+import { getActiveShowcaseConfig } from "../lib/showcaseMode";
 import { ChatSidebar } from "./ChatSidebar";
 import { EpisodesPanel } from "./EpisodesPanel";
 import { FloatingChatPeeks } from "./FloatingChatPeeks";
@@ -272,6 +292,7 @@ import { ViewportPlaceholder } from "./ViewportPlaceholder";
 import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
 import { NotificationStrip } from "./ui/NotificationStrip";
 import { StatusDot } from "./ui/StatusDot";
+import { VoiceMicDeafenPills } from "./ui/VoiceQuickControls";
 
 type SideTab = CapsuleTab;
 
@@ -437,8 +458,9 @@ export function WatchRoom() {
       ? "Watch Theater"
       : "Media Player";
 
-  const [sideTab, setSideTab] = useState<SideTab>("room");
-  const [panelOpen, setPanelOpen] = useState(false);
+  const showcaseCfg = getActiveShowcaseConfig();
+  const [sideTab, setSideTab] = useState<SideTab>(showcaseCfg?.initialTab ?? "room");
+  const [panelOpen, setPanelOpen] = useState(Boolean(showcaseCfg?.initialTab));
   const [chromeIdle, setChromeIdle] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
@@ -464,6 +486,29 @@ export function WatchRoom() {
   const setChatOpen = useChatStore((s) => s.setChatOpen);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
+  const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
+  const voiceJoined = useVoiceStore((s) => s.joined);
+  const voiceMuted = useVoiceStore((s) => s.muted);
+  const voiceDeafened = useVoiceStore((s) => s.deafened);
+  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
+  const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
+  const voiceSpeakingPeers = useVoiceStore((s) => s.speakingPeers);
+  const avatarId = useAppStore((s) => s.avatarId);
+  const voiceCaptureHealthy =
+    voiceStreamStatus !== "micBusy" &&
+    voiceStreamStatus !== "reconnecting" &&
+    voiceStreamStatus !== "permissionDenied";
+  const localVoiceSpeaking = voiceJoined && !voiceMuted && voiceGateOpen && voiceCaptureHealthy;
+
+  useEffect(() => {
+    void voiceSetMoviePlaying(loaded && !paused).catch(() => undefined);
+  }, [loaded, paused]);
+
+  useEffect(() => {
+    voicePeerMapRef.current = null;
+    voiceLeftAtRef.current.clear();
+    lastVoiceInviteToastAtRef.current = 0;
+  }, [roomCode]);
   const chatDocked = windowWidth >= 860;
   const chatSidebarPresence = useAnimatedPresence(Boolean(roomCode) && chatSidebarOpen, 280);
 
@@ -473,6 +518,9 @@ export function WatchRoom() {
   const viewportTrackerRef = useRef(new ViewportSyncTracker());
   const soundTrackerRef = useRef(new RoomSoundTracker());
   const syncDisconnectTrackerRef = useRef(new SyncDisconnectTracker());
+  const voicePeerMapRef = useRef<Record<string, boolean> | null>(null);
+  const voiceLeftAtRef = useRef<Map<string, number>>(new Map());
+  const lastVoiceInviteToastAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
   const mpvLifecycleActiveRef = useRef(false);
   const mpvStartedRef = useRef(false);
@@ -513,6 +561,7 @@ export function WatchRoom() {
   contextMenuOpenRef.current = contextMenu !== null;
 
   const canAutoHideChromeNow = useCallback(() => {
+    if (getActiveShowcaseConfig() !== null) return false;
     const p = usePlayerStore.getState();
     const app = useAppStore.getState();
     const sync = useSyncStore.getState();
@@ -1702,6 +1751,9 @@ export function WatchRoom() {
     let active = true;
     const unlisteners: Array<() => void> = [];
     const peerNotReadyPauseTimers = new Set<number>();
+    let blockedVoiceTimer: number | null = null;
+    let blockedVoiceNotified = false;
+    let reconnectingVoiceTimer: number | null = null;
     let settled = false;
     let resolveReady!: () => void;
     listenersReadyPromiseRef.current = new Promise<void>((resolve) => {
@@ -2161,6 +2213,189 @@ export function WatchRoom() {
               actor: username,
             });
           }),
+          onVoiceRoster((roster) => {
+            if (!active) return;
+            const prevState = useVoiceStore.getState();
+            prevState.setRoster(roster);
+
+            const selfUser = resolveEffectiveUsername(
+              useSyncStore.getState().status,
+              useAppStore.getState().username,
+            );
+            const diff = diffVoiceRosterPeers(voicePeerMapRef.current, roster, selfUser);
+            const isSeed = voicePeerMapRef.current === null;
+            voicePeerMapRef.current = diff.nextMap;
+
+            const pNow = usePlayerStore.getState();
+            const moviePlayingNow = pNow.loaded && !pNow.paused;
+            const nowMs = Date.now();
+
+            if (!isSeed && prevState.voiceEnabled) {
+              for (const user of diff.joinedUsers) {
+                const key = user.trim().toLowerCase();
+                const leftAt = voiceLeftAtRef.current.get(key) ?? 0;
+                if (nowMs - leftAt < 4000) continue; // Suppress rapid reconnect flap
+                if (prevState.joined) {
+                  playSoundCue("peerVoiceJoined", { moviePlaying: moviePlayingNow });
+                } else {
+                  playSoundCue("peerVoiceJoined", { moviePlaying: moviePlayingNow });
+                  if (nowMs - lastVoiceInviteToastAtRef.current > 12000) {
+                    lastVoiceInviteToastAtRef.current = nowMs;
+                    pushNote("info", `${user} started voice chat`, 8000, "voice-peer-started", {
+                      label: "Join",
+                      onClick: () => {
+                        void joinVoiceSession().then((outcome) => {
+                          if (outcome === "needsBtConfirm") {
+                            setSideTab("room");
+                            setPanelOpen(true);
+                          }
+                        });
+                      },
+                    });
+                  }
+                }
+              }
+              if (prevState.joined) {
+                for (const user of diff.leftUsers) {
+                  voiceLeftAtRef.current.set(user.trim().toLowerCase(), nowMs);
+                  playSoundCue("peerVoiceLeft", { moviePlaying: moviePlayingNow });
+                }
+              }
+            }
+
+            // Surface blocked P2P voice peers globally after 4s grace window
+            const blockedNames = roster
+              .filter((r) => r.inVoice && r.transport === "blocked")
+              .map((r) => r.username);
+            if (prevState.joined && blockedNames.length > 0) {
+              if (blockedVoiceTimer === null && !blockedVoiceNotified) {
+                blockedVoiceTimer = window.setTimeout(() => {
+                  blockedVoiceTimer = null;
+                  if (!active || !useVoiceStore.getState().joined) return;
+                  const currentBlocked = useVoiceStore
+                    .getState()
+                    .roster.filter((r) => r.inVoice && r.transport === "blocked");
+                  if (currentBlocked.length === 0) return;
+                  blockedVoiceNotified = true;
+                  const names = currentBlocked.map((b) => b.username).join(", ");
+                  pushNote(
+                    "warn",
+                    `Direct voice blocked for ${names} — check Relay settings in Voice & Audio.`,
+                    7500,
+                    VOICE_PEER_BLOCKED_NOTE_TAG,
+                    {
+                      label: "Voice & Audio",
+                      onClick: () => useAppStore.getState().openSettings("voice"),
+                    },
+                  );
+                }, 4000);
+              }
+            } else {
+              if (blockedVoiceTimer !== null) {
+                window.clearTimeout(blockedVoiceTimer);
+                blockedVoiceTimer = null;
+              }
+              if (blockedVoiceNotified) {
+                blockedVoiceNotified = false;
+                useNotificationStore.getState().dismissByTag(VOICE_PEER_BLOCKED_NOTE_TAG);
+              }
+            }
+          }),
+          onVoiceSpeaking((speakers) => {
+            if (!active) return;
+            useVoiceStore.getState().setSpeakingPeers(speakers);
+          }),
+          onVoiceLevel((lvl) => {
+            if (!active) return;
+            useVoiceStore.getState().setLocalLevel(lvl.db, lvl.speechProb, lvl.gateOpen);
+          }),
+          onVoiceLocalState((st) => {
+            if (!active) return;
+            const prevVoice = useVoiceStore.getState();
+            const changed =
+              prevVoice.muted !== st.muted || prevVoice.deafened !== st.deafened;
+            prevVoice.applyLocalState(st.muted, st.deafened, st.pttActive);
+            if (changed && prevVoice.joined) {
+              const p = usePlayerStore.getState();
+              p.flashFeedback(
+                st.deafened
+                  ? "Audio & Mic Deafened"
+                  : st.muted
+                    ? "Mic Muted"
+                    : "Mic Unmuted",
+              );
+              playSoundCue(st.muted || st.deafened ? "micMuted" : "micUnmuted", {
+                moviePlaying: p.loaded && !p.paused,
+              });
+            }
+          }),
+          onVoiceStatus((st) => {
+            if (!active) return;
+            const vNow = useVoiceStore.getState();
+            vNow.applyStatusPayload(st);
+            if (!vNow.joined) return;
+            const noteStore = useNotificationStore.getState();
+            if (st.streamStatus === "micBusy" || st.streamStatus === "permissionDenied") {
+              if (reconnectingVoiceTimer !== null) {
+                window.clearTimeout(reconnectingVoiceTimer);
+                reconnectingVoiceTimer = null;
+              }
+              const msg =
+                st.streamStatus === "permissionDenied"
+                  ? "Microphone permission denied by Windows Privacy."
+                  : st.streamError ?? "Microphone is in exclusive use by another app.";
+              pushNote("error", msg, 8000, VOICE_HEALTH_NOTE_TAG, {
+                label: "Voice & Audio",
+                onClick: () => useAppStore.getState().openSettings("voice"),
+              });
+            } else if (st.streamStatus === "reconnecting") {
+              if (reconnectingVoiceTimer === null) {
+                reconnectingVoiceTimer = window.setTimeout(() => {
+                  reconnectingVoiceTimer = null;
+                  if (!active) return;
+                  const s = useVoiceStore.getState();
+                  if (s.joined && s.streamStatus === "reconnecting") {
+                    pushNote(
+                      "warn",
+                      s.streamError ?? "Audio device lost — reconnecting…",
+                      6500,
+                      VOICE_HEALTH_NOTE_TAG,
+                      {
+                        label: "Voice & Audio",
+                        onClick: () => useAppStore.getState().openSettings("voice"),
+                      },
+                    );
+                  }
+                }, 2200);
+              }
+            } else if (st.bluetoothHfpDropped) {
+              pushNote(
+                "warn",
+                "Bluetooth mic dropped into low-quality mode — switch mic or Listen Only.",
+                7500,
+                VOICE_HEALTH_NOTE_TAG,
+                {
+                  label: "Voice & Audio",
+                  onClick: () => useAppStore.getState().openSettings("voice"),
+                },
+              );
+            } else if (st.streamStatus === "live") {
+              if (reconnectingVoiceTimer !== null) {
+                window.clearTimeout(reconnectingVoiceTimer);
+                reconnectingVoiceTimer = null;
+              }
+              noteStore.dismissByTag(VOICE_HEALTH_NOTE_TAG);
+            }
+          }),
+          onVoiceDevicesChanged(() => {
+            if (!active) return;
+            const s = useVoiceStore.getState();
+            void voiceListDevices(s.inputDevice, s.outputDevice)
+              .then((d) => {
+                if (active) useVoiceStore.getState().setDevices(d);
+              })
+              .catch(() => undefined);
+          }),
         ]);
 
         if (!active) {
@@ -2175,6 +2410,8 @@ export function WatchRoom() {
       // Sync initial fullscreen state if OS entered fullscreen externally
       const initialFs = await windowIsFullscreen();
       if (active) usePlayerStore.getState().setIsFullscreen(initialFs);
+      void voiceSetConfig(useVoiceStore.getState().toConfigDto()).catch(() => undefined);
+      useVoiceStore.getState().syncAllPeerVolumesToBackend();
     };
 
     void setup();
@@ -2182,6 +2419,14 @@ export function WatchRoom() {
     return () => {
       active = false;
       markListenersReady();
+      if (blockedVoiceTimer !== null) {
+        window.clearTimeout(blockedVoiceTimer);
+        blockedVoiceTimer = null;
+      }
+      if (reconnectingVoiceTimer !== null) {
+        window.clearTimeout(reconnectingVoiceTimer);
+        reconnectingVoiceTimer = null;
+      }
       for (const timerId of peerNotReadyPauseTimers) {
         window.clearTimeout(timerId);
       }
@@ -2531,6 +2776,14 @@ export function WatchRoom() {
 
   const showFloatingCapsule = chrome.showTransportBar && !chromeIdle;
   const showWindowBar = !isFullscreen && !chromeIdle;
+  const topVoicePresence = useAnimatedPresence(
+    Boolean(roomCode) &&
+      voiceEnabled &&
+      voiceJoined &&
+      !chatSidebarOpen &&
+      !(panelOpen && sideTab === "room"),
+    170,
+  );
   const desktopRuntime = isDesktop();
   const showVideoBackdrop =
     loaded &&
@@ -2540,6 +2793,7 @@ export function WatchRoom() {
     (!desktopRuntime || engineSurfaceVisible);
 
   useEffect(() => {
+    if (showcaseCfg) return;
     if (!frozenFrame) return;
     if (
       loaded &&
@@ -3405,6 +3659,24 @@ export function WatchRoom() {
               )}
             </div>
           }
+          rightActions={
+            topVoicePresence.mounted ? (
+              <div
+                className={`flex items-center gap-1.5 ${
+                  topVoicePresence.exiting
+                    ? "anim-pop-out pointer-events-none"
+                    : "anim-pop-in"
+                }`}
+              >
+                <VoiceMicDeafenPills
+                  muted={voiceMuted}
+                  deafened={voiceDeafened}
+                  speaking={localVoiceSpeaking}
+                  captureHealthy={voiceCaptureHealthy}
+                />
+              </div>
+            ) : undefined
+          }
           glassControls={showVideoBackdrop}
         />
       </div>
@@ -3493,7 +3765,7 @@ export function WatchRoom() {
           }`}
         >
         <NotificationStrip inline />
-        {panelOpen && feedback && (
+        {feedback && (
           <span
             key={feedback.id}
             data-glass-region="true"
@@ -3550,6 +3822,7 @@ export function WatchRoom() {
 
       {/* Full-window video viewport: title bar and glass play bar float directly over the film */}
       <div
+        data-showcase-stage="true"
         ref={viewportRef}
         className={`absolute inset-0 z-0 ${
           showVideoBackdrop ? "bg-transparent" : "bg-canvas"
@@ -3723,6 +3996,43 @@ export function WatchRoom() {
         lockedForLocalUser={introLockedNow}
       />
 
+      <StageSpeakerOverlay
+        enabled={
+          Boolean(roomCode) &&
+          voiceEnabled &&
+          voiceJoined &&
+          !panelOpen &&
+          !chatSidebarOpen &&
+          (isFullscreen || chromeIdle)
+        }
+        speakers={voiceSpeakingPeers}
+        localUsername={effectiveUserNow}
+        localAvatarId={avatarId}
+        localSpeaking={localVoiceSpeaking}
+        localMuted={voiceMuted}
+        localDeafened={voiceDeafened}
+        localCaptureHealthy={voiceCaptureHealthy}
+      />
+
+      {isFullscreen && showFloatingCapsule && topVoicePresence.mounted && (
+        <div
+          data-glass-region="true"
+          style={{ right: chatSidebarOpen ? `${chatSidebarWidth + 16}px` : "16px" }}
+          className={`absolute top-3.5 z-[46] flex items-center gap-1.5 ${
+            topVoicePresence.exiting
+              ? "anim-pop-out pointer-events-none"
+              : "anim-pop-in"
+          }`}
+        >
+          <VoiceMicDeafenPills
+            muted={voiceMuted}
+            deafened={voiceDeafened}
+            speaking={localVoiceSpeaking}
+            captureHealthy={voiceCaptureHealthy}
+          />
+        </div>
+      )}
+
       {/* Slim vertical liquid-glass bar on the right edge (only when placement is "edge") */}
       {roomCode &&
         chatTriggerPlacement === "edge" &&
@@ -3788,6 +4098,7 @@ export function WatchRoom() {
           docked={chatDocked}
           exiting={chatSidebarPresence.exiting}
           topChromeOffset={!isFullscreen && showWindowBar}
+          roomPanelOpen={panelOpen && sideTab === "room"}
           onClose={() => setChatSidebarOpenSmooth(false)}
           onSeekToTimestamp={handleSeekToChatTimestamp}
           onResizingChange={setChatResizing}

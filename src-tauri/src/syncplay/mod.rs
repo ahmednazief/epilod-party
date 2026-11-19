@@ -2,6 +2,7 @@
 
 use crate::mpv::MpvController;
 use crate::p2p::{P2pAutoAlignment, P2pControlCmd, P2pLocalMedia, P2pSessionHandle};
+use crate::voice::VoiceController;
 use epilod_core::matching::{analyze_files, FileIdentity, FileMatchStatus, SourceRelation};
 use epilod_core::mpv_ipc::{set_pause_cmd, set_speed_cmd};
 use epilod_core::p2p::{
@@ -183,11 +184,18 @@ pub struct SyncController {
     align_mode: Arc<Mutex<bool>>,
     network_opts: Arc<Mutex<LocalPathOptions>>,
     persisted_host: Arc<Mutex<Option<PersistedHostAuthority>>>,
+    voice: Arc<Mutex<Option<Arc<VoiceController>>>>,
 }
 
 impl SyncController {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_voice_controller(&self, vc: Arc<VoiceController>) {
+        if let Ok(mut guard) = self.voice.lock() {
+            *guard = Some(vc);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -257,6 +265,7 @@ impl SyncController {
         let has_user_alignment = Arc::clone(&self.has_user_alignment);
         let align_mode = Arc::clone(&self.align_mode);
         let persisted_host = Arc::clone(&self.persisted_host);
+        let voice = Arc::clone(&self.voice);
 
         let task = tokio::spawn(async move {
             run_sync_loop(
@@ -280,6 +289,7 @@ impl SyncController {
                 has_user_alignment,
                 align_mode,
                 persisted_host,
+                voice,
             )
             .await;
         });
@@ -357,6 +367,7 @@ impl SyncController {
         let has_user_alignment = Arc::clone(&self.has_user_alignment);
         let align_mode = Arc::clone(&self.align_mode);
         let persisted_host = Arc::clone(&self.persisted_host);
+        let voice = Arc::clone(&self.voice);
         let task = tokio::spawn(async move {
             run_sync_loop(
                 app,
@@ -379,6 +390,7 @@ impl SyncController {
                 has_user_alignment,
                 align_mode,
                 persisted_host,
+                voice,
             )
             .await;
         });
@@ -494,6 +506,11 @@ impl SyncController {
     }
 
     async fn disconnect_internal(&self) {
+        if let Ok(guard) = self.voice.lock() {
+            if let Some(ref vc) = *guard {
+                vc.detach_p2p();
+            }
+        }
         let taken = {
             if let Ok(mut guard) = self.runtime.lock() {
                 guard.take()
@@ -775,6 +792,7 @@ async fn run_sync_loop(
     has_user_alignment: Arc<Mutex<bool>>,
     align_mode: Arc<Mutex<bool>>,
     persisted_host: Arc<Mutex<Option<PersistedHostAuthority>>>,
+    voice: Arc<Mutex<Option<Arc<VoiceController>>>>,
 ) {
     let mut policy = ReconnectPolicy::new();
     let mut wire_room = initial_wire_room;
@@ -828,6 +846,7 @@ async fn run_sync_loop(
                             &has_user_alignment,
                             &align_mode,
                             &persisted_host,
+                            &voice,
                             r,
                             w,
                         )
@@ -857,6 +876,7 @@ async fn run_sync_loop(
                             &has_user_alignment,
                             &align_mode,
                             &persisted_host,
+                            &voice,
                             r,
                             w,
                         )
@@ -1282,6 +1302,7 @@ async fn drive_authenticated_session<R, W>(
     has_user_alignment: &Arc<Mutex<bool>>,
     align_mode: &Arc<Mutex<bool>>,
     persisted_host: &Arc<Mutex<Option<PersistedHostAuthority>>>,
+    voice: &Arc<Mutex<Option<Arc<VoiceController>>>>,
     reader: R,
     mut writer: W,
 ) -> SessionExit
@@ -1370,6 +1391,11 @@ where
         p2p_chat_fallback_tx,
         p2p_chat_react_fallback_tx,
     );
+    if let Ok(guard) = voice.lock() {
+        if let Some(ref vc) = *guard {
+            vc.attach_p2p(Arc::clone(&p2p.voice));
+        }
+    }
 
     let result: Result<LoopExit, String> = loop {
         tokio::select! {

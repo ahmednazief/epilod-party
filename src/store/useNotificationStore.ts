@@ -2,16 +2,28 @@ import { create } from "zustand";
 
 export type NotificationKind = "info" | "success" | "warn" | "error";
 
+export interface NotificationAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface NotificationItem {
   id: number;
   kind: NotificationKind;
   message: string;
   tag?: string;
+  action?: NotificationAction;
 }
 
 interface NotificationState {
   items: NotificationItem[];
-  push: (kind: NotificationKind, message: string, ttlMs?: number, tag?: string) => number;
+  push: (
+    kind: NotificationKind,
+    message: string,
+    ttlMs?: number,
+    tag?: string,
+    action?: NotificationAction,
+  ) => number;
   dismiss: (id: number) => void;
   dismissByTag: (tag: string) => void;
   dismissByTagPrefix: (prefix: string) => void;
@@ -45,7 +57,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => {
 
   return {
     items: [],
-    push: (kind, message, ttlMs = 5500, tag) => {
+    push: (kind, message, ttlMs = 5500, tag, action) => {
       const existing = get().items.find(
         (item) => (tag ? item.tag === tag : item.kind === kind && item.message === message),
       );
@@ -54,12 +66,12 @@ export const useNotificationStore = create<NotificationState>((set, get) => {
         clearTimer(id);
         set((state) => ({
           items: state.items.map((item) =>
-            item.id === id ? { id, kind, message, tag } : item,
+            item.id === id ? { id, kind, message, tag, action } : item,
           ),
         }));
       } else {
         set((state) => ({
-          items: [...state.items.slice(-2), { id, kind, message, tag }],
+          items: [...state.items.slice(-2), { id, kind, message, tag, action }],
         }));
       }
       if (ttlMs > 0) {

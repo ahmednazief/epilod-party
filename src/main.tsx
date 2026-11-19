@@ -3,7 +3,12 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { logFrontendEvent } from "./lib/logger";
+import { initShowcaseMode } from "./lib/showcaseMode";
 import "./styles/globals.css";
+
+if (import.meta.env.DEV) {
+  initShowcaseMode();
+}
 
 if (typeof window !== "undefined") {
   const rootEl = document.documentElement;

@@ -1052,3 +1052,397 @@ export function AppLiquidGlassDefs() {
     </svg>
   );
 }
+
+/**
+ * Custom faceted crystal Voice / Audio category emblem.
+ */
+export function AppVoiceCategoryIcon({ size = 16, active = false, className = "" }: AppIconProps) {
+  const uid = useId().replace(/:/g, "");
+  const capId = `ep-vcat-cap-${uid}`;
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={capId} x1="9" y1="3" x2="15" y2="14" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor={active ? "#EDE9FE" : "#FFFFFF"} stopOpacity={active ? "0.42" : "0.18"} />
+          <stop offset="100%" stopColor={active ? "#8B5CF6" : "#CBD5E1"} stopOpacity={active ? "0.38" : "0.08"} />
+        </linearGradient>
+      </defs>
+      <rect
+        x="8.8"
+        y="3.3"
+        width="6.4"
+        height="10.4"
+        rx="3.2"
+        fill={`url(#${capId})`}
+        stroke={active ? "#DDD6FE" : "currentColor"}
+        strokeWidth="1.65"
+      />
+      <path d="M10.8 6.8H13.2M10.8 9.6H13.2" stroke={active ? "#FFFFFF" : "currentColor"} strokeOpacity="0.65" strokeWidth="1.2" strokeLinecap="round" />
+      <path
+        d="M5.4 11.2a6.6 6.6 0 0 0 13.2 0"
+        stroke={active ? "#C4B5FD" : "currentColor"}
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path d="M12 17.8v2.8M9 20.6h6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted liquid-crystal Microphone glyph with speaking & muted states.
+ */
+export function AppMicIcon({
+  muted = false,
+  speaking = false,
+  size = 14,
+  className = "",
+}: AppIconProps & { muted?: boolean; speaking?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const capGradId = `ep-mic-cap-${uid}`;
+  const isSpeaking = speaking && !muted;
+  const strokeMain = muted ? "currentColor" : isSpeaking ? "#38BDF8" : "currentColor";
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={capGradId} x1="9" y1="3" x2="15" y2="14" gradientUnits="userSpaceOnUse">
+          <stop
+            offset="0%"
+            stopColor={isSpeaking ? "#E0F2FE" : "#FFFFFF"}
+            stopOpacity={muted ? "0.14" : isSpeaking ? "0.62" : "0.34"}
+          />
+          <stop
+            offset="100%"
+            stopColor={isSpeaking ? "#0284C7" : "#A78BFA"}
+            stopOpacity={muted ? "0.08" : isSpeaking ? "0.52" : "0.24"}
+          />
+        </linearGradient>
+      </defs>
+      <rect
+        x="8.6"
+        y="3.2"
+        width="6.8"
+        height="10.6"
+        rx="3.4"
+        fill={`url(#${capGradId})`}
+        stroke={strokeMain}
+        strokeWidth="1.75"
+        strokeOpacity={muted ? "0.42" : "1"}
+      />
+      <path
+        d="M10.7 6.8H13.3M10.7 9.5H13.3"
+        stroke={isSpeaking ? "#BAE6FD" : "currentColor"}
+        strokeOpacity={muted ? "0.25" : "0.72"}
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+      <path
+        d="M5.4 11.3a6.6 6.6 0 0 0 13.2 0"
+        stroke={isSpeaking ? "#7DD3FC" : "currentColor"}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeOpacity={muted ? "0.42" : "0.95"}
+      />
+      <path
+        d="M12 17.9v2.7M9.2 20.6h5.6"
+        stroke={strokeMain}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeOpacity={muted ? "0.42" : "0.92"}
+      />
+      {isSpeaking && (
+        <path
+          d="M3.1 8.1a9.8 9.8 0 0 0 0 5.8M20.9 8.1a9.8 9.8 0 0 1 0 5.8"
+          stroke="#38BDF8"
+          strokeWidth="1.65"
+          strokeLinecap="round"
+          strokeOpacity="0.95"
+        />
+      )}
+      {muted && (
+        <path
+          d="M4.4 4.4L19.6 19.6"
+          stroke="#FB7185"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+        />
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted liquid-crystal Headphones glyph with deafened state.
+ */
+export function AppHeadphonesIcon({
+  deafened = false,
+  size = 14,
+  className = "",
+}: AppIconProps & { deafened?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const cupGradId = `ep-hp-cup-${uid}`;
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={cupGradId} x1="4" y1="11.5" x2="8.5" y2="19.5" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity={deafened ? "0.14" : "0.40"} />
+          <stop offset="100%" stopColor="#A78BFA" stopOpacity={deafened ? "0.08" : "0.34"} />
+        </linearGradient>
+      </defs>
+      <path
+        d="M4.2 13.6V11.8a7.8 7.8 0 0 1 15.6 0v1.8"
+        stroke="currentColor"
+        strokeWidth="1.95"
+        strokeLinecap="round"
+        strokeOpacity={deafened ? "0.42" : "0.96"}
+      />
+      <rect
+        x="3.3"
+        y="12"
+        width="4.6"
+        height="7.2"
+        rx="2.3"
+        fill={`url(#${cupGradId})`}
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeOpacity={deafened ? "0.42" : "1"}
+      />
+      <rect
+        x="16.1"
+        y="12"
+        width="4.6"
+        height="7.2"
+        rx="2.3"
+        fill={`url(#${cupGradId})`}
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeOpacity={deafened ? "0.42" : "1"}
+      />
+      <path
+        d="M5.6 14.1V17.1M18.4 14.1V17.1"
+        stroke="#DDD6FE"
+        strokeOpacity={deafened ? "0.15" : "0.65"}
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+      {deafened && (
+        <path
+          d="M4.4 4.4L19.6 19.6"
+          stroke="#FB7185"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+        />
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted dual-tone crystal Voice Mixer / Audio Tune icon (box-free for pill docks).
+ */
+export function AppVoiceTuneIcon({
+  active = false,
+  size = 14,
+  className = "",
+}: AppIconProps) {
+  const accentKnob = active ? "#DDD6FE" : "#C4B5FD";
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M6 4.5V19.5M12 4.5V19.5M18 4.5V19.5"
+        stroke="currentColor"
+        strokeOpacity="0.45"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+      <path
+        d="M6 12.5V19.5M12 8.5V19.5M18 14.5V19.5"
+        stroke={active ? "#FFFFFF" : "currentColor"}
+        strokeOpacity="0.88"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <circle cx="6" cy="11" r="2.3" fill={accentKnob} stroke="#FFFFFF" strokeOpacity="0.7" strokeWidth="1" />
+      <circle cx="12" cy="7.5" r="2.3" fill="#FFFFFF" stroke={accentKnob} strokeWidth="1" />
+      <circle cx="18" cy="14" r="2.3" fill={accentKnob} stroke="#FFFFFF" strokeOpacity="0.7" strokeWidth="1" />
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted crystal Voice Waveform bars with active (green) & speaking (sky-cyan) states.
+ */
+export function AppVoiceWaveIcon({
+  active = false,
+  speaking = false,
+  size = 14,
+  className = "",
+}: AppIconProps & { speaking?: boolean }) {
+  const barSecondary = speaking ? "#38BDF8" : active ? "#4ADE80" : "currentColor";
+  const barPrimary = speaking ? "#7DD3FC" : active ? "#A7F3D0" : "currentColor";
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={`${speaking ? "ep-voice-wave-speaking" : ""} ${className}`}
+    >
+      <rect
+        className="ep-voice-wave-bar"
+        x="3.6"
+        y="9"
+        width="2.4"
+        height="6"
+        rx="1.2"
+        fill={barPrimary}
+        fillOpacity={speaking || active ? "0.95" : "0.85"}
+      />
+      <rect
+        className="ep-voice-wave-bar"
+        x="8.2"
+        y="5.5"
+        width="2.4"
+        height="13"
+        rx="1.2"
+        fill={barSecondary}
+      />
+      <rect
+        className="ep-voice-wave-bar"
+        x="13.4"
+        y="3.8"
+        width="2.4"
+        height="16.4"
+        rx="1.2"
+        fill={barPrimary}
+      />
+      <rect
+        className="ep-voice-wave-bar"
+        x="18"
+        y="7.6"
+        width="2.4"
+        height="8.8"
+        rx="1.2"
+        fill={barSecondary}
+      />
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted crystal Speaker Volume glyph for per-peer voice mixing.
+ */
+export function AppSpeakerVolumeIcon({
+  muted = false,
+  size = 14,
+  className = "",
+}: AppIconProps & { muted?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const coneId = `ep-spk-cone-${uid}`;
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={coneId} x1="4" y1="6" x2="14" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity={muted ? "0.14" : "0.32"} />
+          <stop offset="100%" stopColor="#C4B5FD" stopOpacity={muted ? "0.08" : "0.24"} />
+        </linearGradient>
+      </defs>
+      <path
+        d="M4.2 9.4H7.8L12.6 5.4V18.6L7.8 14.6H4.2C3.65 14.6 3.2 14.15 3.2 13.6V10.4C3.2 9.85 3.65 9.4 4.2 9.4Z"
+        fill={`url(#${coneId})`}
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinejoin="round"
+        strokeOpacity={muted ? "0.45" : "1"}
+      />
+      {muted ? (
+        <path d="M16.2 9.4L20.8 14.6M20.8 9.4L16.2 14.6" stroke="#FB7185" strokeWidth="1.9" strokeLinecap="round" />
+      ) : (
+        <>
+          <path d="M15.8 9.2a4.3 4.3 0 0 1 0 5.6" stroke="#C4B5FD" strokeWidth="1.7" strokeLinecap="round" />
+          <path d="M18.6 6.8a7.6 7.6 0 0 1 0 10.4" stroke="currentColor" strokeOpacity="0.82" strokeWidth="1.65" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Custom sculpted crystal Signal Quality Bars glyph for peer voice link quality.
+ */
+export function AppSignalBarsIcon({
+  bars = 4,
+  speaking = false,
+  size = 12,
+  className = "",
+}: AppIconProps & { bars?: number; speaking?: boolean }) {
+  const activeCount = Math.max(1, Math.min(4, Math.round(bars)));
+  const activeColor = speaking ? "#38BDF8" : "#A7F3D0";
+  const heights = [5, 8.5, 12, 15.5];
+  const xs = [3.5, 8.2, 12.9, 17.6];
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      {heights.map((h, idx) => {
+        const lit = idx < activeCount;
+        return (
+          <rect
+            key={idx}
+            x={xs[idx]}
+            y={19.5 - h}
+            width="2.7"
+            height={h}
+            rx="1.35"
+            fill={lit ? activeColor : "currentColor"}
+            fillOpacity={lit ? "0.95" : "0.24"}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+/**
+ * Custom frosted crystal member-actions arrow trigger.
+ */
+export function AppMemberMenuArrowIcon({
+  open = false,
+  size = 14,
+  className = "",
+}: AppIconProps & { open?: boolean }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={`transition-transform duration-200 ease-[var(--spring-fluid)] ${open ? "rotate-180" : ""} ${className}`}
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9.2"
+        fill="currentColor"
+        fillOpacity={open ? "0.18" : "0.08"}
+        stroke="currentColor"
+        strokeOpacity={open ? "0.45" : "0.22"}
+        strokeWidth="1.2"
+      />
+      <path
+        d="M8.3 10.4L12 14.2L15.7 10.4"
+        stroke={open ? "#FFFFFF" : "#DDD6FE"}
+        strokeWidth="1.85"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

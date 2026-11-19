@@ -1,13 +1,22 @@
 import {
   AppAlertIcon,
+  AppArrowIcon,
   AppChevronIcon,
   AppCloseIcon,
   AppFolderIcon,
+  AppHeadphonesIcon,
+  AppMemberMenuArrowIcon,
+  AppMicIcon,
   AppResetIcon,
   AppSeasonFolderIcon,
+  AppSignalBarsIcon,
   AppSlidersIcon,
+  AppSpeakerVolumeIcon,
+  AppVoiceTuneIcon,
+  AppVoiceWaveIcon,
 } from "./ui/AppIcons";
-import { memo, useEffect, useRef, useState, type FormEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
 import { formatUserError } from "../lib/errors";
 import {
@@ -44,6 +53,7 @@ import {
   runP2pAutoAlign,
   setSceneAlignMode,
 } from "../lib/timelineActions";
+import { useAnimatedPresence, usePresencePayload } from "../lib/useAnimatedPresence";
 import { sanitizeRoomCodeInput } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
@@ -53,6 +63,7 @@ import { formatRoomCodeDisplay, generateRoomCode } from "./HomeScreen";
 import { formatClock } from "./TransportBar";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { Button } from "./ui/Button";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { WatchPartyIcon } from "./ui/LobbyIcons";
 import { OtpCodeInput } from "./ui/OtpCodeInput";
@@ -73,8 +84,36 @@ import {
   PlayerResyncIcon,
 } from "./ui/PlayerIcons";
 import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
+import { Scrubber } from "./ui/Scrubber";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { StatusDot } from "./ui/StatusDot";
+import { VoiceQuickSettingsTray } from "./ui/VoiceQuickSettingsTray";
+import { VoiceMicDeafenPills } from "./ui/VoiceQuickControls";
+import { formatVoiceHotkey, type VoicePeerRosterDto } from "../lib/voice";
+import {
+  getActiveVoiceSpeakerNames,
+  isLocalVoiceSpeaking,
+  toggleVoiceSession,
+} from "../lib/voiceActions";
+import { useVoiceStore } from "../store/useVoiceStore";
+
+function voiceTransportLabel(transport: string | undefined): string {
+  switch (transport) {
+    case "directLan":
+      return "Direct LAN";
+    case "directIpv6":
+      return "Direct IPv6";
+    case "directWan":
+      return "Direct P2P";
+    case "relayed":
+      return "Relayed P2P";
+    case "blocked":
+    case "unavailable":
+      return "Strict NAT blocked";
+    default:
+      return "Direct P2P";
+  }
+}
 
 interface RoomPanelProps {
   onClose?: () => void;
@@ -125,7 +164,150 @@ export const RoomPanel = memo(function RoomPanel({
   const [busyAdminUser, setBusyAdminUser] = useState<string | null>(null);
   const [verifyingJoin, setVerifyingJoin] = useState(false);
   const [timingOpen, setTimingOpen] = useState(false);
+  const [openMemberUser, setOpenMemberUser] = useState<string | null>(null);
+  const [memberMenuCoords, setMemberMenuCoords] = useState<{
+    peerKey: string;
+    left: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
+  const memberAnchorRefs = useRef<Record<string, HTMLElement | null>>({});
+  const memberMenuBoxRef = useRef<HTMLDivElement | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
+
+  const openSettings = useAppStore((s) => s.openSettings);
+  const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
+  const voiceJoined = useVoiceStore((s) => s.joined);
+  const voiceJoining = useVoiceStore((s) => s.joining);
+  const voiceMuted = useVoiceStore((s) => s.muted);
+  const voiceDeafened = useVoiceStore((s) => s.deafened);
+  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
+  const voiceSpeakingPeers = useVoiceStore((s) => s.speakingPeers);
+  const voiceRoster = useVoiceStore((s) => s.roster);
+  const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
+  const voiceStreamError = useVoiceStore((s) => s.streamError);
+  const voiceSpeakerLeak = useVoiceStore((s) => s.speakerLeakDetected);
+  const voiceBtHfpDropped = useVoiceStore((s) => s.bluetoothHfpDropped);
+  const voiceLowBandwidth = useVoiceStore((s) => s.lowBandwidthWarning);
+  const voicePeerOverrides = useVoiceStore((s) => s.peerOverrides);
+  const voiceInputMode = useVoiceStore((s) => s.inputMode);
+  const voicePttVk = useVoiceStore((s) => s.pttVk);
+  const voicePttMod = useVoiceStore((s) => s.pttMod);
+  const setVoicePeerVolume = useVoiceStore((s) => s.setPeerVolume);
+  const [btPreJoinConfirm, setBtPreJoinConfirm] = useState(false);
+  const [voiceSetupOpen, setVoiceSetupOpen] = useState(false);
+  const voiceCaptureHealthy =
+    voiceStreamStatus !== "micBusy" &&
+    voiceStreamStatus !== "reconnecting" &&
+    voiceStreamStatus !== "permissionDenied";
+  const localSpeaking = isLocalVoiceSpeaking({
+    joined: voiceJoined,
+    muted: voiceMuted,
+    deafened: voiceDeafened,
+    localGateOpen: voiceGateOpen,
+    streamStatus: voiceStreamStatus,
+  });
+  const voiceControlsPresence = useAnimatedPresence(voiceEnabled && voiceJoined, 180);
+
+  const voicePeersInCall = voiceRoster.filter((r) => r.inVoice);
+  const blockedVoicePeers = voicePeersInCall.filter((r) => r.transport === "blocked");
+  const relayedVoicePeers = voicePeersInCall.filter((r) => r.transport === "relayed");
+
+  const toggleMemberMenu = useCallback((peerKey: string) => {
+    setOpenMemberUser((prev) => (prev === peerKey ? null : peerKey));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!openMemberUser) {
+      setMemberMenuCoords(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const anchor = memberAnchorRefs.current[openMemberUser];
+      if (!anchor) {
+        setOpenMemberUser(null);
+        return;
+      }
+      const r = anchor.getBoundingClientRect();
+      const vw = window.innerWidth || 1280;
+      const vh = window.innerHeight || 720;
+      const menuWidth = 216;
+      const left = Math.max(12, Math.min(r.right - menuWidth, vw - menuWidth - 12));
+      const spaceBelow = vh - r.bottom - 14;
+      const spaceAbove = r.top - 14;
+      if (spaceBelow < 175 && spaceAbove > spaceBelow) {
+        setMemberMenuCoords({
+          peerKey: openMemberUser,
+          left,
+          bottom: Math.max(12, vh - r.top + 6),
+        });
+      } else {
+        setMemberMenuCoords({
+          peerKey: openMemberUser,
+          left,
+          top: Math.min(vh - 12, r.bottom + 6),
+        });
+      }
+    };
+
+    const onScroll = (e: Event) => {
+      if (
+        memberMenuBoxRef.current &&
+        e.target instanceof Node &&
+        memberMenuBoxRef.current.contains(e.target)
+      ) {
+        return;
+      }
+      setOpenMemberUser(null);
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [openMemberUser]);
+
+  useEffect(() => {
+    if (!openMemberUser) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const anchor = memberAnchorRefs.current[openMemberUser];
+      if (
+        memberMenuBoxRef.current &&
+        !memberMenuBoxRef.current.contains(target) &&
+        (!anchor || !anchor.contains(target))
+      ) {
+        setOpenMemberUser(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpenMemberUser(null);
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openMemberUser]);
+
+  const handleToggleVoice = async (listenOnly = false, skipBtCheck = false) => {
+    const res = await toggleVoiceSession({
+      listenOnly,
+      skipBtCheck: skipBtCheck || btPreJoinConfirm,
+    });
+    if (res === "needsBtConfirm") {
+      setBtPreJoinConfirm(true);
+    } else if (res === "joined" || res === "left") {
+      setBtPreJoinConfirm(false);
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -338,11 +520,118 @@ export const RoomPanel = memo(function RoomPanel({
     Boolean(alignAnchor1) &&
     Math.abs((alignMode ? liveRoomPositionSecs : localPositionSecs) - (alignAnchor1?.roomSecs ?? 0)) >= 30;
   const liveAlignDelta = localPositionSecs - timelineScale * liveRoomPositionSecs;
+  const roomActiveSpeakers = getActiveVoiceSpeakerNames(effectiveUsername, {
+    joined: voiceJoined,
+    muted: voiceMuted,
+    deafened: voiceDeafened,
+    localGateOpen: voiceGateOpen,
+    streamStatus: voiceStreamStatus,
+    speakingPeers: voiceSpeakingPeers,
+    roster: voiceRoster,
+    peerOverrides: voicePeerOverrides,
+  });
+  const roomVoiceCount =
+    voiceJoined
+      ? 1 +
+        voicePeersInCall.filter(
+          (r) => r.username.trim().toLowerCase() !== effectiveUsername.trim().toLowerCase(),
+        ).length
+      : voicePeersInCall.length;
+
+  const getMemberMeta = (p: (typeof participants)[number]) => {
+    const normName = (n: string | null | undefined) => (n ?? "").trim().toLowerCase();
+    const peerKey = normName(p.username);
+    const isSelf = peerKey === normName(effectiveUsername);
+    const canQuickFixFps =
+      !isSelf &&
+      !scaleCalibrated &&
+      p.sourceRelation === "fpsMismatch" &&
+      typeof p.suggestedFpsScale === "number";
+    const canQuickAlign =
+      !isSelf &&
+      !hasTimelineAlignment &&
+      p.sourceRelation === "differentCut" &&
+      localLoaded;
+    const isRowHost =
+      Boolean(p.isHost) ||
+      (ctrlLock.hostControlActive
+        ? peerKey !== "" && peerKey === normName(ctrlLock.hostUsername)
+        : p.isController && !p.isAdmin);
+    const isRowAdmin =
+      Boolean(p.isAdmin) ||
+      (ctrlLock.hostControlActive &&
+        !isRowHost &&
+        ctrlLock.adminUsernames.some((a) => normName(a) === peerKey));
+    const canManageAdmin = ctrlLock.localIsHost && !isSelf && syncConnected && !isRowHost;
+    const voiceEntry: VoicePeerRosterDto | null = isSelf
+      ? voiceJoined
+        ? {
+            username: p.username,
+            voiceId: 0,
+            epoch: 0,
+            inVoice: true,
+            muted: voiceMuted,
+            deafened: voiceDeafened,
+            transport: "directLan",
+            relayVia: null,
+            rttMs: null,
+            lossPct: 0,
+            jitterMs: 0,
+            bitrateKbps: 0,
+            qualityBars: voiceCaptureHealthy ? 4 : 1,
+            healthReason: null,
+            healthFix: null,
+          }
+        : null
+      : voiceRoster.find((r) => normName(r.username) === peerKey) ?? null;
+    const peerInVoice = Boolean(voiceEntry?.inVoice);
+    const peerSpeaking = isSelf
+      ? localSpeaking
+      : peerInVoice &&
+        !voiceEntry?.muted &&
+        !voiceEntry?.deafened &&
+        voiceSpeakingPeers.some((s) => normName(s) === peerKey);
+    const peerVolOv = voicePeerOverrides[peerKey] ?? { volume: 1.0, muted: false };
+    const peerLocallyMuted = !isSelf && peerVolOv.muted;
+    const hasMemberActions =
+      !isSelf &&
+      (canManageAdmin ||
+        voiceEnabled ||
+        peerInVoice ||
+        (canQuickFixFps && Boolean(p.suggestedFpsScale)) ||
+        canQuickAlign);
+
+    return {
+      peerKey,
+      isSelf,
+      canQuickFixFps,
+      canQuickAlign,
+      isRowHost,
+      isRowAdmin,
+      canManageAdmin,
+      voiceEntry,
+      peerInVoice,
+      peerSpeaking,
+      peerVolOv,
+      peerLocallyMuted,
+      hasMemberActions,
+    };
+  };
+
+  const activeMenuParticipant = openMemberUser
+    ? participants.find((p) => p.username.trim().toLowerCase() === openMemberUser) ?? null
+    : null;
+  const activeMenuPayload = usePresencePayload(
+    activeMenuParticipant && memberMenuCoords && memberMenuCoords.peerKey === openMemberUser
+      ? { participant: activeMenuParticipant, coords: memberMenuCoords }
+      : null,
+    160,
+  );
 
   return (
     <div className="flex flex-col flex-1 min-h-0 gap-2.5">
       {/* Unified Minimal Header */}
-      <div className="flex items-center justify-between gap-2 shrink-0 px-1 pt-0.5">
+      <div className="flex items-center justify-between gap-2 shrink-0 px-2 pt-0.5">
         <div className="flex items-center gap-2 min-w-0">
           <WatchPartyIcon bare size={16} className="shrink-0" />
           <span className="text-[13px] font-semibold text-white truncate">Watch Party</span>
@@ -383,26 +672,28 @@ export const RoomPanel = memo(function RoomPanel({
 
         <div className="flex items-center gap-1 shrink-0">
           {roomCode && (
-            <button
-              type="button"
-              onClick={handleLeaveParty}
-              title="Leave Watch Party and keep watching solo"
-              className="ep-bar-icon-btn h-7 px-2 rounded-full inline-flex items-center gap-1 text-[11.5px] font-medium text-secondary hover:text-bad cursor-pointer"
-            >
-              <PartyLeaveIcon size={14} className="shrink-0" />
-              <span>Leave</span>
-            </button>
+            <GlassHoverTip label="Leave Watch Party" detail="Keep watching solo">
+              <button
+                type="button"
+                onClick={handleLeaveParty}
+                className="ep-bar-icon-btn h-7 px-2 rounded-full inline-flex items-center gap-1 text-[11.5px] font-medium text-secondary hover:text-bad cursor-pointer"
+              >
+                <PartyLeaveIcon size={14} className="shrink-0" />
+                <span>Leave</span>
+              </button>
+            </GlassHoverTip>
           )}
           {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close Watch Party menu"
-              title="Close (Esc)"
-              className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
-            >
-              <AppCloseIcon size={14} />
-            </button>
+            <GlassHoverTip label="Close" detail="Esc">
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close Watch Party menu"
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
+              >
+                <AppCloseIcon size={14} />
+              </button>
+            </GlassHoverTip>
           )}
         </div>
       </div>
@@ -485,8 +776,26 @@ export const RoomPanel = memo(function RoomPanel({
             )}
           </div>
         </div>
+      ) : voiceSetupOpen ? (
+        <div className="ep-menu-scroll anim-tab-in flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden gap-2 -mr-2 pr-2 -ml-1 pl-1">
+          <button
+            type="button"
+            onClick={() => setVoiceSetupOpen(false)}
+            className="ep-menu-row ep-press w-fit px-2 py-1 rounded-full inline-flex items-center gap-1.5 text-[11.5px] font-medium text-secondary hover:text-white cursor-pointer"
+          >
+            <AppArrowIcon direction="left" size={13} />
+            <span>Back to Watch Party</span>
+          </button>
+          <VoiceQuickSettingsTray
+            open={voiceSetupOpen}
+            onOpenFullSettings={() => {
+              setVoiceSetupOpen(false);
+              openSettings("voice");
+            }}
+          />
+        </div>
       ) : (
-        <div className="ep-menu-scroll anim-tab-in flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden gap-2 pr-1">
+        <div className="ep-menu-scroll anim-tab-in flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden gap-2 -mr-2 pr-2 -ml-1 pl-1">
           {hasConnectionIssue && (
             <div className="px-2 py-1 flex items-center justify-between gap-2 text-[11px] text-bad">
               <span className="truncate">{endpointSummary.detailText || "Connection interrupted"}</span>
@@ -517,24 +826,47 @@ export const RoomPanel = memo(function RoomPanel({
           <button
             type="button"
             onClick={() => void handleCopyRoom()}
-            title={serverOverrideNotice || "Click to copy share code"}
             className="ep-menu-row ep-press w-full px-2 py-1.5 flex items-center justify-between gap-3 text-left cursor-pointer"
           >
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 text-[11px] text-secondary">
                 <span>{literalRoom ? "Syncplay Room" : "Share Code"}</span>
                 {ctrlLock.hasControllers && (
-                  <span className="inline-flex items-center gap-1 text-accent-soft font-medium">
-                    <span>·</span>
-                    <PartyHostIcon size={11} />
-                    <span>
-                      {ctrlLock.localIsHost
-                        ? "You host"
-                        : ctrlLock.localIsAdmin
-                          ? "Admin"
-                          : ctrlLock.hostUsername ?? ctrlLock.controllers[0]}
+                  <GlassHoverTip
+                    label={
+                      ctrlLock.hostControlActive
+                        ? ctrlLock.localIsHost
+                          ? "Host-only control"
+                          : ctrlLock.localIsAdmin
+                            ? "Admin control"
+                            : "Host-only room"
+                        : "Room Host"
+                    }
+                    detail={
+                      ctrlLock.hostControlActive
+                        ? ctrlLock.localIsHost
+                          ? "Assign Admins via member arrow"
+                          : ctrlLock.localIsAdmin
+                            ? "You can control playback"
+                            : `Controlled by ${ctrlLock.hostUsername ?? "the host"}${
+                                ctrlLock.adminUsernames.length > 0 ? " & admins" : ""
+                              }`
+                        : serverOverrideNotice || "Created this room"
+                    }
+                    accent={ctrlLock.localIsAdmin && !ctrlLock.localIsHost ? "admin" : "host"}
+                  >
+                    <span className="inline-flex items-center gap-1 text-accent-soft font-medium">
+                      <span>·</span>
+                      <PartyHostIcon size={12} />
+                      <span>
+                        {ctrlLock.localIsHost
+                          ? "You host"
+                          : ctrlLock.localIsAdmin
+                            ? "Admin"
+                            : ctrlLock.hostUsername ?? ctrlLock.controllers[0]}
+                      </span>
                     </span>
-                  </span>
+                  </GlassHoverTip>
                 )}
               </div>
               <div className="text-[19px] leading-tight font-semibold tracking-[0.16em] text-white num truncate">
@@ -551,23 +883,6 @@ export const RoomPanel = memo(function RoomPanel({
               <span>{copied ? "Copied" : "Copy"}</span>
             </span>
           </button>
-
-          {ctrlLock.hostControlActive && (
-            <div className="px-2 py-1 rounded-xl bg-white/[0.04] border border-white/[0.07] flex items-center justify-between gap-2 text-[11px]">
-              <span className="inline-flex items-center gap-1.5 text-secondary min-w-0 truncate">
-                <PartyHostIcon size={12} className="shrink-0" />
-                <span className="truncate">
-                  {ctrlLock.localIsHost
-                    ? "Host-only control · Give friends Admin below"
-                    : ctrlLock.localIsAdmin
-                      ? "Admin active · You can control playback"
-                      : `Host-only · Controlled by ${ctrlLock.hostUsername ?? "the host"}${
-                          ctrlLock.adminUsernames.length > 0 ? " & admins" : ""
-                        }`}
-                </span>
-              </span>
-            </div>
-          )}
 
           {mismatch && (
             <div
@@ -635,6 +950,317 @@ export const RoomPanel = memo(function RoomPanel({
             </div>
           )}
 
+          {/* Opt-in Room Voice Bar */}
+          {syncConnected && (
+            <div className="px-2 py-1 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                {!voiceEnabled ? (
+                  <button
+                    type="button"
+                    onClick={() => openSettings("voice")}
+                    className="ep-bar-pill ep-press h-7 px-3 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-muted hover:text-white cursor-pointer"
+                  >
+                    <AppVoiceWaveIcon active={false} speaking={false} size={13} />
+                    <span>Voice Disabled</span>
+                  </button>
+                ) : voiceJoined ? (
+                  <GlassHoverTip
+                    label={
+                      voiceDeafened
+                        ? "Voice deafened"
+                        : voiceMuted
+                          ? "Mic muted"
+                          : voiceInputMode === "ptt"
+                            ? `PTT · Hold ${formatVoiceHotkey(voicePttVk, voicePttMod)}`
+                            : "Voice connected"
+                    }
+                    detail={
+                      roomVoiceCount > 1
+                        ? `${roomVoiceCount} in voice · Headphones or PTT recommended`
+                        : "Headphones or PTT recommended"
+                    }
+                    accent={
+                      roomActiveSpeakers.length > 0
+                        ? "speaking"
+                        : voiceDeafened
+                          ? "bad"
+                          : "ok"
+                    }
+                    className="inline-flex items-center min-w-0"
+                  >
+                    <div className="flex items-center gap-2 min-w-0 cursor-default">
+                      <AppVoiceWaveIcon
+                        active
+                        speaking={roomActiveSpeakers.length > 0}
+                        size={13}
+                        className="shrink-0"
+                      />
+                      <span
+                        className={`text-[11.5px] font-medium truncate ${
+                          roomActiveSpeakers.length > 0
+                            ? "text-[#38BDF8]"
+                            : voiceDeafened
+                              ? "text-bad/90"
+                              : voiceMuted
+                                ? "text-secondary"
+                                : "text-white/90"
+                        }`}
+                      >
+                        {voiceJoining
+                          ? "Starting Voice…"
+                          : roomActiveSpeakers.length > 0
+                            ? roomActiveSpeakers.length === 1
+                              ? `${roomActiveSpeakers[0]} speaking`
+                              : `${roomActiveSpeakers.slice(0, 2).join(", ")} speaking`
+                            : voiceDeafened
+                              ? "Deafened"
+                              : voiceMuted
+                                ? "Mic muted"
+                                : voiceInputMode === "ptt"
+                                  ? `PTT · ${formatVoiceHotkey(voicePttVk, voicePttMod)}`
+                                  : roomVoiceCount > 1
+                                    ? `Voice · ${roomVoiceCount}`
+                                    : "Voice connected"}
+                      </span>
+                    </div>
+                  </GlassHoverTip>
+                ) : (
+                  <GlassHoverTip
+                    label="Join voice"
+                    detail="Talk with peers in this room"
+                    className="inline-flex items-center min-w-0"
+                  >
+                    <button
+                      type="button"
+                      disabled={voiceJoining}
+                      onClick={() => void handleToggleVoice(false)}
+                      className="ep-glass-primary-pill ep-press h-7 px-3 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-white cursor-pointer disabled:opacity-60"
+                    >
+                      <AppVoiceWaveIcon active={false} speaking={false} size={13} />
+                      <span>
+                        {voiceJoining
+                          ? "Starting Voice…"
+                          : roomVoiceCount > 0
+                            ? `Join Voice (${roomVoiceCount})`
+                            : "Join Voice"}
+                      </span>
+                    </button>
+                  </GlassHoverTip>
+                )}
+
+                {voiceEnabled && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {!voiceJoined && (
+                      <GlassHoverTip
+                        label="Listen Only"
+                        detail="Join muted without capturing mic"
+                      >
+                        <button
+                          type="button"
+                          disabled={voiceJoining}
+                          onClick={() => void handleToggleVoice(true)}
+                          aria-label="Listen Only"
+                          className="ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer disabled:opacity-60"
+                        >
+                          <AppHeadphonesIcon size={14} />
+                        </button>
+                      </GlassHoverTip>
+                    )}
+
+                    {voiceControlsPresence.mounted && (
+                      <div
+                        className={`inline-flex items-center gap-1.5 ${
+                          voiceControlsPresence.exiting
+                            ? "anim-pop-out pointer-events-none"
+                            : "anim-pop-in"
+                        }`}
+                      >
+                        <VoiceMicDeafenPills
+                          muted={voiceMuted}
+                          deafened={voiceDeafened}
+                          speaking={localSpeaking}
+                          captureHealthy={voiceCaptureHealthy}
+                        />
+                      </div>
+                    )}
+
+                    <GlassHoverTip
+                      label="Audio & Devices"
+                      detail={
+                        !voiceCaptureHealthy ||
+                        voiceBtHfpDropped ||
+                        voiceSpeakerLeak ||
+                        blockedVoicePeers.length > 0
+                          ? "Voice alert — inspect audio or Voice Health"
+                          : "Mic, output, mode & ducking"
+                      }
+                      accent={
+                        !voiceCaptureHealthy || voiceBtHfpDropped || voiceSpeakerLeak
+                          ? "warn"
+                          : "default"
+                      }
+                    >
+                      <button
+                        type="button"
+                        aria-label="Voice & Audio Quick Setup"
+                        aria-expanded={voiceSetupOpen}
+                        data-tone={
+                          !voiceCaptureHealthy || voiceBtHfpDropped || voiceSpeakerLeak
+                            ? "warn"
+                            : undefined
+                        }
+                        onClick={() => setVoiceSetupOpen((o) => !o)}
+                        className={`ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer ${
+                          voiceSetupOpen
+                            ? "bg-white/15 text-white border-white/30"
+                            : "text-secondary hover:text-white"
+                        }`}
+                      >
+                        <AppVoiceTuneIcon active={voiceSetupOpen} size={14} />
+                      </button>
+                    </GlassHoverTip>
+
+                    {voiceControlsPresence.mounted && (
+                      <div
+                        className={`inline-flex items-center ${
+                          voiceControlsPresence.exiting
+                            ? "anim-pop-out pointer-events-none"
+                            : "anim-pop-in"
+                        }`}
+                      >
+                        <GlassHoverTip
+                          label="Leave Voice"
+                          detail="Disconnect voice chat"
+                          accent="bad"
+                        >
+                          <button
+                            type="button"
+                            disabled={voiceJoining}
+                            aria-label="Leave Voice"
+                            data-tone="leave"
+                            onClick={() => void handleToggleVoice(false)}
+                            className="ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer disabled:opacity-60"
+                          >
+                            <PartyLeaveIcon size={13} />
+                          </button>
+                        </GlassHoverTip>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <AnimatedCollapse open={btPreJoinConfirm && !voiceJoined} innerClassName="pt-1">
+                <div
+                  role="alert"
+                  className="ep-glass-warning-inline rounded-[12px] px-2.5 py-2 space-y-1.5 text-[11px]"
+                >
+                  <p className="text-secondary leading-snug">
+                    Bluetooth mic active — Windows hands-free mode cuts movie audio quality. Use a wired mic or Listen Only for full stereo.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleVoice(false, true)}
+                      className="ep-warning-action ep-press h-6 px-2.5 rounded-full text-[10.5px] font-semibold text-white cursor-pointer"
+                    >
+                      Join Anyway
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleVoice(true, true)}
+                      className="ep-bar-pill ep-press h-6 px-2.5 rounded-full text-[10.5px] font-medium text-secondary hover:text-white cursor-pointer"
+                    >
+                      Listen Only
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBtPreJoinConfirm(false)}
+                      className="h-6 px-2 text-[10.5px] text-muted hover:text-white cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </AnimatedCollapse>
+
+              <AnimatedCollapse
+                open={
+                  voiceJoined &&
+                  (voiceStreamStatus === "micBusy" ||
+                    voiceStreamStatus === "reconnecting" ||
+                    voiceStreamStatus === "permissionDenied" ||
+                    Boolean(voiceStreamError) ||
+                    voiceBtHfpDropped ||
+                    voiceSpeakerLeak ||
+                    voiceLowBandwidth ||
+                    relayedVoicePeers.length > 0 ||
+                    blockedVoicePeers.length > 0)
+                }
+              >
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10.5px] text-secondary px-0.5 pt-0.5">
+                  {voiceStreamStatus === "micBusy" && (
+                    <span className="text-bad font-medium">
+                      Mic in exclusive use by another app
+                    </span>
+                  )}
+                  {voiceStreamStatus === "reconnecting" && (
+                    <span className="text-warn font-medium">
+                      Reconnecting audio device…
+                    </span>
+                  )}
+                  {voiceStreamStatus === "permissionDenied" && (
+                    <span className="text-bad font-medium">
+                      Microphone permission denied
+                    </span>
+                  )}
+                  {voiceStreamError &&
+                    voiceStreamStatus !== "micBusy" &&
+                    voiceStreamStatus !== "reconnecting" &&
+                    voiceStreamStatus !== "permissionDenied" && (
+                      <span className="text-warn">{voiceStreamError}</span>
+                    )}
+                  {voiceBtHfpDropped && (
+                    <span className="text-warn font-medium">
+                      Bluetooth mic dropped — switch mic or Listen Only
+                    </span>
+                  )}
+                  {voiceSpeakerLeak && (
+                    <span className="text-warn font-medium">
+                      Speaker echo guard active (headphones recommended)
+                    </span>
+                  )}
+                  {voiceLowBandwidth && (
+                    <span className="text-warn">
+                      Low upload bandwidth — audio quality adapted
+                    </span>
+                  )}
+                  {relayedVoicePeers.length > 0 && (
+                    <GlassHoverTip
+                      label="Relayed Voice"
+                      detail="1-hop encrypted relay via peer"
+                      accent="admin"
+                    >
+                      <span className="text-accent-soft cursor-default">
+                        Relayed via {relayedVoicePeers[0].relayVia}
+                      </span>
+                    </GlassHoverTip>
+                  )}
+                  {blockedVoicePeers.length > 0 && (
+                    <span className="text-warn">
+                      Voice blocked for{" "}
+                      {blockedVoicePeers
+                        .map((b) =>
+                          b.healthReason ? `${b.username} (${b.healthReason})` : b.username,
+                        )
+                        .join(", ")}
+                    </span>
+                  )}
+                </div>
+              </AnimatedCollapse>
+            </div>
+          )}
+
           {/* Viewers Header */}
           <div className="px-2 pt-1 flex items-center justify-between gap-2 text-[11px]">
             <div className="flex items-center gap-1.5 font-medium text-secondary">
@@ -668,8 +1294,17 @@ export const RoomPanel = memo(function RoomPanel({
           ) : (
             <div className="flex flex-col gap-0.5">
               {participants.map((p) => {
-                const isSelf =
-                  p.username.trim().toLowerCase() === effectiveUsername.trim().toLowerCase();
+                const {
+                  peerKey,
+                  isSelf,
+                  isRowHost,
+                  isRowAdmin,
+                  voiceEntry,
+                  peerInVoice,
+                  peerSpeaking,
+                  peerLocallyMuted,
+                  hasMemberActions,
+                } = getMemberMeta(p);
                 const localHasFile =
                   localLoaded && !playerError && Boolean(selectedFileName?.trim());
                 const badge = formatParticipantMatchBadge(p, {
@@ -684,40 +1319,69 @@ export const RoomPanel = memo(function RoomPanel({
                     ? "Private title"
                     : formatDisplayMediaTitle(p.fileName).title || readablePeer.label
                   : null;
-                const canQuickFixFps =
-                  !isSelf &&
-                  !scaleCalibrated &&
-                  p.sourceRelation === "fpsMismatch" &&
-                  typeof p.suggestedFpsScale === "number";
-                const canQuickAlign =
-                  !isSelf &&
-                  !hasTimelineAlignment &&
-                  p.sourceRelation === "differentCut" &&
-                  localLoaded;
-                const normName = (n: string | null | undefined) => (n ?? "").trim().toLowerCase();
-                const isRowHost =
-                  Boolean(p.isHost) ||
-                  (ctrlLock.hostControlActive
-                    ? normName(p.username) !== "" &&
-                      normName(p.username) === normName(ctrlLock.hostUsername)
-                    : p.isController && !p.isAdmin);
-                const isRowAdmin =
-                  Boolean(p.isAdmin) ||
-                  (ctrlLock.hostControlActive &&
-                    !isRowHost &&
-                    ctrlLock.adminUsernames.some((a) => normName(a) === normName(p.username)));
-                const canManageAdmin = ctrlLock.localIsHost && !isSelf && syncConnected && !isRowHost;
-                const adminBusy = busyAdminUser === p.username;
+                const peerVoiceBlocked =
+                  voiceEntry?.transport === "blocked" || voiceEntry?.transport === "unavailable";
+                const baseTransport =
+                  voiceEntry?.transport === "relayed" && voiceEntry.relayVia
+                    ? `Relayed via ${voiceEntry.relayVia}`
+                    : voiceTransportLabel(voiceEntry?.transport);
+                const voiceHealthSuffix = voiceEntry?.healthReason
+                  ? ` · ${voiceEntry.healthReason}${voiceEntry.healthFix ? ` (${voiceEntry.healthFix})` : ""}`
+                  : voiceEntry?.bitrateKbps
+                    ? ` · ${Math.round(voiceEntry.bitrateKbps)} kbps`
+                    : "";
+                const voiceTransportDetail = isSelf
+                  ? voiceCaptureHealthy
+                    ? voiceMuted
+                      ? "Mic muted"
+                      : "Mic ready"
+                    : voiceStreamStatus === "micBusy"
+                      ? "Mic busy in another app"
+                      : voiceStreamStatus === "permissionDenied"
+                        ? "Microphone access denied"
+                        : "Reconnecting audio…"
+                  : `${baseTransport}${voiceHealthSuffix}`;
+                const voiceTipLabel = voiceEntry?.deafened
+                  ? "Deafened"
+                  : peerLocallyMuted
+                    ? "Muted by you"
+                    : voiceEntry?.muted
+                      ? "Mic muted"
+                      : peerSpeaking && !peerLocallyMuted
+                        ? "Speaking"
+                        : "In voice";
+                const voiceTipAccent: "speaking" | "bad" | "warn" | "ok" = voiceEntry?.deafened ||
+                  voiceEntry?.muted ||
+                  peerLocallyMuted
+                  ? "bad"
+                  : peerVoiceBlocked || (isSelf && !voiceCaptureHealthy)
+                    ? "warn"
+                    : peerSpeaking
+                      ? "speaking"
+                      : "ok";
+                const isMenuOpen = memberMenuCoords?.peerKey === peerKey && openMemberUser === peerKey;
+
                 return (
                   <div
                     key={p.username}
+                    onContextMenu={(e) => {
+                      if (!hasMemberActions) return;
+                      e.preventDefault();
+                      toggleMemberMenu(peerKey);
+                    }}
                     className="px-2 py-1.5 rounded-xl flex items-start gap-2.5 min-w-0 hover:bg-white/[0.045] transition-colors"
                   >
                     <ProfileAvatar
                       avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId)}
                       size={26}
-                      className={`ring-2 shrink-0 mt-0.5 ${
-                        badge.isMismatch ? "ring-warn/85" : p.isReady ? "ring-ok/80" : "ring-warn/75"
+                      className={`ring-2 shrink-0 mt-0.5 transition-shadow duration-150 ${
+                        peerSpeaking && !peerLocallyMuted
+                          ? "ring-[#38BDF8] ep-speaking-ring"
+                          : badge.isMismatch
+                            ? "ring-warn/85"
+                            : p.isReady
+                              ? "ring-ok/80"
+                              : "ring-warn/75"
                       }`}
                     />
                     <div className="min-w-0 flex-1 space-y-0.5">
@@ -728,33 +1392,121 @@ export const RoomPanel = memo(function RoomPanel({
                           </span>
                           {isSelf && <span className="text-[11px] text-muted shrink-0">you</span>}
                           {isRowHost && (
-                            <span
-                              title="Room host"
-                              className="inline-flex items-center gap-1 text-[10.5px] font-medium text-accent-soft shrink-0"
+                            <GlassHoverTip
+                              label="Room Host"
+                              detail="Controls room & playback"
+                              accent="host"
                             >
-                              <PartyHostIcon size={11} />
-                              <span>Host</span>
-                            </span>
+                              <span
+                                aria-label="Room Host"
+                                className="inline-flex items-center justify-center shrink-0 cursor-default"
+                              >
+                                <PartyHostIcon size={14} />
+                              </span>
+                            </GlassHoverTip>
                           )}
                           {!isRowHost && isRowAdmin && (
-                            <span
-                              title="Room admin (can control playback)"
-                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-accent/20 border border-accent-soft/30 text-[10px] font-medium text-accent-soft shrink-0"
+                            <GlassHoverTip
+                              label="Room Admin"
+                              detail="Can control playback"
+                              accent="admin"
                             >
-                              <PartyAdminIcon size={10} />
-                              <span>Admin</span>
-                            </span>
+                              <span
+                                aria-label="Room Admin"
+                                className="inline-flex items-center justify-center shrink-0 cursor-default"
+                              >
+                                <PartyAdminIcon size={13} />
+                              </span>
+                            </GlassHoverTip>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {!p.isReady && (
-                            <span className="text-[10.5px] font-medium text-warn">Not ready</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {peerInVoice && (
+                            <GlassHoverTip
+                              label={voiceTipLabel}
+                              detail={voiceTransportDetail}
+                              accent={voiceTipAccent}
+                              disabled={isMenuOpen}
+                            >
+                              <button
+                                type="button"
+                                disabled={isSelf}
+                                aria-label={`${p.username} ${voiceTipLabel}`}
+                                onClick={() => toggleMemberMenu(peerKey)}
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium transition-colors ${
+                                  isSelf ? "cursor-default" : "cursor-pointer hover:bg-white/10"
+                                } ${
+                                  peerVoiceBlocked
+                                    ? "text-warn bg-warn/10"
+                                    : voiceEntry?.deafened || voiceEntry?.muted || peerLocallyMuted
+                                      ? "text-bad bg-bad/10"
+                                      : peerSpeaking
+                                        ? "text-[#38BDF8] bg-[#38BDF8]/15"
+                                        : "text-secondary"
+                                }`}
+                              >
+                                {voiceEntry?.deafened ? (
+                                  <AppHeadphonesIcon deafened size={12} />
+                                ) : (
+                                  <AppMicIcon
+                                    muted={Boolean(voiceEntry?.muted || peerLocallyMuted)}
+                                    speaking={peerSpeaking && !peerLocallyMuted}
+                                    size={12}
+                                  />
+                                )}
+                                {!isSelf && voiceEntry?.transport === "relayed" && (
+                                  <span>Relay</span>
+                                )}
+                                {!isSelf && !peerVoiceBlocked && (
+                                  <AppSignalBarsIcon
+                                    bars={voiceEntry?.qualityBars}
+                                    speaking={peerSpeaking && !peerLocallyMuted}
+                                    size={11}
+                                    className="shrink-0"
+                                  />
+                                )}
+                              </button>
+                            </GlassHoverTip>
                           )}
-                          <PlayerReadyIcon
-                            ready={p.isReady}
-                            size={14}
-                            className="shrink-0"
-                          />
+                          <GlassHoverTip
+                            label={p.isReady ? "Ready" : "Not ready"}
+                            detail={p.isReady ? "Playback synced" : "Waiting for video"}
+                            accent={p.isReady ? "ok" : "warn"}
+                          >
+                            <span
+                              aria-label={p.isReady ? "Ready" : "Not ready"}
+                              className="inline-flex items-center shrink-0 cursor-default"
+                            >
+                              <PlayerReadyIcon ready={p.isReady} size={14} />
+                            </span>
+                          </GlassHoverTip>
+                          {hasMemberActions ? (
+                            <GlassHoverTip
+                              label="Member actions"
+                              detail="Voice & role"
+                              disabled={isMenuOpen}
+                            >
+                              <button
+                                ref={(el) => {
+                                  memberAnchorRefs.current[peerKey] = el;
+                                }}
+                                type="button"
+                                aria-label={`Actions for ${p.username}`}
+                                aria-expanded={isMenuOpen}
+                                aria-haspopup="menu"
+                                onClick={() => toggleMemberMenu(peerKey)}
+                                className={`ep-press h-5.5 w-5.5 rounded-full flex items-center justify-center cursor-pointer transition-colors ${
+                                  isMenuOpen
+                                    ? "text-white bg-white/15"
+                                    : "text-secondary hover:text-white hover:bg-white/[0.08]"
+                                }`}
+                              >
+                                <AppMemberMenuArrowIcon open={isMenuOpen} size={14} />
+                              </button>
+                            </GlassHoverTip>
+                          ) : (
+                            <span aria-hidden="true" className="w-5.5 shrink-0" />
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 text-[11px] min-w-0">
@@ -770,60 +1522,6 @@ export const RoomPanel = memo(function RoomPanel({
                           </>
                         )}
                       </div>
-                      {(canManageAdmin || (canQuickFixFps && p.suggestedFpsScale) || canQuickAlign) && (
-                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                          {canManageAdmin && (
-                            <button
-                              type="button"
-                              disabled={Boolean(busyAdminUser)}
-                              onClick={() => void handleTogglePeerAdmin(p.username, !isRowAdmin)}
-                              className={`ep-press px-2 py-0.5 rounded-full text-[10.5px] font-medium inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 ${
-                                isRowAdmin
-                                  ? "ep-bar-pill text-secondary hover:bg-bad/20 hover:text-bad"
-                                  : "ep-bar-pill text-accent-soft hover:text-white"
-                              }`}
-                            >
-                              <PartyAdminIcon size={10} />
-                              <span>
-                                {adminBusy
-                                  ? "Updating…"
-                                  : isRowAdmin
-                                    ? "Remove Admin"
-                                    : "Make Admin"}
-                              </span>
-                            </button>
-                          )}
-                          {canQuickFixFps && p.suggestedFpsScale && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setTimingOpen(true);
-                                void applyTimelineTransform(
-                                  { offsetSecs: timelineOffsetSecs, scale: p.suggestedFpsScale! },
-                                  `FPS matched (${p.suggestedFpsLabel ?? "calibrated"})`,
-                                );
-                              }}
-                              className="ep-glass-primary-pill ep-press px-2.5 py-0.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium text-white cursor-pointer"
-                            >
-                              <PartyFpsMatchIcon size={11} />
-                              <span>Fix FPS</span>
-                            </button>
-                          )}
-                          {canQuickAlign && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setTimingOpen(true);
-                                void setSceneAlignMode(true);
-                              }}
-                              className="ep-press px-2 py-0.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium bg-warn/20 text-warn hover:bg-warn/30 cursor-pointer"
-                            >
-                              <PartyAlignSceneIcon size={11} />
-                              <span>Align</span>
-                            </button>
-                          )}
-                        </div>
-                      )}
                     </div>
                   </div>
                 );
@@ -982,15 +1680,16 @@ export const RoomPanel = memo(function RoomPanel({
                           <span>Align to Friend’s Scene…</span>
                         </button>
                         {hasTimelineAlignment && (
-                          <button
-                            type="button"
-                            onClick={() => void resetTimelineAlignment()}
-                            title="Reset source offset & speed"
-                            className="ep-bar-icon-btn ep-press h-7.5 px-2 rounded-xl inline-flex items-center gap-1 text-[11px] text-muted hover:text-white cursor-pointer"
-                          >
-                            <AppResetIcon size={12} />
-                            <span>Reset</span>
-                          </button>
+                          <GlassHoverTip label="Reset timing" detail="Clear offset & speed">
+                            <button
+                              type="button"
+                              onClick={() => void resetTimelineAlignment()}
+                              className="ep-bar-icon-btn ep-press h-7.5 px-2 rounded-xl inline-flex items-center gap-1 text-[11px] text-muted hover:text-white cursor-pointer"
+                            >
+                              <AppResetIcon size={12} />
+                              <span>Reset</span>
+                            </button>
+                          </GlassHoverTip>
                         )}
                       </div>
                     )}
@@ -1062,6 +1761,186 @@ export const RoomPanel = memo(function RoomPanel({
           )}
         </div>
       )}
+
+      {activeMenuPayload.mounted &&
+        activeMenuPayload.value &&
+        typeof document !== "undefined" &&
+        (() => {
+          const { participant: menuPeer, coords } = activeMenuPayload.value;
+          const menuMeta = getMemberMeta(menuPeer);
+          const adminBusy = busyAdminUser === menuPeer.username;
+          const statusLabel = menuMeta.isRowHost
+            ? "Host"
+            : menuMeta.isRowAdmin
+              ? "Admin"
+              : menuMeta.peerInVoice
+                ? "In voice"
+                : "Viewer";
+
+          return createPortal(
+            <div
+              ref={memberMenuBoxRef}
+              role="menu"
+              aria-label={`Actions for ${menuPeer.username}`}
+              data-glass-region="true"
+              style={{
+                left: `${coords.left}px`,
+                ...(coords.top !== undefined ? { top: `${coords.top}px` } : {}),
+                ...(coords.bottom !== undefined ? { bottom: `${coords.bottom}px` } : {}),
+              }}
+              className={`${
+                activeMenuPayload.exiting
+                  ? "anim-pop-out pointer-events-none"
+                  : "anim-pop-in"
+              } ep-glass-submenu fixed z-[80] w-[216px] rounded-2xl p-1.5 flex flex-col gap-1`}
+            >
+              <div className="px-2 py-1 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <ProfileAvatar
+                    avatarId={resolvePeerAvatarId(menuPeer.username, effectiveUsername, avatarId)}
+                    size={18}
+                    className={`ring-1 shrink-0 ${
+                      menuMeta.peerSpeaking && !menuMeta.peerLocallyMuted
+                        ? "ring-[#38BDF8]"
+                        : "ring-white/20"
+                    }`}
+                  />
+                  <span className="text-[11.5px] font-medium text-white truncate">
+                    {menuPeer.username}
+                  </span>
+                </div>
+                <span className="text-[10px] font-medium text-secondary shrink-0">
+                  {statusLabel}
+                </span>
+              </div>
+
+              {!menuMeta.isSelf && (menuMeta.peerInVoice || voiceEnabled) && (
+                <div className="space-y-1 pb-0.5">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() =>
+                      setVoicePeerVolume(
+                        menuPeer.username,
+                        menuMeta.peerVolOv.volume,
+                        !menuMeta.peerVolOv.muted,
+                      )
+                    }
+                    className={`ep-menu-row ep-press w-full px-2 py-1.5 rounded-xl flex items-center justify-between gap-2 text-left text-[11.5px] font-medium cursor-pointer ${
+                      menuMeta.peerLocallyMuted
+                        ? "text-bad"
+                        : "text-secondary hover:text-white"
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <AppMicIcon
+                        muted={menuMeta.peerLocallyMuted}
+                        speaking={menuMeta.peerSpeaking}
+                        size={14}
+                      />
+                      <span>
+                        {menuMeta.peerLocallyMuted ? "Unmute in Voice" : "Mute in Voice"}
+                      </span>
+                    </span>
+                  </button>
+
+                  <div className="px-2 pt-0.5 pb-1.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[10.5px]">
+                      <span className="inline-flex items-center gap-1.5 text-secondary">
+                        <AppSpeakerVolumeIcon
+                          muted={menuMeta.peerLocallyMuted || menuMeta.peerVolOv.volume === 0}
+                          size={13}
+                        />
+                        <span>Voice Volume</span>
+                      </span>
+                      <span className="num font-medium text-white/90">
+                        {Math.round(menuMeta.peerVolOv.volume * 100)}%
+                      </span>
+                    </div>
+                    <Scrubber
+                      ariaLabel={`${menuPeer.username} voice volume`}
+                      min={0}
+                      max={200}
+                      step={5}
+                      value={Math.round(menuMeta.peerVolOv.volume * 100)}
+                      alwaysShowThumb
+                      formatTooltip={(v) => `${Math.round(v)}%`}
+                      onChange={(v) =>
+                        setVoicePeerVolume(
+                          menuPeer.username,
+                          v / 100,
+                          menuMeta.peerVolOv.muted,
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              )}
+
+              {menuMeta.canManageAdmin && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={Boolean(busyAdminUser)}
+                  onClick={() => {
+                    void handleTogglePeerAdmin(menuPeer.username, !menuMeta.isRowAdmin);
+                    setOpenMemberUser(null);
+                  }}
+                  className={`ep-menu-row ep-press w-full px-2 py-1.5 rounded-xl flex items-center gap-2 text-left text-[11.5px] font-medium cursor-pointer disabled:opacity-50 ${
+                    menuMeta.isRowAdmin
+                      ? "text-secondary hover:text-bad"
+                      : "text-accent-soft hover:text-white"
+                  }`}
+                >
+                  <PartyAdminIcon size={14} revoke={menuMeta.isRowAdmin} className="shrink-0" />
+                  <span>
+                    {adminBusy
+                      ? "Updating…"
+                      : menuMeta.isRowAdmin
+                        ? "Remove Admin"
+                        : "Make Admin"}
+                  </span>
+                </button>
+              )}
+
+              {menuMeta.canQuickFixFps && menuPeer.suggestedFpsScale && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMemberUser(null);
+                    setTimingOpen(true);
+                    void applyTimelineTransform(
+                      { offsetSecs: timelineOffsetSecs, scale: menuPeer.suggestedFpsScale! },
+                      `FPS matched (${menuPeer.suggestedFpsLabel ?? "calibrated"})`,
+                    );
+                  }}
+                  className="ep-menu-row ep-press w-full px-2 py-1.5 rounded-xl flex items-center gap-2 text-left text-[11.5px] font-medium text-white cursor-pointer"
+                >
+                  <PartyFpsMatchIcon size={14} className="shrink-0" />
+                  <span>Fix FPS</span>
+                </button>
+              )}
+
+              {menuMeta.canQuickAlign && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMemberUser(null);
+                    setTimingOpen(true);
+                    void setSceneAlignMode(true);
+                  }}
+                  className="ep-menu-row ep-press w-full px-2 py-1.5 rounded-xl flex items-center gap-2 text-left text-[11.5px] font-medium text-warn cursor-pointer"
+                >
+                  <PartyAlignSceneIcon size={14} className="shrink-0" />
+                  <span>Align Scene</span>
+                </button>
+              )}
+            </div>,
+            document.body,
+          );
+        })()}
     </div>
   );
 });
