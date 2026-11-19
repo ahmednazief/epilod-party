@@ -1804,10 +1804,13 @@ where
                             sm.last_server_playstate.as_ref().map(|ps| ps.paused);
                         let (any_peer_has_file, compatible_peer_exists) =
                             summarize_peer_compatibility(&participants, &active_username, local_file);
+                        let local_file_known =
+                            local_file.lock().ok().is_some_and(|g| g.is_some());
                         let all_peers_incompatible =
-                            sm.local_duration_secs.is_some()
+                            (sm.local_duration_secs.is_some() || local_file_known)
                                 && any_peer_has_file
                                 && !compatible_peer_exists;
+                        let loading_media_now = mpv.is_loading_media();
                         let suppress_unauth_state = unauthorized_actor.is_some()
                             && (authoritative_playstate.is_some()
                                 || should_enforce_authoritative_playstate(
@@ -1815,9 +1818,13 @@ where
                                     &active_username,
                                     &room_control,
                                 ));
-                        let effective_state = if all_peers_incompatible || suppress_unauth_state {
-                            // Ignore peer states from other episodes or unauthorized non-controllers
-                            // while still letting ping and ignoring_on_the_fly ACKs progress.
+                        let effective_state = if loading_media_now
+                            || all_peers_incompatible
+                            || suppress_unauth_state
+                        {
+                            // Ignore peer states while loading a new file, from other episodes,
+                            // or from unauthorized non-controllers while still letting ping and
+                            // ignoring_on_the_fly ACKs progress.
                             epilod_core::syncplay::ServerState {
                                 playstate: None,
                                 ..st.clone()
@@ -1856,7 +1863,8 @@ where
                         if sm.align_mode {
                             emit_room_state(app, &sm, now_secs);
                         }
-                        let server_unpaused = !all_peers_incompatible
+                        let server_unpaused = !loading_media_now
+                            && !all_peers_incompatible
                             && !suppress_unauth_state
                             && st.playstate.as_ref().is_some_and(|ps| !ps.paused);
                         let blocking_manual_peers = if server_unpaused && !sm.align_mode {

@@ -140,7 +140,8 @@ pub struct VoiceTransportHandle {
     pub last_voice_tx_rx_ms: AtomicU64,
     pub udp_would_block_events: AtomicU32,
     rx_tx: std::sync::mpsc::SyncSender<VoiceRxPacket>,
-    rx_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<VoiceRxPacket>>>,
+    rx_rx: std::sync::Mutex<std::sync::mpsc::Receiver<VoiceRxPacket>>,
+    rx_notify: (std::sync::Mutex<u64>, std::sync::Condvar),
     cmd_tx: mpsc::Sender<P2pControlCmd>,
     pub start_instant: Instant,
     #[cfg(test)]
@@ -174,7 +175,8 @@ impl VoiceTransportHandle {
             last_voice_tx_rx_ms: AtomicU64::new(0),
             udp_would_block_events: AtomicU32::new(0),
             rx_tx,
-            rx_rx: std::sync::Mutex::new(Some(rx_rx)),
+            rx_rx: std::sync::Mutex::new(rx_rx),
+            rx_notify: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
             cmd_tx,
             start_instant: Instant::now(),
             #[cfg(test)]
@@ -182,8 +184,54 @@ impl VoiceTransportHandle {
         }
     }
 
-    pub fn take_rx_receiver(&self) -> Option<std::sync::mpsc::Receiver<VoiceRxPacket>> {
-        self.rx_rx.lock().unwrap_or_else(|e| e.into_inner()).take()
+    /// Drains all currently queued incoming voice packets without dropping ownership of the receiver
+    /// across worker restarts (e.g., opening Voice Settings before joining, or leaving & rejoining voice).
+    pub fn drain_rx_packets(&self, mut on_packet: impl FnMut(VoiceRxPacket)) {
+        let rx = self.rx_rx.lock().unwrap_or_else(|e| e.into_inner());
+        while let Ok(pkt) = rx.try_recv() {
+            on_packet(pkt);
+        }
+    }
+
+    pub fn clear_rx_packets(&self) {
+        let rx = self.rx_rx.lock().unwrap_or_else(|e| e.into_inner());
+        while rx.try_recv().is_ok() {}
+    }
+
+    /// Blocks up to `timeout` until a new voice RX packet arrives (used when mixer is idle).
+    pub fn wait_for_rx_packet(&self, last_seen: &mut u64, timeout: Duration) -> bool {
+        let (lock, cv) = &self.rx_notify;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard != *last_seen {
+            *last_seen = *guard;
+            return true;
+        }
+        let (guard, _) = cv
+            .wait_timeout_while(guard, timeout, |seq| *seq == *last_seen)
+            .unwrap_or_else(|e| e.into_inner());
+        if *guard != *last_seen {
+            *last_seen = *guard;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn push_rx_packet_and_notify(&self, pkt: VoiceRxPacket) {
+        if self.rx_tx.try_send(pkt).is_ok() {
+            let (lock, cv) = &self.rx_notify;
+            let mut seq = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *seq = seq.wrapping_add(1);
+            cv.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn try_recv_rx_packet(&self) -> Result<VoiceRxPacket, std::sync::mpsc::TryRecvError> {
+        self.rx_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_recv()
     }
 
     pub fn roster_snapshot(&self) -> Vec<VoicePeerRosterDto> {
@@ -342,6 +390,9 @@ impl VoiceTransportHandle {
             .store(allow_relay_for_others, Ordering::Release);
         self.allow_relayed_voice
             .store(allow_relayed_voice, Ordering::Release);
+        if !in_voice {
+            self.clear_rx_packets();
+        }
         let _ = self.cmd_tx.try_send(P2pControlCmd::UpdateLocalVoiceState);
     }
 }
@@ -416,6 +467,7 @@ enum P2pDatagramMessage {
 enum UdpPacketEvent {
     App(String, P2pAppMessage),
     Datagram(String, P2pDatagramMessage),
+    Connected(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,6 +614,7 @@ struct VoiceRxPeerState {
     crypto: VoiceRxCrypto,
     token_bucket: PeerTokenBucket,
     per_voice_buckets: HashMap<u8, PeerTokenBucket>,
+    last_voice_pkt_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -613,6 +666,7 @@ pub struct P2pSessionHandle {
 }
 
 impl P2pSessionHandle {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         app: AppHandle,
         initial_username: String,
@@ -1445,6 +1499,7 @@ fn try_handle_voice_udp(
     voice_handle
         .last_voice_tx_rx_ms
         .store(now_ms, Ordering::Relaxed);
+    rx_state.last_voice_pkt_at = Some(Instant::now());
 
     let relayed = (flags & VOICE_FLAG_RELAYED) != 0;
     let end_of_talk = (flags & VOICE_FLAG_END_OF_TALK) != 0;
@@ -1520,7 +1575,7 @@ fn try_handle_voice_udp(
         return true;
     }
 
-    let _ = voice_handle.rx_tx.try_send(VoiceRxPacket {
+    voice_handle.push_rx_packet_and_notify(VoiceRxPacket {
         origin_key,
         origin_username,
         voice_id,
@@ -1631,7 +1686,9 @@ async fn run_p2p_actor(
     let local_session_id = local_identity.session_id;
     let start_instant = voice_handle.start_instant;
 
+    const BEACON_COOLDOWN: Duration = Duration::from_millis(2500);
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalEvent>(32);
+    let stun_in_flight = Arc::new(AtomicBool::new(!test_loopback));
 
     // Run non-blocking LAN + STUN + UPnP candidate discovery while Syncplay is already live
     if test_loopback {
@@ -1661,12 +1718,14 @@ async fn run_p2p_actor(
     } else {
         let sock_stun = Arc::clone(&sock_v4);
         let int_tx = internal_tx.clone();
+        let stun_flag = Arc::clone(&stun_in_flight);
         tokio::spawn(async move {
             let (lan_ip, global_v6, stun_res) = tokio::join!(
                 discover_local_lan_v4(),
                 discover_local_global_v6(),
                 query_stun_candidates(&sock_stun),
             );
+            stun_flag.store(false, Ordering::Release);
             let upnp = if let (Some(lip), true) = (lan_ip, local_port_v4 > 0) {
                 try_upnp_port_map(lip, local_port_v4).await
             } else {
@@ -1774,6 +1833,7 @@ async fn run_p2p_actor(
     let mut upnp_mapping: Option<UpnpMapping> = None;
     let mut last_beacon_sent_at: Option<Instant> = None;
     let mut sent_beacon_to_room = false;
+    let mut beacon_echo_pending = false;
 
     let mut cached_ref_probes: Option<(String, Vec<SparseAudioProbe>)> = None;
     let mut ref_extract_cancel: Option<Arc<AtomicBool>> = None;
@@ -1793,7 +1853,7 @@ async fn run_p2p_actor(
     loop {
         tokio::select! {
             biased;
-            Ok((n, src)) = sock_v4.recv_from(&mut udp_buf_v4) => {
+            Ok((n, src)) = sock_v4.recv_from(&mut udp_buf_v4), if !stun_in_flight.load(Ordering::Acquire) => {
                 if try_handle_voice_udp(
                     &udp_buf_v4[..n],
                     &sock_v4,
@@ -1949,14 +2009,22 @@ async fn run_p2p_actor(
                         voice_relay_routes.retain(|k, _| active_keys.contains(k));
                         if peers.is_empty() {
                             sent_beacon_to_room = false;
+                            beacon_echo_pending = false;
                         }
                         if active_keys.len() > 1 && !sent_beacon_to_room {
                             if let Some(ref msg) = local_beacon_str {
-                                if last_beacon_sent_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(6)) {
+                                if last_beacon_sent_at
+                                    .is_none_or(|t| t.elapsed() >= BEACON_COOLDOWN)
+                                {
                                     let _ = beacon_tx.try_send(msg.clone());
                                     last_beacon_sent_at = Some(Instant::now());
                                     sent_beacon_to_room = true;
+                                    beacon_echo_pending = false;
+                                } else {
+                                    beacon_echo_pending = true;
                                 }
+                            } else {
+                                beacon_echo_pending = true;
                             }
                         }
                         maybe_drive_auto_align(
@@ -1990,11 +2058,18 @@ async fn run_p2p_actor(
                     P2pControlCmd::PeerJoined(username) => {
                         if !username.eq_ignore_ascii_case(&local_username) {
                             if let Some(ref msg) = local_beacon_str {
-                                if last_beacon_sent_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(6)) {
+                                if last_beacon_sent_at
+                                    .is_none_or(|t| t.elapsed() >= BEACON_COOLDOWN)
+                                {
                                     let _ = beacon_tx.try_send(msg.clone());
                                     last_beacon_sent_at = Some(Instant::now());
                                     sent_beacon_to_room = true;
+                                    beacon_echo_pending = false;
+                                } else {
+                                    beacon_echo_pending = true;
                                 }
+                            } else {
+                                beacon_echo_pending = true;
                             }
                         }
                     }
@@ -2032,6 +2107,7 @@ async fn run_p2p_actor(
                                     start_instant,
                                 )),
                                 per_voice_buckets: HashMap::new(),
+                                last_voice_pkt_at: None,
                             },
                         );
                         let mut session = PeerSession {
@@ -2080,13 +2156,20 @@ async fn run_p2p_actor(
                         .await;
                         peers.insert(key, session);
 
-                        // Echo our own beacon once if not yet shared recently so newcomer receives our candidates
+                        // Echo our own beacon if not yet shared recently so newcomer receives our candidates
                         if let Some(ref msg) = local_beacon_str {
-                            if last_beacon_sent_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(6)) {
+                            if last_beacon_sent_at
+                                .is_none_or(|t| t.elapsed() >= BEACON_COOLDOWN)
+                            {
                                 let _ = beacon_tx.try_send(msg.clone());
                                 last_beacon_sent_at = Some(Instant::now());
                                 sent_beacon_to_room = true;
+                                beacon_echo_pending = false;
+                            } else {
+                                beacon_echo_pending = true;
                             }
+                        } else {
+                            beacon_echo_pending = true;
                         }
                         emit_p2p_status(app.as_ref(), &nat_mode, &peers, align_job.as_ref());
                         if rebuild_voice_routing(
@@ -2536,6 +2619,7 @@ async fn run_p2p_actor(
                                     start_instant,
                                 )),
                                 per_voice_buckets: HashMap::new(),
+                                last_voice_pkt_at: None,
                             },
                         );
                         let mut session = PeerSession {
@@ -2604,10 +2688,16 @@ async fn run_p2p_actor(
                         upnp_mapping = upnp;
                         let msg = encode_ep2_beacon(&beacon);
                         local_beacon_str = Some(msg.clone());
-                        if (test_loopback || participants.len() > 1) && !sent_beacon_to_room {
+                        let should_send = (test_loopback
+                            || participants.len() > 1
+                            || !peers.is_empty()
+                            || beacon_echo_pending)
+                            && (!sent_beacon_to_room || beacon_echo_pending);
+                        if should_send {
                             let _ = beacon_tx.try_send(msg);
                             last_beacon_sent_at = Some(Instant::now());
                             sent_beacon_to_room = true;
+                            beacon_echo_pending = false;
                         }
                         emit_p2p_status(app.as_ref(), &nat_mode, &peers, align_job.as_ref());
                     }
@@ -2796,7 +2886,7 @@ async fn run_p2p_actor(
                 let mut newly_connected = false;
                 let voice_active = voice_handle.in_voice.load(Ordering::Relaxed);
                 let voice_busy = voice_handle.voice_recently_active();
-                for peer in peers.values_mut() {
+                for (peer_key, peer) in peers.iter_mut() {
                     #[cfg(test)]
                     if peer.test_drop_direct {
                         continue;
@@ -2820,12 +2910,16 @@ async fn run_p2p_actor(
                             }
                         }
                         LinkTransportState::DirectLan | LinkTransportState::DirectWan => {
-                            let mut retx = peer.reliable.collect_retransmits(now_ms, 260);
-                            if voice_busy && retx.len() > 2 {
-                                retx.truncate(2);
-                            } else if voice_active && retx.len() > 8 {
-                                retx.truncate(8);
-                            }
+                            let max_retx = if voice_busy {
+                                2
+                            } else if voice_active {
+                                8
+                            } else {
+                                16
+                            };
+                            let retx = peer
+                                .reliable
+                                .collect_retransmits_bounded(now_ms, 260, max_retx);
                             if !retx.is_empty() {
                                 if let Some(addr) = peer.active_addr {
                                     for frame in retx {
@@ -2877,19 +2971,55 @@ async fn run_p2p_actor(
                             }
                         }
                     }
-                    // Evict ghost voice peers whose state hasn't refreshed within 15 s TTL
+                    // Evict ghost voice peers whose state hasn't refreshed within 25 s TTL
+                    // (unless authenticated voice packets arrived recently).
+                    let recent_voice_pkt = voice_rx_peers.values().any(|r| {
+                        r.peer_key == *peer_key
+                            && r.last_voice_pkt_at
+                                .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+                    });
                     if peer.voice_in_call
+                        && !recent_voice_pkt
                         && peer
                             .last_voice_state_rx
-                            .is_some_and(|t| t.elapsed() >= Duration::from_secs(15))
+                            .is_some_and(|t| t.elapsed() >= Duration::from_secs(25))
                     {
-                        peer.prev_voice_epoch = Some(peer.voice_epoch);
                         peer.voice_in_call = false;
                         peer.voice_blocked_peers.clear();
                         status_dirty = true;
                     }
                 }
-                if voice_active && last_voice_broadcast_at.elapsed() >= Duration::from_secs(5) {
+                if let Some(ref msg) = local_beacon_str {
+                    if beacon_echo_pending
+                        && last_beacon_sent_at.is_none_or(|t| t.elapsed() >= BEACON_COOLDOWN)
+                    {
+                        let _ = beacon_tx.try_send(msg.clone());
+                        last_beacon_sent_at = Some(Instant::now());
+                        sent_beacon_to_room = true;
+                        beacon_echo_pending = false;
+                    } else if !test_loopback
+                        && last_beacon_sent_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(10))
+                    {
+                        let needs_discovery_refresh = participants.values().any(|p| {
+                            if p.username.eq_ignore_ascii_case(&local_username) {
+                                return false;
+                            }
+                            let key = p.username.to_ascii_lowercase();
+                            match peers.get(&key) {
+                                None => true,
+                                Some(ps) => {
+                                    ps.last_rx_at.is_none()
+                                        && ps.started_at.elapsed() < Duration::from_secs(35)
+                                }
+                            }
+                        });
+                        if needs_discovery_refresh {
+                            let _ = beacon_tx.try_send(msg.clone());
+                            last_beacon_sent_at = Some(Instant::now());
+                        }
+                    }
+                }
+                if voice_active && last_voice_broadcast_at.elapsed() >= Duration::from_secs(4) {
                     last_voice_broadcast_at = Instant::now();
                     broadcast_local_voice_state(
                         &local_username,
@@ -3122,6 +3252,7 @@ fn compute_chat_routing(
     (direct_keys, relay_targets, fallback_needed)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn forward_chat_relay(
     peers: &mut HashMap<String, PeerSession>,
     relay_targets: Vec<String>,
@@ -3233,6 +3364,57 @@ async fn dispatch_udp_event(
             )
             .await;
             emit_p2p_status(app, nat_mode, peers, align_job.as_ref());
+        }
+        UdpPacketEvent::Connected(peer_key) => {
+            broadcast_local_voice_state(
+                local_username,
+                peers,
+                voice_handle,
+                sock_v4,
+                sock_v6,
+                epoch_ms(start_instant),
+                Some(&peer_key),
+            )
+            .await;
+            maybe_drive_auto_align(
+                app,
+                network_opts,
+                local_username,
+                local_media,
+                participants,
+                peers,
+                sock_v4,
+                sock_v6,
+                start_instant,
+                cached_ref_probes,
+                ref_extract_cancel,
+                align_job,
+                completed_sigs,
+                internal_tx,
+                false,
+            )
+            .await;
+            emit_p2p_status(app, nat_mode, peers, align_job.as_ref());
+            if rebuild_voice_routing(
+                app,
+                local_username,
+                local_session_id,
+                participants,
+                peers,
+                voice_handle,
+                voice_relay_routes,
+            ) {
+                broadcast_local_voice_state(
+                    local_username,
+                    peers,
+                    voice_handle,
+                    sock_v4,
+                    sock_v6,
+                    epoch_ms(start_instant),
+                    None,
+                )
+                .await;
+            }
         }
         UdpPacketEvent::Datagram(from_key, dmsg) => match dmsg {
             P2pDatagramMessage::ChatTyping { sender, is_typing } => {
@@ -3418,7 +3600,7 @@ async fn send_punch_burst(
     };
     // Rank candidates IPv6 > LAN > WAN
     let mut ranked = peer.beacon.candidates.clone();
-    ranked.sort_by(|a, b| candidate_priority(b.kind).cmp(&candidate_priority(a.kind)));
+    ranked.sort_by_key(|b| std::cmp::Reverse(candidate_priority(b.kind)));
     for cand in &ranked {
         let _ = send_via_matching_sock(sock_v4, sock_v6, &pkt, cand.addr).await;
     }
@@ -3497,6 +3679,7 @@ async fn handle_udp_packet(
     }
     let peer_key = peer_key.clone();
     let frame = peer.crypto.open(buf)?;
+    let was_direct = is_direct_peer(peer);
 
     let stale_existing = peer
         .last_rx_at
@@ -3558,7 +3741,11 @@ async fn handle_udp_packet(
                     let _ = reply_sock.send_to(&pkt, active).await;
                 }
             }
-            None
+            if !was_direct && is_direct_peer(peer) {
+                Some(UdpPacketEvent::Connected(peer_key))
+            } else {
+                None
+            }
         }
         P2pWireFrame::Datagram { data } => {
             peer.state = if is_lan_ip(active.ip()) {
@@ -3566,6 +3753,14 @@ async fn handle_udp_packet(
             } else {
                 LinkTransportState::DirectWan
             };
+            if !peer.bidirectional_verified {
+                let rev_ts = epoch_ms(start_instant);
+                peer.pending_pings.insert(rev_ts, Instant::now());
+                if let Some(rev_pkt) = peer.crypto.seal(&P2pWireFrame::PunchPing { ts_ms: rev_ts })
+                {
+                    let _ = reply_sock.send_to(&rev_pkt, active).await;
+                }
+            }
             serde_json::from_slice::<P2pDatagramMessage>(&data)
                 .ok()
                 .map(|m| UdpPacketEvent::Datagram(peer_key, m))
@@ -3576,15 +3771,31 @@ async fn handle_udp_packet(
             } else {
                 LinkTransportState::DirectWan
             };
+            if matches!(other, P2pWireFrame::Ack { .. }) {
+                peer.bidirectional_verified = true;
+            } else if !peer.bidirectional_verified {
+                let rev_ts = epoch_ms(start_instant);
+                peer.pending_pings.insert(rev_ts, Instant::now());
+                if let Some(rev_pkt) = peer.crypto.seal(&P2pWireFrame::PunchPing { ts_ms: rev_ts })
+                {
+                    let _ = reply_sock.send_to(&rev_pkt, active).await;
+                }
+            }
             let (acks, assembled) = peer.reliable.handle_frame(other);
             for ack in acks {
                 if let Some(pkt) = peer.crypto.seal(&ack) {
                     let _ = reply_sock.send_to(&pkt, active).await;
                 }
             }
-            assembled
-                .and_then(|bytes| serde_json::from_slice::<P2pAppMessage>(&bytes).ok())
-                .map(|m| UdpPacketEvent::App(peer_key, m))
+            if let Some(msg) =
+                assembled.and_then(|bytes| serde_json::from_slice::<P2pAppMessage>(&bytes).ok())
+            {
+                Some(UdpPacketEvent::App(peer_key, msg))
+            } else if !was_direct && is_direct_peer(peer) {
+                Some(UdpPacketEvent::Connected(peer_key))
+            } else {
+                None
+            }
         }
     }
 }
@@ -3825,6 +4036,13 @@ async fn handle_peer_app_msg(
             }
             if peer.voice_epoch != 0 && peer.voice_epoch != epoch {
                 peer.prev_voice_epoch = Some(peer.voice_epoch);
+            }
+            if in_voice {
+                if peer.prev_voice_epoch == Some(epoch) {
+                    peer.prev_voice_epoch = None;
+                }
+            } else if peer.voice_in_call {
+                peer.prev_voice_epoch = Some(epoch);
             }
             if voice_gen > 0 {
                 peer.voice_gen = voice_gen;
@@ -4380,11 +4598,19 @@ mod tests {
         }
     }
 
+    struct LoopbackRx(Arc<VoiceTransportHandle>);
+
+    impl LoopbackRx {
+        fn try_recv(&self) -> Result<VoiceRxPacket, std::sync::mpsc::TryRecvError> {
+            self.0.try_recv_rx_packet()
+        }
+    }
+
     struct LoopbackNode {
         username: String,
         cmd_tx: mpsc::Sender<P2pControlCmd>,
         voice: Arc<VoiceTransportHandle>,
-        rx: std::sync::mpsc::Receiver<VoiceRxPacket>,
+        rx: LoopbackRx,
         beacon: P2pBeacon,
     }
 
@@ -4421,7 +4647,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("test beacon populated");
-        let rx = voice.take_rx_receiver().expect("take rx");
+        let rx = LoopbackRx(Arc::clone(&voice));
         LoopbackNode {
             username: username.to_string(),
             cmd_tx,
@@ -5356,5 +5582,148 @@ mod tests {
             tracker.est_kbps() < before_bloat,
             "Real +95 ms per-peer RTT bloat must reduce uplink estimate"
         );
+    }
+
+    #[tokio::test]
+    async fn voice_rx_receiver_survives_monitor_stop_and_rejoin() {
+        let mut a = spawn_loopback_node("Alice").await;
+        let mut b = spawn_loopback_node("Bob").await;
+
+        let parts = vec![make_test_participant("Alice"), make_test_participant("Bob")];
+        for n in [&a, &b] {
+            let _ = n
+                .cmd_tx
+                .send(P2pControlCmd::UpdateParticipants(parts.clone()))
+                .await;
+        }
+        let _ = a
+            .cmd_tx
+            .send(P2pControlCmd::TestInjectBeacon {
+                username: b.username.clone(),
+                beacon: b.beacon.clone(),
+                drop_direct_from: vec![],
+            })
+            .await;
+        let _ = b
+            .cmd_tx
+            .send(P2pControlCmd::TestInjectBeacon {
+                username: a.username.clone(),
+                beacon: a.beacon.clone(),
+                drop_direct_from: vec![],
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        // Simulate Bob opening Voice Settings (worker drains/clears while not in call) before joining
+        b.voice.clear_rx_packets();
+        a.voice
+            .notify_local_state(true, 2, false, false, true, true);
+        b.voice
+            .notify_local_state(true, 2, false, false, true, true);
+        tokio::time::sleep(Duration::from_millis(220)).await;
+
+        for seq in 0..8u16 {
+            a.voice
+                .send_voice_frame(seq, (seq as u32) * 960, false, &[0x55; 48]);
+            tokio::time::sleep(Duration::from_millis(8)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let mut received_round_1 = 0usize;
+        b.voice.drain_rx_packets(|pkt| {
+            if pkt.origin_key == "alice" {
+                received_round_1 += 1;
+            }
+        });
+        assert!(
+            received_round_1 >= 6,
+            "Round 1 should deliver packets after prior clear, got {received_round_1}"
+        );
+
+        // Simulate Bob leaving voice & rejoining voice (epoch 3)
+        b.voice
+            .notify_local_state(false, 2, false, false, true, true);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        b.voice
+            .notify_local_state(true, 3, false, false, true, true);
+        tokio::time::sleep(Duration::from_millis(220)).await;
+
+        for seq in 10..18u16 {
+            a.voice
+                .send_voice_frame(seq, (seq as u32) * 960, false, &[0x66; 48]);
+            tokio::time::sleep(Duration::from_millis(8)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let mut received_round_2 = 0usize;
+        b.voice.drain_rx_packets(|pkt| {
+            if pkt.origin_key == "alice" {
+                received_round_2 += 1;
+            }
+        });
+        assert!(
+            received_round_2 >= 6,
+            "Round 2 should still deliver packets after leave & rejoin, got {received_round_2}"
+        );
+
+        // Round 3: Simulate Alice dropping out and recovering under the SAME epoch (2):
+        // prev_voice_epoch must be cleared when VoiceState { in_voice: true } arrives again.
+        a.voice
+            .notify_local_state(false, 2, false, false, true, true);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        a.voice
+            .notify_local_state(true, 2, false, false, true, true);
+        tokio::time::sleep(Duration::from_millis(220)).await;
+
+        for seq in 20..28u16 {
+            a.voice
+                .send_voice_frame(seq, (seq as u32) * 960, false, &[0x77; 48]);
+            tokio::time::sleep(Duration::from_millis(8)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let mut received_round_3 = 0usize;
+        b.voice.drain_rx_packets(|pkt| {
+            if pkt.origin_key == "alice" && pkt.epoch == 2 {
+                received_round_3 += 1;
+            }
+        });
+        assert!(
+            received_round_3 >= 6,
+            "Round 3 should still deliver packets after same-epoch VoiceState recovery, got {received_round_3}"
+        );
+
+        for n in [&mut a, &mut b] {
+            let _ = n.cmd_tx.send(P2pControlCmd::Shutdown).await;
+        }
+    }
+
+    #[test]
+    fn voice_transport_wait_for_rx_packet_wakes_immediately() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+        let handle = Arc::new(VoiceTransportHandle::new(cmd_tx));
+        let mut last_seq = 0u64;
+        assert!(!handle.wait_for_rx_packet(&mut last_seq, Duration::from_millis(5)));
+
+        let h2 = Arc::clone(&handle);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            h2.push_rx_packet_and_notify(VoiceRxPacket {
+                origin_key: "peer".to_string(),
+                origin_username: "Peer".to_string(),
+                voice_id: 1,
+                epoch: 1,
+                seq: 1,
+                ts_48k: 960,
+                end_of_talk: false,
+                relayed: false,
+                opus: vec![1, 2, 3],
+                arrival_ms: 10,
+            });
+        });
+        let woke = handle.wait_for_rx_packet(&mut last_seq, Duration::from_millis(200));
+        t.join().unwrap();
+        assert!(woke);
+        assert!(last_seq > 0);
     }
 }

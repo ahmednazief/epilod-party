@@ -28,6 +28,8 @@ import { getFileDisplayName } from "../lib/fileDrop";
 import {
   mpvAddSubtitle,
   mpvRemoveSubtitle,
+  mpvSetSecondarySubDelay,
+  mpvSetSecondarySubTrack,
   mpvSetSubDelay,
   mpvSetSubStyle,
   mpvSetSubTrack,
@@ -41,6 +43,11 @@ import {
   type SubtitleEncodingHint,
 } from "../lib/mpv";
 import { runWithHiddenMpvSurface } from "../lib/playerActions";
+import { buildMediaFileKey } from "../lib/resume";
+import {
+  clearPerFileSubtitlePref,
+  savePerFileSubtitlePref,
+} from "../lib/subtitlePrefs";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
   buildSubTrackOptions,
@@ -101,6 +108,8 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const overrideAssStyle = useSubtitleStore((s) => s.overrideAssStyle);
   const encodingHint = useSubtitleStore((s) => s.encodingHint);
   const delaySecs = useSubtitleStore((s) => s.delaySecs);
+  const secondarySubId = useSubtitleStore((s) => s.secondarySubId);
+  const setSecondarySubId = useSubtitleStore((s) => s.setSecondarySubId);
   const autoSyncBusy = useSubtitleStore((s) => s.autoSyncBusy);
   const autoSyncOutcome = useSubtitleStore((s) => s.autoSyncOutcome);
   const autoSyncError = useSubtitleStore((s) => s.autoSyncError);
@@ -281,6 +290,11 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
         await mpvSetSubDelay(result.offsetSecs);
         setDelaySecs(result.offsetSecs);
         setAutoSyncResult(result);
+        const appNow = useAppStore.getState();
+        const durNow = usePlayerStore.getState().durationSecs;
+        savePerFileSubtitlePref(buildMediaFileKey(appNow.selectedFileName, durNow), {
+          delaySecs: result.offsetSecs,
+        });
         pushNote(
           "success",
           result.driftApplied
@@ -331,6 +345,13 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   const handleNudge = (delta: number) => {
     const next = nudgeDelay(delta);
     safeMpvCall(mpvSetSubDelay(next), "mpvSetSubDelay");
+    const appNow = useAppStore.getState();
+    const durNow = usePlayerStore.getState().durationSecs;
+    savePerFileSubtitlePref(buildMediaFileKey(appNow.selectedFileName, durNow), {
+      delaySecs: next,
+      trackLang: selectedSub?.lang ?? null,
+      subtitleFile: loadedFilePath,
+    });
   };
 
   const handleRunOnlineSearch = async (
@@ -674,6 +695,10 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                   aria-checked={active}
                   data-active={active}
                   onClick={() => {
+                    if (secondarySubId === t.id) {
+                      setSecondarySubId(null);
+                      safeMpvCall(mpvSetSecondarySubTrack(null), "mpvSetSecondarySubTrack");
+                    }
                     void selectSubTrack(t.id, tracks, {
                       mpvSetSubTrack,
                       mpvSetSubDelay,
@@ -705,6 +730,42 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               );
             })}
           </div>
+        )}
+
+        {loaded && subOptions.length > 1 && (
+          <SelectMenu
+            variant="row"
+            label="Secondary (top)"
+            ariaLabel="Secondary subtitle track"
+            placement="top"
+            value={secondarySubId !== null ? String(secondarySubId) : ""}
+            options={[
+              { value: "", label: "Off" },
+              ...subOptions
+                .filter((o) => o.value !== currentSubVal && o.track)
+                .map((opt) => {
+                  const t = opt.track!;
+                  const { label } = formatSubtitleTrackDisplay(t, {
+                    detectedLang: detectedSubLangs[t.id],
+                  });
+                  return { value: String(t.id), label };
+                }),
+            ]}
+            onChange={(rawVal) => {
+              const val = rawVal ? Number(rawVal) : null;
+              setSecondarySubId(val);
+              safeMpvCall(mpvSetSecondarySubTrack(val, 10), "mpvSetSecondarySubTrack");
+              if (val === null) {
+                safeMpvCall(mpvSetSecondarySubDelay(0), "mpvSetSecondarySubDelay");
+              }
+              const appNow = useAppStore.getState();
+              const durNow = usePlayerStore.getState().durationSecs;
+              const chosen = val !== null ? subOptions.find((o) => o.track?.id === val) : null;
+              savePerFileSubtitlePref(buildMediaFileKey(appNow.selectedFileName, durNow), {
+                secondaryTrackLang: chosen?.track?.lang ?? null,
+              });
+            }}
+          />
         )}
 
         {((subIsBitmap && fallbackEmbeddedSub) || autoSyncError) && (
@@ -800,6 +861,9 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               onClick={() => {
                 setDelaySecs(0);
                 safeMpvCall(mpvSetSubDelay(0), "mpvSetSubDelay");
+                const appNow = useAppStore.getState();
+                const durNow = usePlayerStore.getState().durationSecs;
+                clearPerFileSubtitlePref(buildMediaFileKey(appNow.selectedFileName, durNow));
               }}
               className="ep-press ep-tray-option h-7.5 rounded-full text-muted hover:text-white disabled:opacity-30 cursor-pointer"
             >

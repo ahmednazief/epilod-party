@@ -384,10 +384,110 @@ test("voiceActions speaking predicates and multi-surface Voice UX components are
     "utf8",
   );
   const watchRoom = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
+  const settingsModal = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8",
+  );
+
+  const roomPanel = fs.readFileSync(path.join(REPO_ROOT, "src/components/RoomPanel.tsx"), "utf8");
+  const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
 
   assert.equal(chatSidebar.includes("VoiceQuickSettingsTray"), true);
+  assert.equal(quickTray.includes('navigateTo("input", "push")'), true);
+  assert.equal(quickTray.includes('navigateTo("output", "push")'), true);
+  assert.equal(quickTray.includes('navigateTo("filters", "push")'), true);
+  assert.equal(quickTray.includes("anim-submenu-push"), true);
+  assert.equal(quickTray.includes("anim-submenu-pop"), true);
+  assert.equal(roomPanel.includes("ep-popover-bloom"), true);
+  assert.equal(roomPanel.includes("ep-popover-bloom-out"), true);
+  assert.equal(chatSidebar.includes("ep-popover-bloom"), true);
+  assert.equal(chatSidebar.includes("ep-popover-bloom-out"), true);
+  assert.equal(globalsCss.includes("@keyframes ep-submenu-push"), true);
+  assert.equal(globalsCss.includes("@keyframes ep-submenu-pop"), true);
   assert.equal(transportBar.includes("Auto-ducking movie"), true);
   assert.equal(transportBar.includes("ep-speaking-ring"), true);
-  assert.equal(quickTray.includes("All Voice &amp; Audio Settings"), true);
+  assert.equal(quickTray.includes('aria-label="All Voice & Audio Settings"'), true);
+  assert.equal(quickTray.includes("wasOpenRef"), true);
+  assert.equal(settingsModal.includes("wasVoiceTabOpenRef"), true);
+  assert.equal(quickTray.includes("acquireMicMonitorSurface"), true);
+  assert.equal(quickTray.includes("releaseMicMonitorSurface"), true);
+  assert.equal(settingsModal.includes("acquireMicMonitorSurface"), true);
+  assert.equal(settingsModal.includes("releaseMicMonitorSurface"), true);
   assert.equal(watchRoom.includes("StageSpeakerOverlay"), true);
+
+  // Verify surface ref-counting keeps mic monitor alive across Tray -> Settings handoff
+  const {
+    acquireMicMonitorSurface,
+    releaseMicMonitorSurface,
+    getActiveMicMonitorSurfaces,
+  } = await bundleAndImport<typeof import("../src/lib/voice")>("src/lib/voice.ts");
+  assert.equal(getActiveMicMonitorSurfaces(), 0);
+  assert.equal(acquireMicMonitorSurface(), 1); // Tray opens
+  assert.equal(acquireMicMonitorSurface(), 2); // Settings -> Voice opens from tray link
+  assert.equal(releaseMicMonitorSurface(), 1); // Tray closes -> monitor must stay alive
+  assert.equal(releaseMicMonitorSurface(), 0); // Settings closes -> safe to stop monitor
+  assert.equal(releaseMicMonitorSurface(), 0); // Clamps at 0
+});
+
+test("toggleVoiceMute flashes fluid micCue for mute/unmute and KeyM routes mic mute when joined", async () => {
+  setupMockLocalStorage();
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "epilod-mic-cue-"));
+  const outFile = path.join(outDir, "bundle.mjs");
+  try {
+    buildSync({
+      stdin: {
+        contents: `
+          export { useVoiceStore } from "./src/store/useVoiceStore.ts";
+          export { toggleVoiceMute } from "./src/lib/voiceActions.ts";
+        `,
+        resolveDir: REPO_ROOT,
+        loader: "ts",
+      },
+      outfile: outFile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node22",
+      logLevel: "silent",
+    });
+    const { useVoiceStore, toggleVoiceMute } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`);
+    useVoiceStore.getState().resetSession();
+    useVoiceStore.getState().setJoined(true);
+    assert.equal(useVoiceStore.getState().micCue, null);
+
+    const mutedNow = toggleVoiceMute();
+    assert.equal(mutedNow, true);
+    assert.equal(useVoiceStore.getState().micCue?.muted, true);
+    assert.equal(useVoiceStore.getState().micCue?.step, 1);
+
+    const unmutedNow = toggleVoiceMute();
+    assert.equal(unmutedNow, false);
+    assert.equal(useVoiceStore.getState().micCue?.muted, false);
+    assert.equal(useVoiceStore.getState().micCue?.step, 2);
+
+    useVoiceStore.getState().clearMicCue();
+    assert.equal(useVoiceStore.getState().micCue, null);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+
+  const shortcutsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/hooks/usePlayerShortcuts.ts"),
+    "utf8",
+  );
+  const watchRoomSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  const globalsCss = fs.readFileSync(
+    path.join(REPO_ROOT, "src/styles/globals.css"),
+    "utf8",
+  );
+
+  assert.equal(shortcutsSrc.includes("toggleVoiceMute()"), true);
+  assert.equal(watchRoomSrc.includes("micCuePresence"), true);
+  assert.equal(watchRoomSrc.includes("ep-glass-mic-cue"), true);
+  assert.equal(globalsCss.includes("@keyframes ep-mic-cue-in"), true);
+  assert.equal(globalsCss.includes("@keyframes ep-mic-cue-out"), true);
+  assert.equal(globalsCss.includes("@keyframes ep-mic-halo-pulse"), true);
 });

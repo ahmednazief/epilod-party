@@ -16,6 +16,7 @@ export interface ManualIntroBounds {
 
 interface CachedVideoIntro {
   segments: DetectedIntro[];
+  outro?: DetectedIntro | null;
   updatedAt: number;
 }
 
@@ -84,25 +85,40 @@ export function getEffectiveIntroSegments(
   return segments;
 }
 
-function loadCachedSegmentsForKey(key: string): DetectedIntro[] {
-  if (!key) return [];
-  const cache = readJsonStorage<IntroCacheMap>(INTRO_CACHE_STORAGE_KEY, {});
-  const entry = cache[key];
-  if (!entry || !Array.isArray(entry.segments)) return [];
-  return entry.segments.filter(
-    (s) =>
-      s &&
-      typeof s.startSecs === "number" &&
-      typeof s.endSecs === "number" &&
-      typeof s.skipTargetSecs === "number" &&
-      s.endSecs > s.startSecs
+function isValidDetectedSegment(s: unknown): s is DetectedIntro {
+  if (!s || typeof s !== "object") return false;
+  const cand = s as Partial<DetectedIntro>;
+  return (
+    typeof cand.startSecs === "number" &&
+    typeof cand.endSecs === "number" &&
+    typeof cand.skipTargetSecs === "number" &&
+    cand.endSecs > cand.startSecs
   );
 }
 
-function saveCachedSegmentsForKey(key: string, segments: DetectedIntro[]): void {
-  if (!key || segments.length === 0) return;
+function loadCachedIntroDataForKey(key: string): {
+  segments: DetectedIntro[];
+  outro: DetectedIntro | null;
+} {
+  if (!key) return { segments: [], outro: null };
   const cache = readJsonStorage<IntroCacheMap>(INTRO_CACHE_STORAGE_KEY, {});
-  cache[key] = { segments, updatedAt: Date.now() };
+  const entry = cache[key];
+  if (!entry) return { segments: [], outro: null };
+  const segments = Array.isArray(entry.segments)
+    ? entry.segments.filter(isValidDetectedSegment)
+    : [];
+  const outro = isValidDetectedSegment(entry.outro) ? entry.outro : null;
+  return { segments, outro };
+}
+
+function saveCachedIntroDataForKey(
+  key: string,
+  segments: DetectedIntro[],
+  outro: DetectedIntro | null,
+): void {
+  if (!key || (segments.length === 0 && !outro)) return;
+  const cache = readJsonStorage<IntroCacheMap>(INTRO_CACHE_STORAGE_KEY, {});
+  cache[key] = { segments, outro, updatedAt: Date.now() };
   const keys = Object.keys(cache);
   if (keys.length > MAX_CACHED_VIDEOS) {
     keys.sort((a, b) => (cache[a]?.updatedAt ?? 0) - (cache[b]?.updatedAt ?? 0));
@@ -150,9 +166,12 @@ interface IntroState {
   chapters: MpvChapter[];
   detecting: boolean;
   segments: DetectedIntro[];
+  outro: DetectedIntro | null;
   manualIntro: ManualIntroBounds | null;
   dismissedKeys: string[];
   autoSkippedKeys: string[];
+  dismissedOutroKeys: string[];
+  autoAdvancedOutroKeys: string[];
 
   resetForVideo: (videoPath?: string | null) => void;
   setChapters: (chapters: MpvChapter[]) => void;
@@ -164,6 +183,8 @@ interface IntroState {
   clearManualIntro: () => void;
   dismissSegment: (segKey: string) => void;
   markAutoSkipped: (segKey: string) => void;
+  dismissOutro: (outroKey: string) => void;
+  markOutroAutoAdvanced: (outroKey: string) => void;
 }
 
 export const useIntroStore = create<IntroState>((set, get) => ({
@@ -171,20 +192,27 @@ export const useIntroStore = create<IntroState>((set, get) => ({
   chapters: [],
   detecting: false,
   segments: [],
+  outro: null,
   manualIntro: null,
   dismissedKeys: [],
   autoSkippedKeys: [],
+  dismissedOutroKeys: [],
+  autoAdvancedOutroKeys: [],
 
   resetForVideo: (videoPath = null) => {
     const key = normalizeIntroVideoKey(videoPath);
+    const cached = loadCachedIntroDataForKey(key);
     set({
       videoKey: key || null,
       chapters: [],
       detecting: false,
-      segments: loadCachedSegmentsForKey(key),
+      segments: cached.segments,
+      outro: cached.outro,
       manualIntro: loadManualForKey(key),
       dismissedKeys: [],
       autoSkippedKeys: [],
+      dismissedOutroKeys: [],
+      autoAdvancedOutroKeys: [],
     });
   },
 
@@ -195,14 +223,15 @@ export const useIntroStore = create<IntroState>((set, get) => ({
   setDetectedOutcome: (videoPath, outcome) => {
     const targetKey = normalizeIntroVideoKey(videoPath);
     const segments = Array.isArray(outcome.segments) ? outcome.segments : [];
-    if (targetKey && segments.length > 0) {
-      saveCachedSegmentsForKey(targetKey, segments);
+    const outro = outcome.outro && isValidDetectedSegment(outcome.outro) ? outcome.outro : null;
+    if (targetKey && (segments.length > 0 || outro)) {
+      saveCachedIntroDataForKey(targetKey, segments, outro);
     }
     const currentKey = get().videoKey ?? "";
     if (targetKey && currentKey && targetKey !== currentKey) {
       return;
     }
-    set({ segments, detecting: false });
+    set({ segments, outro, detecting: false });
   },
 
   markManualStart: (startSecs) => {
@@ -259,5 +288,19 @@ export const useIntroStore = create<IntroState>((set, get) => ({
       s.autoSkippedKeys.includes(segKey)
         ? s
         : { autoSkippedKeys: [...s.autoSkippedKeys, segKey] }
+    ),
+
+  dismissOutro: (outroKey) =>
+    set((s) =>
+      s.dismissedOutroKeys.includes(outroKey)
+        ? s
+        : { dismissedOutroKeys: [...s.dismissedOutroKeys, outroKey] }
+    ),
+
+  markOutroAutoAdvanced: (outroKey) =>
+    set((s) =>
+      s.autoAdvancedOutroKeys.includes(outroKey)
+        ? s
+        : { autoAdvancedOutroKeys: [...s.autoAdvancedOutroKeys, outroKey] }
     ),
 }));

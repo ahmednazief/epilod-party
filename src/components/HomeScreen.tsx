@@ -1,3 +1,4 @@
+import { Lock, Pin, X } from "lucide-react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -25,13 +26,26 @@ import { isDesktop } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
 import { getFileDisplayName } from "../lib/fileDrop";
 import { scanMediaPaths } from "../lib/playlist";
+import {
+  buildSeriesKey,
+  extractParentFolderPath,
+  pickInitialSeriesIndex,
+  type SeriesProgressEntry,
+} from "../lib/seriesProgress";
 import { isTextEntryElement } from "../lib/shortcuts";
 import { playSoundCue } from "../lib/soundEffects";
+import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
+import {
+  normalizeRecentServerHost,
+  useRecentRoomsStore,
+  type RecentRoomEntry,
+} from "../store/useRecentRoomsStore";
+import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
@@ -80,6 +94,7 @@ export function HomeScreen() {
   const setUsername = useAppStore((s) => s.setUsername);
   const setAvatarId = useAppStore((s) => s.setAvatarId);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
+  const setServerEndpoint = useAppStore((s) => s.setServerEndpoint);
   const openSettings = useAppStore((s) => s.openSettings);
   const openShortcuts = useAppStore((s) => s.openShortcuts);
   const enterRoom = useAppStore((s) => s.enterRoom);
@@ -101,8 +116,24 @@ export function HomeScreen() {
   const [openingMedia, setOpeningMedia] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [editingRoomId, setEditingRoomId] = useState<string | null>(null);
+  const [editingRoomNickname, setEditingRoomNickname] = useState("");
+  const [passwordRoomId, setPasswordRoomId] = useState<string | null>(null);
+  const [pendingRecentHostOnly, setPendingRecentHostOnly] = useState(false);
+  const [missingSeriesKey, setMissingSeriesKey] = useState<string | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
   const profileRef = useRef<HTMLDivElement | null>(null);
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
+  const recentRooms = useRecentRoomsStore((s) => s.rooms);
+  const recentRoomsStorageError = useRecentRoomsStore((s) => s.storageError);
+  const togglePinRecentRoom = useRecentRoomsStore((s) => s.togglePin);
+  const setRecentRoomNickname = useRecentRoomsStore((s) => s.setNickname);
+  const removeRecentRoom = useRecentRoomsStore((s) => s.removeRoom);
+  const seriesMap = useSeriesProgressStore((s) => s.series);
+  const relocateSeriesFolder = useSeriesProgressStore((s) => s.relocateSeriesFolder);
+  const continueSeriesList = Object.values(seriesMap)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 3);
   const profilePopover = useAnimatedPresence(editingName, 170);
   const dragBanner = useAnimatedPresence(isDragActive, 170);
 
@@ -201,6 +232,53 @@ export function HomeScreen() {
     }
     setError(null);
     return true;
+  };
+
+  const handleContinueSeries = async (entry: SeriesProgressEntry) => {
+    setError(null);
+    setMissingSeriesKey(null);
+    try {
+      const scan = await scanMediaPaths([entry.folderPath]);
+      if (scan.items.length === 0) {
+        setMissingSeriesKey(entry.seriesKey);
+        return;
+      }
+      const idx = pickInitialSeriesIndex(scan.items, entry);
+      usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName || entry.folderName);
+      const target = scan.items[idx];
+      setSelectedFile(target.path, target.fileName);
+      enterRoom("", false, false);
+    } catch {
+      setMissingSeriesKey(entry.seriesKey);
+    }
+  };
+
+  const handleLocateSeriesFolder = async (entry: SeriesProgressEntry) => {
+    if (!isDesktop()) return;
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: `Locate "${entry.folderName}"`,
+      });
+      const dir = typeof picked === "string" ? picked : null;
+      if (!dir) return;
+      const scan = await scanMediaPaths([dir]);
+      if (scan.items.length === 0) {
+        setError("No video files found in that folder.");
+        return;
+      }
+      const newKey = relocateSeriesFolder(entry.seriesKey, dir, scan.folderName || entry.folderName);
+      const updated = newKey ? useSeriesProgressStore.getState().getSeries(newKey) : entry;
+      setMissingSeriesKey(null);
+      const idx = pickInitialSeriesIndex(scan.items, updated);
+      usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName || entry.folderName);
+      const target = scan.items[idx];
+      setSelectedFile(target.path, target.fileName);
+      enterRoom("", false, false);
+    } catch (err) {
+      setError(formatUserError(err));
+    }
   };
 
   const handleOpenMediaSolo = async () => {
@@ -352,7 +430,45 @@ export function HomeScreen() {
       );
       return;
     }
-    enterRoom(cleaned, standardRoomName, false);
+    const hostOnly = Boolean(passwordRoomId && pendingRecentHostOnly);
+    setPasswordRoomId(null);
+    setPendingRecentHostOnly(false);
+    enterRoom(cleaned, standardRoomName, hostOnly);
+  };
+
+  const handleJoinRecentRoom = (room: RecentRoomEntry) => {
+    if (!ensureValidName()) return;
+    setError(null);
+    setServerEndpoint(room.serverHost);
+    setStandardRoomName(room.literalRoom);
+    setJoinInput(room.roomName);
+    const hostOnly = Boolean(room.hostOnly);
+
+    if (!room.hasPassword) {
+      setServerPassword("");
+      setPasswordRoomId(null);
+      setPendingRecentHostOnly(false);
+      enterRoom(room.roomName, room.literalRoom, hostOnly);
+      return;
+    }
+
+    if (passwordRoomId !== room.id || !serverPassword) {
+      if (passwordRoomId !== room.id) {
+        setServerPassword("");
+      }
+      setPasswordRoomId(room.id);
+      setPendingRecentHostOnly(hostOnly);
+      setShowOptions(true);
+      setError("Enter the room password to join.");
+      window.setTimeout(() => {
+        passwordInputRef.current?.focus();
+      }, 80);
+      return;
+    }
+
+    setPasswordRoomId(null);
+    setPendingRecentHostOnly(false);
+    enterRoom(room.roomName, room.literalRoom, hostOnly);
   };
 
   const handleOpenFolderSolo = async () => {
@@ -372,7 +488,16 @@ export function HomeScreen() {
       if (typeof chosen !== "string" || !chosen) return;
       const scan = await scanMediaPaths([chosen]);
       if (scan.items.length > 0) {
-        const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+        let idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+        if (useAppStore.getState().trackWatchedEpisodes) {
+          const folderPath = extractParentFolderPath(scan.items[0].path);
+          const saved = folderPath
+            ? useSeriesProgressStore.getState().getSeries(buildSeriesKey(folderPath))
+            : null;
+          if (saved) {
+            idx = pickInitialSeriesIndex(scan.items, saved);
+          }
+        }
         usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
         const target = scan.items[idx];
         setSelectedFile(target.path, target.fileName);
@@ -624,6 +749,53 @@ export function HomeScreen() {
                 <span>{openingMedia ? "Opening..." : "Open Media"}</span>
               </button>
             </div>
+
+            {continueSeriesList.length > 0 && (
+              <div className="w-full max-w-[440px] ep-glass-sheet rounded-[20px] p-3.5 space-y-2">
+                <div className="text-[11px] font-medium uppercase tracking-wider text-muted px-1">
+                  Continue watching
+                </div>
+                <div className="space-y-1.5">
+                  {continueSeriesList.map((entry) => {
+                    const isMissing = missingSeriesKey === entry.seriesKey;
+                    return (
+                      <div
+                        key={entry.seriesKey}
+                        className="ep-menu-row rounded-xl px-3 py-2 flex items-center justify-between gap-2.5 text-xs"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => void handleContinueSeries(entry)}
+                          className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
+                        >
+                          <PlayerEpisodesIcon size={15} className="text-accent-soft shrink-0" />
+                          <span className="truncate font-medium text-white">
+                            {entry.folderName}
+                          </span>
+                          {entry.lastEpisodeKey && (
+                            <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10px] text-secondary num shrink-0">
+                              {entry.lastEpisodeKey}
+                            </span>
+                          )}
+                        </button>
+                        {isMissing && (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-[11px] text-warn">Folder not found</span>
+                            <button
+                              type="button"
+                              onClick={() => void handleLocateSeriesFolder(entry)}
+                              className="ep-press px-2 py-1 rounded-lg bg-white/[0.1] hover:bg-white/[0.16] text-[11px] text-white cursor-pointer"
+                            >
+                              Locate folder
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div key="party" className="anim-fade-slide-up w-full max-w-[440px] flex flex-col gap-4">
@@ -754,6 +926,8 @@ export function HomeScreen() {
                       placeholder="Exact Syncplay room name…"
                       onChange={(e) => {
                         setJoinInput(sanitizeRoomCodeInput(e.target.value, true));
+                        setPasswordRoomId(null);
+                        setPendingRecentHostOnly(false);
                         if (error) setError(null);
                       }}
                       className="ep-glass-input flex-1 h-10 px-3.5 rounded-xl text-sm num tracking-wide text-primary placeholder:tracking-normal placeholder:text-muted focus:outline-none min-w-0"
@@ -776,6 +950,8 @@ export function HomeScreen() {
                     verifying={verifyingJoin}
                     onChange={(digits) => {
                       setJoinInput(digits);
+                      setPasswordRoomId(null);
+                      setPendingRecentHostOnly(false);
                       if (error) setError(null);
                     }}
                     onComplete={handleAutoVerifyOtp}
@@ -802,17 +978,30 @@ export function HomeScreen() {
                 </button>
 
                 <AnimatedCollapse open={showOptions} className="-mx-2.5" innerClassName="pt-2.5 pb-0.5 space-y-2">
-                  <div className="px-2.5">
+                  <form onSubmit={handleJoinRoom} className="px-2.5 flex items-center gap-2">
                     <input
+                      ref={passwordInputRef}
                       type="password"
                       value={serverPassword}
                       maxLength={128}
                       placeholder="Optional room password (kept only this session)"
                       aria-label="Room password"
-                      onChange={(e) => setServerPassword(e.target.value)}
-                      className="ep-glass-input w-full h-9.5 px-3.5 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
+                      onChange={(e) => {
+                        setServerPassword(e.target.value);
+                        if (error) setError(null);
+                      }}
+                      className="ep-glass-input flex-1 h-9.5 px-3.5 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none min-w-0"
                     />
-                  </div>
+                    {(standardRoomName ? hasJoinCode : /^\d{6}$/.test(joinInput)) && (
+                      <button
+                        type="submit"
+                        className="ep-glass-primary-pill ep-press h-9.5 px-3.5 rounded-xl text-xs font-medium text-white inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
+                      >
+                        <span>Join</span>
+                        <AppArrowIcon direction="right" size={13} />
+                      </button>
+                    )}
+                  </form>
                   <button
                     type="button"
                     role="switch"
@@ -821,6 +1010,8 @@ export function HomeScreen() {
                       const checked = !standardRoomName;
                       setStandardRoomName(checked);
                       setVerifyingJoin(false);
+                      setPasswordRoomId(null);
+                      setPendingRecentHostOnly(false);
                       setJoinInput((prev) =>
                         checked
                           ? sanitizeRoomCodeInput(prev, true)
@@ -834,6 +1025,148 @@ export function HomeScreen() {
                   </button>
                 </AnimatedCollapse>
               </div>
+
+              {recentRooms.length > 0 && (
+                <div className="pt-2 border-t border-white/[0.08] space-y-1.5">
+                  <div className="flex items-center justify-between px-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                      Recent rooms
+                    </span>
+                    {recentRoomsStorageError && (
+                      <span className="text-[10px] text-warn">
+                        Could not save changes to disk
+                      </span>
+                    )}
+                  </div>
+                  <div className="space-y-1 max-h-40 overflow-y-auto pr-0.5">
+                    {recentRooms.map((room: RecentRoomEntry) => {
+                      const isEditing = editingRoomId === room.id;
+                      const isCustomHost =
+                        normalizeRecentServerHost(room.serverHost).toLowerCase() !==
+                        normalizeRecentServerHost(DEFAULT_ENDPOINT).toLowerCase();
+                      const lastEpKey = room.seriesKey
+                        ? seriesMap[room.seriesKey]?.lastEpisodeKey
+                        : undefined;
+                      return (
+                        <div
+                          key={room.id}
+                          className="ep-menu-row rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs group"
+                        >
+                          {isEditing ? (
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                setRecentRoomNickname(room.id, editingRoomNickname);
+                                setEditingRoomId(null);
+                              }}
+                              className="flex-1 flex items-center gap-1.5 min-w-0"
+                            >
+                              <input
+                                type="text"
+                                autoFocus
+                                value={editingRoomNickname}
+                                placeholder="Room nickname…"
+                                maxLength={40}
+                                onChange={(e) => setEditingRoomNickname(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape") setEditingRoomId(null);
+                                }}
+                                className="ep-glass-input flex-1 h-7 px-2 rounded-lg text-xs text-primary min-w-0 focus:outline-none"
+                              />
+                              <button
+                                type="submit"
+                                className="ep-press px-2 h-7 rounded-lg bg-white/[0.1] text-[11px] text-white cursor-pointer"
+                              >
+                                Save
+                              </button>
+                            </form>
+                          ) : (
+                            <button
+                              type="button"
+                              title={`Server: ${room.serverHost}`}
+                              onClick={() => handleJoinRecentRoom(room)}
+                              className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
+                            >
+                              <span className="truncate font-medium text-primary group-hover:text-white">
+                                {room.nickname ||
+                                  (room.literalRoom
+                                    ? room.roomName
+                                    : formatRoomCodeDisplay(room.roomName))}
+                              </span>
+                              {room.nickname && (
+                                <span className="text-[11px] text-muted num truncate">
+                                  {room.literalRoom
+                                    ? room.roomName
+                                    : formatRoomCodeDisplay(room.roomName)}
+                                </span>
+                              )}
+                              {isCustomHost && (
+                                <span className="text-[10px] text-muted truncate max-w-[110px] shrink-0">
+                                  {room.serverHost}
+                                </span>
+                              )}
+                              {lastEpKey && (
+                                <span
+                                  title={`Last watched: ${lastEpKey}`}
+                                  className="px-1.5 py-0.5 rounded-full bg-white/[0.06] text-[10px] text-accent-soft num shrink-0"
+                                >
+                                  Last: {lastEpKey}
+                                </span>
+                              )}
+                              {room.hasPassword && (
+                                <Lock
+                                  size={11}
+                                  className="text-muted shrink-0"
+                                  aria-label="Password protected"
+                                />
+                              )}
+                            </button>
+                          )}
+
+                          {!isEditing && (
+                            <div className="flex items-center gap-0.5 shrink-0">
+                              <button
+                                type="button"
+                                aria-label={room.pinned ? "Unpin room" : "Pin room"}
+                                title={room.pinned ? "Unpin" : "Pin"}
+                                onClick={() => togglePinRecentRoom(room.id)}
+                                className={`ep-press p-1 rounded-lg cursor-pointer ${
+                                  room.pinned
+                                    ? "text-accent-soft bg-white/[0.08]"
+                                    : "text-muted hover:text-white hover:bg-white/[0.08]"
+                                }`}
+                              >
+                                <Pin size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label="Rename room"
+                                title="Nickname"
+                                onClick={() => {
+                                  setEditingRoomId(room.id);
+                                  setEditingRoomNickname(room.nickname ?? "");
+                                }}
+                                className="ep-press p-1 rounded-lg text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                              >
+                                <AppEditIcon size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label="Remove recent room"
+                                title="Remove"
+                                onClick={() => removeRecentRoom(room.id)}
+                                className="ep-press p-1 rounded-lg text-muted hover:text-bad hover:bg-white/[0.08] cursor-pointer"
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {error && (

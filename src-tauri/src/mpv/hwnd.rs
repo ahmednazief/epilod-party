@@ -8,8 +8,9 @@ use tauri::{AppHandle, Emitter};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DeleteDC,
-    DeleteObject, GetDC, GetStockObject, ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode,
-    StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLACK_BRUSH, DIB_RGB_COLORS, HALFTONE, HDC,
+    DeleteObject, GetDC, GetStockObject, RedrawWindow, ReleaseDC, SelectObject, SetBrushOrgEx,
+    SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLACK_BRUSH,
+    DIB_RGB_COLORS, HALFTONE, HDC, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
     SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -176,15 +177,39 @@ pub fn create_child_hwnd(
                     closing: AtomicBool::new(false),
                 });
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
-                SetWindowPos(
-                    hwnd,
-                    HWND_BOTTOM,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-                );
+                let mut actual_rect = RECT {
+                    left: rect.x,
+                    top: rect.y,
+                    right: rect.x + w,
+                    bottom: rect.y + h,
+                };
+                if GetClientRect(parent_hwnd as HWND, &mut actual_rect) != 0 {
+                    let pw = (actual_rect.right - actual_rect.left).max(1);
+                    let ph = (actual_rect.bottom - actual_rect.top).max(1);
+                    if w <= 1 || h <= 1 {
+                        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, pw, ph, SWP_NOACTIVATE);
+                    } else {
+                        SetWindowPos(
+                            hwnd,
+                            HWND_BOTTOM,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                        );
+                    }
+                } else {
+                    SetWindowPos(
+                        hwnd,
+                        HWND_BOTTOM,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                    );
+                }
                 Ok(hwnd as isize)
             }
         };
@@ -240,6 +265,12 @@ pub fn resize_child_hwnd(
                                 h,
                                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS | SWP_NOCOPYBITS,
                             );
+                            let _ = RedrawWindow(
+                                target_hwnd as HWND,
+                                std::ptr::null(),
+                                std::ptr::null_mut(),
+                                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME,
+                            );
                         }
                     }
                 }
@@ -268,6 +299,12 @@ pub fn set_child_visible(app: &AppHandle, hwnd: isize, visible: bool) {
                 0,
                 0,
                 SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+            let _ = RedrawWindow(
+                hwnd as HWND,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME,
             );
         } else {
             SetWindowPos(

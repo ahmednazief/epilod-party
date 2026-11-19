@@ -1,4 +1,4 @@
-import { useAppStore } from "../store/useAppStore";
+import { useAppStore, type OutroNextMode } from "../store/useAppStore";
 import {
   buildIntroSegmentKey,
   getEffectiveIntroSegments,
@@ -137,4 +137,91 @@ export async function skipActiveOrUpcomingIntro(
   const seg = findSkippableIntroAt(player.positionSecs, segments);
   if (!seg) return false;
   return executeSkipIntro(seg, deps);
+}
+
+export interface ResolveActiveOutroInput {
+  loaded: boolean;
+  hasNextEpisode: boolean;
+  outroNextMode: OutroNextMode;
+  lockedForLocalUser: boolean;
+  popoverOpen: boolean;
+  positionSecs: number;
+  durationSecs: number;
+  videoKey: string | null;
+  detectedOutro: DetectedIntro | null;
+  introActive?: boolean;
+  dismissedOutroKeys: readonly string[];
+}
+
+export interface ActiveOutroPrompt {
+  outroKey: string;
+  startSecs: number;
+  endSecs: number;
+  isDetectedOutro: boolean;
+}
+
+/**
+ * Resolves whether the floating "Next Episode" pill should show right now because playback has
+ * entered either the detected outro/ED segment or the near-end closing fallback window.
+ */
+export function resolveActiveOutroPrompt(
+  input: ResolveActiveOutroInput,
+): ActiveOutroPrompt | null {
+  if (
+    !input.loaded ||
+    !input.hasNextEpisode ||
+    input.outroNextMode === "off" ||
+    input.lockedForLocalUser ||
+    input.popoverOpen ||
+    input.introActive
+  ) {
+    return null;
+  }
+  if (
+    !Number.isFinite(input.positionSecs) ||
+    input.positionSecs < 0 ||
+    !Number.isFinite(input.durationSecs) ||
+    input.durationSecs <= 0
+  ) {
+    return null;
+  }
+
+  if (input.detectedOutro) {
+    const enterAt = Math.max(0, input.detectedOutro.startSecs - 1.0);
+    const reachesTail = input.detectedOutro.endSecs >= input.durationSecs - 25;
+    const inRange =
+      input.positionSecs >= enterAt &&
+      (reachesTail
+        ? input.positionSecs <= input.durationSecs
+        : input.positionSecs < input.detectedOutro.endSecs - 0.5);
+    if (!inRange) return null;
+
+    const outroKey = buildIntroSegmentKey(input.videoKey, input.detectedOutro);
+    if (input.dismissedOutroKeys.includes(outroKey)) return null;
+    return {
+      outroKey,
+      startSecs: input.detectedOutro.startSecs,
+      endSecs: input.detectedOutro.endSecs,
+      isDetectedOutro: true,
+    };
+  }
+
+  if (input.durationSecs < 90) {
+    return null;
+  }
+  const fallbackWindowSecs = Math.min(40, Math.max(15, Math.round(input.durationSecs * 0.035)));
+  const startSecs = Math.max(5, input.durationSecs - fallbackWindowSecs);
+  if (input.positionSecs < startSecs) {
+    return null;
+  }
+  const outroKey = `${input.videoKey ?? ""}::outroFallback::${Math.round(startSecs * 10)}`;
+  if (input.dismissedOutroKeys.includes(outroKey)) {
+    return null;
+  }
+  return {
+    outroKey,
+    startSecs,
+    endSecs: input.durationSecs,
+    isDetectedOutro: false,
+  };
 }

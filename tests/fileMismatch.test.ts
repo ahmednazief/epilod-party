@@ -446,7 +446,14 @@ test("formatParticipantMatchBadge, formatDurationDelta, and useSyncStore dismiss
       makeParticipant({ username: "Me", fileName: "Ep1.mkv" }),
       { localHasFile: true, isSelf: true },
     ),
-    { text: "In sync", className: "text-ok", isMismatch: false },
+    { text: "Video loaded", className: "text-secondary", isMismatch: false },
+  );
+  assert.deepEqual(
+    fileMismatch.formatParticipantMatchBadge(
+      makeParticipant({ username: "Alice", fileName: "Ep1.mkv", fileMatch: "matched" }),
+      { localHasFile: true, isSelf: false },
+    ),
+    { text: "Same video", className: "text-secondary", isMismatch: false },
   );
   assert.deepEqual(
     fileMismatch.formatParticipantMatchBadge(
@@ -579,4 +586,68 @@ test("FileMismatchBanner, RoomPanel, TransportBar, WatchRoom, and globals.css wi
   assert.equal(css.includes(".ep-glass-warning-inline {"), true);
   assert.equal(css.includes(".ep-warning-badge {"), true);
   assert.equal(css.includes(".ep-warning-action {"), true);
+});
+
+test("analyzePartyFileMismatch sets high confidence autoFixable for known FPS ratios and low otherwise", async () => {
+  const { fileMismatch, useSyncStore } = await loadMismatchBundle();
+
+  const fpsMismatch = fileMismatch.analyzePartyFileMismatch({
+    syncConnected: true,
+    localUsername: "Me",
+    localLoaded: true,
+    localFileName: "Movie.mkv",
+    participants: [
+      {
+        username: "Me",
+        isReady: true,
+        isController: true,
+        fileName: "Movie.mkv",
+        fileMatch: "matched",
+      },
+      {
+        username: "Peer",
+        isReady: true,
+        isController: false,
+        fileName: "Movie.mkv",
+        fileMatch: "durationMismatch",
+        sourceRelation: "fpsMismatch",
+        suggestedFpsScale: 25 / 23.976,
+        suggestedFpsLabel: "23.976 -> 25",
+      },
+    ],
+  });
+  assert.equal(fpsMismatch?.kind, "fpsMismatch");
+  assert.equal(fpsMismatch?.autoFixable, true);
+  assert.equal(fpsMismatch?.confidence, "high");
+
+  const diffFile = fileMismatch.analyzePartyFileMismatch({
+    syncConnected: true,
+    localUsername: "Me",
+    localLoaded: true,
+    localFileName: "MovieA.mkv",
+    participants: [
+      {
+        username: "Me",
+        isReady: true,
+        isController: true,
+        fileName: "MovieA.mkv",
+        fileMatch: "matched",
+      },
+      {
+        username: "Peer",
+        isReady: true,
+        isController: false,
+        fileName: "MovieB.mkv",
+        fileMatch: "differentFile",
+      },
+    ],
+  });
+  assert.equal(diffFile?.kind, "differentFile");
+  assert.equal(diffFile?.autoFixable, false);
+  assert.equal(diffFile?.confidence, "low");
+
+  useSyncStore.getState().markMismatchSigUndone("fpsMismatch|movie.mkv|peer");
+  assert.equal(useSyncStore.getState().undoneMismatchSigs.includes("fpsMismatch|movie.mkv|peer"), true);
+  useSyncStore.getState().reset();
+  assert.equal(useSyncStore.getState().undoneMismatchSigs.length, 0);
 });

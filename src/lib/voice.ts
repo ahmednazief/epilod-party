@@ -203,6 +203,25 @@ export async function voiceSetPeerVolume(
   await safeInvoke("voice_set_peer_volume", { username, volume, muted });
 }
 
+let activeMicMonitorSurfaces = 0;
+
+/** Registers an active UI surface (Settings or Quick Audio tray) holding mic monitor open. */
+export function acquireMicMonitorSurface(): number {
+  activeMicMonitorSurfaces += 1;
+  return activeMicMonitorSurfaces;
+}
+
+/** Releases a UI surface's mic monitor claim and returns remaining active surface count. */
+export function releaseMicMonitorSurface(): number {
+  activeMicMonitorSurfaces = Math.max(0, activeMicMonitorSurfaces - 1);
+  return activeMicMonitorSurfaces;
+}
+
+/** Returns how many UI surfaces are currently holding mic monitoring active. */
+export function getActiveMicMonitorSurfaces(): number {
+  return activeMicMonitorSurfaces;
+}
+
 export async function voiceStartMicMonitor(loopback: boolean): Promise<void> {
   if (!isDesktop()) return;
   await safeInvoke("voice_start_mic_monitor", { loopback });

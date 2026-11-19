@@ -379,3 +379,146 @@ test("Shortcuts, UI components, WatchRoom, and Rust IPC wire Smart Skip Intro cl
     "TransportBar outer component must never subscribe to high-rate positionSecs"
   );
 });
+
+test("Outro Next Episode detection, persistence, overlay wiring, and settings automation", async () => {
+  const ls = setupMockLocalStorage();
+  const { appStore, introStore, introActions } = await loadBundledIntroModules();
+
+  const app = appStore.useAppStore.getState();
+  assert.equal(app.outroNextMode, "manual");
+  app.setOutroNextMode("auto");
+  assert.equal(ls.get("ep.outroNextMode"), "auto");
+  assert.equal(appStore.useAppStore.getState().outroNextMode, "auto");
+  app.setOutroNextMode("off");
+  assert.equal(ls.get("ep.outroNextMode"), "off");
+
+  app.setSelectedFile("D:\\Series\\Show.S01E01.mkv", "Show.S01E01.mkv");
+  const intro = introStore.useIntroStore.getState();
+  const detectedOutro = {
+    startSecs: 1320,
+    endSecs: 1410,
+    skipTargetSecs: 1410,
+    kind: "outro" as const,
+    source: "chapter" as const,
+    confidence: "high" as const,
+    label: "Next Episode",
+    similarity: null,
+    matchedEpisodes: 1,
+  };
+  intro.setDetectedOutcome("D:\\Series\\Show.S01E01.mkv", {
+    segments: [],
+    primaryIntro: null,
+    outro: detectedOutro,
+  });
+  assert.equal(introStore.useIntroStore.getState().outro?.startSecs, 1320);
+
+  // Restores cached outro when revisiting the same video
+  introStore.useIntroStore.getState().resetForVideo("D:\\Series\\Show.S01E01.mkv");
+  assert.equal(introStore.useIntroStore.getState().outro?.endSecs, 1410);
+
+  // Detected outro prompt activates within 1s pre-entry and hides when dismissed, locked, or after post-credits boundary
+  assert.equal(
+    introActions.resolveActiveOutroPrompt({
+      loaded: true,
+      hasNextEpisode: true,
+      outroNextMode: "manual",
+      lockedForLocalUser: false,
+      popoverOpen: false,
+      positionSecs: 1318,
+      durationSecs: 1440,
+      videoKey: "d:\\series\\show.s01e01.mkv",
+      detectedOutro,
+      introActive: false,
+      dismissedOutroKeys: [],
+    }),
+    null,
+  );
+  const activePrompt = introActions.resolveActiveOutroPrompt({
+    loaded: true,
+    hasNextEpisode: true,
+    outroNextMode: "auto",
+    lockedForLocalUser: false,
+    popoverOpen: false,
+    positionSecs: 1322,
+    durationSecs: 1440,
+    videoKey: "d:\\series\\show.s01e01.mkv",
+    detectedOutro,
+    introActive: false,
+    dismissedOutroKeys: [],
+  });
+  assert.ok(activePrompt, "Outro prompt shows when entering detected ending");
+  assert.equal(activePrompt?.isDetectedOutro, true);
+
+  assert.equal(
+    introActions.resolveActiveOutroPrompt({
+      loaded: true,
+      hasNextEpisode: true,
+      outroNextMode: "auto",
+      lockedForLocalUser: false,
+      popoverOpen: false,
+      positionSecs: 1322,
+      durationSecs: 1440,
+      videoKey: "d:\\series\\show.s01e01.mkv",
+      detectedOutro,
+      introActive: false,
+      dismissedOutroKeys: [activePrompt!.outroKey],
+    }),
+    null,
+    "Dismissed outro stays hidden",
+  );
+
+  // Fallback near-end trigger when no chapter/subtitle/audio outro exists
+  const fallbackBefore = introActions.resolveActiveOutroPrompt({
+    loaded: true,
+    hasNextEpisode: true,
+    outroNextMode: "manual",
+    lockedForLocalUser: false,
+    popoverOpen: false,
+    positionSecs: 1380,
+    durationSecs: 1440,
+    videoKey: "d:\\series\\show.s01e01.mkv",
+    detectedOutro: null,
+    introActive: false,
+    dismissedOutroKeys: [],
+  });
+  assert.equal(fallbackBefore, null);
+
+  const fallbackActive = introActions.resolveActiveOutroPrompt({
+    loaded: true,
+    hasNextEpisode: true,
+    outroNextMode: "manual",
+    lockedForLocalUser: false,
+    popoverOpen: false,
+    positionSecs: 1410,
+    durationSecs: 1440,
+    videoKey: "d:\\series\\show.s01e01.mkv",
+    detectedOutro: null,
+    introActive: false,
+    dismissedOutroKeys: [],
+  });
+  assert.ok(fallbackActive, "Near-end fallback shows Next Episode pill when outro reaches tail");
+  assert.equal(fallbackActive?.isDetectedOutro, false);
+
+  // UI wiring checks
+  const nextOverlaySrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/NextEpisodeOverlay.tsx"),
+    "utf8"
+  );
+  assert.match(nextOverlaySrc, /ep-glass-liquid-pill/);
+  assert.match(nextOverlaySrc, /ep-intro-countdown-fill/);
+  assert.match(nextOverlaySrc, /Next Episode/);
+
+  const settingsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SettingsModal.tsx"),
+    "utf8"
+  );
+  assert.match(settingsSrc, /Next Episode on Outro/);
+  assert.match(settingsSrc, /"auto", label: "Auto-Next"/);
+
+  const watchRoomSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8"
+  );
+  assert.match(watchRoomSrc, /<NextEpisodeOverlay/);
+  assert.match(watchRoomSrc, /segmentDetectEnabled/);
+});

@@ -226,8 +226,16 @@ export const ChatSidebar = memo(function ChatSidebar({
   );
   const voiceAudioPresence = usePresencePayload(
     voiceAudioOpen && voiceAudioCoords ? voiceAudioCoords : null,
-    170,
+    190,
   );
+
+  useEffect(() => {
+    window.dispatchEvent(new Event("ep:glass-layout"));
+    const timer = window.setTimeout(() => {
+      window.dispatchEvent(new Event("ep:glass-layout"));
+    }, 65);
+    return () => window.clearTimeout(timer);
+  }, [voiceAudioOpen, voiceAudioPresence.mounted]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const msgRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -271,10 +279,11 @@ export const ChatSidebar = memo(function ChatSidebar({
       if (!anchor) return;
       const r = anchor.getBoundingClientRect();
       const vw = window.innerWidth || 1280;
-      const width = 264;
+      const vh = window.innerHeight || 720;
+      const width = 244;
       setVoiceAudioCoords({
         left: Math.max(12, Math.min(r.right - width, vw - width - 12)),
-        top: r.bottom + 6,
+        top: Math.max(12, Math.min(r.bottom + 6, vh - 290)),
       });
     };
     update();
@@ -306,8 +315,17 @@ export const ChatSidebar = memo(function ChatSidebar({
         setVoiceAudioOpen(false);
       }
     };
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && voiceAudioOpen) {
+        setVoiceAudioOpen(false);
+      }
+    };
     window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [optionsOpen, voiceAudioOpen]);
 
   const activeTypingNames = useMemo(() => {
@@ -1010,16 +1028,16 @@ export const ChatSidebar = memo(function ChatSidebar({
                 style={{
                   left: `${voiceAudioPresence.value.left}px`,
                   top: `${voiceAudioPresence.value.top}px`,
+                  transformOrigin: "top right",
                 }}
-                className={`ep-glass-submenu fixed z-[75] w-[264px] rounded-2xl p-1 ${
+                className={`ep-glass-submenu fixed z-[75] w-[244px] rounded-2xl p-2 ${
                   voiceAudioPresence.exiting
-                    ? "anim-pop-out pointer-events-none"
-                    : "anim-pop-in"
+                    ? "ep-popover-bloom-out pointer-events-none"
+                    : "ep-popover-bloom"
                 }`}
               >
                 <VoiceQuickSettingsTray
                   open={voiceAudioOpen}
-                  className="bg-transparent border-0 p-1.5"
                   onOpenFullSettings={() => {
                     setVoiceAudioOpen(false);
                     openSettings("voice");

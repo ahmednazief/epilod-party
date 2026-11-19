@@ -31,6 +31,7 @@ pub async fn connect_and_run_ipc<F>(
     pending_replies: PendingReplyMap,
     client_seek_seq: Arc<AtomicU64>,
     volume_reassert_cb: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    file_loaded_cb: Arc<dyn Fn() + Send + Sync>,
     check_child_exited: F,
 ) -> String
 where
@@ -215,6 +216,11 @@ where
                         .unwrap_or_else(|e| e.into_inner())
                         .clear();
                     ui_time_throttle.reset();
+                    let _ = cmd_tx.try_send(
+                        "{\"command\":[\"set_property\",\"vid\",\"auto\"],\"request_id\":900003}\n"
+                            .to_string(),
+                    );
+                    file_loaded_cb();
                     let _ = app.emit("mpv://file-loaded", ());
                     if let Some(cb) = volume_reassert_cb
                         .lock()

@@ -153,7 +153,7 @@ export function Scrubber({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (disabled || max <= min) return;
+    if (disabled || max <= min || e.currentTarget.closest?.('[aria-hidden="true"]')) return;
     let next: number | null = null;
     if (e.key === "ArrowRight" || e.key === "ArrowUp") {
       next = clamp(value + step, min, max);

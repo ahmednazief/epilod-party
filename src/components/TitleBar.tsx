@@ -1,4 +1,5 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, PhysicalSize } from "@tauri-apps/api/window";
+import { PictureInPicture2, Pin } from "lucide-react";
 import {
   AppCloseIcon,
   AppDownloadIcon,
@@ -22,6 +23,10 @@ function isTitleBarInteractiveTarget(target: EventTarget | null): boolean {
   );
 }
 
+// Kept at module scope so exiting WatchRoom while in mini mode still restores
+// the pre-mini window dimensions after TitleBar remounts on HomeScreen.
+let savedMiniBounds: { width: number; height: number; wasMaximized: boolean } | null = null;
+
 interface TitleBarProps {
   leftSlot: ReactNode;
   rightActions?: ReactNode;
@@ -34,6 +39,11 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
   const dragCleanupRef = useRef<(() => void) | null>(null);
 
   const openSettings = useAppStore((s) => s.openSettings);
+  const screen = useAppStore((s) => s.screen);
+  const alwaysOnTop = useAppStore((s) => s.alwaysOnTop);
+  const miniMode = useAppStore((s) => s.miniMode);
+  const setAlwaysOnTop = useAppStore((s) => s.setAlwaysOnTop);
+  const setMiniMode = useAppStore((s) => s.setMiniMode);
   const updateStatus = useUpdaterStore((s) => s.status);
   const updateProgress = useUpdaterStore((s) => s.progress);
   const isDownloadingUpdate = useUpdaterStore((s) => s.isDownloading);
@@ -65,6 +75,9 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
     const bind = async () => {
       try {
         const win = getCurrentWindow();
+        if (useAppStore.getState().alwaysOnTop) {
+          await win.setAlwaysOnTop(true);
+        }
         const max = await win.isMaximized();
         if (active) setIsMaximized(max);
         const fn = await win.onResized(async () => {
@@ -111,6 +124,61 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
     if (!isDesktop()) return;
     await getCurrentWindow().close();
   };
+
+  const handleToggleAlwaysOnTop = async () => {
+    const next = !alwaysOnTop;
+    setAlwaysOnTop(next);
+    if (!isDesktop()) return;
+    try {
+      await getCurrentWindow().setAlwaysOnTop(next);
+    } catch {
+      // Ignore outside Tauri runtime
+    }
+  };
+
+  const handleToggleMiniMode = async () => {
+    const next = !miniMode;
+    setMiniMode(next);
+    if (!isDesktop()) return;
+    try {
+      const win = getCurrentWindow();
+      if (next) {
+        const wasMax = await win.isMaximized();
+        const size = await win.innerSize();
+        savedMiniBounds = {
+          width: size.width,
+          height: size.height,
+          wasMaximized: wasMax,
+        };
+        if (wasMax) {
+          await win.unmaximize();
+        }
+        await win.setSize(new LogicalSize(480, 270));
+        await win.setAlwaysOnTop(true);
+      } else {
+        const prev = savedMiniBounds;
+        savedMiniBounds = null;
+        await win.setAlwaysOnTop(useAppStore.getState().alwaysOnTop);
+        if (prev) {
+          await win.setSize(new PhysicalSize(prev.width, prev.height));
+          if (prev.wasMaximized) {
+            await win.maximize();
+          }
+        }
+      }
+      window.dispatchEvent(new Event("resize"));
+    } catch {
+      // Ignore outside Tauri runtime
+    }
+  };
+
+  useEffect(() => {
+    // Leaving the room while in mini mode must restore the normal window size.
+    if (screen !== "room" && miniMode) {
+      void handleToggleMiniMode();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, miniMode]);
 
   const handleMaximizedTitleMouseDown = (e: ReactMouseEvent<HTMLElement>) => {
     if (!isDesktop() || !isMaximized || e.button !== 0 || isTitleBarInteractiveTarget(e.target)) {
@@ -306,6 +374,34 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
         )}
 
         <div className="flex items-center gap-1 pl-1">
+          {screen === "room" && (
+            <button
+              type="button"
+              aria-label={miniMode ? "Exit mini mode" : "Mini mode"}
+              aria-pressed={miniMode}
+              title={miniMode ? "Exit Mini Mode" : "Mini Mode (480×270)"}
+              onClick={() => void handleToggleMiniMode()}
+              className={`ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center cursor-pointer ${
+                miniMode ? "text-accent-soft bg-white/[0.12]" : "text-white/70 hover:text-white"
+              }`}
+            >
+              <PictureInPicture2 size={13} />
+            </button>
+          )}
+
+          <button
+            type="button"
+            aria-label={alwaysOnTop ? "Unpin window from top" : "Keep window always on top"}
+            aria-pressed={alwaysOnTop}
+            title={alwaysOnTop ? "Always on top: On" : "Always on top"}
+            onClick={() => void handleToggleAlwaysOnTop()}
+            className={`ep-bar-icon-btn h-7 w-7 rounded-full inline-flex items-center justify-center cursor-pointer ${
+              alwaysOnTop ? "text-accent-soft bg-white/[0.12]" : "text-white/70 hover:text-white"
+            }`}
+          >
+            <Pin size={13} />
+          </button>
+
           <button
             type="button"
             aria-label="Minimize window"

@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -6,6 +7,7 @@ import {
   AppFolderIcon,
   AppKeyboardIcon,
   AppLogsIcon,
+  AppMicIcon,
   AppRepeatIcon,
   AppSeasonFolderIcon,
   AppSlidersIcon,
@@ -55,8 +57,9 @@ import {
   resolveEpisodeLoadSyncPlan,
   resolveFollowPartyEpisode,
   type EpisodeLoadTrigger,
+  type RecentEpisodeSwitch,
 } from "../lib/autoNext";
-import { isDesktop } from "../lib/bridge";
+import { isDesktop, safeInvoke } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
 import { getFileDisplayName, splitDroppedFiles } from "../lib/fileDrop";
 import { resolveFullscreenChromeState } from "../lib/fullscreenUi";
@@ -72,10 +75,12 @@ import {
   mpvResize,
   mpvSeek,
   mpvSetPause,
+  mpvSetSecondarySubTrack,
   mpvSetSpeed,
   mpvSetSubDelay,
   mpvSetSubStyle,
   mpvSetVisible,
+  mpvShowOsdText,
   mpvStart,
   mpvStop,
   onMpvCommandWarning,
@@ -124,6 +129,7 @@ import {
   resetAutoSubtitleState,
   runWithHiddenMpvSurface,
   seekPlaybackRelative,
+  seekPlaybackTo,
   selectAudioTrackOption,
   SyncDisconnectTracker,
   toggleLoopPlayback,
@@ -235,7 +241,18 @@ import {
   useAnimatedPresence,
   usePresencePayload,
 } from "../lib/useAnimatedPresence";
+import { buildMediaFileKey, formatResumeClock } from "../lib/resume";
+import { getPerFileSubtitlePref } from "../lib/subtitlePrefs";
+import {
+  buildEpisodeKey,
+  buildSeriesKey,
+  extractParentFolderPath,
+  pickInitialSeriesIndex,
+} from "../lib/seriesProgress";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { buildRecentRoomId, useRecentRoomsStore } from "../store/useRecentRoomsStore";
+import { useResumeStore } from "../store/useResumeStore";
+import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import {
   buildIntroSegmentKey,
@@ -276,6 +293,7 @@ import { EpisodesPanel } from "./EpisodesPanel";
 import { FloatingChatPeeks } from "./FloatingChatPeeks";
 import { FloatingReactionsOverlay } from "./FloatingReactionsOverlay";
 import { SkipIntroOverlay } from "./SkipIntroOverlay";
+import { NextEpisodeOverlay } from "./NextEpisodeOverlay";
 import { FileMismatchBanner } from "./FileMismatchBanner";
 import { formatRoomCodeDisplay } from "./HomeScreen";
 import { FrozenVideoFrame } from "./FrozenVideoFrame";
@@ -385,8 +403,12 @@ export function WatchRoom() {
 
   const closeSettings = useAppStore((s) => s.closeSettings);
   const openSettings = useAppStore((s) => s.openSettings);
+  const miniMode = useAppStore((s) => s.miniMode);
+  const startWhenAllReady = useAppStore((s) => s.startWhenAllReady);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const skipIntroEnabled = useAppStore((s) => s.skipIntroMode !== "off");
+  const outroNextEnabled = useAppStore((s) => s.outroNextMode !== "off");
+  const segmentDetectEnabled = skipIntroEnabled || outroNextEnabled;
   const autoFetchSubtitles = useAppStore((s) => s.autoFetchSubtitles);
   const preferredSubtitleLangs = useAppStore((s) => s.preferredSubtitleLangs);
   const openSubtitlesApiKey = useAppStore((s) => s.openSubtitlesApiKey);
@@ -493,6 +515,7 @@ export function WatchRoom() {
   const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
   const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
   const voiceSpeakingPeers = useVoiceStore((s) => s.speakingPeers);
+  const micCue = useVoiceStore((s) => s.micCue);
   const avatarId = useAppStore((s) => s.avatarId);
   const voiceCaptureHealthy =
     voiceStreamStatus !== "micBusy" &&
@@ -548,6 +571,8 @@ export function WatchRoom() {
   const autoSubFetchedKeyRef = useRef("");
   const autoLoadedPathRef = useRef<string | null>(null);
   const justAdvancedFromPathRef = useRef<string | null>(null);
+  const recentLocalSwitchesRef = useRef<RecentEpisodeSwitch[]>([]);
+  const recentFollowTimestampsRef = useRef<number[]>([]);
   const pendingPairedSubRef = useRef<{ videoPath: string; subPath: string } | null>(null);
   const loadSubtitlePathRef = useRef<((path: string) => Promise<void>) | null>(null);
   const selectEpisodeAtIndexRef = useRef<
@@ -555,6 +580,48 @@ export function WatchRoom() {
   >(null);
   const lastPeerFileRef = useRef<string | null>(null);
   const restoredAlignmentPairRef = useRef<string | null>(null);
+  const resumeAppliedKeyRef = useRef<string | null>(null);
+  const subPrefAppliedKeyRef = useRef<string | null>(null);
+  const lastResumeSaveAtRef = useRef<number>(0);
+  const watchedMarkedPathRef = useRef<string | null>(null);
+  const jumpedFromEarlyToEndRef = useRef<boolean>(false);
+
+  const markCurrentEpisodeWatchedIfEligible = useCallback((isEof = false) => {
+    const appNow = useAppStore.getState();
+    if (!appNow.trackWatchedEpisodes) return;
+    const pNow = usePlayerStore.getState();
+    if (!pNow.loaded || pNow.durationSecs <= 0 || !appNow.selectedFilePath) return;
+    if (!isEof && pNow.positionSecs < pNow.durationSecs * 0.9) return;
+    if (jumpedFromEarlyToEndRef.current) return;
+    if (watchedMarkedPathRef.current === appNow.selectedFilePath) return;
+
+    const plNow = usePlaylistStore.getState();
+    if (plNow.items.length === 0) return;
+    const folderPath = extractParentFolderPath(plNow.items[0].path);
+    if (!folderPath) return;
+    const epItem = plNow.items[plNow.currentIndex] ?? appNow.selectedFileName ?? appNow.selectedFilePath;
+    const epKey = buildEpisodeKey(epItem);
+    const seriesKey = useSeriesProgressStore.getState().upsertSeries({
+      folderPath,
+      folderName: plNow.folderName || "Series",
+      lastEpisodeKey: epKey,
+    });
+    if (seriesKey) {
+      useSeriesProgressStore.getState().markWatched(seriesKey, epKey, true);
+      watchedMarkedPathRef.current = appNow.selectedFilePath;
+    }
+  }, []);
+
+  const saveCurrentResumePosition = useCallback(() => {
+    const appNow = useAppStore.getState();
+    if (!appNow.rememberPlaybackPosition) return;
+    const pNow = usePlayerStore.getState();
+    if (!pNow.loaded || pNow.durationSecs <= 0 || !appNow.selectedFileName) return;
+    const key = buildMediaFileKey(appNow.selectedFileName, pNow.durationSecs);
+    if (!key) return;
+    useResumeStore.getState().savePosition(key, pNow.positionSecs, pNow.durationSecs);
+    lastResumeSaveAtRef.current = Date.now();
+  }, []);
 
   panelOpenRef.current = panelOpen;
   sideTabRef.current = sideTab;
@@ -566,7 +633,7 @@ export function WatchRoom() {
     const app = useAppStore.getState();
     const sync = useSyncStore.getState();
     const shouldAutoHidePlaying = !p.paused;
-    const shouldAutoHidePausedFullscreen = p.paused && p.isFullscreen;
+    const shouldAutoHidePausedFullscreen = p.paused && (p.isFullscreen || app.miniMode);
     return (
       p.loaded &&
       (shouldAutoHidePlaying || shouldAutoHidePausedFullscreen) &&
@@ -866,6 +933,7 @@ export function WatchRoom() {
     onExitFullscreen: exitFullscreen,
     onToggleReactions: toggleReactionsPopover,
     onToggleChat: toggleChatSidebar,
+    onWakeChrome: wakeChrome,
   });
 
   const ensureMpvStarted = useCallback(async () => {
@@ -955,9 +1023,21 @@ export function WatchRoom() {
       setLoadingMedia(true);
       const displayName = getFileDisplayName(path);
       const prevSelectedPath = useAppStore.getState().selectedFilePath;
+      saveCurrentResumePosition();
+      resumeAppliedKeyRef.current = null;
+      subPrefAppliedKeyRef.current = null;
+      watchedMarkedPathRef.current = null;
+      jumpedFromEarlyToEndRef.current = false;
+      const switchNowMs = Date.now();
+      const prunedSwitches = recentLocalSwitchesRef.current.filter(
+        (sw) => switchNowMs - sw.atMs < 10_000,
+      );
       if (prevSelectedPath && prevSelectedPath.toLowerCase() !== path.toLowerCase()) {
         justAdvancedFromPathRef.current = prevSelectedPath;
+        prunedSwitches.push({ path: prevSelectedPath, atMs: switchNowMs, trigger });
       }
+      prunedSwitches.push({ path, atMs: switchNowMs, trigger });
+      recentLocalSwitchesRef.current = prunedSwitches.slice(-12);
       const wasPlayingBeforeLoad = trigger === "autoNext" || !usePlayerStore.getState().paused;
       autoLoadedPathRef.current = path;
       void subtitleCancelAutoSync().catch(() => undefined);
@@ -1152,6 +1232,13 @@ export function WatchRoom() {
     }
   }, [selectEpisodeAtIndex]);
 
+  const handleOutroNextEpisode = useCallback(() => {
+    const { currentIndex, items } = usePlaylistStore.getState();
+    if (currentIndex >= 0 && currentIndex < items.length - 1) {
+      void selectEpisodeAtIndex(currentIndex + 1, "autoNext");
+    }
+  }, [selectEpisodeAtIndex]);
+
   const loadMediaInputs = useCallback(
     async (paths: string[], options?: { append?: boolean }) => {
       const clean = paths.map((p) => p.trim()).filter(Boolean);
@@ -1200,6 +1287,7 @@ export function WatchRoom() {
         }
 
         let targetIndex = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+        let matchedPeer = false;
         const sState = useSyncStore.getState();
         if (sState.status.state === "connected" && pStore.followPartyEpisode) {
           const myName = resolveEffectiveUsername(sState.status, useAppStore.getState().username).toLowerCase();
@@ -1210,8 +1298,22 @@ export function WatchRoom() {
             const peerMatch = matchPeerEpisodeInPlaylist(leader.fileName, scan.items);
             if (peerMatch !== -1) {
               targetIndex = peerMatch;
+              matchedPeer = true;
               lastPeerFileRef.current = leader.fileName.trim();
             }
+          }
+        }
+        if (
+          !matchedPeer &&
+          useAppStore.getState().trackWatchedEpisodes &&
+          splitDroppedFiles(clean).directorySuspected
+        ) {
+          const folderPath = extractParentFolderPath(scan.items[0].path);
+          const saved = folderPath
+            ? useSeriesProgressStore.getState().getSeries(buildSeriesKey(folderPath))
+            : null;
+          if (saved) {
+            targetIndex = pickInitialSeriesIndex(scan.items, saved);
           }
         }
 
@@ -1426,7 +1528,7 @@ export function WatchRoom() {
   }, [tracks]);
 
   useEffect(() => {
-    if (!loaded || !skipIntroEnabled || !selectedFilePath) {
+    if (!loaded || !segmentDetectEnabled || !selectedFilePath) {
       introDetectGenRef.current += 1;
       useIntroStore.getState().setDetecting(false);
       void introCancelDetect();
@@ -1452,7 +1554,8 @@ export function WatchRoom() {
     // Skip redundant FFmpeg/audio scan if we already have chapter or cached audio match and chapters haven't changed
     if (
       introChapters.length === 0 &&
-      curIntroState.segments.some((s) => s.source === "audioMatch")
+      curIntroState.segments.some((s) => s.source === "audioMatch") &&
+      (!outroNextEnabled || Boolean(curIntroState.outro))
     ) {
       introCheckedSigRef.current = reqSig;
       return;
@@ -1496,7 +1599,8 @@ export function WatchRoom() {
     };
   }, [
     loaded,
-    skipIntroEnabled,
+    segmentDetectEnabled,
+    outroNextEnabled,
     selectedFilePath,
     durationSecs,
     introChapters,
@@ -1804,6 +1908,14 @@ export function WatchRoom() {
             const prevPos = lastTimePosRef.current;
             lastTimePosRef.current = position;
             usePlayerStore.getState().setPositionSecs(position);
+            const durNow = usePlayerStore.getState().durationSecs;
+            if (durNow > 0 && prevPos < durNow * 0.3 && position >= durNow * 0.9 && position - prevPos > durNow * 0.5) {
+              jumpedFromEarlyToEndRef.current = true;
+            }
+            if (Date.now() - lastResumeSaveAtRef.current >= 10_000) {
+              saveCurrentResumePosition();
+            }
+            markCurrentEpisodeWatchedIfEligible(false);
             lastLoopSyncAtRef.current = detectAndSyncLoopWrap(
               prevPos,
               position,
@@ -1861,7 +1973,13 @@ export function WatchRoom() {
               }
               usePlayerStore.getState().setEndedAtEof(true);
               usePlayerStore.getState().setPaused(true);
+              markCurrentEpisodeWatchedIfEligible(true);
               const playlist = usePlaylistStore.getState();
+              const seriesFolder = playlist.items[0] ? extractParentFolderPath(playlist.items[0].path) : "";
+              const seriesKey = seriesFolder ? buildSeriesKey(seriesFolder) : "";
+              const watchedKeys = seriesKey
+                ? (useSeriesProgressStore.getState().getSeries(seriesKey)?.watchedKeys ?? [])
+                : [];
               const syncNow = useSyncStore.getState();
               const syncConnNow = syncNow.status.state === "connected";
               const effUserNow = resolveEffectiveUsername(
@@ -1878,6 +1996,8 @@ export function WatchRoom() {
                 autoPlayNext: playlist.autoPlayNext,
                 currentIndex: playlist.currentIndex,
                 itemsLength: playlist.items.length,
+                items: playlist.items,
+                watchedKeys,
                 loadInFlight: loadInFlightRef.current,
                 eofHandledForGen: eofHandledLoadGenRef.current,
                 currentLoadGen: loadGenRef.current,
@@ -1970,7 +2090,18 @@ export function WatchRoom() {
           onSyncStatus((status) => {
             if (!active) return;
             useSyncStore.getState().setStatus(status);
-            if (status.state !== "connected") {
+            if (status.state === "connected") {
+              const appNow = useAppStore.getState();
+              if (appNow.roomCode) {
+                useRecentRoomsStore.getState().recordJoin({
+                  roomName: appNow.roomCode,
+                  serverHost: appNow.serverEndpoint,
+                  literalRoom: appNow.literalRoom,
+                  hasPassword: Boolean(appNow.serverPassword),
+                  hostOnly: appNow.hostOnlyRoom,
+                });
+              }
+            } else {
               useNotificationStore.getState().dismissByTagPrefix(NOT_READY_TAG_PREFIX);
             }
             syncDisconnectTrackerRef.current.onStatus(
@@ -2076,6 +2207,9 @@ export function WatchRoom() {
           onSyncPeerLeft(({ username: peerName }) => {
             if (!active) return;
             handlePeerDisconnected(peerName);
+            if (useAppStore.getState().osdEnabled && usePlayerStore.getState().loaded) {
+              safeMpvCall(mpvShowOsdText(`${peerName} left`), "osd:peerLeft");
+            }
           }),
           onSyncPlayBlocked(({ usernames }) => {
             if (!active) return;
@@ -2144,6 +2278,9 @@ export function WatchRoom() {
             pushNote(formatted.level, formatted.text, 5500);
             if (formatted.feedback) {
               usePlayerStore.getState().flashFeedback(formatted.feedback);
+            }
+            if (useAppStore.getState().osdEnabled && usePlayerStore.getState().loaded) {
+              safeMpvCall(mpvShowOsdText(formatted.feedback || formatted.text), "osd:controlNotice");
             }
           }),
           onSyncReaction((reaction) => {
@@ -2316,6 +2453,7 @@ export function WatchRoom() {
               prevVoice.muted !== st.muted || prevVoice.deafened !== st.deafened;
             prevVoice.applyLocalState(st.muted, st.deafened, st.pttActive);
             if (changed && prevVoice.joined) {
+              prevVoice.flashMicCue(st.muted || st.deafened);
               const p = usePlayerStore.getState();
               p.flashFeedback(
                 st.deafened
@@ -2579,7 +2717,7 @@ export function WatchRoom() {
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!isTextEntryElement(e.target)) {
+      if (e.code === "Tab" && !isTextEntryElement(e.target)) {
         wakeChrome();
       }
       if (
@@ -2735,19 +2873,37 @@ export function WatchRoom() {
 
   // Follow controller / party member when switching episodes within a loaded season queue
   useEffect(() => {
+    const syncConnectedNow = syncStatus.state === "connected";
+    const effUserNow = resolveEffectiveUsername(syncStatus, username);
+    const ctrlLockNow = getControllerLockState(
+      syncConnectedNow,
+      participants,
+      effUserNow,
+      roomControl,
+    );
+    const nowMs = Date.now();
     const decision = resolveFollowPartyEpisode({
-      syncConnected: syncStatus.state === "connected",
+      syncConnected: syncConnectedNow,
       followPartyEpisode,
       participants,
-      localUsername: resolveEffectiveUsername(syncStatus, username),
+      localUsername: effUserNow,
       playlistItems,
       playlistIndex,
       loadInFlight: loadingMedia || loadInFlightRef.current,
       previousPeerFile: lastPeerFileRef.current,
       justAdvancedFromPath: justAdvancedFromPathRef.current,
+      hasControllers: ctrlLockNow.hasControllers,
+      localIsController: ctrlLockNow.localIsController,
+      recentLocalSwitches: recentLocalSwitchesRef.current,
+      recentFollowTimestamps: recentFollowTimestampsRef.current,
+      nowMs,
     });
     lastPeerFileRef.current = decision.nextPeerFile;
     if (decision.action === "follow") {
+      recentFollowTimestampsRef.current = [
+        ...recentFollowTimestampsRef.current.filter((t) => nowMs - t < 10_000),
+        nowMs,
+      ].slice(-10);
       pushNote(
         "info",
         `Following ${decision.leaderUsername} to ${
@@ -2763,6 +2919,7 @@ export function WatchRoom() {
     playlistIndex,
     playlistItems,
     pushNote,
+    roomControl,
     switchToPartyEpisode,
     syncStatus,
     username,
@@ -2873,7 +3030,214 @@ export function WatchRoom() {
   const chatPeeksCount = useChatStore((s) => s.peeks.length);
   const chatPeeksEnabled = useAppStore((s) => s.chatPeeksEnabled);
 
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    if (useAppStore.getState().globalShortcutsEnabled) {
+      void safeInvoke("set_global_shortcuts_enabled", { enabled: true }).catch(() => undefined);
+    }
+    void listen<string>("app://global-shortcut", (event) => {
+      if (disposed) return;
+      if (event.payload === "toggle-play") {
+        togglePlayback();
+      } else if (event.payload === "seek-back") {
+        seekPlaybackRelative(-10);
+      } else if (event.payload === "seek-forward") {
+        seekPlaybackRelative(10);
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const wasAllReadyRef = useRef<boolean>(false);
+  const allReadyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const allReady = participants.length > 1 && participants.every((p) => p.isReady);
+    const prevAllReady = wasAllReadyRef.current;
+    wasAllReadyRef.current = allReady;
+    if (
+      !startWhenAllReady ||
+      syncStatus.state !== "connected" ||
+      !loaded ||
+      !paused ||
+      !allReady
+    ) {
+      if (allReadyTimerRef.current !== null) {
+        window.clearTimeout(allReadyTimerRef.current);
+        allReadyTimerRef.current = null;
+      }
+      return;
+    }
+    if (prevAllReady) {
+      return;
+    }
+    const effUser = resolveEffectiveUsername(syncStatus, username);
+    const lock = getControllerLockState(true, participants, effUser, roomControl);
+    if (lock.lockedForLocalUser) {
+      return;
+    }
+    if (allReadyTimerRef.current !== null) {
+      window.clearTimeout(allReadyTimerRef.current);
+    }
+    allReadyTimerRef.current = window.setTimeout(() => {
+      allReadyTimerRef.current = null;
+      const sNow = useSyncStore.getState();
+      const pNow = usePlayerStore.getState();
+      const stillAllReady =
+        sNow.participants.length > 1 && sNow.participants.every((p) => p.isReady);
+      if (stillAllReady && pNow.loaded && pNow.paused) {
+        togglePlayback();
+      }
+    }, 2000);
+  }, [startWhenAllReady, syncStatus, participants, loaded, paused, username, roomControl]);
+
+  useEffect(() => {
+    return () => {
+      if (allReadyTimerRef.current !== null) {
+        window.clearTimeout(allReadyTimerRef.current);
+        allReadyTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const fileMismatch = usePartyFileMismatch();
+
+  useEffect(() => {
+    if (miniMode) {
+      setPanelOpen(false);
+      setChatOpen(false);
+      setChromeIdle(true);
+    }
+  }, [miniMode]);
+
+  useEffect(() => {
+    return () => {
+      saveCurrentResumePosition();
+    };
+  }, [saveCurrentResumePosition]);
+
+  const syncConnectedState = syncStatus.state === "connected";
+
+  useEffect(() => {
+    if (!loaded || durationSecs <= 0 || !selectedFileName) return;
+    if (!syncConnectedState || !roomCode) return;
+    const appNow = useAppStore.getState();
+    if (!appNow.trackWatchedEpisodes) return;
+    const plNow = usePlaylistStore.getState();
+    if (plNow.items.length === 0 || !plNow.folderName) return;
+    const folderPath = extractParentFolderPath(plNow.items[0].path);
+    if (!folderPath) return;
+    const epItem = plNow.items[plNow.currentIndex] ?? selectedFileName;
+    const seriesKey = useSeriesProgressStore.getState().upsertSeries({
+      folderPath,
+      folderName: plNow.folderName,
+      lastEpisodeKey: buildEpisodeKey(epItem),
+    });
+    if (seriesKey) {
+      const roomId = buildRecentRoomId(roomCode, appNow.serverEndpoint, literalRoom);
+      useRecentRoomsStore.getState().setSeriesKey(roomId, seriesKey);
+    }
+  }, [loaded, durationSecs, selectedFileName, syncConnectedState, roomCode, literalRoom]);
+
+  useEffect(() => {
+    if (!loaded || durationSecs <= 0 || !selectedFileName) return;
+    const appNow = useAppStore.getState();
+
+    // Upsert local series progress even when watching solo
+    if (appNow.trackWatchedEpisodes) {
+      const plNow = usePlaylistStore.getState();
+      if (plNow.items.length > 0 && plNow.folderName) {
+        const folderPath = extractParentFolderPath(plNow.items[0].path);
+        if (folderPath) {
+          const epItem = plNow.items[plNow.currentIndex] ?? selectedFileName;
+          useSeriesProgressStore.getState().upsertSeries({
+            folderPath,
+            folderName: plNow.folderName,
+            lastEpisodeKey: buildEpisodeKey(epItem),
+          });
+        }
+      }
+    }
+
+    const fileKey = buildMediaFileKey(selectedFileName, durationSecs);
+    if (fileKey && subPrefAppliedKeyRef.current !== fileKey && tracks.some((t) => t.type === "sub")) {
+      subPrefAppliedKeyRef.current = fileKey;
+      const savedSub = getPerFileSubtitlePref(fileKey);
+      if (savedSub && Math.abs(savedSub.delaySecs) >= 0.05) {
+        useSubtitleStore.getState().setDelaySecs(savedSub.delaySecs);
+        safeMpvCall(mpvSetSubDelay(savedSub.delaySecs), "restoreSubDelay");
+        const sign = savedSub.delaySecs >= 0 ? "+" : "";
+        useNotificationStore.getState().push(
+          "info",
+          `Subtitle delay restored (${sign}${savedSub.delaySecs.toFixed(1)}s)`,
+          4500,
+          `sub-delay:${fileKey}`,
+        );
+      }
+      if (savedSub?.secondaryTrackLang) {
+        const wantLang = savedSub.secondaryTrackLang.trim().toLowerCase();
+        const matchTrack = tracks.find(
+          (t) =>
+            t.type === "sub" &&
+            !t.selected &&
+            (t.lang ?? "").trim().toLowerCase() === wantLang,
+        );
+        if (matchTrack) {
+          useSubtitleStore.getState().setSecondarySubId(matchTrack.id);
+          safeMpvCall(mpvSetSecondarySubTrack(matchTrack.id, 10), "restoreSecondarySub");
+        }
+      }
+    }
+    if (!appNow.rememberPlaybackPosition) return;
+    if (!fileKey || resumeAppliedKeyRef.current === fileKey) return;
+    resumeAppliedKeyRef.current = fileKey;
+
+    const saved = useResumeStore.getState().getPosition(fileKey);
+    if (!saved || saved.positionSecs < 30 || saved.positionSecs > durationSecs * 0.95) {
+      return;
+    }
+
+    const clock = formatResumeClock(saved.positionSecs);
+    if (!appNow.roomCode) {
+      seekPlaybackTo(saved.positionSecs);
+      useNotificationStore.getState().push(
+        "info",
+        `Resumed from ${clock}`,
+        7000,
+        `resume:${fileKey}`,
+        {
+          label: "Start over",
+          onClick: () => seekPlaybackTo(0),
+        },
+      );
+    } else {
+      const syncNow = useSyncStore.getState();
+      const effUser = resolveEffectiveUsername(syncNow.status, appNow.username).trim().toLowerCase();
+      const otherPeerLoaded = syncNow.participants.some(
+        (p) => p.username.trim().toLowerCase() !== effUser && Boolean(p.fileName?.trim()),
+      );
+      if (!otherPeerLoaded) {
+        useNotificationStore.getState().push(
+          "info",
+          `Continue from ${clock}?`,
+          9000,
+          `resume-prompt:${fileKey}`,
+          {
+            label: "Continue",
+            onClick: () => seekPlaybackTo(saved.positionSecs),
+          },
+        );
+      }
+    }
+  }, [loaded, durationSecs, selectedFileName, tracks]);
   const visibleFileMismatch =
     !panelOpen &&
     !alignMode &&
@@ -2895,6 +3259,7 @@ export function WatchRoom() {
       : null;
   const popover = usePresencePayload(activePopover, 200);
   const seekCuePresence = usePresencePayload(seekCue, 240);
+  const micCuePresence = usePresencePayload(micCue, 220);
   const syncConnectedNow = syncStatus.state === "connected";
   const effectiveUserNow = resolveEffectiveUsername(syncStatus, username);
   const ctrlLockNow = getControllerLockState(
@@ -2955,6 +3320,8 @@ export function WatchRoom() {
     leavingRef.current = true;
     eofHandledLoadGenRef.current = -1;
     justAdvancedFromPathRef.current = null;
+    recentLocalSwitchesRef.current = [];
+    recentFollowTimestampsRef.current = [];
     autoLoadedPathRef.current = null;
     soundTrackerRef.current.reset();
     pendingPairedSubRef.current = null;
@@ -3701,7 +4068,7 @@ export function WatchRoom() {
           visible={backdropPresence.mounted}
           playing={!paused}
           viewportRef={stageRef}
-          layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${chatPeeksCount}:${chatSidebarOpen}:${chatSidebarWidth}:${viewportTick}`}
+          layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${micCuePresence.mounted}:${micCuePresence.exiting}:${micCuePresence.value?.id ?? 0}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${chatPeeksCount}:${chatSidebarOpen}:${chatSidebarWidth}:${viewportTick}`}
           pausedRefreshKey={`${Math.round(positionSecs * 2)}:${seekSettledTick}:${viewportTick}`}
         />
         {seekCuePresence.mounted && seekCuePresence.value && (
@@ -3755,6 +4122,58 @@ export function WatchRoom() {
                 {seekCuePresence.value.direction === "forward" && (
                   <PlayerSeekCueIcon direction="forward" size={17} className="relative z-10 shrink-0" />
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+        {micCuePresence.mounted && micCuePresence.value && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none absolute top-[44%] left-1/2 -translate-x-1/2 -translate-y-1/2 z-[46] select-none"
+          >
+            <div className={micCuePresence.exiting ? "ep-mic-cue-out" : "ep-mic-cue-in"}>
+              <div
+                data-glass-region="true"
+                className={`ep-glass-mic-cue relative rounded-full px-4 py-2.5 inline-flex items-center gap-2.5 ${
+                  micCuePresence.value.muted
+                    ? "ep-glass-mic-cue-muted"
+                    : "ep-glass-mic-cue-live"
+                } ${
+                  micCuePresence.value.step > 1
+                    ? micCuePresence.value.step % 2 === 0
+                      ? "ep-seek-bubble-bounce-a"
+                      : "ep-seek-bubble-bounce-b"
+                    : ""
+                }`}
+              >
+                <span className="relative inline-flex items-center justify-center w-7 h-7 rounded-full bg-white/[0.08] shrink-0">
+                  <span
+                    key={`halo-${micCuePresence.value.id}`}
+                    aria-hidden="true"
+                    className={`pointer-events-none absolute inset-0 rounded-full ${
+                      micCuePresence.value.muted
+                        ? "ep-mic-halo-muted"
+                        : "ep-mic-halo-live"
+                    }`}
+                  />
+                  <AppMicIcon
+                    muted={micCuePresence.value.muted}
+                    speaking={!micCuePresence.value.muted}
+                    size={16}
+                    className={`relative z-10 ${
+                      micCuePresence.value.muted ? "text-bad" : "text-[#38BDF8]"
+                    }`}
+                  />
+                </span>
+                <div className="relative z-10 flex items-center gap-2 whitespace-nowrap">
+                  <span className="text-[13px] font-semibold tracking-tight text-white">
+                    {micCuePresence.value.muted ? "Mic Muted" : "Mic Live"}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded-md bg-white/[0.09] text-[10px] font-semibold text-white/75 tracking-wide">
+                    M
+                  </span>
+                </div>
               </div>
             </div>
           </div>
@@ -3994,6 +4413,13 @@ export function WatchRoom() {
         chromeVisible={showFloatingCapsule}
         popoverOpen={popover.mounted}
         lockedForLocalUser={introLockedNow}
+      />
+
+      <NextEpisodeOverlay
+        chromeVisible={showFloatingCapsule}
+        popoverOpen={popover.mounted}
+        lockedForLocalUser={introLockedNow}
+        onNextEpisode={handleOutroNextEpisode}
       />
 
       <StageSpeakerOverlay

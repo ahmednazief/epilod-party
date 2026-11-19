@@ -344,11 +344,18 @@ export async function mpvAddSubtitle(
   path: string,
   encodingHint: SubtitleEncodingHint = "auto",
   displayTitle?: string | null,
+  fixRtl?: boolean,
 ): Promise<void> {
+  const resolvedFixRtl =
+    fixRtl ??
+    (typeof localStorage !== "undefined"
+      ? localStorage.getItem("ep.fixArabicPunctuation") !== "false"
+      : true);
   await safeInvoke("mpv_add_subtitle", {
     path,
     encodingHint,
     displayTitle: displayTitle ?? null,
+    fixRtl: resolvedFixRtl,
   });
 }
 
@@ -381,6 +388,21 @@ export async function mpvSetAudioTrack(aid: number | null): Promise<void> {
 
 export async function mpvSetSubTrack(sid: number | null): Promise<void> {
   await safeInvoke("mpv_set_sub_track", { sid });
+}
+
+export async function mpvSetSecondarySubTrack(
+  sid: number | null,
+  pos = 10,
+): Promise<void> {
+  await safeInvoke("mpv_set_secondary_sub_track", { sid, pos });
+}
+
+export async function mpvSetSecondarySubDelay(delaySecs: number): Promise<void> {
+  await safeInvoke("mpv_set_secondary_sub_delay", { delaySecs });
+}
+
+export async function mpvShowOsdText(text: string, durationMs = 2400): Promise<void> {
+  await safeInvoke("mpv_show_osd_text", { text, durationMs });
 }
 
 export interface SubtitleAutoSyncParams {
@@ -686,7 +708,7 @@ export interface MpvChapter {
   time: number;
 }
 
-export type IntroSegmentKind = "intro" | "recap";
+export type IntroSegmentKind = "intro" | "recap" | "outro";
 export type IntroSource =
   | "chapter"
   | "audioMatch"
@@ -710,6 +732,7 @@ export interface DetectedIntro {
 export interface IntroDetectionOutcome {
   segments: DetectedIntro[];
   primaryIntro: DetectedIntro | null;
+  outro?: DetectedIntro | null;
 }
 
 export interface DetectVideoIntroParams {

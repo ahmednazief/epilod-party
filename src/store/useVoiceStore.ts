@@ -21,6 +21,15 @@ export interface PeerVoiceOverride {
   muted: boolean;
 }
 
+export interface MicCueBadge {
+  id: number;
+  muted: boolean;
+  step: number;
+}
+
+let micCueSeq = 0;
+let micCueTimer: ReturnType<typeof setTimeout> | null = null;
+
 function readStorage(key: string, fallback: string): string {
   try {
     if (typeof localStorage !== "undefined") {
@@ -166,6 +175,7 @@ interface VoiceState {
   speakingPeers: string[];
   roster: VoicePeerRosterDto[];
   devices: VoiceDeviceListDto | null;
+  micCue: MicCueBadge | null;
 
   // Actions
   setJoined: (joined: boolean) => void;
@@ -174,6 +184,8 @@ interface VoiceState {
   setDeafened: (deafened: boolean) => void;
   setPttActive: (pttActive: boolean) => void;
   applyLocalState: (muted: boolean, deafened: boolean, pttActive?: boolean) => void;
+  flashMicCue: (muted: boolean) => void;
+  clearMicCue: () => void;
   setMicTestActive: (active: boolean) => void;
   setCalibration: (cal: VoiceCalibrationPayload | null) => void;
   applyStatusPayload: (status: VoiceStatusPayload) => void;
@@ -263,6 +275,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   speakingPeers: [],
   roster: [],
   devices: null,
+  micCue: null,
 
   setJoined: (joined) => set({ joined, joining: false }),
   setJoining: (joining) => set({ joining }),
@@ -302,6 +315,32 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       pttActive: typeof pttActive === "boolean" ? pttActive : s.pttActive,
       preDeafenMuted: !deafened ? muted : s.preDeafenMuted,
     })),
+  flashMicCue: (muted) => {
+    micCueSeq += 1;
+    const seq = micCueSeq;
+    if (micCueTimer) {
+      clearTimeout(micCueTimer);
+      micCueTimer = null;
+    }
+    set((s) => ({
+      micCue: {
+        id: seq,
+        muted,
+        step: s.micCue ? s.micCue.step + 1 : 1,
+      },
+    }));
+    micCueTimer = setTimeout(() => {
+      micCueTimer = null;
+      set((s) => (s.micCue?.id === seq ? { micCue: null } : s));
+    }, 1250);
+  },
+  clearMicCue: () => {
+    if (micCueTimer) {
+      clearTimeout(micCueTimer);
+      micCueTimer = null;
+    }
+    set({ micCue: null });
+  },
   setMicTestActive: (micTestActive) => set({ micTestActive }),
   setCalibration: (calibration) => set({ calibration }),
   applyStatusPayload: (status) =>
@@ -399,5 +438,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       localGateOpen: false,
       speakingPeers: [],
       roster: [],
+      micCue: null,
     }),
 }));

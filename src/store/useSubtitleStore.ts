@@ -162,6 +162,8 @@ interface SubtitleState {
   overrideAssStyle: boolean;
   encodingHint: SubtitleEncodingHint;
   delaySecs: number;
+  secondarySubId: number | null;
+  secondaryDelaySecs: number;
   sessionGen: number;
   autoSyncBusy: boolean;
   autoSyncOutcome: AutoSyncResult | null;
@@ -178,6 +180,8 @@ interface SubtitleState {
   setOverrideAssStyle: (overrideAssStyle: boolean) => void;
   setEncodingHint: (hint: SubtitleEncodingHint) => void;
   setDelaySecs: (delaySecs: number) => void;
+  setSecondarySubId: (sid: number | null) => void;
+  setSecondaryDelaySecs: (delaySecs: number) => void;
   nudgeDelay: (deltaSecs: number) => number;
   setLoadedTrack: (loadedFilePath: string, originalFilePath?: string) => void;
   clearLoadedTrack: () => void;
@@ -220,6 +224,8 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
   overrideAssStyle: false,
   encodingHint: "auto",
   delaySecs: 0,
+  secondarySubId: null,
+  secondaryDelaySecs: 0,
   sessionGen: 0,
   autoSyncBusy: false,
   autoSyncOutcome: null,
@@ -245,6 +251,13 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
       delaySecs: Math.max(-600, Math.min(600, roundToCentisecond(delaySecs))),
     }),
 
+  setSecondarySubId: (secondarySubId) => set({ secondarySubId }),
+
+  setSecondaryDelaySecs: (secondaryDelaySecs) =>
+    set({
+      secondaryDelaySecs: Math.max(-600, Math.min(600, roundToCentisecond(secondaryDelaySecs))),
+    }),
+
   nudgeDelay: (deltaSecs) => {
     const next = Math.max(-600, Math.min(600, roundToCentisecond(get().delaySecs + deltaSecs)));
     set({ delaySecs: next });
@@ -264,6 +277,8 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
       loadedFilePath: null,
       originalFilePath: null,
       delaySecs: 0,
+      secondarySubId: null,
+      secondaryDelaySecs: 0,
       sessionGen: s.sessionGen + 1,
       autoSyncBusy: false,
       autoSyncOutcome: null,

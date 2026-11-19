@@ -37,6 +37,29 @@ export interface PartyFileMismatch {
   sourceRelation: SourceRelation | null;
   suggestedFpsScale: number | null;
   suggestedFpsLabel: string | null;
+  autoFixable: boolean;
+  confidence: "high" | "low";
+}
+
+const KNOWN_FPS_VALUES = [23.976, 24, 25, 29.97] as const;
+
+export function isKnownFpsRatio(scale: number | null | undefined): boolean {
+  if (typeof scale !== "number" || !Number.isFinite(scale) || scale <= 0) {
+    return false;
+  }
+  if (Math.abs(scale - 1) < 0.001) {
+    return false;
+  }
+  for (const a of KNOWN_FPS_VALUES) {
+    for (const b of KNOWN_FPS_VALUES) {
+      if (a === b) continue;
+      const ratio = a / b;
+      if (Math.abs(scale - ratio) / ratio < 0.001) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export interface PartyFileMismatchInput {
@@ -267,6 +290,8 @@ export function analyzePartyFileMismatch(
       sourceRelation: primary.sourceRelation ?? null,
       suggestedFpsScale: null,
       suggestedFpsLabel: null,
+      autoFixable: false,
+      confidence: "low",
     };
   }
 
@@ -337,6 +362,12 @@ export function analyzePartyFileMismatch(
 
   const localBase = input.localFileName ? getFileDisplayName(input.localFileName) : null;
 
+  const suggestedFpsScale =
+    kind === "fpsMismatch" && typeof primary.suggestedFpsScale === "number"
+      ? primary.suggestedFpsScale
+      : null;
+  const highConfidenceFps = kind === "fpsMismatch" && isKnownFpsRatio(suggestedFpsScale);
+
   return {
     kind,
     signature: `${kind}|${(localBase ?? "").toLowerCase()}|${peerSig}`,
@@ -360,11 +391,10 @@ export function analyzePartyFileMismatch(
       input.currentPlaylistIndex,
     ),
     sourceRelation: primary.sourceRelation ?? null,
-    suggestedFpsScale:
-      kind === "fpsMismatch" && typeof primary.suggestedFpsScale === "number"
-        ? primary.suggestedFpsScale
-        : null,
+    suggestedFpsScale,
     suggestedFpsLabel: kind === "fpsMismatch" ? (primary.suggestedFpsLabel ?? null) : null,
+    autoFixable: highConfidenceFps,
+    confidence: highConfidenceFps ? "high" : "low",
   };
 }
 
@@ -385,7 +415,7 @@ export function formatParticipantMatchBadge(
     if (!options.localHasFile) {
       return { text: "No video open", className: "text-muted", isMismatch: false };
     }
-    return { text: "In sync", className: "text-ok", isMismatch: false };
+    return { text: "Video loaded", className: "text-secondary", isMismatch: false };
   }
 
   if (!peerHasFile) {
@@ -398,7 +428,7 @@ export function formatParticipantMatchBadge(
 
   switch (participant.fileMatch) {
     case "matched":
-      return { text: "In sync", className: "text-ok", isMismatch: false };
+      return { text: "Same video", className: "text-secondary", isMismatch: false };
     case "sameLengthDifferentEncode":
       if (aligned) {
         return { text: "Aligned", className: "text-ok", isMismatch: false };

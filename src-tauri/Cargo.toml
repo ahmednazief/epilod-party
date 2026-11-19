@@ -24,6 +24,7 @@ epilod-core = { path = "../crates/epilod-core" }
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
 epilod-installer-core = { path = "../crates/epilod-installer-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "process", "macros"] }
 windows-sys = { version = "0.59", features = [

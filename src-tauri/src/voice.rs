@@ -28,14 +28,19 @@ use wasapi::{
     initialize_mta, AudioClientProperties, DeviceEnumerator, DeviceEventCallbacks, Direction, Role,
     SampleType, StreamCategory, StreamMode, WaveFormat,
 };
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+use windows_sys::Win32::System::Threading::{
+    CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use crate::mpv::MpvController;
-use crate::p2p::{VoicePeerRosterDto, VoiceRxPacket, VoiceTransportHandle};
+use crate::p2p::{VoicePeerRosterDto, VoiceTransportHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1086,14 +1091,37 @@ impl VoiceController {
             .max(1);
         self.shared.in_voice.store(true, Ordering::Release);
         self.shared.record_log(&format!("voice.join epoch={epoch}"));
-        self.shared.set_stream_status("reconnecting", None);
+        self.transition_stream_status_for_join();
         self.ensure_workers_running();
         self.sync_transport_flags_with_epoch(epoch);
         Ok(())
     }
 
+    fn transition_stream_status_for_join(&self) {
+        let already_live = self
+            .worker_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+            && *self
+                .shared
+                .stream_status
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                == "live";
+        if already_live {
+            self.shared.emit_status_snapshot();
+        } else {
+            self.shared.set_stream_status("reconnecting", None);
+        }
+    }
+
     pub fn leave_voice(&self) {
         self.shared.in_voice.store(false, Ordering::Release);
+        self.shared.muted.store(false, Ordering::Release);
+        self.shared.deafened.store(false, Ordering::Release);
+        self.shared.pre_deafen_muted.store(false, Ordering::Release);
+        self.shared.ptt_held.store(false, Ordering::Release);
         self.shared.duck.restore_full();
         self.shared.record_log("voice.leave");
         self.sync_transport_flags();
@@ -1511,6 +1539,11 @@ fn f32_to_u16(s: f32) -> u16 {
     ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0).clamp(0.0, 65535.0) as u16
 }
 
+#[inline]
+fn f32_to_i32(s: f32) -> i32 {
+    (s.clamp(-1.0, 1.0) * 2_147_483_647.0) as i32
+}
+
 fn find_wasapi_device_by_name(
     enumerator: &DeviceEnumerator,
     dir: Direction,
@@ -1531,6 +1564,7 @@ fn find_wasapi_device_by_name(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_and_run_wasapi_comm_capture(
     selected_input: &str,
     chosen_name: &str,
@@ -1763,58 +1797,21 @@ fn open_input_stream(
     let sample_rate = def_cfg.sample_rate().0;
     let channels = def_cfg.channels().max(1) as usize;
     let fmt = def_cfg.sample_format();
-    let stream_cfg = def_cfg.config();
+    let default_stream_cfg = def_cfg.config();
+    let low_latency_cfg = low_latency_stream_config(&def_cfg, 10);
 
-    let rb = HeapRb::<f32>::new(VOICE_SAMPLE_RATE); // 1 second cushion
-    let (mut prod, cons) = rb.split();
     let cb_shared = Arc::clone(&shared);
     let err_cb = move |_err| {
         err_flag.store(true, Ordering::Release);
     };
 
-    let stream = match fmt {
-        cpal::SampleFormat::F32 => dev.build_input_stream(
-            &stream_cfg,
-            move |data: &[f32], _| {
-                cb_shared
-                    .last_in_cb_ms
-                    .store(cb_shared.now_ms(), Ordering::Relaxed);
-                push_pcm_to_mono_rb(data, channels, &mut prod, |s| s);
-            },
-            err_cb,
-            None,
-        ),
-        cpal::SampleFormat::I16 => dev.build_input_stream(
-            &stream_cfg,
-            move |data: &[i16], _| {
-                cb_shared
-                    .last_in_cb_ms
-                    .store(cb_shared.now_ms(), Ordering::Relaxed);
-                push_pcm_to_mono_rb(data, channels, &mut prod, |s| (s as f32) / 32768.0);
-            },
-            err_cb,
-            None,
-        ),
-        cpal::SampleFormat::U16 => dev.build_input_stream(
-            &stream_cfg,
-            move |data: &[u16], _| {
-                cb_shared
-                    .last_in_cb_ms
-                    .store(cb_shared.now_ms(), Ordering::Relaxed);
-                push_pcm_to_mono_rb(data, channels, &mut prod, |s| {
-                    ((s as f32) - 32768.0) / 32768.0
-                });
-            },
-            err_cb,
-            None,
-        ),
-        other => {
-            return Err((
-                "reconnecting",
-                false,
-                format!("Unsupported microphone sample format: {other:?}"),
-            ));
-        }
+    let (stream, cons) = if let Some(ref ll_cfg) = low_latency_cfg {
+        build_cpal_input_stream(&dev, ll_cfg, fmt, channels, Arc::clone(&cb_shared), err_cb.clone())
+            .or_else(|_| {
+                build_cpal_input_stream(&dev, &default_stream_cfg, fmt, channels, cb_shared, err_cb)
+            })
+    } else {
+        build_cpal_input_stream(&dev, &default_stream_cfg, fmt, channels, cb_shared, err_cb)
     }
     .map_err(|e| classify_audio_open_error(&format!("Failed opening microphone: {e}")))?;
 
@@ -1892,6 +1889,18 @@ fn open_loopback_stream(
                 None,
             )
             .ok()?,
+        cpal::SampleFormat::I32 => dev
+            .build_input_stream(
+                &stream_cfg,
+                move |data: &[i32], _| {
+                    push_pcm_to_mono_rb(data, channels, &mut prod, |s| {
+                        (s as f32) / 2_147_483_648.0
+                    });
+                },
+                err_cb,
+                None,
+            )
+            .ok()?,
         _ => return None,
     };
 
@@ -1924,20 +1933,181 @@ fn open_output_stream(
     let sample_rate = def_cfg.sample_rate().0;
     let channels = def_cfg.channels().max(1) as usize;
     let fmt = def_cfg.sample_format();
-    let stream_cfg = def_cfg.config();
+    let default_stream_cfg = def_cfg.config();
+    let low_latency_cfg = low_latency_stream_config(&def_cfg, 10);
 
+    let (stream, prod) = if let Some(ref ll_cfg) = low_latency_cfg {
+        build_cpal_output_stream(
+            &dev,
+            ll_cfg,
+            fmt,
+            channels,
+            Arc::clone(&shared),
+            Arc::clone(&err_flag),
+        )
+        .or_else(|_| {
+            build_cpal_output_stream(&dev, &default_stream_cfg, fmt, channels, shared, err_flag)
+        })
+    } else {
+        build_cpal_output_stream(&dev, &default_stream_cfg, fmt, channels, shared, err_flag)
+    }
+    .map_err(|e| format!("Failed opening playback device: {e}"))?;
+
+    stream
+        .play()
+        .map_err(|e| format!("Failed starting playback stream: {e}"))?;
+
+    Ok((stream, prod, sample_rate, chosen_name, out_is_bt))
+}
+
+/// High-resolution waitable-timer sleeper for sub-millisecond voice pacing on Windows,
+/// avoiding the default 15.625 ms OS timer tick quantization.
+struct HighResSleeper {
+    handle: HANDLE,
+}
+
+impl HighResSleeper {
+    fn new() -> Self {
+        let handle = unsafe {
+            CreateWaitableTimerExW(
+                std::ptr::null(),
+                std::ptr::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS,
+            )
+        };
+        Self { handle }
+    }
+
+    fn sleep(&self, dur: Duration) {
+        if dur.is_zero() {
+            return;
+        }
+        if !self.handle.is_null() {
+            let ticks_100ns = -((dur.as_nanos() / 100).max(1).min(i64::MAX as u128) as i64);
+            let ok = unsafe { SetWaitableTimer(self.handle, &ticks_100ns, 0, None, std::ptr::null(), 0) };
+            if ok != 0 {
+                unsafe {
+                    WaitForSingleObject(self.handle, INFINITE);
+                }
+                return;
+            }
+        }
+        std::thread::sleep(dur);
+    }
+}
+
+impl Drop for HighResSleeper {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+fn low_latency_stream_config(
+    def_cfg: &cpal::SupportedStreamConfig,
+    target_ms: u32,
+) -> Option<cpal::StreamConfig> {
+    let mut cfg = def_cfg.config();
+    match def_cfg.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } if *min <= *max => {
+            let desired = ((def_cfg.sample_rate().0 as u64 * target_ms as u64) / 1000)
+                .clamp(*min as u64, *max as u64) as u32;
+            cfg.buffer_size = cpal::BufferSize::Fixed(desired);
+            Some(cfg)
+        }
+        _ => None,
+    }
+}
+
+fn build_cpal_input_stream<E>(
+    dev: &cpal::Device,
+    stream_cfg: &cpal::StreamConfig,
+    fmt: cpal::SampleFormat,
+    channels: usize,
+    cb_shared: Arc<SharedVoiceRuntime>,
+    err_cb: E,
+) -> Result<(cpal::Stream, ringbuf::HeapCons<f32>), String>
+where
+    E: FnMut(cpal::StreamError) + Send + 'static,
+{
+    let rb = HeapRb::<f32>::new(VOICE_SAMPLE_RATE); // 1 second cushion
+    let (mut prod, cons) = rb.split();
+    let stream = match fmt {
+        cpal::SampleFormat::F32 => dev.build_input_stream(
+            stream_cfg,
+            move |data: &[f32], _| {
+                cb_shared
+                    .last_in_cb_ms
+                    .store(cb_shared.now_ms(), Ordering::Relaxed);
+                push_pcm_to_mono_rb(data, channels, &mut prod, |s| s);
+            },
+            err_cb,
+            None,
+        ),
+        cpal::SampleFormat::I16 => dev.build_input_stream(
+            stream_cfg,
+            move |data: &[i16], _| {
+                cb_shared
+                    .last_in_cb_ms
+                    .store(cb_shared.now_ms(), Ordering::Relaxed);
+                push_pcm_to_mono_rb(data, channels, &mut prod, |s| (s as f32) / 32768.0);
+            },
+            err_cb,
+            None,
+        ),
+        cpal::SampleFormat::U16 => dev.build_input_stream(
+            stream_cfg,
+            move |data: &[u16], _| {
+                cb_shared
+                    .last_in_cb_ms
+                    .store(cb_shared.now_ms(), Ordering::Relaxed);
+                push_pcm_to_mono_rb(data, channels, &mut prod, |s| {
+                    ((s as f32) - 32768.0) / 32768.0
+                });
+            },
+            err_cb,
+            None,
+        ),
+        cpal::SampleFormat::I32 => dev.build_input_stream(
+            stream_cfg,
+            move |data: &[i32], _| {
+                cb_shared
+                    .last_in_cb_ms
+                    .store(cb_shared.now_ms(), Ordering::Relaxed);
+                push_pcm_to_mono_rb(data, channels, &mut prod, |s| (s as f32) / 2_147_483_648.0);
+            },
+            err_cb,
+            None,
+        ),
+        other => return Err(format!("Unsupported microphone sample format: {other:?}")),
+    }
+    .map_err(|e| format!("{e}"))?;
+    Ok((stream, cons))
+}
+
+fn build_cpal_output_stream(
+    dev: &cpal::Device,
+    stream_cfg: &cpal::StreamConfig,
+    fmt: cpal::SampleFormat,
+    channels: usize,
+    cb_shared: Arc<SharedVoiceRuntime>,
+    err_flag: Arc<AtomicBool>,
+) -> Result<(cpal::Stream, ringbuf::HeapProd<f32>), String> {
     let rb = HeapRb::<f32>::new(VOICE_SAMPLE_RATE * 2);
     let (prod, mut cons) = rb.split();
     let mut last_l = 0.0f32;
     let mut last_r = 0.0f32;
-    let cb_shared = Arc::clone(&shared);
     let err_cb = move |_err| {
         err_flag.store(true, Ordering::Release);
     };
 
     let stream = match fmt {
         cpal::SampleFormat::F32 => dev.build_output_stream(
-            &stream_cfg,
+            stream_cfg,
             move |data: &mut [f32], _| {
                 cb_shared
                     .last_out_cb_ms
@@ -1948,7 +2118,7 @@ fn open_output_stream(
             None,
         ),
         cpal::SampleFormat::I16 => dev.build_output_stream(
-            &stream_cfg,
+            stream_cfg,
             move |data: &mut [i16], _| {
                 cb_shared
                     .last_out_cb_ms
@@ -1966,7 +2136,7 @@ fn open_output_stream(
             None,
         ),
         cpal::SampleFormat::U16 => dev.build_output_stream(
-            &stream_cfg,
+            stream_cfg,
             move |data: &mut [u16], _| {
                 cb_shared
                     .last_out_cb_ms
@@ -1983,28 +2153,44 @@ fn open_output_stream(
             err_cb,
             None,
         ),
-        other => {
-            return Err(format!("Unsupported playback sample format: {other:?}"));
-        }
+        cpal::SampleFormat::I32 => dev.build_output_stream(
+            stream_cfg,
+            move |data: &mut [i32], _| {
+                cb_shared
+                    .last_out_cb_ms
+                    .store(cb_shared.now_ms(), Ordering::Relaxed);
+                pop_stereo_from_rb(
+                    data,
+                    channels,
+                    &mut cons,
+                    &mut last_l,
+                    &mut last_r,
+                    f32_to_i32,
+                );
+            },
+            err_cb,
+            None,
+        ),
+        other => return Err(format!("Unsupported playback sample format: {other:?}")),
     }
-    .map_err(|e| format!("Failed opening playback device: {e}"))?;
-
-    stream
-        .play()
-        .map_err(|e| format!("Failed starting playback stream: {e}"))?;
-
-    Ok((stream, prod, sample_rate, chosen_name, out_is_bt))
+    .map_err(|e| format!("{e}"))?;
+    Ok((stream, prod))
 }
 
-/// Adjusts mixer sleep period slightly (19..=21 ms) so hardware DAC crystal drift never underruns or overflows.
+/// Adjusts mixer sleep period slightly (19..=22 ms) around a tight 25..40 ms output cushion so
+/// hardware DAC crystal drift never underruns or builds stale latency.
 pub fn compute_output_pacing_delay_ms(
     occupied_samples: usize,
     stereo_frame_samples: usize,
     active_audio: bool,
 ) -> i64 {
-    if active_audio && occupied_samples < stereo_frame_samples * 2 {
+    let low_samples = (stereo_frame_samples * 5) / 4; // 25 ms minimum skew headroom
+    let high_samples = stereo_frame_samples * 2; // 40 ms target ceiling
+    if active_audio && occupied_samples < low_samples {
         19
-    } else if occupied_samples > stereo_frame_samples * 4 {
+    } else if occupied_samples > stereo_frame_samples * 3 {
+        22
+    } else if occupied_samples > high_samples {
         21
     } else {
         20
@@ -2107,6 +2293,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let mut resampler: Option<VoiceResamplerState> = None;
     let mut raw_accum: Vec<f32> = Vec::with_capacity(4096);
     let mut mono_48k_fifo: VecDeque<f32> = VecDeque::with_capacity(4096);
+    let sleeper = HighResSleeper::new();
 
     let mut active_loopback: Option<(cpal::Stream, ringbuf::HeapCons<f32>, u32)> = None;
     let mut lb_resampler: Option<VoiceResamplerState> = None;
@@ -2287,6 +2474,14 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
         if let Some((_, ref mut cons, _)) = active_stream {
             drain_mono_stream_to_48k(cons, &mut raw_accum, &mut resampler, &mut mono_48k_fifo);
+            // Keep capture mic latency tightly bounded (max 60 ms) across OS stalls
+            let max_tx_fifo = VOICE_FRAME_10MS * 6;
+            if mono_48k_fifo.len() > max_tx_fifo {
+                let excess_frames = (mono_48k_fifo.len() - max_tx_fifo) / VOICE_FRAME_10MS;
+                if excess_frames > 0 {
+                    mono_48k_fifo.drain(..excess_frames * VOICE_FRAME_10MS);
+                }
+            }
         }
         if let Some((_, ref mut lb_cons, _)) = active_loopback {
             drain_mono_stream_to_48k(
@@ -2461,6 +2656,9 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 InputModeWire::Ptt => Some(shared.ptt_held.load(Ordering::Relaxed)),
             };
             let muted = shared.muted.load(Ordering::Acquire);
+            let mic_test = shared.mic_test_loopback.load(Ordering::Acquire);
+            let eff_ptt = if mic_test { None } else { ptt_opt };
+            let eff_muted = if mic_test { false } else { muted };
             let vad_assisted = ns_mode != NoiseSuppressionMode::Off;
 
             let (out_cnt, is_open, db) = gate.process_10ms(
@@ -2468,8 +2666,8 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 speech_prob,
                 eff_thresh,
                 vad_assisted,
-                ptt_opt,
-                muted,
+                eff_ptt,
+                eff_muted,
                 &mut gate_out,
             );
 
@@ -2482,7 +2680,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                         serde_json::json!({
                             "db": db,
                             "speechProb": speech_prob,
-                            "gateOpen": is_open && !muted,
+                            "gateOpen": is_open && !eff_muted,
                         }),
                     );
                 }
@@ -2496,17 +2694,18 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             for frame in gate_out.iter().take(out_cnt) {
                 encode_accum.extend_from_slice(frame);
             }
+            // Zero-pad and flush any leftover 10 ms tail when gate closes so it does not shift
+            // the next talkspurt by +10 ms or cause a double-packet jitter burst on onset.
+            if !is_open && mono_48k_fifo.len() < VOICE_FRAME_10MS && !encode_accum.is_empty() {
+                encode_accum.resize(VOICE_FRAME_20MS, 0.0);
+            }
 
             while encode_accum.len() >= VOICE_FRAME_20MS {
                 let mut pcm20 = [0.0f32; VOICE_FRAME_20MS];
                 pcm20.copy_from_slice(&encode_accum[..VOICE_FRAME_20MS]);
                 encode_accum.drain(..VOICE_FRAME_20MS);
 
-                comp.process_with_speech_prob(
-                    &mut pcm20,
-                    speech_prob,
-                    cfg.compression_enabled,
-                );
+                comp.process_with_speech_prob(&mut pcm20, speech_prob, cfg.compression_enabled);
 
                 // Switch Opus signal hint dynamically so Off mode preserves raw music/instruments cleanly
                 let want_auto_signal = cfg.noise_mode == NoiseModeWire::Off;
@@ -2623,9 +2822,9 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 seq = seq.wrapping_add(1);
                 ts_48k = ts_48k.wrapping_add(VOICE_FRAME_20MS as u32);
                 eot_remaining -= 1;
-                std::thread::sleep(Duration::from_millis(20));
+                sleeper.sleep(Duration::from_millis(16));
             } else {
-                std::thread::sleep(Duration::from_millis(4));
+                sleeper.sleep(Duration::from_millis(2));
             }
         }
     }
@@ -2654,12 +2853,16 @@ fn run_mix_rx_thread(
     let mut test_delay_queue: VecDeque<Vec<f32>> = VecDeque::with_capacity(24);
     let mut stereo_48k = vec![0.0f32; VOICE_FRAME_20MS * 2];
     let mut decoded_buf = vec![0.0f32; VOICE_FRAME_20MS];
-    let mut rx_receiver: Option<std::sync::mpsc::Receiver<VoiceRxPacket>> = None;
+    let mut last_transport_ptr: usize = 0;
+    let mut lb_idle_ticks: u32 = 0;
     let mut last_speaking_set: Vec<String> = Vec::new();
     let mut last_speaking_emit = Instant::now();
     let mut last_dev_check = Instant::now();
     let mut last_telem_push = Instant::now();
     let mut last_comm_out: Option<String> = None;
+    let mut last_duck_tick = Instant::now();
+    let mut last_rx_notify_seq: u64 = 0;
+    let sleeper = HighResSleeper::new();
 
     let mut next_tick = Instant::now() + Duration::from_millis(20);
 
@@ -2754,72 +2957,83 @@ fn run_mix_rx_thread(
             }
         }
 
-        // Acquire RX receiver from attached P2P transport
-        if rx_receiver.is_none() {
-            if let Some(ref tr) = *shared.transport.read().unwrap_or_else(|e| e.into_inner()) {
-                rx_receiver = tr.take_rx_receiver();
-            }
-        } else if shared
+        // Drain incoming network packets from the active P2P transport without consuming ownership
+        let transport_opt = shared
             .transport
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .is_none()
-        {
-            rx_receiver = None;
+            .clone();
+        if let Some(ref tr) = transport_opt {
+            let ptr = Arc::as_ptr(tr) as usize;
+            if ptr != last_transport_ptr {
+                last_transport_ptr = ptr;
+                peers.clear();
+            }
+            if shared.in_voice.load(Ordering::Acquire) {
+                tr.drain_rx_packets(|pkt| {
+                    if !peers.contains_key(&pkt.origin_key) && peers.len() >= 8 {
+                        return; // Cap total decoders at 8
+                    }
+                    if !peers.contains_key(&pkt.origin_key) {
+                        // Never panic here: release builds use panic = "abort".
+                        let Ok(decoder) = OpusDecoder::new(SampleRate::Hz48000, Channels::Mono)
+                        else {
+                            return;
+                        };
+                        peers.insert(
+                            pkt.origin_key.clone(),
+                            PeerDecoderState {
+                                username: pkt.origin_username.clone(),
+                                jitter: PeerJitterBuffer::new(),
+                                decoder,
+                                leveler: PeerRxLeveler::new(),
+                                last_speaking_at: None,
+                                is_speaking: false,
+                            },
+                        );
+                    }
+                    if let Some(entry) = peers.get_mut(&pkt.origin_key) {
+                        entry.jitter.push(
+                            JitterPacket {
+                                seq: pkt.seq,
+                                epoch: pkt.epoch,
+                                ts_48k: pkt.ts_48k,
+                                end_of_talk: pkt.end_of_talk,
+                                opus: pkt.opus,
+                            },
+                            pkt.arrival_ms,
+                        );
+                    }
+                });
+            } else {
+                tr.clear_rx_packets();
+                peers.clear();
+            }
+        } else {
+            last_transport_ptr = 0;
             peers.clear();
         }
 
-        // Drain incoming network packets
-        if let Some(ref rx) = rx_receiver {
-            while let Ok(pkt) = rx.try_recv() {
-                if !peers.contains_key(&pkt.origin_key) && peers.len() >= 8 {
-                    continue; // Cap total decoders at 8
-                }
-                if !peers.contains_key(&pkt.origin_key) {
-                    // Never panic here: release builds use panic = "abort".
-                    let Ok(decoder) = OpusDecoder::new(SampleRate::Hz48000, Channels::Mono) else {
-                        continue;
-                    };
-                    peers.insert(
-                        pkt.origin_key.clone(),
-                        PeerDecoderState {
-                            username: pkt.origin_username.clone(),
-                            jitter: PeerJitterBuffer::new(),
-                            decoder,
-                            leveler: PeerRxLeveler::new(),
-                            last_speaking_at: None,
-                            is_speaking: false,
-                        },
-                    );
-                }
-                let Some(entry) = peers.get_mut(&pkt.origin_key) else {
-                    continue;
-                };
-                entry.jitter.push(
-                    JitterPacket {
-                        seq: pkt.seq,
-                        epoch: pkt.epoch,
-                        ts_48k: pkt.ts_48k,
-                        end_of_talk: pkt.end_of_talk,
-                        opus: pkt.opus,
-                    },
-                    pkt.arrival_ms,
-                );
-            }
-        }
-
-        // Handle Mic Test delayed loopback (~350 ms = 17 x 20ms frames)
+        // Handle Mic Test delayed loopback (~240 ms cushion, plus tail drain after short utterances)
         let mic_test = shared.mic_test_loopback.load(Ordering::Acquire);
+        let mut received_lb = false;
         while let Ok(frame) = test_lb_rx.try_recv() {
             if mic_test {
+                received_lb = true;
                 test_delay_queue.push_back(frame);
                 while test_delay_queue.len() > 24 {
                     test_delay_queue.pop_front();
                 }
             }
         }
+        if received_lb {
+            lb_idle_ticks = 0;
+        } else {
+            lb_idle_ticks = lb_idle_ticks.saturating_add(1);
+        }
         if !mic_test {
             test_delay_queue.clear();
+            lb_idle_ticks = 0;
         }
 
         let deafened = shared.deafened.load(Ordering::Acquire);
@@ -2937,9 +3151,12 @@ fn run_mix_rx_thread(
             shared.avg_jitter_ms.store(0, Ordering::Relaxed);
         }
 
-        // Update movie ducking on remote speech
+        // Update movie ducking on remote speech (~20 ms cadence)
         shared.duck.set_remote_speaking(!active_speakers.is_empty());
-        shared.duck.tick_20ms();
+        if last_duck_tick.elapsed() >= Duration::from_millis(18) {
+            last_duck_tick = Instant::now();
+            shared.duck.tick_20ms();
+        }
 
         // Emit speaking roster when changed or every 250 ms
         active_speakers.sort();
@@ -2955,7 +3172,10 @@ fn run_mix_rx_thread(
 
         // Mix audio to playback ringbuf
         let mut test_frame: Option<Vec<f32>> = None;
-        if mic_test && test_delay_queue.len() >= 17 {
+        if mic_test
+            && !test_delay_queue.is_empty()
+            && (test_delay_queue.len() >= 12 || lb_idle_ticks >= 12)
+        {
             if let Some(mut f) = test_delay_queue.pop_front() {
                 for s in &mut f {
                     *s = soft_limit(*s, 0.5); // -6 dBFS safety cap
@@ -2970,7 +3190,7 @@ fn run_mix_rx_thread(
                 .map(|(_, pcm, g, p)| (pcm.as_slice(), *g, *p))
                 .collect();
             if let Some(ref tf) = test_frame {
-                refs.push((tf.as_slice(), 1.0, 0.0));
+                refs.push((tf.as_slice(), cfg.master_volume.clamp(0.25, 2.0), 0.0));
             }
             mix_mono_peers_to_stereo(&refs, &mut stereo_48k);
 
@@ -3011,31 +3231,34 @@ fn run_mix_rx_thread(
             }
 
             if let Some((_, ref mut prod, out_rate)) = active_out {
-                if let Some(ref mut rs_state) = out_resampler {
-                    for i in 0..VOICE_FRAME_20MS {
-                        rs_state.in_buf[0][i] = stereo_48k[i * 2];
-                        rs_state.in_buf[1][i] = stereo_48k[i * 2 + 1];
-                    }
-                    if let Ok((_, out_n)) = rs_state.resampler.process_into_buffer(
-                        &rs_state.in_buf,
-                        &mut rs_state.out_buf,
-                        None,
-                    ) {
-                        if prod.vacant_len() >= out_n * 2 {
-                            for (&l, &r) in rs_state.out_buf[0]
-                                .iter()
-                                .zip(rs_state.out_buf[1].iter())
-                                .take(out_n)
-                            {
-                                let _ = prod.try_push(l);
-                                let _ = prod.try_push(r);
+                let stereo_frame_samples = ((out_rate as usize) * 2 / 50).max(640);
+                // Hard-cap output ringbuffer occupancy (<= 80 ms) so OS scheduling stalls cannot build lag
+                if prod.occupied_len() <= stereo_frame_samples * 4 {
+                    if let Some(ref mut rs_state) = out_resampler {
+                        for i in 0..VOICE_FRAME_20MS {
+                            rs_state.in_buf[0][i] = stereo_48k[i * 2];
+                            rs_state.in_buf[1][i] = stereo_48k[i * 2 + 1];
+                        }
+                        if let Ok((_, out_n)) = rs_state.resampler.process_into_buffer(
+                            &rs_state.in_buf,
+                            &mut rs_state.out_buf,
+                            None,
+                        ) {
+                            if prod.vacant_len() >= out_n * 2 {
+                                for (&l, &r) in rs_state.out_buf[0]
+                                    .iter()
+                                    .zip(rs_state.out_buf[1].iter())
+                                    .take(out_n)
+                                {
+                                    let _ = prod.try_push(l);
+                                    let _ = prod.try_push(r);
+                                }
                             }
                         }
+                    } else if prod.vacant_len() >= stereo_48k.len() {
+                        let _ = prod.push_slice(&stereo_48k);
                     }
-                } else if prod.vacant_len() >= stereo_48k.len() {
-                    let _ = prod.push_slice(&stereo_48k);
                 }
-                let _ = out_rate;
             }
         } else {
             shared
@@ -3064,9 +3287,22 @@ fn run_mix_rx_thread(
             20
         };
 
+        let any_peer_active = peers.values().any(|st| st.jitter.is_active());
+        if !any_peer_active && !mic_test && test_delay_queue.is_empty() {
+            let woke_on_pkt = if let Some(ref tr) = transport_opt {
+                tr.wait_for_rx_packet(&mut last_rx_notify_seq, Duration::from_millis(20))
+            } else {
+                sleeper.sleep(Duration::from_millis(20));
+                false
+            };
+            // Sync 20 ms playback cadence right after incoming talkspurt onset packet arrives
+            next_tick = Instant::now() + Duration::from_millis(if woke_on_pkt { 21 } else { 20 });
+            continue;
+        }
+
         let now = Instant::now();
         if next_tick > now {
-            std::thread::sleep(next_tick - now);
+            sleeper.sleep(next_tick - now);
         } else {
             next_tick = now;
         }
@@ -3480,6 +3716,153 @@ mod tests {
             }
             assert_eq!(underruns, 0, "skew={dac_samples_per_20ms} underrun");
             assert_eq!(overflows, 0, "skew={dac_samples_per_20ms} overflow");
+            assert!(
+                occupied <= frame_samples * 2 + 128,
+                "skew={dac_samples_per_20ms} held excessive cushion: {occupied}"
+            );
         }
+    }
+
+    #[test]
+    fn high_res_sleeper_respects_short_intervals() {
+        let sleeper = HighResSleeper::new();
+        let t0 = Instant::now();
+        sleeper.sleep(Duration::from_millis(2));
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(12),
+            "2ms high-res sleep took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn opus_roundtrip_and_output_resampler_preserve_audio_energy() {
+        let encoder =
+            OpusEncoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).unwrap();
+        let mut decoder = OpusDecoder::new(SampleRate::Hz48000, Channels::Mono).unwrap();
+        let mut opus_out = [0u8; MAX_VOICE_OPUS_BYTES];
+        let mut decoded = vec![0.0f32; VOICE_FRAME_20MS];
+        let mut stereo_48k = vec![0.0f32; VOICE_FRAME_20MS * 2];
+
+        // Prime encoder/decoder with 5 frames of a clean 440 Hz vocal tone
+        let mut max_out_rms = 0.0f32;
+        for f_idx in 0..5usize {
+            let mut pcm20 = [0.0f32; VOICE_FRAME_20MS];
+            for (i, s) in pcm20.iter_mut().enumerate() {
+                let t = ((f_idx * VOICE_FRAME_20MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                *s = 0.35 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+            }
+            let n = encoder.encode_float(&pcm20, &mut opus_out).unwrap();
+            let pkt = OpusPacket::try_from(&opus_out[..n]).unwrap();
+            let sig = MutSignals::try_from(&mut decoded).unwrap();
+            let dec_n = decoder.decode_float(Some(pkt), sig, false).unwrap();
+            assert_eq!(dec_n, VOICE_FRAME_20MS);
+            mix_mono_peers_to_stereo(&[(&decoded, 1.0, 0.0)], &mut stereo_48k);
+            let rms =
+                (stereo_48k.iter().map(|s| s * s).sum::<f32>() / (stereo_48k.len() as f32)).sqrt();
+            if rms > max_out_rms {
+                max_out_rms = rms;
+            }
+        }
+        assert!(
+            max_out_rms > 0.15,
+            "Opus roundtrip + stereo mixer must preserve audio energy; rms={max_out_rms}"
+        );
+
+        // Verify non-48 kHz Windows output resampler (44.1 kHz & 96 kHz)
+        for rate in [44_100u32, 96_000u32] {
+            let mut rs = FastFixedIn::<f32>::new(
+                (rate as f64) / (VOICE_SAMPLE_RATE as f64),
+                1.0,
+                PolynomialDegree::Cubic,
+                VOICE_FRAME_20MS,
+                2,
+            )
+            .unwrap();
+            let mut in_buf = vec![vec![0.0f32; VOICE_FRAME_20MS]; 2];
+            for i in 0..VOICE_FRAME_20MS {
+                in_buf[0][i] = stereo_48k[i * 2];
+                in_buf[1][i] = stereo_48k[i * 2 + 1];
+            }
+            let mut out_buf = rs.output_buffer_allocate(true);
+            let (_, out_n) = rs.process_into_buffer(&in_buf, &mut out_buf, None).unwrap();
+            assert!(out_n > 0);
+            let out_rms =
+                (out_buf[0][..out_n].iter().map(|s| s * s).sum::<f32>() / (out_n as f32)).sqrt();
+            assert!(
+                out_rms > 0.05,
+                "Output resampler rate={rate} must preserve energy; rms={out_rms}"
+            );
+        }
+
+        // Verify I32 conversion path (f32 has 24 mantissa bits)
+        assert!((f32_to_i32(0.5) - 1_073_741_824).abs() <= 2);
+        assert!((f32_to_i32(-0.5) + 1_073_741_824).abs() <= 2);
+    }
+
+    #[test]
+    fn windows_audio_output_smoke_when_device_present() {
+        let _ = initialize_mta();
+        let list = list_voice_devices("default", "default");
+        if list.outputs.is_empty() {
+            return;
+        }
+        let mpv = Arc::new(MpvController::new());
+        let vc = VoiceController::new(mpv);
+        let err_flag = Arc::new(AtomicBool::new(false));
+        let opened = open_output_stream("default", err_flag, Arc::clone(&vc.shared));
+        assert!(
+            opened.is_ok(),
+            "open_output_stream('default') failed on Windows host: {:?}",
+            opened.err()
+        );
+        let (_stream, mut prod, rate, name, _) = opened.unwrap();
+        let pushed = ((rate as usize) / 25).max(320) * 2;
+        for _ in 0..pushed {
+            let _ = prod.try_push(0.0);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        let cb_ms = vc.shared.last_out_cb_ms.load(Ordering::Relaxed);
+        let remaining = prod.occupied_len();
+        assert!(
+            cb_ms > 0,
+            "CPAL output callback never fired for '{name}' (rate={rate})"
+        );
+        assert!(
+            remaining < pushed,
+            "CPAL output stream '{name}' did not consume samples from ringbuf (pushed={pushed}, remaining={remaining})"
+        );
+    }
+
+    #[test]
+    fn join_preserves_live_monitor_status_and_leave_clears_mute_deafen() {
+        let mpv = Arc::new(MpvController::new());
+        let vc = VoiceController::new(mpv);
+
+        // Fresh join with no running workers sets "reconnecting" until stream opens
+        vc.transition_stream_status_for_join();
+        assert_eq!(
+            *vc.shared.stream_status.read().unwrap(),
+            "reconnecting".to_string()
+        );
+
+        // Simulate pre-join Mic Monitor already running and "live"
+        *vc.worker_lock.lock().unwrap() = Some(WorkerHandles {
+            dsp_thread: None,
+            mix_thread: None,
+            ptt_thread: None,
+        });
+        vc.shared.set_stream_status("live", None);
+        vc.transition_stream_status_for_join();
+        assert_eq!(*vc.shared.stream_status.read().unwrap(), "live".to_string());
+
+        // Leaving voice resets muted, deafened, pre_deafen_muted, and ptt_held
+        vc.set_deafen(true);
+        vc.shared.ptt_held.store(true, Ordering::Release);
+        vc.leave_voice();
+        assert!(!vc.shared.muted.load(Ordering::Acquire));
+        assert!(!vc.shared.deafened.load(Ordering::Acquire));
+        assert!(!vc.shared.pre_deafen_muted.load(Ordering::Acquire));
+        assert!(!vc.shared.ptt_held.load(Ordering::Acquire));
     }
 }

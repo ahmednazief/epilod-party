@@ -245,6 +245,40 @@ pub fn set_sub_delay_cmd(request_id: u64, delay_secs: f64) -> String {
     set_property_cmd(request_id, "sub-delay", json!(clamped))
 }
 
+pub fn set_secondary_sub_track_cmd(request_id: u64, sid: Option<u64>) -> String {
+    match sid {
+        Some(id) => set_property_cmd(request_id, "secondary-sid", json!(id)),
+        None => set_property_cmd(request_id, "secondary-sid", json!("no")),
+    }
+}
+
+pub fn set_secondary_sub_pos_cmd(request_id: u64, pos: u32) -> String {
+    set_property_cmd(request_id, "secondary-sub-pos", json!(pos.clamp(0, 100)))
+}
+
+pub fn set_secondary_sub_delay_cmd(request_id: u64, delay_secs: f64) -> String {
+    let clamped = if delay_secs.is_finite() {
+        delay_secs.clamp(-3600.0, 3600.0)
+    } else {
+        0.0
+    };
+    set_property_cmd(request_id, "secondary-sub-delay", json!(clamped))
+}
+
+pub fn show_osd_text_cmd(request_id: u64, text: &str, duration_ms: u32) -> String {
+    let clean: String = text
+        .chars()
+        .filter(|&c| !c.is_control() || c == ' ')
+        .take(160)
+        .collect();
+    let ms = duration_ms.clamp(500, 10_000);
+    // Pass OSD level 0 so explicit notifications still appear when --osd-level=0 is configured.
+    encode_command(
+        request_id,
+        &[json!("show-text"), json!(clean), json!(ms), json!(0)],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn set_sub_style_cmds(
     first_request_id: u64,
@@ -1044,12 +1078,18 @@ pub fn autosync_extract_cc_args_ffmpeg(
     ]
 }
 
-/// Extract an opening window of mono 8kHz PCM audio via ffmpeg to stdout (`pipe:1`) for intro detection.
-pub fn intro_extract_audio_args_ffmpeg(
+/// Extract a time window of mono 8kHz PCM audio via ffmpeg to stdout (`pipe:1`) for intro/outro detection.
+pub fn intro_extract_audio_range_args_ffmpeg(
     video_path: &str,
+    start_secs: f64,
     window_secs: f64,
     audio_stream_idx: Option<usize>,
 ) -> Vec<String> {
+    let safe_start = if start_secs.is_finite() && start_secs > 0.0 {
+        start_secs
+    } else {
+        0.0
+    };
     let safe_dur = if window_secs.is_finite() {
         window_secs.clamp(5.0, 960.0)
     } else {
@@ -1062,7 +1102,11 @@ pub fn intro_extract_audio_args_ffmpeg(
         "-loglevel".to_string(),
         "error".to_string(),
         "-ss".to_string(),
-        "0".to_string(),
+        if safe_start == 0.0 {
+            "0".to_string()
+        } else {
+            format!("{safe_start:.3}")
+        },
         "-i".to_string(),
         video_path.to_string(),
         "-t".to_string(),
@@ -1087,13 +1131,28 @@ pub fn intro_extract_audio_args_ffmpeg(
     args
 }
 
-/// Fallback opening-window audio extractor using mpv when ffmpeg.exe is unavailable.
-pub fn intro_extract_audio_args_mpv(
+/// Extract an opening window of mono 8kHz PCM audio via ffmpeg to stdout (`pipe:1`) for intro detection.
+pub fn intro_extract_audio_args_ffmpeg(
+    video_path: &str,
+    window_secs: f64,
+    audio_stream_idx: Option<usize>,
+) -> Vec<String> {
+    intro_extract_audio_range_args_ffmpeg(video_path, 0.0, window_secs, audio_stream_idx)
+}
+
+/// Fallback time-window audio extractor using mpv when ffmpeg.exe is unavailable.
+pub fn intro_extract_audio_range_args_mpv(
     video_path: &str,
     out_pcm_path: &str,
+    start_secs: f64,
     window_secs: f64,
     audio_track_id: Option<u64>,
 ) -> Vec<String> {
+    let safe_start = if start_secs.is_finite() && start_secs > 0.0 {
+        start_secs
+    } else {
+        0.0
+    };
     let safe_dur = if window_secs.is_finite() {
         window_secs.clamp(5.0, 960.0)
     } else {
@@ -1107,7 +1166,11 @@ pub fn intro_extract_audio_args_mpv(
         "--sub=no".to_string(),
         "--msg-level=all=error".to_string(),
         "--term-status-msg=".to_string(),
-        "--start=0".to_string(),
+        if safe_start == 0.0 {
+            "--start=0".to_string()
+        } else {
+            format!("--start={safe_start:.3}")
+        },
         format!("--length={safe_dur:.3}"),
         "--audio-channels=mono".to_string(),
         "--audio-samplerate=8000".to_string(),
@@ -1120,6 +1183,49 @@ pub fn intro_extract_audio_args_mpv(
     }
     args.push(video_path.to_string());
     args
+}
+
+/// Fallback opening-window audio extractor using mpv when ffmpeg.exe is unavailable.
+pub fn intro_extract_audio_args_mpv(
+    video_path: &str,
+    out_pcm_path: &str,
+    window_secs: f64,
+    audio_track_id: Option<u64>,
+) -> Vec<String> {
+    intro_extract_audio_range_args_mpv(video_path, out_pcm_path, 0.0, window_secs, audio_track_id)
+}
+
+/// Extract an embedded text subtitle track as ASS to stdout (`pipe:1`), optionally seeking near the outro.
+pub fn intro_extract_sub_tail_args_ffmpeg(
+    video_path: &str,
+    start_secs: f64,
+    sub_stream_idx: usize,
+) -> Vec<String> {
+    let safe_start = if start_secs.is_finite() && start_secs > 0.0 {
+        start_secs
+    } else {
+        0.0
+    };
+    vec![
+        "-nostdin".to_string(),
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-ss".to_string(),
+        format!("{safe_start:.3}"),
+        "-copyts".to_string(),
+        "-i".to_string(),
+        video_path.to_string(),
+        "-vn".to_string(),
+        "-an".to_string(),
+        "-dn".to_string(),
+        "-map".to_string(),
+        format!("0:s:{sub_stream_idx}"),
+        "-f".to_string(),
+        "ass".to_string(),
+        "pipe:1".to_string(),
+    ]
 }
 
 /// Extract only the opening `window_secs` of an embedded text subtitle track as ASS to stdout (`pipe:1`).

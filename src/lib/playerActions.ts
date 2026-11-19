@@ -391,6 +391,36 @@ export function seekPlaybackRelative(
   }
 }
 
+export function seekPlaybackTo(targetSecs: number): void {
+  const player = usePlayerStore.getState();
+  if (!player.loaded) return;
+  const clamped = Math.max(
+    0,
+    player.durationSecs > 0 ? Math.min(player.durationSecs, targetSecs) : targetSecs,
+  );
+  const sync = useSyncStore.getState();
+  const app = useAppStore.getState();
+  const connected = sync.status.state === "connected";
+  const aligning = connected && sync.alignMode;
+  const lock = getControllerLockState(
+    connected,
+    sync.participants,
+    resolveEffectiveUsername(sync.status, app.username),
+    sync.roomControl,
+  );
+  if (lock.lockedForLocalUser && !aligning) {
+    useNotificationStore.getState().push("warn", formatControllerLockReason(lock));
+    return;
+  }
+  const seq = nextClientSeekSeq();
+  player.setEndedAtEof(false);
+  player.setPositionSecs(clamped);
+  safeMpvCall(mpvSeek(clamped, { clientSeekSeq: seq }));
+  if (connected && !aligning) {
+    void syncUserSeek(clamped);
+  }
+}
+
 function pushSubStyle(visible: boolean): void {
   const sub = useSubtitleStore.getState();
   safeMpvCall(mpvSetSubStyle(buildSubStyleParams(sub, { visible })));

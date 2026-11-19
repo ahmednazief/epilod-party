@@ -21,6 +21,7 @@ const MAX_OPENING_START_SECS: f64 = 780.0;
 pub enum IntroSegmentKind {
     Intro,
     Recap,
+    Outro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +60,8 @@ pub struct DetectedIntro {
 pub struct IntroDetectionOutcome {
     pub segments: Vec<DetectedIntro>,
     pub primary_intro: Option<DetectedIntro>,
+    #[serde(default)]
+    pub outro: Option<DetectedIntro>,
 }
 
 impl IntroDetectionOutcome {
@@ -66,6 +69,7 @@ impl IntroDetectionOutcome {
         Self {
             segments: Vec::new(),
             primary_intro: None,
+            outro: None,
         }
     }
 
@@ -76,11 +80,22 @@ impl IntroDetectionOutcome {
             .iter()
             .find(|s| s.kind == IntroSegmentKind::Intro)
             .cloned()
-            .or_else(|| segments.first().cloned());
+            .or_else(|| {
+                segments
+                    .iter()
+                    .find(|s| s.kind != IntroSegmentKind::Outro)
+                    .cloned()
+            });
         Self {
             segments,
             primary_intro,
+            outro: None,
         }
+    }
+
+    pub fn with_outro(mut self, outro: Option<DetectedIntro>) -> Self {
+        self.outro = outro;
+        self
     }
 }
 
@@ -114,11 +129,29 @@ pub fn recommended_intro_window_secs(duration_secs: f64) -> f64 {
         .min(duration_secs.max(45.0))
 }
 
+/// Returns `(tail_start_secs, tail_window_secs)` for cross-episode outro/ED fingerprinting.
+pub fn recommended_outro_window_secs(duration_secs: f64) -> Option<(f64, f64)> {
+    if !duration_secs.is_finite() || duration_secs < 300.0 {
+        return None;
+    }
+    let window = (duration_secs * 0.28).clamp(150.0, 360.0);
+    let start = (duration_secs - window).max(0.0);
+    Some((start, window.min(duration_secs - start)))
+}
+
 fn opening_start_limit(duration_secs: f64) -> f64 {
     if duration_secs.is_finite() && duration_secs > 0.0 {
         (duration_secs * 0.45).min(MAX_OPENING_START_SECS)
     } else {
         MAX_OPENING_START_SECS
+    }
+}
+
+fn closing_start_min(duration_secs: f64) -> f64 {
+    if duration_secs.is_finite() && duration_secs > 0.0 {
+        (duration_secs * 0.55).max(duration_secs - 420.0).max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -146,14 +179,22 @@ fn is_negative_chapter_title(lower: &str, tokens: &[String]) -> bool {
         || lower.contains("予告")
 }
 
-fn is_op_token(tok: &str) -> bool {
-    if tok == "op" {
+fn is_numbered_prefix_token(tok: &str, prefix: &str) -> bool {
+    if tok == prefix {
         return true;
     }
-    if let Some(rest) = tok.strip_prefix("op") {
+    if let Some(rest) = tok.strip_prefix(prefix) {
         return !rest.is_empty() && rest.len() <= 2 && rest.chars().all(|c| c.is_ascii_digit());
     }
     false
+}
+
+fn is_op_token(tok: &str) -> bool {
+    is_numbered_prefix_token(tok, "op")
+}
+
+fn is_ed_token(tok: &str) -> bool {
+    is_numbered_prefix_token(tok, "ed")
 }
 
 fn classify_chapter_title(
@@ -276,6 +317,7 @@ pub fn detect_intro_from_chapters(
             let label = match kind {
                 IntroSegmentKind::Intro => "Skip Intro".to_string(),
                 IntroSegmentKind::Recap => "Skip Recap".to_string(),
+                IntroSegmentKind::Outro => "Next Episode".to_string(),
             };
             segments.push(DetectedIntro {
                 start_secs: *start,
@@ -291,7 +333,75 @@ pub fn detect_intro_from_chapters(
         }
     }
 
-    IntroDetectionOutcome::from_segments(segments)
+    let outro = detect_outro_from_chapters_intervals(&intervals, duration_secs);
+    IntroDetectionOutcome::from_segments(segments).with_outro(outro)
+}
+
+fn is_explicit_outro_chapter_title(
+    raw_title: &str,
+    start_secs: f64,
+    len_secs: f64,
+    duration_secs: f64,
+) -> bool {
+    let trimmed = raw_title.trim();
+    if trimmed.is_empty() || !(15.0..=480.0).contains(&len_secs) {
+        return false;
+    }
+    if duration_secs.is_finite()
+        && duration_secs > 0.0
+        && start_secs < closing_start_min(duration_secs)
+    {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let tokens = tokenize_title(&lower);
+    if tokens
+        .iter()
+        .any(|t| t == "preview" || t == "next" || t == "trailer")
+        || lower.contains("next episode")
+        || trimmed.contains("予告")
+    {
+        return false;
+    }
+    let explicit = tokens
+        .iter()
+        .any(|t| t == "outro" || t == "ending" || t == "closing" || is_ed_token(t))
+        || lower.contains("end credits")
+        || lower.contains("closing credits")
+        || lower.contains("ending theme")
+        || trimmed.contains("エンディング");
+    if explicit {
+        return true;
+    }
+    // Single word "credits" / "end" only in the final 35% of the video.
+    let late_enough =
+        !duration_secs.is_finite() || duration_secs <= 0.0 || start_secs >= duration_secs * 0.65;
+    late_enough && tokens.iter().any(|t| t == "credits")
+}
+
+fn detect_outro_from_chapters_intervals(
+    intervals: &[(Option<String>, f64, f64)],
+    duration_secs: f64,
+) -> Option<DetectedIntro> {
+    for (title_opt, start, end) in intervals.iter().rev() {
+        let Some(ref title) = title_opt else {
+            continue;
+        };
+        if is_explicit_outro_chapter_title(title, *start, end - start, duration_secs) {
+            return Some(DetectedIntro {
+                start_secs: *start,
+                end_secs: *end,
+                skip_target_secs: *end,
+                kind: IntroSegmentKind::Outro,
+                source: IntroSource::Chapter,
+                confidence: IntroConfidence::High,
+                label: "Next Episode".to_string(),
+                similarity: None,
+                matched_episodes: 1,
+            });
+        }
+    }
+    None
 }
 
 /// Detects standalone episodic anime/TV structure from unnamed chapters (e.g. an ~85-95s opening
@@ -327,11 +437,10 @@ pub fn detect_intro_from_unnamed_chapter_structure(
         if !precedes_body {
             continue;
         }
-        let has_matching_ed = intervals.iter().skip(i + 1).any(|(_, es, ee)| {
+        if let Some(&(_, ed_start, ed_end)) = intervals.iter().skip(i + 1).find(|(_, es, ee)| {
             let ed_len = ee - es;
             *es >= late_min && (75.0..=115.0).contains(&ed_len)
-        });
-        if has_matching_ed {
+        }) {
             return IntroDetectionOutcome::from_segments(vec![DetectedIntro {
                 start_secs: *op_start,
                 end_secs: *op_end,
@@ -342,7 +451,18 @@ pub fn detect_intro_from_unnamed_chapter_structure(
                 label: "Skip Intro".to_string(),
                 similarity: None,
                 matched_episodes: 1,
-            }]);
+            }])
+            .with_outro(Some(DetectedIntro {
+                start_secs: ed_start,
+                end_secs: ed_end,
+                skip_target_secs: ed_end,
+                kind: IntroSegmentKind::Outro,
+                source: IntroSource::ChapterStructure,
+                confidence: IntroConfidence::Medium,
+                label: "Next Episode".to_string(),
+                similarity: None,
+                matched_episodes: 1,
+            }));
         }
     }
 
@@ -408,6 +528,30 @@ fn is_ass_op_style_or_actor(raw: &str) -> bool {
         .any(|t| is_op_token(t) || t == "opening" || t == "intro")
 }
 
+fn is_ass_ed_style_or_actor(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let tokens = tokenize_title(&lower);
+    if tokens.iter().any(|t| {
+        t == "op"
+            || t == "opening"
+            || t == "intro"
+            || t == "sign"
+            || t == "signs"
+            || t == "default"
+            || t == "dialogue"
+            || t == "eyecatch"
+            || t == "preview"
+    }) {
+        return false;
+    }
+    tokens
+        .iter()
+        .any(|t| is_ed_token(t) || t == "ending" || t == "outro")
+}
+
 fn parse_ass_time_secs(raw: &str) -> Option<f64> {
     let parts: Vec<&str> = raw.trim().split(':').collect();
     if parts.len() != 3 {
@@ -420,11 +564,15 @@ fn parse_ass_time_secs(raw: &str) -> Option<f64> {
     (total.is_finite() && total >= 0.0).then_some(total)
 }
 
-fn detect_ass_op_span(raw_text: &str, duration_secs: f64) -> Option<(f64, f64)> {
+type AssCueSpans = (Option<(f64, f64)>, Option<(f64, f64)>);
+
+fn detect_ass_cue_spans(raw_text: &str, duration_secs: f64) -> AssCueSpans {
     let start_limit = opening_start_limit(duration_secs);
+    let end_min = closing_start_min(duration_secs);
     let mut in_events = false;
     let mut format_cols: Option<Vec<String>> = None;
     let mut op_spans: Vec<(f64, f64)> = Vec::new();
+    let mut ed_spans: Vec<(f64, f64)> = Vec::new();
 
     for line in raw_text.lines() {
         let trimmed = line.trim();
@@ -458,19 +606,32 @@ fn detect_ass_op_span(raw_text: &str, duration_secs: f64) -> Option<(f64, f64)> 
             fields.get(idx).map(|s| s.trim())
         };
 
-        let start = find_col("start", 1).and_then(parse_ass_time_secs)?;
-        let end = find_col("end", 2).and_then(parse_ass_time_secs)?;
-        if end <= start || start > start_limit {
+        let Some(start) = find_col("start", 1).and_then(parse_ass_time_secs) else {
+            continue;
+        };
+        let Some(end) = find_col("end", 2).and_then(parse_ass_time_secs) else {
+            continue;
+        };
+        if end <= start {
             continue;
         }
         let style = find_col("style", 3).unwrap_or("");
         let name = find_col("name", 4).unwrap_or("");
-        if is_ass_op_style_or_actor(style) || is_ass_op_style_or_actor(name) {
+        if start <= start_limit
+            && (is_ass_op_style_or_actor(style) || is_ass_op_style_or_actor(name))
+        {
             op_spans.push((start, end));
+        } else if start >= end_min
+            && (is_ass_ed_style_or_actor(style) || is_ass_ed_style_or_actor(name))
+        {
+            ed_spans.push((start, end));
         }
     }
 
-    cluster_cue_spans(&op_spans, 3, 15.0, 15.0, 155.0)
+    (
+        cluster_cue_spans(&op_spans, 3, 15.0, 15.0, 155.0),
+        cluster_cue_spans(&ed_spans, 3, 15.0, 15.0, 180.0),
+    )
 }
 
 fn cluster_cue_spans(
@@ -527,9 +688,97 @@ fn is_explicit_opening_cue_text(text: &str) -> bool {
         || lower.contains("intro theme")
 }
 
+fn is_explicit_ending_cue_text(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.contains("ending theme")
+        || lower.contains("ending song")
+        || lower.contains("ending music")
+        || lower.contains("ending credits")
+        || lower.contains("closing theme")
+        || lower.contains("closing song")
+        || lower.contains("closing credits")
+        || lower.contains("outro music")
+        || lower.contains("outro theme")
+        || lower.contains("end credits")
+}
+
 fn is_music_lyric_cue(cue: &SubtitleCue) -> bool {
     let t = cue.text.trim();
     !t.is_empty() && (t.contains('♪') || t.contains('♫'))
+}
+
+fn find_subtitle_span(
+    cues: &[SubtitleCue],
+    min_start: f64,
+    max_start: f64,
+    explicit_pred: fn(&str) -> bool,
+) -> Option<(f64, f64, IntroConfidence)> {
+    for cue in cues {
+        let s = cue.start_ms as f64 / 1000.0;
+        let e = cue.end_ms as f64 / 1000.0;
+        if s >= min_start
+            && s <= max_start
+            && (MIN_INTRO_SECS..=155.0).contains(&(e - s))
+            && explicit_pred(&cue.text)
+        {
+            return Some((s, e, IntroConfidence::Medium));
+        }
+    }
+
+    let mut run_start = 0.0f64;
+    let mut run_end = 0.0f64;
+    let mut run_count = 0usize;
+    for cue in cues {
+        let s = cue.start_ms as f64 / 1000.0;
+        let e = cue.end_ms as f64 / 1000.0;
+        if s < min_start {
+            continue;
+        }
+        if s > max_start {
+            break;
+        }
+        if is_music_lyric_cue(cue) && (run_count == 0 || s <= run_end + 12.0) {
+            if run_count == 0 {
+                run_start = s;
+            }
+            run_end = run_end.max(e);
+            run_count += 1;
+        } else {
+            if run_count >= 4 && (22.0..=150.0).contains(&(run_end - run_start)) {
+                return Some((run_start, run_end, IntroConfidence::Medium));
+            }
+            if is_music_lyric_cue(cue) {
+                run_start = s;
+                run_end = e;
+                run_count = 1;
+            } else {
+                run_count = 0;
+            }
+        }
+    }
+    if run_count >= 4 && (22.0..=150.0).contains(&(run_end - run_start)) {
+        return Some((run_start, run_end, IntroConfidence::Medium));
+    }
+    None
+}
+
+fn make_outro_segment(
+    start: f64,
+    end: f64,
+    source: IntroSource,
+    confidence: IntroConfidence,
+) -> DetectedIntro {
+    DetectedIntro {
+        start_secs: start,
+        end_secs: end,
+        skip_target_secs: end,
+        kind: IntroSegmentKind::Outro,
+        source,
+        confidence,
+        label: "Next Episode".to_string(),
+        similarity: None,
+        matched_episodes: 1,
+    }
 }
 
 pub fn detect_intro_from_subtitle_text(
@@ -541,8 +790,18 @@ pub fn detect_intro_from_subtitle_text(
         .map(|e| matches!(e.trim().to_ascii_lowercase().as_str(), "ass" | "ssa"))
         .unwrap_or_else(|| raw_text.contains("[Events]") && raw_text.contains("Dialogue:"));
 
+    let mut ass_ed_outro: Option<DetectedIntro> = None;
     if is_ass {
-        if let Some((start, end)) = detect_ass_op_span(raw_text, duration_secs) {
+        let (op_span, ed_span) = detect_ass_cue_spans(raw_text, duration_secs);
+        if let Some((es, ee)) = ed_span {
+            ass_ed_outro = Some(make_outro_segment(
+                es,
+                ee,
+                IntroSource::SubtitleCue,
+                IntroConfidence::High,
+            ));
+        }
+        if let Some((start, end)) = op_span {
             return IntroDetectionOutcome::from_segments(vec![DetectedIntro {
                 start_secs: start,
                 end_secs: end,
@@ -553,91 +812,47 @@ pub fn detect_intro_from_subtitle_text(
                 label: "Skip Intro".to_string(),
                 similarity: None,
                 matched_episodes: 1,
-            }]);
+            }])
+            .with_outro(ass_ed_outro);
         }
     }
 
     let Ok(cues) = parse_subtitles(raw_text) else {
-        return IntroDetectionOutcome::empty();
+        return IntroDetectionOutcome::empty().with_outro(ass_ed_outro);
     };
     let start_limit = opening_start_limit(duration_secs);
+    let end_min = closing_start_min(duration_secs);
+    let max_end_pos = if duration_secs.is_finite() && duration_secs > 0.0 {
+        duration_secs
+    } else {
+        f64::INFINITY
+    };
 
-    // 1) Explicit opening theme cue tag spanning >= 12s
-    for cue in &cues {
-        let s = cue.start_ms as f64 / 1000.0;
-        let e = cue.end_ms as f64 / 1000.0;
-        if s <= start_limit
-            && (MIN_INTRO_SECS..=155.0).contains(&(e - s))
-            && is_explicit_opening_cue_text(&cue.text)
-        {
-            return IntroDetectionOutcome::from_segments(vec![DetectedIntro {
-                start_secs: s,
-                end_secs: e,
-                skip_target_secs: e,
-                kind: IntroSegmentKind::Intro,
-                source: IntroSource::SubtitleCue,
-                confidence: IntroConfidence::Medium,
-                label: "Skip Intro".to_string(),
-                similarity: None,
-                matched_episodes: 1,
-            }]);
-        }
-    }
-
-    // 2) Contiguous run of >= 4 ♪ music-note cues without normal spoken cues interleaved
-    let mut run_start = 0.0f64;
-    let mut run_end = 0.0f64;
-    let mut run_count = 0usize;
-    for cue in &cues {
-        let s = cue.start_ms as f64 / 1000.0;
-        let e = cue.end_ms as f64 / 1000.0;
-        if s > start_limit {
-            break;
-        }
-        if is_music_lyric_cue(cue) && (run_count == 0 || s <= run_end + 12.0) {
-            if run_count == 0 {
-                run_start = s;
-            }
-            run_end = run_end.max(e);
-            run_count += 1;
-        } else {
-            if run_count >= 4 && (22.0..=135.0).contains(&(run_end - run_start)) {
-                return IntroDetectionOutcome::from_segments(vec![DetectedIntro {
-                    start_secs: run_start,
-                    end_secs: run_end,
-                    skip_target_secs: run_end,
-                    kind: IntroSegmentKind::Intro,
-                    source: IntroSource::SubtitleCue,
-                    confidence: IntroConfidence::Medium,
-                    label: "Skip Intro".to_string(),
-                    similarity: None,
-                    matched_episodes: 1,
-                }]);
-            }
-            if is_music_lyric_cue(cue) {
-                run_start = s;
-                run_end = e;
-                run_count = 1;
-            } else {
-                run_count = 0;
-            }
-        }
-    }
-    if run_count >= 4 && (22.0..=135.0).contains(&(run_end - run_start)) {
-        return IntroDetectionOutcome::from_segments(vec![DetectedIntro {
-            start_secs: run_start,
-            end_secs: run_end,
-            skip_target_secs: run_end,
+    let intro_seg = find_subtitle_span(&cues, 0.0, start_limit, is_explicit_opening_cue_text).map(
+        |(s, e, confidence)| DetectedIntro {
+            start_secs: s,
+            end_secs: e,
+            skip_target_secs: e,
             kind: IntroSegmentKind::Intro,
             source: IntroSource::SubtitleCue,
-            confidence: IntroConfidence::Medium,
+            confidence,
             label: "Skip Intro".to_string(),
             similarity: None,
             matched_episodes: 1,
-        }]);
-    }
+        },
+    );
 
-    IntroDetectionOutcome::empty()
+    let outro = ass_ed_outro.or_else(|| {
+        find_subtitle_span(&cues, end_min, max_end_pos, is_explicit_ending_cue_text).map(
+            |(s, e, confidence)| make_outro_segment(s, e, IntroSource::SubtitleCue, confidence),
+        )
+    });
+
+    if let Some(intro) = intro_seg {
+        IntroDetectionOutcome::from_segments(vec![intro]).with_outro(outro)
+    } else {
+        IntroDetectionOutcome::empty().with_outro(outro)
+    }
 }
 
 /// Compact multi-band whitened spectral fingerprint at 8 fps (125 ms) for fast cross-episode
@@ -1115,25 +1330,35 @@ pub fn match_intro_between_episodes(
     best
 }
 
-pub fn detect_intro_across_episodes(
+struct CrossEpisodeMatchResult {
+    start_secs: f64,
+    end_secs: f64,
+    similarity: f64,
+    matched_episodes: usize,
+    confidence: IntroConfidence,
+    sibling_ranges: Vec<(String, f64, f64, f64)>,
+}
+
+fn match_corroborated_across_episodes(
     target_fp: &SpectralIntroFingerprint,
-    siblings: &[(&str, &SpectralIntroFingerprint)],
+    target_offset_secs: f64,
+    siblings: &[(&str, &SpectralIntroFingerprint, f64)],
     target_chapters: &[MpvChapter],
     target_duration_secs: f64,
-) -> (IntroDetectionOutcome, Vec<(String, f64, f64, f64)>) {
+) -> Option<CrossEpisodeMatchResult> {
     let mut target_matches: Vec<(usize, PairwiseIntroMatch)> = Vec::new();
 
-    for (idx, (_sib_path, sib_fp)) in siblings.iter().enumerate() {
+    for (idx, (_sib_path, sib_fp, _sib_off)) in siblings.iter().enumerate() {
         if let Some(m) = match_intro_between_episodes(target_fp, sib_fp) {
             target_matches.push((idx, m));
         }
     }
 
     if target_matches.is_empty() {
-        return (IntroDetectionOutcome::empty(), Vec::new());
+        return None;
     }
 
-    // Check if sibling matches corroborate the same intro on target (within +/-4s or >=70% overlap)
+    // Check if sibling matches corroborate the same segment on target (within +/-4s or >=70% overlap)
     let mut agreeing_indices: HashSet<usize> = HashSet::new();
     let (raw_start, raw_end, sim, matched_eps, confidence) = if target_matches.len() >= 2 {
         let best = target_matches
@@ -1170,7 +1395,7 @@ pub fn detect_intro_across_episodes(
                     agreeing.iter().map(|(_, m)| m.a_end_secs).sum::<f64>() / agreeing.len() as f64;
                 (avg_s, avg_e)
             } else {
-                // Tight intersection isolates the shared OP when one pair also matched an adjacent tail
+                // Tight intersection isolates the shared theme when one pair matched an adjacent tail
                 let inter_s = agreeing
                     .iter()
                     .map(|(_, m)| m.a_start_secs)
@@ -1227,9 +1452,9 @@ pub fn detect_intro_across_episodes(
         (m.a_start_secs, m.a_end_secs, m.mean_similarity, 2, conf)
     };
 
-    let mut sibling_intros: Vec<(String, f64, f64, f64)> = Vec::with_capacity(target_matches.len());
+    let mut sibling_ranges: Vec<(String, f64, f64, f64)> = Vec::with_capacity(target_matches.len());
     for (idx, m) in &target_matches {
-        let sib_path = siblings[*idx].0;
+        let (sib_path, _, sib_offset) = siblings[*idx];
         let (sib_s, sib_e) = if agreeing_indices.contains(idx) {
             let s = (m.b_start_secs + (raw_start - m.a_start_secs)).max(0.0);
             let e = m.b_end_secs + (raw_end - m.a_end_secs);
@@ -1241,24 +1466,95 @@ pub fn detect_intro_across_episodes(
         } else {
             (m.b_start_secs, m.b_end_secs)
         };
-        sibling_intros.push((sib_path.to_string(), sib_s, sib_e, m.mean_similarity));
+        sibling_ranges.push((
+            sib_path.to_string(),
+            sib_offset + sib_s,
+            sib_offset + sib_e,
+            m.mean_similarity,
+        ));
     }
 
-    let (start_secs, end_secs) =
-        snap_interval_to_chapters(raw_start, raw_end, target_chapters, target_duration_secs);
-    let outcome = IntroDetectionOutcome::from_segments(vec![DetectedIntro {
+    let (start_secs, end_secs) = snap_interval_to_chapters(
+        target_offset_secs + raw_start,
+        target_offset_secs + raw_end,
+        target_chapters,
+        target_duration_secs,
+    );
+
+    Some(CrossEpisodeMatchResult {
         start_secs,
         end_secs,
-        skip_target_secs: end_secs,
+        similarity: sim,
+        matched_episodes: matched_eps,
+        confidence,
+        sibling_ranges,
+    })
+}
+
+pub fn detect_intro_across_episodes(
+    target_fp: &SpectralIntroFingerprint,
+    siblings: &[(&str, &SpectralIntroFingerprint)],
+    target_chapters: &[MpvChapter],
+    target_duration_secs: f64,
+) -> (IntroDetectionOutcome, Vec<(String, f64, f64, f64)>) {
+    let wrapped: Vec<(&str, &SpectralIntroFingerprint, f64)> =
+        siblings.iter().map(|&(p, fp)| (p, fp, 0.0)).collect();
+    let Some(res) = match_corroborated_across_episodes(
+        target_fp,
+        0.0,
+        &wrapped,
+        target_chapters,
+        target_duration_secs,
+    ) else {
+        return (IntroDetectionOutcome::empty(), Vec::new());
+    };
+    let outcome = IntroDetectionOutcome::from_segments(vec![DetectedIntro {
+        start_secs: res.start_secs,
+        end_secs: res.end_secs,
+        skip_target_secs: res.end_secs,
         kind: IntroSegmentKind::Intro,
         source: IntroSource::AudioMatch,
-        confidence,
+        confidence: res.confidence,
         label: "Skip Intro".to_string(),
-        similarity: Some(sim),
-        matched_episodes: matched_eps,
+        similarity: Some(res.similarity),
+        matched_episodes: res.matched_episodes,
     }]);
+    (outcome, res.sibling_ranges)
+}
 
-    (outcome, sibling_intros)
+pub type SiblingOutroSpan = (String, f64, f64, f64);
+
+pub fn detect_outro_across_episodes(
+    target_fp: &SpectralIntroFingerprint,
+    target_offset_secs: f64,
+    siblings: &[(&str, &SpectralIntroFingerprint, f64)],
+    target_chapters: &[MpvChapter],
+    target_duration_secs: f64,
+) -> (Option<DetectedIntro>, Vec<SiblingOutroSpan>) {
+    let Some(res) = match_corroborated_across_episodes(
+        target_fp,
+        target_offset_secs,
+        siblings,
+        target_chapters,
+        target_duration_secs,
+    ) else {
+        return (None, Vec::new());
+    };
+    if res.start_secs < closing_start_min(target_duration_secs) {
+        return (None, Vec::new());
+    }
+    let outro = DetectedIntro {
+        start_secs: res.start_secs,
+        end_secs: res.end_secs,
+        skip_target_secs: res.end_secs,
+        kind: IntroSegmentKind::Outro,
+        source: IntroSource::AudioMatch,
+        confidence: res.confidence,
+        label: "Next Episode".to_string(),
+        similarity: Some(res.similarity),
+        matched_episodes: res.matched_episodes,
+    };
+    (Some(outro), res.sibling_ranges)
 }
 
 pub fn pick_sibling_episode_paths(
@@ -1635,5 +1931,68 @@ Hello!
             match_intro_between_episodes(&fp_dup, &fp_dup).is_none(),
             "identical audio copy must not be misclassified as an intro"
         );
+    }
+
+    #[test]
+    fn test_outro_detection_across_chapters_unnamed_subtitles_and_audio() {
+        // 1. Named chapters return outro cleanly alongside intro/recap
+        let chaps = vec![
+            chap(Some("OP 1"), 30.0),
+            chap(Some("Part A"), 120.0),
+            chap(Some("Ending"), 1320.0),
+            chap(Some("Next Episode Preview"), 1410.0),
+        ];
+        let chap_res = detect_intro_from_chapters(&chaps, 1440.0);
+        let chap_outro = chap_res.outro.expect("named Ending chapter detected");
+        assert_eq!(chap_outro.kind, IntroSegmentKind::Outro);
+        assert_eq!(chap_outro.start_secs, 1320.0);
+        assert_eq!(chap_outro.end_secs, 1410.0);
+
+        // 2. Unnamed anime OP+Body+ED chapters detect ED cleanly
+        let unnamed = vec![
+            chap(Some("Chapter 01"), 0.0),
+            chap(Some("Chapter 02"), 90.0),
+            chap(Some("Chapter 03"), 180.0),
+            chap(Some("Chapter 04"), 780.0),
+            chap(Some("Chapter 05"), 1320.0),
+            chap(Some("Chapter 06"), 1410.0),
+        ];
+        let unnamed_res = detect_intro_from_unnamed_chapter_structure(&unnamed, 1440.0, true);
+        let unnamed_outro = unnamed_res.outro.expect("unnamed ED structure detected");
+        assert_eq!(unnamed_outro.kind, IntroSegmentKind::Outro);
+        assert_eq!(unnamed_outro.start_secs, 1320.0);
+        assert_eq!(unnamed_outro.end_secs, 1410.0);
+
+        // 3. ASS ED-Romaji subtitle cue cluster
+        let ass = "\
+[Script Info]
+ScriptType: v4.00+
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:01:10.00,0:01:28.00,OP-Romaji,,0,0,0,,OP line 1
+Dialogue: 0,0:01:30.00,0:01:55.00,OP-Romaji,,0,0,0,,OP line 2
+Dialogue: 0,0:01:58.00,0:02:38.00,OP-Romaji,,0,0,0,,OP line 3
+Dialogue: 0,0:21:30.00,0:21:55.00,ED-Romaji,,0,0,0,,ED line 1
+Dialogue: 0,0:21:58.00,0:22:25.00,ED-Romaji,,0,0,0,,ED line 2
+Dialogue: 0,0:22:28.00,0:22:55.00,ED-Romaji,,0,0,0,,ED line 3
+";
+        let sub_res = detect_intro_from_subtitle_text(ass, Some("ass"), 1440.0);
+        let sub_outro = sub_res.outro.expect("ASS ED style detected");
+        assert!((sub_outro.start_secs - 1290.0).abs() < 0.01);
+        assert!((sub_outro.end_secs - 1375.0).abs() < 0.01);
+
+        // 4. Cross-episode tail audio matching shifted by offset
+        let ed_theme = synth_theme_samples(77, 85, INTRO_FP_SAMPLE_RATE, 0.42);
+        let tail_a = build_episode_audio(701, 40, &ed_theme, 702, 220); // offset 1100 -> ED 1140..1225
+        let tail_b = build_episode_audio(801, 75, &ed_theme, 802, 220); // offset 1120 -> ED 1195..1280
+        let fp_a = SpectralIntroFingerprint::from_mono_8k_samples(&tail_a).unwrap();
+        let fp_b = SpectralIntroFingerprint::from_mono_8k_samples(&tail_b).unwrap();
+        let (audio_outro, _) =
+            detect_outro_across_episodes(&fp_a, 1100.0, &[("ep2.mkv", &fp_b, 1120.0)], &[], 1360.0);
+        let found = audio_outro.expect("cross-episode ED detected");
+        assert_eq!(found.kind, IntroSegmentKind::Outro);
+        assert!((found.start_secs - 1140.0).abs() <= 2.5);
+        assert!((found.end_secs - 1225.0).abs() <= 2.5);
     }
 }

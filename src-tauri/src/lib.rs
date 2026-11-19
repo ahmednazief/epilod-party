@@ -186,11 +186,15 @@ mod windows_app {
     use epilod_core::logging::{LogLevel, LogsSnapshot, RingLogger};
     use epilod_core::mpv_ipc::{
         loadfile_cmd, set_aid_cmd, set_aspect_cmd, set_loop_cmd, set_mute_cmd, set_pause_cmd,
+        set_secondary_sub_delay_cmd, set_secondary_sub_pos_cmd, set_secondary_sub_track_cmd,
         set_sid_cmd, set_speed_cmd, set_sub_delay_cmd, set_sub_style_cmds_with_bold,
-        set_video_margin_right_cmd, set_volume_cmd, sub_add_cmd_with_title, sub_remove_cmd,
+        set_video_margin_right_cmd, set_volume_cmd, show_osd_text_cmd, sub_add_cmd_with_title,
+        sub_remove_cmd,
     };
     use epilod_core::room_code::BACKUP_ENDPOINT;
-    use epilod_core::subtitle_sync::{decode_subtitle_bytes_with_hint, SubtitleEncodingHint};
+    use epilod_core::subtitle_sync::{
+        contains_arabic, decode_subtitle_bytes_with_hint, fix_rtl_subtitles, SubtitleEncodingHint,
+    };
     use epilod_core::validation::{
         is_allowed_webview_url, sanitize_aspect_mode, sanitize_hex_color, sanitize_playback_speed,
         sanitize_username, validate_existing_local_file_with_options,
@@ -357,18 +361,19 @@ mod windows_app {
         state.autosync.cancel();
         state.intro_detect.cancel();
         state.mpv.prepare_for_load();
+        state.mpv.set_media_loaded(true);
         let pause_req = state.mpv.next_request_id();
         let _ = state.mpv.send_command(set_pause_cmd(pause_req, true));
 
         let req = state.mpv.next_request_id();
         if let Err(e) = state.mpv.send_command(loadfile_cmd(req, &path_str)) {
+            state.mpv.set_media_loaded(false);
             state.mpv.clear_loading_flag();
             if let Ok(mut rg) = state.rate_guard.lock() {
                 rg.clear_dedup_if_matches("mpv_load", &path_str);
             }
             return Err(e);
         }
-        state.mpv.set_media_loaded(true);
         state.sync.reset_for_new_file();
         state.sync.set_local_media_path(Some(valid_path.clone()));
 
@@ -524,9 +529,11 @@ mod windows_app {
         path: String,
         encoding_hint: Option<SubtitleEncodingHint>,
         display_title: Option<String>,
+        fix_rtl: Option<bool>,
     ) -> Result<(), String> {
         let opts = state.network_policy.options();
         let hint = encoding_hint.unwrap_or_default();
+        let apply_fix_rtl = fix_rtl.unwrap_or(true);
 
         // Fix 25: Convert legacy non-UTF8 or explicit-hint subtitle files to clean UTF-8 temp file for libass.
         // Run all filesystem & decoding work off the async executor so UNC/large files never stall IPC.
@@ -537,19 +544,30 @@ mod windows_app {
                 let title = derive_external_sub_title(&valid, display_title.as_deref());
                 match std::fs::read(&valid) {
                     Ok(bytes) => {
+                        let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
+                        let is_srt_or_vtt =
+                            ext.eq_ignore_ascii_case("srt") || ext.eq_ignore_ascii_case("vtt");
+                        let utf8_str = std::str::from_utf8(&bytes).ok();
+                        let needs_rtl_fix =
+                            apply_fix_rtl && is_srt_or_vtt && utf8_str.is_some_and(contains_arabic);
                         let needs_transcode = hint != SubtitleEncodingHint::Auto
-                            || std::str::from_utf8(&bytes).is_err();
+                            || utf8_str.is_none()
+                            || needs_rtl_fix;
                         if needs_transcode {
                             let decoded = decode_subtitle_bytes_with_hint(&bytes, hint)
                                 .map_err(|e| e.to_string())?;
+                            let final_text = if apply_fix_rtl && is_srt_or_vtt {
+                                fix_rtl_subtitles(&decoded, ext)
+                            } else {
+                                decoded
+                            };
                             let sub_dir = std::env::temp_dir().join("epilod-subs");
                             std::fs::create_dir_all(&sub_dir)
                                 .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
-                            let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
                             let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
                             let out =
                                 sub_dir.join(format!("decoded_{}_{seq}.{ext}", std::process::id()));
-                            std::fs::write(&out, decoded.as_bytes()).map_err(|e| {
+                            std::fs::write(&out, final_text.as_bytes()).map_err(|e| {
                                 format!("Failed writing decoded UTF-8 subtitle: {e}")
                             })?;
                             prune_decoded_subs_dir(&sub_dir, 10);
@@ -626,6 +644,48 @@ mod windows_app {
     ) -> Result<(), String> {
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_aid_cmd(req, aid))
+    }
+
+    #[tauri::command]
+    async fn mpv_set_secondary_sub_track(
+        state: State<'_, AppState>,
+        sid: Option<u64>,
+        pos: Option<u32>,
+    ) -> Result<(), String> {
+        let req = state.mpv.next_request_id();
+        state
+            .mpv
+            .send_command(set_secondary_sub_track_cmd(req, sid))?;
+        if sid.is_some() {
+            let pos_req = state.mpv.next_request_id();
+            state
+                .mpv
+                .send_command(set_secondary_sub_pos_cmd(pos_req, pos.unwrap_or(10)))?;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn mpv_set_secondary_sub_delay(
+        state: State<'_, AppState>,
+        delay_secs: f64,
+    ) -> Result<(), String> {
+        let req = state.mpv.next_request_id();
+        state
+            .mpv
+            .send_command(set_secondary_sub_delay_cmd(req, delay_secs))
+    }
+
+    #[tauri::command]
+    async fn mpv_show_osd_text(
+        state: State<'_, AppState>,
+        text: String,
+        duration_ms: Option<u32>,
+    ) -> Result<(), String> {
+        let req = state.mpv.next_request_id();
+        state
+            .mpv
+            .send_command(show_osd_text_cmd(req, &text, duration_ms.unwrap_or(2400)))
     }
 
     #[tauri::command]
@@ -972,6 +1032,48 @@ mod windows_app {
             return Err("Invalid participant username.".to_string());
         }
         state.sync.set_room_admin(trimmed.to_string(), grant).await
+    }
+
+    #[tauri::command]
+    async fn set_global_shortcuts_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+        use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+
+        let shortcuts = [
+            (
+                "Ctrl+Alt+Space",
+                Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space),
+            ),
+            (
+                "Ctrl+Alt+Left",
+                Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::ArrowLeft),
+            ),
+            (
+                "Ctrl+Alt+Right",
+                Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::ArrowRight),
+            ),
+        ];
+
+        let mgr = app.global_shortcut();
+        for (_, sc) in &shortcuts {
+            let _ = mgr.unregister(*sc);
+        }
+        if !enabled {
+            return Ok(());
+        }
+
+        let mut registered: Vec<Shortcut> = Vec::new();
+        for (label, sc) in &shortcuts {
+            if let Err(err) = mgr.register(*sc) {
+                for prev in registered {
+                    let _ = mgr.unregister(prev);
+                }
+                return Err(format!(
+                    "Could not register global shortcut ({label}): {err}. Another app may already be using it."
+                ));
+            }
+            registered.push(*sc);
+        }
+        Ok(())
     }
 
     #[tauri::command]
@@ -1592,6 +1694,23 @@ mod windows_app {
 
         tauri::Builder::default()
             .plugin(tauri_plugin_dialog::init())
+            .plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(|app, shortcut, event| {
+                        use tauri_plugin_global_shortcut::{Code, ShortcutState};
+                        if event.state() != ShortcutState::Pressed {
+                            return;
+                        }
+                        let action = match shortcut.key {
+                            Code::Space => "toggle-play",
+                            Code::ArrowLeft => "seek-back",
+                            Code::ArrowRight => "seek-forward",
+                            _ => return,
+                        };
+                        let _ = app.emit("app://global-shortcut", action);
+                    })
+                    .build(),
+            )
             .manage(app_state)
             .on_window_event(move |window, event| match event {
                 tauri::WindowEvent::Resized(size) => {
@@ -1727,6 +1846,9 @@ mod windows_app {
                 mpv_set_sub_delay,
                 mpv_set_audio_track,
                 mpv_set_sub_track,
+                mpv_set_secondary_sub_track,
+                mpv_set_secondary_sub_delay,
+                mpv_show_osd_text,
                 subtitle_auto_sync,
                 subtitle_two_anchor_sync,
                 subtitle_cancel_auto_sync,
@@ -1763,6 +1885,7 @@ mod windows_app {
                 sync_send_chat_react,
                 sync_send_chat_typing,
                 scan_media_paths,
+                set_global_shortcuts_enabled,
                 log_frontend_event,
                 get_logs_snapshot,
                 update_get_status,

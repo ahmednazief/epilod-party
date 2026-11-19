@@ -1720,21 +1720,38 @@ impl ReliableChannel {
     }
 
     pub fn collect_retransmits(&mut self, now_ms: u64, rto_ms: u64) -> Vec<P2pWireFrame> {
-        let mut out = Vec::new();
-        for msg in self.outgoing.values_mut() {
-            let total = msg.chunks.len() as u16;
-            for idx in 0..msg.chunks.len() {
-                let last = msg.last_sent_ms[idx];
-                if !msg.acked[idx] && (last == 0 || now_ms.saturating_sub(last) >= rto_ms) {
-                    msg.last_sent_ms[idx] = now_ms.max(1);
-                    out.push(P2pWireFrame::Chunk {
-                        msg_id: msg.msg_id,
-                        idx: idx as u16,
-                        total,
-                        data: msg.chunks[idx].clone(),
-                    });
-                    if out.len() >= 16 {
-                        return out;
+        self.collect_retransmits_bounded(now_ms, rto_ms, 16)
+    }
+
+    pub fn collect_retransmits_bounded(
+        &mut self,
+        now_ms: u64,
+        rto_ms: u64,
+        max_frames: usize,
+    ) -> Vec<P2pWireFrame> {
+        if max_frames == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(max_frames.min(16));
+        for single_chunk_first in [true, false] {
+            for msg in self.outgoing.values_mut() {
+                if (msg.chunks.len() == 1) != single_chunk_first {
+                    continue;
+                }
+                let total = msg.chunks.len() as u16;
+                for idx in 0..msg.chunks.len() {
+                    let last = msg.last_sent_ms[idx];
+                    if !msg.acked[idx] && (last == 0 || now_ms.saturating_sub(last) >= rto_ms) {
+                        msg.last_sent_ms[idx] = now_ms.max(1);
+                        out.push(P2pWireFrame::Chunk {
+                            msg_id: msg.msg_id,
+                            idx: idx as u16,
+                            total,
+                            data: msg.chunks[idx].clone(),
+                        });
+                        if out.len() >= max_frames {
+                            return out;
+                        }
                     }
                 }
             }
@@ -2128,5 +2145,32 @@ mod tests {
         assert_eq!(probes.len(), 6);
         assert!(!probes.contains(&40000));
         assert!(probes.contains(&40001));
+    }
+
+    #[test]
+    fn reliable_channel_bounded_retransmits_prioritize_control_frames_and_do_not_starve() {
+        let mut ch = ReliableChannel::new();
+        let bulk = vec![0xAB; P2P_CHUNK_PAYLOAD_BYTES * 5];
+        let (bulk_id, bulk_frames) = ch.enqueue_message(&bulk).unwrap();
+        assert_eq!(bulk_frames.len(), 5);
+        ch.mark_sent(bulk_id, 100);
+
+        let ctrl = br#"{"kind":"voiceState","inVoice":true}"#;
+        let (ctrl_id, ctrl_frames) = ch.enqueue_message(ctrl).unwrap();
+        assert_eq!(ctrl_frames.len(), 1);
+        ch.mark_sent(ctrl_id, 100);
+
+        // At t=400ms with max_frames=2, the single-chunk control message must go first
+        // and only 1 bulk chunk should be stamped, leaving bulk chunks 1..5 ready immediately.
+        let r1 = ch.collect_retransmits_bounded(400, 260, 2);
+        assert_eq!(r1.len(), 2);
+        assert!(matches!(r1[0], P2pWireFrame::Chunk { msg_id, .. } if msg_id == ctrl_id));
+        assert!(matches!(r1[1], P2pWireFrame::Chunk { msg_id, idx: 0, .. } if msg_id == bulk_id));
+
+        // Immediately afterwards at t=401ms, bulk chunks 1..3 are still unstamped and ready!
+        let r2 = ch.collect_retransmits_bounded(401, 260, 2);
+        assert_eq!(r2.len(), 2);
+        assert!(matches!(r2[0], P2pWireFrame::Chunk { msg_id, idx: 1, .. } if msg_id == bulk_id));
+        assert!(matches!(r2[1], P2pWireFrame::Chunk { msg_id, idx: 2, .. } if msg_id == bulk_id));
     }
 }

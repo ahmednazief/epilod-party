@@ -1,6 +1,5 @@
 import {
   AppAlertIcon,
-  AppArrowIcon,
   AppChevronIcon,
   AppCloseIcon,
   AppFolderIcon,
@@ -32,6 +31,7 @@ import {
 } from "../lib/sourceAlignment";
 import { playSoundCue } from "../lib/soundEffects";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
+import { computeParticipantDrift } from "../lib/syncHealth";
 import {
   enqueueSyncLifecycle,
   syncReconnect,
@@ -173,6 +173,14 @@ export const RoomPanel = memo(function RoomPanel({
   } | null>(null);
   const memberAnchorRefs = useRef<Record<string, HTMLElement | null>>({});
   const memberMenuBoxRef = useRef<HTMLDivElement | null>(null);
+  const voiceSetupBtnRef = useRef<HTMLButtonElement | null>(null);
+  const voiceSetupBoxRef = useRef<HTMLDivElement | null>(null);
+  const [voiceSetupCoords, setVoiceSetupCoords] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    origin: string;
+  } | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
 
   const openSettings = useAppStore((s) => s.openSettings);
@@ -296,6 +304,117 @@ export const RoomPanel = memo(function RoomPanel({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [openMemberUser]);
+
+  useLayoutEffect(() => {
+    if (!voiceSetupOpen) {
+      setVoiceSetupCoords(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const btn = voiceSetupBtnRef.current;
+      if (!btn) {
+        setVoiceSetupOpen(false);
+        return;
+      }
+      const r = btn.getBoundingClientRect();
+      const vw = window.innerWidth || 1280;
+      const vh = window.innerHeight || 720;
+      const menuWidth = 244;
+      const sheet = btn.closest('.ep-glass-sheet, [data-glass-region="true"]');
+      const sheetRect = sheet ? sheet.getBoundingClientRect() : null;
+
+      // Prefer opening cleanly beside the Watch Party sheet (right side if space allows, else left)
+      if (sheetRect) {
+        const clampedTop = Math.max(12, Math.min(Math.round(r.top - 10), vh - 290));
+        if (sheetRect.left >= menuWidth + 22 && sheetRect.left > vw - sheetRect.right) {
+          setVoiceSetupCoords({
+            left: Math.round(sheetRect.left - menuWidth - 10),
+            top: clampedTop,
+            origin: "right center",
+          });
+          return;
+        }
+        if (vw - sheetRect.right >= menuWidth + 22) {
+          setVoiceSetupCoords({
+            left: Math.round(sheetRect.right + 10),
+            top: clampedTop,
+            origin: "left center",
+          });
+          return;
+        }
+        if (sheetRect.left >= menuWidth + 22) {
+          setVoiceSetupCoords({
+            left: Math.round(sheetRect.left - menuWidth - 10),
+            top: clampedTop,
+            origin: "right center",
+          });
+          return;
+        }
+      }
+
+      const left = Math.max(12, Math.min(r.right - menuWidth, vw - menuWidth - 12));
+      const spaceBelow = vh - r.bottom - 14;
+      const spaceAbove = r.top - 14;
+      if (spaceBelow < 240 && spaceAbove > spaceBelow) {
+        setVoiceSetupCoords({
+          left,
+          bottom: Math.max(12, vh - r.top + 6),
+          origin: "bottom right",
+        });
+      } else {
+        setVoiceSetupCoords({
+          left,
+          top: Math.min(vh - 12, r.bottom + 6),
+          origin: "top right",
+        });
+      }
+    };
+
+    const onScroll = (e: Event) => {
+      if (
+        voiceSetupBoxRef.current &&
+        e.target instanceof Node &&
+        voiceSetupBoxRef.current.contains(e.target)
+      ) {
+        return;
+      }
+      setVoiceSetupOpen(false);
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [voiceSetupOpen]);
+
+  useEffect(() => {
+    if (!voiceSetupOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        voiceSetupBoxRef.current &&
+        !voiceSetupBoxRef.current.contains(target) &&
+        (!voiceSetupBtnRef.current || !voiceSetupBtnRef.current.contains(target))
+      ) {
+        setVoiceSetupOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setVoiceSetupOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [voiceSetupOpen]);
 
   const handleToggleVoice = async (listenOnly = false, skipBtCheck = false) => {
     const res = await toggleVoiceSession({
@@ -627,6 +746,18 @@ export const RoomPanel = memo(function RoomPanel({
       : null,
     160,
   );
+  const voiceSetupPresence = usePresencePayload(
+    voiceSetupOpen && voiceSetupCoords ? voiceSetupCoords : null,
+    190,
+  );
+
+  useEffect(() => {
+    window.dispatchEvent(new Event("ep:glass-layout"));
+    const timer = window.setTimeout(() => {
+      window.dispatchEvent(new Event("ep:glass-layout"));
+    }, 65);
+    return () => window.clearTimeout(timer);
+  }, [voiceSetupOpen, voiceSetupPresence.mounted]);
 
   return (
     <div className="flex flex-col flex-1 min-h-0 gap-2.5">
@@ -775,24 +906,6 @@ export const RoomPanel = memo(function RoomPanel({
               </div>
             )}
           </div>
-        </div>
-      ) : voiceSetupOpen ? (
-        <div className="ep-menu-scroll anim-tab-in flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden gap-2 -mr-2 pr-2 -ml-1 pl-1">
-          <button
-            type="button"
-            onClick={() => setVoiceSetupOpen(false)}
-            className="ep-menu-row ep-press w-fit px-2 py-1 rounded-full inline-flex items-center gap-1.5 text-[11.5px] font-medium text-secondary hover:text-white cursor-pointer"
-          >
-            <AppArrowIcon direction="left" size={13} />
-            <span>Back to Watch Party</span>
-          </button>
-          <VoiceQuickSettingsTray
-            open={voiceSetupOpen}
-            onOpenFullSettings={() => {
-              setVoiceSetupOpen(false);
-              openSettings("voice");
-            }}
-          />
         </div>
       ) : (
         <div className="ep-menu-scroll anim-tab-in flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden gap-2 -mr-2 pr-2 -ml-1 pl-1">
@@ -1099,8 +1212,10 @@ export const RoomPanel = memo(function RoomPanel({
                           ? "warn"
                           : "default"
                       }
+                      disabled={voiceSetupOpen}
                     >
                       <button
+                        ref={voiceSetupBtnRef}
                         type="button"
                         aria-label="Voice & Audio Quick Setup"
                         aria-expanded={voiceSetupOpen}
@@ -1109,7 +1224,10 @@ export const RoomPanel = memo(function RoomPanel({
                             ? "warn"
                             : undefined
                         }
-                        onClick={() => setVoiceSetupOpen((o) => !o)}
+                        onClick={() => {
+                          setOpenMemberUser(null);
+                          setVoiceSetupOpen((o) => !o);
+                        }}
                         className={`ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer ${
                           voiceSetupOpen
                             ? "bg-white/15 text-white border-white/30"
@@ -1468,9 +1586,44 @@ export const RoomPanel = memo(function RoomPanel({
                               </button>
                             </GlassHoverTip>
                           )}
+                          {(() => {
+                            const hostPeer = roomControl.hostUsername
+                              ? participants.find(
+                                  (hp) =>
+                                    hp.username.trim().toLowerCase() ===
+                                    roomControl.hostUsername?.trim().toLowerCase(),
+                                )
+                              : undefined;
+                            const refPos =
+                              hostPeer && hostPeer.position > 0
+                                ? hostPeer.position
+                                : liveRoomPositionSecs;
+                            const driftInfo = computeParticipantDrift(p, refPos);
+                            if (!driftInfo) return null;
+                            const dotClass =
+                              driftInfo.level === "ok"
+                                ? "bg-ok"
+                                : driftInfo.level === "warn"
+                                  ? "bg-warn"
+                                  : "bg-bad";
+                            return (
+                              <GlassHoverTip
+                                label={driftInfo.label}
+                                detail={driftInfo.detail}
+                                accent={driftInfo.level}
+                              >
+                                <span
+                                  aria-label={`${driftInfo.label}: ${driftInfo.detail}`}
+                                  className="inline-flex items-center justify-center h-4 px-1 rounded-full bg-white/[0.06] cursor-default shrink-0"
+                                >
+                                  <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
+                                </span>
+                              </GlassHoverTip>
+                            );
+                          })()}
                           <GlassHoverTip
                             label={p.isReady ? "Ready" : "Not ready"}
-                            detail={p.isReady ? "Playback synced" : "Waiting for video"}
+                            detail={p.isReady ? "Ready to watch" : "Waiting for video"}
                             accent={p.isReady ? "ok" : "warn"}
                           >
                             <span
@@ -1941,6 +2094,40 @@ export const RoomPanel = memo(function RoomPanel({
             document.body,
           );
         })()}
+
+      {voiceSetupPresence.mounted &&
+        voiceSetupPresence.value &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={voiceSetupBoxRef}
+            data-glass-region="true"
+            style={{
+              left: `${voiceSetupPresence.value.left}px`,
+              transformOrigin: voiceSetupPresence.value.origin,
+              ...(voiceSetupPresence.value.top !== undefined
+                ? { top: `${voiceSetupPresence.value.top}px` }
+                : {}),
+              ...(voiceSetupPresence.value.bottom !== undefined
+                ? { bottom: `${voiceSetupPresence.value.bottom}px` }
+                : {}),
+            }}
+            className={`ep-glass-submenu fixed z-[80] w-[244px] rounded-2xl p-2 ${
+              voiceSetupPresence.exiting
+                ? "ep-popover-bloom-out pointer-events-none"
+                : "ep-popover-bloom"
+            }`}
+          >
+            <VoiceQuickSettingsTray
+              open={voiceSetupOpen}
+              onOpenFullSettings={() => {
+                setVoiceSetupOpen(false);
+                openSettings("voice");
+              }}
+            />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 });

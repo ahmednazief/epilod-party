@@ -215,7 +215,7 @@ async fn https_request_bytes(
                 .ok_or_else(|| "Subtitle redirect missing Location header.".to_string())?;
             current = resolve_redirect_url(&current, loc, ALLOWED_SUBTITLE_HOSTS)
                 .map_err(|e| e.to_string())?;
-            if matches!(head.status, 301 | 302 | 303) {
+            if matches!(head.status, 301..=303) {
                 cur_method = "GET".to_string();
                 cur_body = None;
             }
@@ -342,10 +342,11 @@ async fn resolve_imdb_matches(
         }
     }
 
-    combined.sort_by(|a, b| b.score.cmp(&a.score));
+    combined.sort_by_key(|b| std::cmp::Reverse(b.score));
     combined
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn query_stremio_subtitles_for_match(
     matched: &ImdbMatch,
     season: Option<u32>,
@@ -403,6 +404,7 @@ async fn query_stremio_subtitles_for_match(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn query_opensubtitles_official_api(
     api_key: &str,
     parsed: &epilod_core::opensubtitles::ParsedMediaQuery,

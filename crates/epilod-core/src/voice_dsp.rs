@@ -524,15 +524,18 @@ impl VoiceDenoiser {
                     *s *= g;
                 }
             } else {
-                let alpha = if sub_rms > self.prev_sub_rms { 0.12 } else { 0.25 };
+                let alpha = if sub_rms > self.prev_sub_rms {
+                    0.12
+                } else {
+                    0.25
+                };
                 self.prev_sub_rms += alpha * (sub_rms - self.prev_sub_rms);
             }
         }
 
         // Stage B: Bounded pre-gain so quiet mics enter RNNoise near -24 dBFS, then neural core.
-        let dry_rms = (self.stage_a_buf.iter().map(|s| s * s).sum::<f32>()
-            / VOICE_FRAME_10MS as f32)
-            .sqrt();
+        let dry_rms =
+            (self.stage_a_buf.iter().map(|s| s * s).sum::<f32>() / VOICE_FRAME_10MS as f32).sqrt();
         let pre_gain = if self.speech_rms_env > 1e-4 {
             (Self::TARGET_RNNOISE_RMS / self.speech_rms_env).clamp(1.0, Self::MAX_PRE_GAIN)
         } else {
@@ -1108,7 +1111,7 @@ impl PeerJitterBuffer {
             started: false,
             in_talkspurt: false,
             last_eot_seen: false,
-            target_frames: 2, // 40 ms initial cushion
+            target_frames: 1, // 20 ms initial low-latency cushion
             stall_cushion_frames: 0,
             frames: BTreeMap::new(),
             interarrival_jitter_ms: 0.0,
@@ -1167,6 +1170,11 @@ impl PeerJitterBuffer {
         }
     }
 
+    /// Returns true while a talkspurt is active or queued frames remain in the buffer.
+    pub fn is_active(&self) -> bool {
+        self.in_talkspurt || !self.frames.is_empty()
+    }
+
     fn effective_target_frames(&self) -> usize {
         (self.target_frames + self.stall_cushion_frames).clamp(1, 6)
     }
@@ -1204,20 +1212,26 @@ impl PeerJitterBuffer {
         }
 
         let pkt_ts_ms = (pkt.ts_48k as u64) / 48;
+        let was_active = self.in_talkspurt;
         if let (Some(prev_arr), Some(prev_ts)) = (self.last_arrival_ms, self.last_pkt_ts_ms) {
             let d_arr = arrival_ms as i64 - prev_arr as i64;
             let d_ts = pkt_ts_ms as i64 - prev_ts as i64;
-            let d = (d_arr - d_ts).unsigned_abs() as f64;
-            self.interarrival_jitter_ms += (d - self.interarrival_jitter_ms) / 16.0;
-            self.target_frames = if self.interarrival_jitter_ms < 12.0 {
-                1
-            } else if self.interarrival_jitter_ms < 28.0 {
-                2
-            } else if self.interarrival_jitter_ms < 50.0 {
-                3
-            } else {
-                4
-            };
+            // Ignore silence-suppression (DTX) gaps between talkspurts so paused speech
+            // timestamps do not inflate interarrival jitter and lock depth at 80 ms.
+            let is_dtx_gap = !was_active || (d_arr > 250 && d_ts <= 120);
+            if !is_dtx_gap {
+                let d = (d_arr - d_ts).unsigned_abs() as f64;
+                self.interarrival_jitter_ms += (d - self.interarrival_jitter_ms) / 16.0;
+                self.target_frames = if self.interarrival_jitter_ms < 12.0 {
+                    1
+                } else if self.interarrival_jitter_ms < 28.0 {
+                    2
+                } else if self.interarrival_jitter_ms < 50.0 {
+                    3
+                } else {
+                    4
+                };
+            }
         }
         self.last_arrival_ms = Some(arrival_ms);
         self.last_pkt_ts_ms = Some(pkt_ts_ms);
@@ -1247,9 +1261,9 @@ impl PeerJitterBuffer {
             }
         }
 
-        // Fast backlog catch-up when an OS/CPU stall queues excess talkspurt frames (> 60 ms over target)
-        if self.frames.len() > eff_target + 3 {
-            let to_drop = if self.frames.len() > eff_target + 6 {
+        // Fast backlog catch-up when an OS/CPU stall queues excess talkspurt frames (> 40 ms over target)
+        if self.frames.len() > eff_target + 2 {
+            let to_drop = if self.frames.len() > eff_target + 4 {
                 2
             } else {
                 1
@@ -1264,16 +1278,17 @@ impl PeerJitterBuffer {
             self.drift_sample_count = 0;
         }
 
-        // Drift tracking over 5 s (250 ticks of 20 ms)
+        // Drift tracking over 1 s (50 ticks of 20 ms)
         let depth = self.frames.len() as i64;
         self.drift_sample_acc += depth - (eff_target as i64);
         self.drift_sample_count += 1;
-        if self.drift_sample_count >= 250 {
-            let avg_excess = self.drift_sample_acc / (self.drift_sample_count as i64);
+        if self.drift_sample_count >= 50 {
+            let acc = self.drift_sample_acc;
+            let count = self.drift_sample_count as i64;
             self.drift_sample_acc = 0;
             self.drift_sample_count = 0;
-            // Beyond +40 ms (+2 frames) sustained drift, drop one oldest frame smoothly
-            if avg_excess >= 2 && self.frames.len() > eff_target + 1 {
+            // Beyond +20 ms (+1 frame) sustained drift, drop one oldest frame smoothly
+            if acc >= count && self.frames.len() > eff_target {
                 if let Some((&oldest_seq, _)) = self.frames.iter().next() {
                     self.frames.remove(&oldest_seq);
                     self.next_play_seq = oldest_seq + 1;
@@ -1286,8 +1301,8 @@ impl PeerJitterBuffer {
             self.consecutive_underruns = 0;
             self.current_gap_frames = 0;
             self.clean_frames_since_stall = self.clean_frames_since_stall.saturating_add(1);
-            if self.clean_frames_since_stall >= 150 && self.stall_cushion_frames > 0 {
-                // Decay extra stall cushion slowly after >= 3 s clean playback
+            if self.clean_frames_since_stall >= 75 && self.stall_cushion_frames > 0 {
+                // Decay extra stall cushion after >= 1.5 s clean playback
                 self.clean_frames_since_stall = 0;
                 self.stall_cushion_frames -= 1;
             }
@@ -1320,7 +1335,7 @@ impl PeerJitterBuffer {
         self.current_gap_frames = self.current_gap_frames.saturating_add(1);
         self.max_gap_frames = self.max_gap_frames.max(self.current_gap_frames);
         self.clean_frames_since_stall = 0;
-        if self.consecutive_underruns >= 2 && self.stall_cushion_frames < 3 {
+        if self.consecutive_underruns >= 2 && self.stall_cushion_frames < 2 {
             // Grow target jitter cushion after repeated underruns to absorb Wi-Fi stalls
             self.stall_cushion_frames += 1;
             self.consecutive_underruns = 0;
@@ -1474,9 +1489,9 @@ impl AdaptiveBitrateController {
                 if self.clean_ticks >= self.hold_ticks_req {
                     self.clean_ticks = 0;
                     let next = match self.bitrate_bps {
-                        ..=24_000 => 32_000,
-                        ..=32_000 => 48_000,
-                        ..=48_000 => 64_000,
+                        0..=24_000 => 32_000,
+                        24_001..=32_000 => 48_000,
+                        32_001..=48_000 => 64_000,
                         _ => 72_000,
                     }
                     .min(cap);
@@ -2131,7 +2146,8 @@ mod tests {
         let mut gout = [[0.0f32; VOICE_FRAME_10MS]; 3];
         let click = [0.012f32; VOICE_FRAME_10MS]; // ~ -38.4 dBFS
         let quiet = [0.0002f32; VOICE_FRAME_10MS];
-        let (_, open_click, _) = gate.process_10ms(&click, 0.55, -40.0, true, None, false, &mut gout);
+        let (_, open_click, _) =
+            gate.process_10ms(&click, 0.55, -40.0, true, None, false, &mut gout);
         assert!(!open_click, "Single 10ms click must not open VAD gate");
         let (_, open_after_click, _) =
             gate.process_10ms(&quiet, 0.10, -40.0, true, None, false, &mut gout);
@@ -2154,8 +2170,8 @@ mod tests {
         }
         // Inject a sharp 2.5 ms broadband mechanical switch transient in sub-window 1
         let mut frame = [0.0f32; VOICE_FRAME_10MS];
-        for i in 120..240 {
-            frame[i] = if i % 2 == 0 { 0.35 } else { -0.35 };
+        for (i, slot) in frame.iter_mut().enumerate().take(240).skip(120) {
+            *slot = if i % 2 == 0 { 0.35 } else { -0.35 };
         }
         let _ = denoiser.process_10ms(NoiseSuppressionMode::Strong, &frame, &mut out);
         let peak_out = out[120..240].iter().fold(0.0f32, |m, s| m.max(s.abs()));
@@ -2208,11 +2224,91 @@ mod tests {
 
     #[test]
     fn abr_supports_64kbps_speech_and_72kbps_raw_music_for_small_rooms() {
-        assert_eq!(AdaptiveBitrateController::room_bitrate_cap_bps(2, 0), 64_000);
+        assert_eq!(
+            AdaptiveBitrateController::room_bitrate_cap_bps(2, 0),
+            64_000
+        );
         assert_eq!(
             AdaptiveBitrateController::room_bitrate_cap_bps_for_mode(2, 0, true),
             72_000
         );
-        assert_eq!(AdaptiveBitrateController::room_bitrate_cap_bps(4, 0), 32_000);
+        assert_eq!(
+            AdaptiveBitrateController::room_bitrate_cap_bps(4, 0),
+            32_000
+        );
+    }
+
+    #[test]
+    fn jitter_buffer_ignores_dtx_silence_gaps_and_trims_drift_fast() {
+        let mut jb = PeerJitterBuffer::new();
+        assert_eq!(jb.target_delay_ms(), 20);
+
+        // Talkspurt 1: 4 packets spaced by 20 ms
+        for i in 1..=4u16 {
+            jb.push(
+                JitterPacket {
+                    seq: i,
+                    epoch: 1,
+                    ts_48k: (i as u32) * 960,
+                    end_of_talk: i == 4,
+                    opus: vec![i as u8],
+                },
+                (i as u64) * 20,
+            );
+            let _ = jb.pop_step();
+        }
+        assert!(!jb.is_active());
+
+        // 5-second natural pause before Talkspurt 2 (ts_48k stayed frozen during silence)
+        jb.push(
+            JitterPacket {
+                seq: 5,
+                epoch: 1,
+                ts_48k: 5 * 960,
+                end_of_talk: false,
+                opus: vec![5],
+            },
+            5080,
+        );
+        jb.push(
+            JitterPacket {
+                seq: 6,
+                epoch: 1,
+                ts_48k: 6 * 960,
+                end_of_talk: false,
+                opus: vec![6],
+            },
+            5100,
+        );
+        assert!(
+            jb.interarrival_jitter_ms() < 5.0,
+            "DTX silence gap must not pollute jitter: {}",
+            jb.interarrival_jitter_ms()
+        );
+        assert_eq!(jb.target_delay_ms(), 20);
+
+        // Inject +1 extra buffered packet (sustained +20 ms clock drift) and verify it trims within ~1s (55 ticks)
+        let _ = jb.pop_step(); // consumes 5; leaves 6 queued
+        let mut next_seq = 7u16;
+        for tick in 0..55u64 {
+            jb.push(
+                JitterPacket {
+                    seq: next_seq,
+                    epoch: 1,
+                    ts_48k: (next_seq as u32) * 960,
+                    end_of_talk: false,
+                    opus: vec![next_seq as u8],
+                },
+                5120 + tick * 20,
+            );
+            next_seq = next_seq.wrapping_add(1);
+            let _ = jb.pop_step();
+        }
+        assert!(
+            jb.current_delay_ms() <= jb.target_delay_ms(),
+            "Sustained +20ms drift should drain to target_delay_ms (current={}, target={})",
+            jb.current_delay_ms(),
+            jb.target_delay_ms()
+        );
     }
 }

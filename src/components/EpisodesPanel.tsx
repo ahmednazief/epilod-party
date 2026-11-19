@@ -1,8 +1,10 @@
+import { Check } from "lucide-react";
 import {
   AppCloseIcon,
   AppFolderIcon,
   AppPlusIcon,
 } from "./ui/AppIcons";
+import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
 import {
   PlayerAutoNextIcon,
   PlayerCaptionsIcon,
@@ -14,10 +16,17 @@ import {
   formatSeasonFolderTitle,
   matchPeerEpisodeInPlaylist,
 } from "../lib/playlist";
+import {
+  buildEpisodeKey,
+  buildSeriesKey,
+  extractParentFolderPath,
+} from "../lib/seriesProgress";
 import { resolveEffectiveUsername } from "../lib/syncController";
 import { useAppStore } from "../store/useAppStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
+import { useResumeStore } from "../store/useResumeStore";
+import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 
@@ -48,9 +57,26 @@ export const EpisodesPanel = memo(function EpisodesPanel({
   const roomCode = useAppStore((s) => s.roomCode);
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
+  const trackWatchedEpisodes = useAppStore((s) => s.trackWatchedEpisodes);
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
   const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
+
+  const seriesMap = useSeriesProgressStore((s) => s.series);
+  const markWatched = useSeriesProgressStore((s) => s.markWatched);
+  const markAllAboveWatched = useSeriesProgressStore((s) => s.markAllAboveWatched);
+  const upsertSeries = useSeriesProgressStore((s) => s.upsertSeries);
+  const resumeEntries = useResumeStore((s) => s.entries);
+
+  const seriesFolderPath = items.length > 0 ? extractParentFolderPath(items[0].path) : "";
+  const seriesKey = seriesFolderPath ? buildSeriesKey(seriesFolderPath) : "";
+  const watchedSet = new Set(seriesKey && seriesMap[seriesKey] ? seriesMap[seriesKey].watchedKeys : []);
+
+  const [epContextMenu, setEpContextMenu] = useState<{
+    x: number;
+    y: number;
+    index: number;
+  } | null>(null);
 
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
@@ -213,6 +239,16 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             const display = formatDisplayMediaTitle(item.fileName);
             const epTitle = display.title || item.cleanTitle;
             const epNum = String(item.episode ?? idx + 1).padStart(2, "0");
+            const epKey = buildEpisodeKey(item);
+            const isWatched = trackWatchedEpisodes && watchedSet.has(epKey);
+            const namePrefix = `${item.fileName.trim().toLowerCase()}::`;
+            const resumeMatch = Object.entries(resumeEntries).find(([k]) =>
+              k.startsWith(namePrefix),
+            )?.[1];
+            const progressPct =
+              !isWatched && resumeMatch && resumeMatch.durationSecs > 0
+                ? Math.min(95, Math.max(4, Math.round((resumeMatch.positionSecs / resumeMatch.durationSecs) * 100)))
+                : 0;
             const peersHere = roomCode
               ? participants.filter(
                   (p) => matchPeerEpisodeInPlaylist(p.fileName, [item]) === 0,
@@ -225,13 +261,19 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                 ref={active ? activeItemRef : undefined}
                 type="button"
                 onClick={() => onSelectEpisode(idx)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setEpContextMenu({ x: e.clientX, y: e.clientY, index: idx });
+                }}
                 aria-current={active ? "true" : undefined}
                 data-droplet={active && indicator.visible ? "true" : undefined}
                 title={`${item.cleanTitle}${item.subtitlePath ? " (Paired subtitle ready)" : ""}`}
-                className={`group relative z-10 w-full rounded-[14px] px-2.5 py-2 text-left flex items-center gap-2.5 cursor-pointer ep-menu-row ep-press ${
+                className={`group relative z-10 w-full rounded-[14px] px-2.5 py-2 text-left flex items-center gap-2.5 cursor-pointer ep-menu-row ep-press overflow-hidden ${
                   active
                     ? "ep-episode-active text-white"
-                    : "hover:bg-white/[0.055] border border-transparent text-secondary hover:text-white"
+                    : isWatched
+                      ? "hover:bg-white/[0.055] border border-transparent text-muted opacity-65 hover:opacity-100 hover:text-white"
+                      : "hover:bg-white/[0.055] border border-transparent text-secondary hover:text-white"
                 }`}
               >
                 {/* Crystal episode number jewel or live equalizer */}
@@ -278,42 +320,120 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                 </div>
 
                 {/* Balanced right metadata cluster aligned cleanly on the row centerline */}
-                {(peersHere.length > 0 || item.episodeBadge) && (
-                  <div className="shrink-0 flex items-center gap-1.5">
-                    {peersHere.length > 0 && (
-                      <span className="flex items-center -space-x-1">
-                        {peersHere.slice(0, 3).map((peer) => (
-                          <ProfileAvatar
-                            key={peer.username}
-                            avatarId={resolvePeerAvatarId(
-                              peer.username,
-                              effectiveUsername,
-                              avatarId,
-                            )}
-                            size={16}
-                            className="ring-1 ring-white/25"
-                          />
-                        ))}
-                      </span>
-                    )}
-                    {item.episodeBadge && (
-                      <span
-                        className={`num ${
-                          active
-                            ? "ep-episode-badge-active px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide text-white/95"
-                            : "px-1 text-[10.5px] font-medium text-white/45 group-hover:text-white/75"
-                        }`}
-                      >
-                        {item.episodeBadge}
-                      </span>
-                    )}
-                  </div>
+                <div className="shrink-0 flex items-center gap-1.5">
+                  {peersHere.length > 0 && (
+                    <span className="flex items-center -space-x-1">
+                      {peersHere.slice(0, 3).map((peer) => (
+                        <ProfileAvatar
+                          key={peer.username}
+                          avatarId={resolvePeerAvatarId(
+                            peer.username,
+                            effectiveUsername,
+                            avatarId,
+                          )}
+                          size={16}
+                          className="ring-1 ring-white/25"
+                        />
+                      ))}
+                    </span>
+                  )}
+                  {item.episodeBadge && (
+                    <span
+                      className={`num ${
+                        active
+                          ? "ep-episode-badge-active px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide text-white/95"
+                          : "px-1 text-[10.5px] font-medium text-white/45 group-hover:text-white/75"
+                      }`}
+                    >
+                      {item.episodeBadge}
+                    </span>
+                  )}
+                  {trackWatchedEpisodes && seriesKey && (
+                    <span
+                      role="button"
+                      tabIndex={-1}
+                      aria-label={isWatched ? "Mark unwatched" : "Mark watched"}
+                      title={isWatched ? "Watched (click to unmark)" : "Mark as watched"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        upsertSeries({
+                          folderPath: seriesFolderPath,
+                          folderName: cleanFolderTitle,
+                        });
+                        markWatched(seriesKey, epKey, !isWatched);
+                      }}
+                      className={`w-5 h-5 rounded-full flex items-center justify-center transition-opacity ${
+                        isWatched
+                          ? "bg-ok/20 text-ok opacity-100"
+                          : "text-white/40 hover:text-white hover:bg-white/[0.1] opacity-0 group-hover:opacity-100"
+                      }`}
+                    >
+                      <Check size={11} />
+                    </span>
+                  )}
+                </div>
+                {progressPct > 0 && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute bottom-0 left-2.5 right-2.5 h-[2px] rounded-full bg-white/[0.08] overflow-hidden"
+                  >
+                    <span
+                      className="block h-full bg-accent/80 rounded-full"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </span>
                 )}
               </button>
             );
           })}
         </div>
       </div>
+
+      {epContextMenu && items[epContextMenu.index] && (
+        <ContextMenu
+          position={{ x: epContextMenu.x, y: epContextMenu.y }}
+          entries={((): ContextMenuEntry[] => {
+            const targetIdx = epContextMenu.index;
+            const targetItem = items[targetIdx];
+            const targetKey = buildEpisodeKey(targetItem);
+            const targetWatched = watchedSet.has(targetKey);
+            return [
+              {
+                id: "toggle-watched",
+                label: targetWatched ? "Mark as unwatched" : "Mark as watched",
+                onSelect: () => {
+                  const key = upsertSeries({
+                    folderPath: seriesFolderPath,
+                    folderName: cleanFolderTitle,
+                  });
+                  if (key) markWatched(key, targetKey, !targetWatched);
+                },
+              },
+              ...(targetIdx > 0
+                ? [
+                    {
+                      id: "mark-above-watched",
+                      label: "Mark all above as watched",
+                      onSelect: () => {
+                        const key = upsertSeries({
+                          folderPath: seriesFolderPath,
+                          folderName: cleanFolderTitle,
+                        });
+                        if (key) {
+                          const aboveKeys = items
+                            .slice(0, targetIdx + 1)
+                            .map((it) => buildEpisodeKey(it));
+                          markAllAboveWatched(key, aboveKeys);
+                        }
+                      },
+                    },
+                  ]
+                : []),
+            ];
+          })()}
+          onClose={() => setEpContextMenu(null)}
+        />
+      )}
     </div>
   );
 });

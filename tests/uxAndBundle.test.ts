@@ -1181,7 +1181,7 @@ test("TransportBar, PlaybackPanel, SkipIntroOverlay, and WatchRoom adapt cleanly
   assert.match(watchSrc, /data-stage-container="true"/);
 });
 
-test("Default play bar is full-width and TransportBar groups chat + reactions in one pill after users", () => {
+test("Default play bar is full-width and TransportBar renders separate circular chat and reactions pills after users", () => {
   const appStoreSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/store/useAppStore.ts"),
     "utf8",
@@ -1196,20 +1196,11 @@ test("Default play bar is full-width and TransportBar groups chat + reactions in
     "utf8",
   );
   const roomIdx = transportSrc.indexOf('data-capsule-anchor="room"');
-  const pillIdx = transportSrc.indexOf("ep-party-social-pill");
   const chatIdx = transportSrc.indexOf('data-capsule-anchor="chat"');
   const reactionsIdx = transportSrc.indexOf('data-capsule-anchor="reactions"');
-  assert.ok(roomIdx !== -1 && pillIdx > roomIdx, "Social pill should follow the party/users pill");
-  assert.ok(
-    chatIdx > pillIdx && reactionsIdx > chatIdx,
-    "Chat trigger should appear before reactions trigger inside ep-party-social-pill",
-  );
-
-  const globalsCss = fs.readFileSync(
-    path.join(REPO_ROOT, "src/styles/globals.css"),
-    "utf8",
-  );
-  assert.equal(globalsCss.includes(".ep-party-social-pill"), true);
+  assert.ok(roomIdx !== -1 && chatIdx > roomIdx, "Chat pill should follow the party/users pill");
+  assert.ok(reactionsIdx > chatIdx, "Reactions circular pill should follow Chat circular pill");
+  assert.equal(transportSrc.includes("ep-party-social-pill"), false);
 });
 
 

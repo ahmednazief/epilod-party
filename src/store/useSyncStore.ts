@@ -21,6 +21,8 @@ interface SyncState {
   lastError: string | null;
   serverOverrideNotice: string | null;
   dismissedMismatchSig: string | null;
+  undoneMismatchSigs: string[];
+  autoFixedMismatchSigs: string[];
   timelineOffsetSecs: number;
   timelineScale: number;
   timelineSegments: TimelineSegment[];
@@ -36,6 +38,8 @@ interface SyncState {
   setLastError: (err: string | null) => void;
   setServerOverrideNotice: (notice: string | null) => void;
   setDismissedMismatchSig: (sig: string | null) => void;
+  markMismatchSigUndone: (sig: string) => void;
+  markMismatchSigAutoFixed: (sig: string) => void;
   setTimelineTransform: (tx: Partial<TimelineTransform>) => void;
   setTimelineSegments: (segments: TimelineSegment[]) => void;
   setP2pStatus: (p2p: P2pStatusPayload | null) => void;
@@ -55,6 +59,8 @@ export const useSyncStore = create<SyncState>((set) => ({
   lastError: null,
   serverOverrideNotice: null,
   dismissedMismatchSig: null,
+  undoneMismatchSigs: [],
+  autoFixedMismatchSigs: [],
   timelineOffsetSecs: 0,
   timelineScale: 1.0,
   timelineSegments: [],
@@ -71,6 +77,18 @@ export const useSyncStore = create<SyncState>((set) => ({
   setLastError: (lastError) => set({ lastError }),
   setServerOverrideNotice: (serverOverrideNotice) => set({ serverOverrideNotice }),
   setDismissedMismatchSig: (dismissedMismatchSig) => set({ dismissedMismatchSig }),
+  markMismatchSigUndone: (sig) =>
+    set((s) => ({
+      undoneMismatchSigs: s.undoneMismatchSigs.includes(sig)
+        ? s.undoneMismatchSigs
+        : [...s.undoneMismatchSigs, sig],
+    })),
+  markMismatchSigAutoFixed: (sig) =>
+    set((s) => ({
+      autoFixedMismatchSigs: s.autoFixedMismatchSigs.includes(sig)
+        ? s.autoFixedMismatchSigs
+        : [...s.autoFixedMismatchSigs, sig],
+    })),
   setTimelineTransform: (tx) =>
     set((s) => {
       const clean = sanitizeTimelineTransform({
@@ -112,6 +130,8 @@ export const useSyncStore = create<SyncState>((set) => ({
       lastError: null,
       serverOverrideNotice: null,
       dismissedMismatchSig: null,
+      undoneMismatchSigs: [],
+      autoFixedMismatchSigs: [],
       timelineOffsetSecs: 0,
       timelineScale: 1.0,
       timelineSegments: [],

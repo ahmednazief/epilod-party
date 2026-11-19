@@ -10,9 +10,10 @@ import {
 } from "../lib/mpv";
 import { skipActiveOrUpcomingIntro } from "../lib/introActions";
 import { toggleMutePlayback, togglePlayback, toggleReadyStatus } from "../lib/playerActions";
+import { toggleVoiceMute } from "../lib/voiceActions";
 import { PRESET_REACTIONS, triggerPartyReaction } from "../lib/reactions";
 import { nextClientSeekSeq, stepSharedRelativeSeek } from "../lib/seekCoalesce";
-import { isTextEntryElement } from "../lib/shortcuts";
+import { isTextEntryElement, shouldEnterToggleFullscreen } from "../lib/shortcuts";
 import {
   formatControllerLockReason,
   getControllerLockState,
@@ -31,12 +32,14 @@ import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { buildSubStyleParams, useSubtitleStore } from "../store/useSubtitleStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { useVoiceStore } from "../store/useVoiceStore";
 
 interface UsePlayerShortcutsOptions {
   onToggleFullscreen: () => void;
   onExitFullscreen: () => void;
   onToggleReactions?: () => void;
   onToggleChat?: () => void;
+  onWakeChrome?: () => void;
 }
 
 export function usePlayerShortcuts({
@@ -44,6 +47,7 @@ export function usePlayerShortcuts({
   onExitFullscreen,
   onToggleReactions,
   onToggleChat,
+  onWakeChrome,
 }: UsePlayerShortcutsOptions): void {
   useEffect(() => {
     const throttledSeek = createLeadingTrailingThrottle(
@@ -115,14 +119,24 @@ export function usePlayerShortcuts({
         sync.roomControl,
       );
 
-      if (e.code === "KeyF") {
+      const focusMode =
+        typeof document !== "undefined" ? document.documentElement?.dataset?.focusMode : undefined;
+      if (
+        e.code === "KeyF" ||
+        ((e.code === "Enter" || e.code === "NumpadEnter") &&
+          !e.shiftKey &&
+          shouldEnterToggleFullscreen(e.target, focusMode))
+      ) {
         e.preventDefault();
-        onToggleFullscreen();
+        if (!e.repeat) {
+          onToggleFullscreen();
+        }
         return;
       }
 
       if (e.code === "KeyR") {
         e.preventDefault();
+        onWakeChrome?.();
         toggleReadyStatus();
         return;
       }
@@ -131,6 +145,19 @@ export function usePlayerShortcuts({
         e.preventDefault();
         onToggleChat?.();
         return;
+      }
+
+      // Mic Mute / Unmute via M when connected to voice chat (works even before media loads)
+      if (e.code === "KeyM" && !e.shiftKey) {
+        const voiceState = useVoiceStore.getState();
+        if (voiceState.voiceEnabled && voiceState.joined) {
+          e.preventDefault();
+          if (!e.repeat) {
+            onWakeChrome?.();
+            toggleVoiceMute();
+          }
+          return;
+        }
       }
 
       if (appState.roomCode && appState.reactionsEnabled) {
@@ -158,6 +185,7 @@ export function usePlayerShortcuts({
       // Play / Pause
       if (e.code === "Space" || e.code === "KeyK") {
         e.preventDefault();
+        onWakeChrome?.();
         togglePlayback({ showFeedback: true });
         return;
       }
@@ -171,6 +199,7 @@ export function usePlayerShortcuts({
 
       if (seekDelta !== 0) {
         e.preventDefault();
+        onWakeChrome?.();
         const aligning = syncConnected && sync.alignMode;
         if (ctrlLock.lockedForLocalUser && !aligning) {
           pushNote("warn", formatControllerLockReason(ctrlLock));
@@ -195,6 +224,7 @@ export function usePlayerShortcuts({
       // Volume
       if (e.code === "ArrowUp" || e.code === "ArrowDown") {
         e.preventDefault();
+        onWakeChrome?.();
         const delta = e.code === "ArrowUp" ? 5 : -5;
         const nextVol = Math.max(0, Math.min(130, player.volume + delta));
         player.setVolume(nextVol);
@@ -206,6 +236,7 @@ export function usePlayerShortcuts({
       // Mute
       if (e.code === "KeyM") {
         e.preventDefault();
+        onWakeChrome?.();
         toggleMutePlayback();
         return;
       }
@@ -213,6 +244,7 @@ export function usePlayerShortcuts({
       // Speed (Fix 09 locked to calibrated room scale in synced room)
       if (e.code === "BracketLeft" || e.code === "BracketRight") {
         e.preventDefault();
+        onWakeChrome?.();
         const delta = e.code === "BracketRight" ? 0.1 : -0.1;
         const nextSpeed = Math.round(Math.max(0.25, Math.min(3.0, player.speed + delta)) * 100) / 100;
         const targetSpeed = sync.timelineScale;
@@ -234,6 +266,7 @@ export function usePlayerShortcuts({
       if (e.code === "KeyI") {
         e.preventDefault();
         if (useAppStore.getState().skipIntroMode !== "off") {
+          onWakeChrome?.();
           void skipActiveOrUpcomingIntro();
         }
         return;
@@ -241,6 +274,7 @@ export function usePlayerShortcuts({
 
       if (e.code === "KeyV") {
         e.preventDefault();
+        onWakeChrome?.();
         const nextVis = !sub.visible;
         sub.setVisible(nextVis);
         player.flashFeedback(nextVis ? "Subtitles On" : "Subtitles Off");
@@ -254,6 +288,7 @@ export function usePlayerShortcuts({
       // Cycle Subtitle Track (Fix 24 resets delay cleanly)
       if (e.code === "KeyS") {
         e.preventDefault();
+        onWakeChrome?.();
         const subTracks = player.tracks.filter((t) => t.type === "sub");
         if (subTracks.length === 0) {
           player.flashFeedback("No subtitle tracks");
@@ -290,6 +325,7 @@ export function usePlayerShortcuts({
       // Subtitle timing nudge
       if (e.code === "KeyZ" || e.code === "KeyX") {
         e.preventDefault();
+        onWakeChrome?.();
         const delta = e.code === "KeyX" ? 0.1 : -0.1;
         const nextDelay = sub.nudgeDelay(delta);
         player.flashFeedback(`Sub ${formatDelaySigned(nextDelay)}`);
@@ -302,5 +338,5 @@ export function usePlayerShortcuts({
       throttledSeek.cancel();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleReactions]);
+  }, [onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleReactions, onWakeChrome]);
 }

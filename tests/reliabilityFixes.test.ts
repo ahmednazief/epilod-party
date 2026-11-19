@@ -228,6 +228,33 @@ test("Fix 20 & 21: shortcut focus guard and SeekAccumulator coalescing window", 
     true,
   );
   assert.equal(sc.isTextEntryElement({ tagName: "BUTTON" } as unknown as EventTarget), false);
+  assert.equal(
+    sc.shouldEnterToggleFullscreen({ tagName: "DIV" } as unknown as EventTarget, "pointer"),
+    true,
+  );
+  // Mouse click leaves stale focus on a button in pointer mode -> Enter still toggles fullscreen
+  assert.equal(
+    sc.shouldEnterToggleFullscreen({ tagName: "BUTTON" } as unknown as EventTarget, "pointer"),
+    true,
+  );
+  // Tabbed keyboard focus on a button/menuitem/input preserves normal Enter activation
+  assert.equal(
+    sc.shouldEnterToggleFullscreen({ tagName: "BUTTON" } as unknown as EventTarget, "keyboard"),
+    false,
+  );
+  assert.equal(
+    sc.shouldEnterToggleFullscreen(
+      { tagName: "DIV", getAttribute: () => "menuitem" } as unknown as EventTarget,
+      "pointer",
+    ),
+    false,
+  );
+  assert.equal(
+    sc.shouldEnterToggleFullscreen({ tagName: "TEXTAREA" } as unknown as EventTarget, "pointer"),
+    false,
+  );
+  const fsSpec = sc.PLAYER_SHORTCUTS.find((s) => s.label === "Toggle fullscreen");
+  assert.deepEqual(fsSpec?.keys, ["F", "Enter"]);
 
   const sk = await loadModules<typeof import("../src/lib/seekCoalesce")>("src/lib/seekCoalesce.ts");
   const acc = new sk.SeekAccumulator(450);
@@ -346,6 +373,8 @@ test("Fix 20 & 21: usePlayerShortcuts source uses physical e.code and 100ms seek
   // Physical e.code ensures Arabic keyboard layouts (e.key='ب','ئ','س') trigger identical bindings
   for (const code of [
     "KeyF",
+    "Enter",
+    "NumpadEnter",
     "KeyR",
     "Space",
     "KeyK",
@@ -367,6 +396,27 @@ test("Fix 20 & 21: usePlayerShortcuts source uses physical e.code and 100ms seek
     assert.equal(hookSrc.includes(`"${code}"`), true, `Missing physical code ${code}`);
   }
   assert.equal(hookSrc.includes("createLeadingTrailingThrottle"), true);
+  assert.equal(hookSrc.includes("onWakeChrome?.()"), true);
+  assert.doesNotMatch(
+    hookSrc,
+    /if\s*\(presetByKey\)\s*\{[^}]*onWakeChrome/,
+  );
+
+  const watchRoomSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  assert.equal(watchRoomSrc.includes("onWakeChrome: wakeChrome"), true);
+  assert.match(
+    watchRoomSrc,
+    /const onKeyDown = \(e: KeyboardEvent\) => \{\s*if \(e\.code === "Tab" && !isTextEntryElement\(e\.target\)\) \{\s*wakeChrome\(\);\s*\}/,
+  );
+
+  const scrubberSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/Scrubber.tsx"),
+    "utf8",
+  );
+  assert.equal(scrubberSrc.includes('closest?.(\'[aria-hidden="true"]\')'), true);
 
   const th = await loadModules<typeof import("../src/lib/throttle")>("src/lib/throttle.ts");
   const sk = await loadModules<typeof import("../src/lib/seekCoalesce")>("src/lib/seekCoalesce.ts");

@@ -7,9 +7,21 @@ import {
   parseEpisodeCode,
   type PlaylistItem,
 } from "./playlist";
+import { pickNextUnwatchedIndex } from "./seriesProgress";
 import type { Participant } from "./syncplay";
 
 export type EpisodeLoadTrigger = "autoNext" | "manual" | "follow";
+
+export interface RecentEpisodeSwitch {
+  path: string;
+  atMs: number;
+  trigger: EpisodeLoadTrigger;
+}
+
+const RECENT_EPISODE_GUARD_MS = 6000;
+const LOCAL_SWITCH_GRACE_MS = 2500;
+const FOLLOW_BURST_WINDOW_MS = 6000;
+const FOLLOW_BURST_LIMIT = 3;
 
 export interface AutoNextEofCheckInput {
   autoPlayNext: boolean;
@@ -19,6 +31,8 @@ export interface AutoNextEofCheckInput {
   eofHandledForGen: number;
   currentLoadGen: number;
   lockedForLocalUser: boolean;
+  items?: readonly PlaylistItem[];
+  watchedKeys?: readonly string[];
 }
 
 export interface AutoNextEofDecision {
@@ -39,6 +53,13 @@ export function canTriggerAutoNextOnEof(input: AutoNextEofCheckInput): AutoNextE
   }
   if (input.currentIndex < 0 || input.currentIndex >= input.itemsLength - 1) {
     return { advance: false, nextIndex: null };
+  }
+  if (input.items && input.watchedKeys && input.watchedKeys.length > 0) {
+    const nextUnwatched = pickNextUnwatchedIndex(input.items, input.currentIndex, input.watchedKeys);
+    if (nextUnwatched === null) {
+      return { advance: false, nextIndex: null };
+    }
+    return { advance: true, nextIndex: nextUnwatched };
   }
   return { advance: true, nextIndex: input.currentIndex + 1 };
 }
@@ -202,6 +223,11 @@ export interface FollowPartyEpisodeInput {
   loadInFlight: boolean;
   previousPeerFile: string | null;
   justAdvancedFromPath?: string | null;
+  hasControllers?: boolean;
+  localIsController?: boolean;
+  recentLocalSwitches?: readonly RecentEpisodeSwitch[];
+  recentFollowTimestamps?: readonly number[];
+  nowMs?: number;
 }
 
 export type FollowPartyEpisodeResult =
@@ -240,6 +266,9 @@ export function resolveFollowPartyEpisode(
 
   const leader = otherPeers.find((p) => p.isController) ?? otherPeers[0];
   const peerFile = leader.fileName?.trim() || null;
+  if (input.hasControllers && input.localIsController && !leader.isController) {
+    return { action: "noop", nextPeerFile: peerFile ?? input.previousPeerFile };
+  }
   if (!peerFile || peerFile === input.previousPeerFile) {
     return { action: "noop", nextPeerFile: input.previousPeerFile };
   }
@@ -257,6 +286,36 @@ export function resolveFollowPartyEpisode(
     target.path.toLowerCase() === input.justAdvancedFromPath.toLowerCase()
   ) {
     return { action: "noop", nextPeerFile: peerFile };
+  }
+
+  const nowMs = input.nowMs ?? Date.now();
+  if (input.recentLocalSwitches && input.recentLocalSwitches.length > 0) {
+    const targetLower = target.path.toLowerCase();
+    const recentlyVisitedTarget = input.recentLocalSwitches.some(
+      (sw) =>
+        nowMs - sw.atMs < RECENT_EPISODE_GUARD_MS &&
+        sw.path.toLowerCase() === targetLower,
+    );
+    if (recentlyVisitedTarget) {
+      return { action: "noop", nextPeerFile: peerFile };
+    }
+    const withinLocalGrace = input.recentLocalSwitches.some(
+      (sw) =>
+        (sw.trigger === "manual" || sw.trigger === "autoNext") &&
+        nowMs - sw.atMs < LOCAL_SWITCH_GRACE_MS,
+    );
+    if (withinLocalGrace) {
+      return { action: "noop", nextPeerFile: peerFile };
+    }
+  }
+
+  if (input.recentFollowTimestamps && input.recentFollowTimestamps.length > 0) {
+    const recentFollows = input.recentFollowTimestamps.filter(
+      (t) => nowMs - t < FOLLOW_BURST_WINDOW_MS,
+    );
+    if (recentFollows.length >= FOLLOW_BURST_LIMIT) {
+      return { action: "noop", nextPeerFile: peerFile };
+    }
   }
 
   return {

@@ -51,6 +51,8 @@ pub struct DeferredLoadState {
     pub pause: Option<bool>,
 }
 
+type VolumeReassertCallback = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 pub struct MpvController {
     runtime: Arc<Mutex<Option<MpvRuntime>>>,
     snapshot: Arc<Mutex<PlayerSnapshot>>,
@@ -69,7 +71,7 @@ pub struct MpvController {
     last_app: Arc<Mutex<Option<AppHandle>>>,
     capture_busy: Arc<AtomicBool>,
     freeze_capture_busy: Arc<AtomicBool>,
-    volume_reassert_cb: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    volume_reassert_cb: VolumeReassertCallback,
 }
 
 impl Default for MpvController {
@@ -183,6 +185,10 @@ impl MpvController {
         let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
         *def = DeferredLoadState::default();
         self.loading_media.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_loading_media(&self) -> bool {
+        self.loading_media.load(Ordering::SeqCst)
     }
 
     /// Records the target seek position and returns `true` when deferred until `file-loaded`.
@@ -415,6 +421,46 @@ impl MpvController {
         let has_media_clone = Arc::clone(&self.has_media);
         let ui_visible_clone = Arc::clone(&self.ui_visible);
         let volume_reassert_clone = Arc::clone(&self.volume_reassert_cb);
+        let runtime_for_file_loaded = Arc::clone(&self.runtime);
+        let has_media_for_file_loaded = Arc::clone(&self.has_media);
+        let ui_visible_for_file_loaded = Arc::clone(&self.ui_visible);
+        let pending_resize_for_file_loaded = Arc::clone(&self.pending_resize);
+        let app_for_file_loaded = app.clone();
+        let file_loaded_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let effective = has_media_for_file_loaded.load(Ordering::SeqCst)
+                && ui_visible_for_file_loaded.load(Ordering::SeqCst);
+            let mut running = false;
+            if let Ok(mut guard) = runtime_for_file_loaded.lock() {
+                if let Some(ref mut rt) = *guard {
+                    if rt.session_id == session_id {
+                        running = !matches!(rt.child.try_wait(), Ok(Some(_)))
+                            && is_child_window_alive(rt.hwnd);
+                        set_child_visible(&rt.app, rt.hwnd, effective);
+                        if let Some(r) = rt.last_rect {
+                            if r.width > 0 && r.height > 0 {
+                                resize_child_hwnd(
+                                    &rt.app,
+                                    rt.hwnd,
+                                    r,
+                                    &pending_resize_for_file_loaded,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let has_media = running && has_media_for_file_loaded.load(Ordering::SeqCst);
+            let ui_vis = ui_visible_for_file_loaded.load(Ordering::SeqCst);
+            let _ = app_for_file_loaded.emit(
+                "mpv://surface-state",
+                MpvSurfaceState {
+                    running,
+                    has_media,
+                    ui_visible: ui_vis,
+                    surface_visible: running && has_media && ui_vis,
+                },
+            );
+        });
         tokio::spawn(async move {
             let reason = ipc::connect_and_run_ipc(
                 pipe_name,
@@ -428,6 +474,7 @@ impl MpvController {
                 Arc::clone(&pending_replies_clone),
                 Arc::clone(&client_seek_seq_clone),
                 Arc::clone(&volume_reassert_clone),
+                file_loaded_cb,
                 move || {
                     if let Ok(mut guard) = runtime_for_probe.try_lock() {
                         if let Some(rt) = guard.as_mut() {

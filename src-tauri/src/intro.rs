@@ -3,13 +3,13 @@
 use crate::mpv::process::{resolve_ffmpeg_exe, resolve_mpv_exe};
 use epilod_core::intro_detect::{
     detect_intro_across_episodes, detect_intro_from_chapters, detect_intro_from_subtitle_text,
-    detect_intro_from_unnamed_chapter_structure, pick_sibling_episode_paths,
-    recommended_intro_window_secs, snap_interval_to_chapters, DetectedIntro, IntroDetectionOutcome,
-    SpectralIntroFingerprint,
+    detect_intro_from_unnamed_chapter_structure, detect_outro_across_episodes,
+    pick_sibling_episode_paths, recommended_intro_window_secs, recommended_outro_window_secs,
+    snap_interval_to_chapters, DetectedIntro, IntroDetectionOutcome, SpectralIntroFingerprint,
 };
 use epilod_core::mpv_ipc::{
-    intro_extract_audio_args_ffmpeg, intro_extract_audio_args_mpv, intro_extract_sub_args_ffmpeg,
-    MpvChapter,
+    intro_extract_audio_range_args_ffmpeg, intro_extract_audio_range_args_mpv,
+    intro_extract_sub_args_ffmpeg, intro_extract_sub_tail_args_ffmpeg, MpvChapter,
 };
 use epilod_core::playlist::parse_episode_code;
 use epilod_core::subtitle_sync::{decode_subtitle_bytes_with_hint, SubtitleEncodingHint};
@@ -75,6 +75,8 @@ pub struct IntroDetectController {
     cancel_flag: Mutex<Arc<AtomicBool>>,
     fp_cache: Mutex<BoundedCache<CacheFileKey, Arc<SpectralIntroFingerprint>>>,
     intro_cache: Mutex<BoundedCache<CacheFileKey, DetectedIntro>>,
+    outro_fp_cache: Mutex<BoundedCache<CacheFileKey, (f64, Arc<SpectralIntroFingerprint>)>>,
+    outro_cache: Mutex<BoundedCache<CacheFileKey, DetectedIntro>>,
 }
 
 impl Default for IntroDetectController {
@@ -89,6 +91,8 @@ impl IntroDetectController {
             cancel_flag: Mutex::new(Arc::new(AtomicBool::new(false))),
             fp_cache: Mutex::new(BoundedCache::new(FP_CACHE_CAPACITY)),
             intro_cache: Mutex::new(BoundedCache::new(INTRO_CACHE_CAPACITY)),
+            outro_fp_cache: Mutex::new(BoundedCache::new(FP_CACHE_CAPACITY)),
+            outro_cache: Mutex::new(BoundedCache::new(INTRO_CACHE_CAPACITY)),
         }
     }
 
@@ -113,6 +117,14 @@ impl IntroDetectController {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.intro_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.outro_fp_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.outro_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -144,6 +156,42 @@ impl IntroDetectController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, intro);
+    }
+
+    fn get_cached_outro_fp(
+        &self,
+        key: &CacheFileKey,
+    ) -> Option<(f64, Arc<SpectralIntroFingerprint>)> {
+        self.outro_fp_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+    }
+
+    fn insert_cached_outro_fp(
+        &self,
+        key: CacheFileKey,
+        off: f64,
+        fp: Arc<SpectralIntroFingerprint>,
+    ) {
+        self.outro_fp_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, (off, fp));
+    }
+
+    fn get_cached_outro(&self, key: &CacheFileKey) -> Option<DetectedIntro> {
+        self.outro_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+    }
+
+    fn insert_cached_outro(&self, key: CacheFileKey, outro: DetectedIntro) {
+        self.outro_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, outro);
     }
 }
 
@@ -283,6 +331,7 @@ async fn run_command_stdout_with_cancel(
 async fn run_mpv_file_extract_with_cancel(
     mpv_exe: &Path,
     video_str: &str,
+    start_secs: f64,
     window_secs: f64,
     audio_track_id: Option<u64>,
     cancel: &Arc<AtomicBool>,
@@ -294,9 +343,10 @@ async fn run_mpv_file_extract_with_cancel(
     let tmp_path =
         std::env::temp_dir().join(format!("epilod_intro_{}_{}.s16le", std::process::id(), id));
     let _guard = TempFileGuard(tmp_path.clone());
-    let args = intro_extract_audio_args_mpv(
+    let args = intro_extract_audio_range_args_mpv(
         video_str,
         &tmp_path.to_string_lossy(),
+        start_secs,
         window_secs,
         audio_track_id,
     );
@@ -341,8 +391,9 @@ async fn run_mpv_file_extract_with_cancel(
     std::fs::read(&tmp_path).map_err(|e| format!("Failed reading temp PCM: {e}"))
 }
 
-async fn extract_intro_pcm_8k(
+async fn extract_pcm_range_8k(
     video_path: &Path,
+    start_secs: f64,
     window_secs: f64,
     audio_stream_idx: Option<usize>,
     ffmpeg_exe: Option<&Path>,
@@ -353,7 +404,12 @@ async fn extract_intro_pcm_8k(
 
     if let Some(ff) = ffmpeg_exe {
         if let Some(stream_idx) = audio_stream_idx {
-            let args = intro_extract_audio_args_ffmpeg(&video_str, window_secs, Some(stream_idx));
+            let args = intro_extract_audio_range_args_ffmpeg(
+                &video_str,
+                start_secs,
+                window_secs,
+                Some(stream_idx),
+            );
             if let Ok(bytes) = run_command_stdout_with_cancel(
                 ff,
                 &args,
@@ -369,7 +425,8 @@ async fn extract_intro_pcm_8k(
             }
         }
         if !cancel.load(Ordering::SeqCst) {
-            let args = intro_extract_audio_args_ffmpeg(&video_str, window_secs, None);
+            let args =
+                intro_extract_audio_range_args_ffmpeg(&video_str, start_secs, window_secs, None);
             if let Ok(bytes) = run_command_stdout_with_cancel(
                 ff,
                 &args,
@@ -388,15 +445,21 @@ async fn extract_intro_pcm_8k(
 
     if let Some(mpv) = mpv_exe {
         let track_id = audio_stream_idx.map(|i| (i + 1) as u64);
-        let bytes =
-            run_mpv_file_extract_with_cancel(mpv, &video_str, window_secs, track_id, cancel)
-                .await?;
+        let bytes = run_mpv_file_extract_with_cancel(
+            mpv,
+            &video_str,
+            start_secs,
+            window_secs,
+            track_id,
+            cancel,
+        )
+        .await?;
         if bytes.len() >= MIN_VALID_PCM_BYTES {
             return Ok(bytes);
         }
     }
 
-    Err("No valid opening audio stream extracted for intro analysis".to_string())
+    Err("No valid audio stream extracted for theme analysis".to_string())
 }
 
 async fn get_or_extract_fingerprint(
@@ -416,8 +479,9 @@ async fn get_or_extract_fingerprint(
         }
     }
 
-    let pcm = extract_intro_pcm_8k(
+    let pcm = extract_pcm_range_8k(
         &canon,
+        0.0,
         window_secs,
         audio_stream_idx,
         ffmpeg_exe,
@@ -442,6 +506,53 @@ async fn get_or_extract_fingerprint(
     Ok((key, arc_fp))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn get_or_extract_tail_fingerprint(
+    video_path: &Path,
+    tail_start_secs: f64,
+    tail_window_secs: f64,
+    audio_stream_idx: Option<usize>,
+    ffmpeg_exe: Option<&Path>,
+    mpv_exe: Option<&Path>,
+    controller: &IntroDetectController,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(CacheFileKey, f64, Arc<SpectralIntroFingerprint>), String> {
+    let (key, canon) = cache_key_for_path(video_path)?;
+    if audio_stream_idx.is_none() {
+        if let Some((cached_off, cached_fp)) = controller.get_cached_outro_fp(&key) {
+            if (cached_off - tail_start_secs).abs() <= 20.0 {
+                return Ok((key, cached_off, cached_fp));
+            }
+        }
+    }
+
+    let pcm = extract_pcm_range_8k(
+        &canon,
+        tail_start_secs,
+        tail_window_secs,
+        audio_stream_idx,
+        ffmpeg_exe,
+        mpv_exe,
+        cancel,
+    )
+    .await?;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Cancelled".to_string());
+    }
+
+    let fp = tokio::task::spawn_blocking(move || SpectralIntroFingerprint::from_pcm_s16le_8k(&pcm))
+        .await
+        .map_err(|_| "Outro fingerprint worker panicked".to_string())?
+        .ok_or_else(|| "Closing audio is silent or too short to fingerprint".to_string())?;
+
+    let arc_fp = Arc::new(fp);
+    if audio_stream_idx.is_none() {
+        controller.insert_cached_outro_fp(key.clone(), tail_start_secs, Arc::clone(&arc_fp));
+    }
+    Ok((key, tail_start_secs, arc_fp))
+}
+
 fn try_detect_from_external_sub(
     sub_path_raw: &str,
     duration_secs: f64,
@@ -456,8 +567,213 @@ fn try_detect_from_external_sub(
     let ext_hint = sub_pb.extension().and_then(|e| e.to_str());
     let text = decode_subtitle_bytes_with_hint(&bytes, SubtitleEncodingHint::Auto).ok()?;
     let outcome = detect_intro_from_subtitle_text(&text, ext_hint, duration_secs);
-    outcome.primary_intro.as_ref()?;
+    if outcome.primary_intro.is_none() && outcome.outro.is_none() {
+        return None;
+    }
     Some(outcome)
+}
+
+fn collect_valid_siblings(
+    video_path: &str,
+    sibling_paths: &[String],
+    target_key: &CacheFileKey,
+    path_options: LocalPathOptions,
+) -> Vec<(String, CacheFileKey, PathBuf)> {
+    let candidate_paths = pick_sibling_episode_paths(video_path, sibling_paths, 3);
+    let mut valid_siblings: Vec<(String, CacheFileKey, PathBuf)> = Vec::new();
+    for sib_raw in candidate_paths {
+        if let Ok(sib_pb) = validate_existing_local_file_with_options(&sib_raw, path_options) {
+            if let Ok((sib_key, sib_canon)) = cache_key_for_path(&sib_pb) {
+                if sib_key != *target_key
+                    && sib_key.1 > 0
+                    && valid_siblings.iter().all(|(_, k, _)| k != &sib_key)
+                {
+                    valid_siblings.push((sib_raw, sib_key, sib_canon));
+                }
+            }
+        }
+    }
+    valid_siblings
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn detect_missing_outro(
+    req: &IntroDetectRequest,
+    target_pb: &Path,
+    target_key: &CacheFileKey,
+    target_canon: &Path,
+    ffmpeg_exe: Option<&Path>,
+    mpv_exe: Option<&Path>,
+    controller: &IntroDetectController,
+    path_options: LocalPathOptions,
+    cancel: &Arc<AtomicBool>,
+) -> Option<DetectedIntro> {
+    if cancel.load(Ordering::SeqCst) {
+        return None;
+    }
+
+    if let Some(mut cached) = controller.get_cached_outro(target_key) {
+        let (snapped_s, snapped_e) = snap_interval_to_chapters(
+            cached.start_secs,
+            cached.end_secs,
+            &req.chapters,
+            req.duration_secs,
+        );
+        cached.start_secs = snapped_s;
+        cached.end_secs = snapped_e;
+        cached.skip_target_secs = snapped_e;
+        return Some(cached);
+    }
+
+    let file_name = target_pb
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let is_episodic = !req.sibling_paths.is_empty() || parse_episode_code(file_name).is_some();
+    let struct_outcome =
+        detect_intro_from_unnamed_chapter_structure(&req.chapters, req.duration_secs, is_episodic);
+    if let Some(outro) = struct_outcome.outro {
+        controller.insert_cached_outro(target_key.clone(), outro.clone());
+        return Some(outro);
+    }
+
+    if let (Some(ff), Some(sub_idx)) = (ffmpeg_exe, req.embedded_sub_idx) {
+        let codec_ok = req
+            .embedded_sub_codec
+            .as_deref()
+            .is_none_or(|c| !is_bitmap_or_cc_codec(c));
+        if codec_ok && sub_idx <= 64 && req.duration_secs >= 60.0 {
+            let sub_start = (req.duration_secs * 0.55).max(0.0);
+            let args = intro_extract_sub_tail_args_ffmpeg(
+                &target_canon.to_string_lossy(),
+                sub_start,
+                sub_idx,
+            );
+            if let Ok(bytes) = run_command_stdout_with_cancel(
+                ff,
+                &args,
+                SUB_EXTRACT_TIMEOUT,
+                MAX_SUBTITLE_BYTES,
+                cancel,
+            )
+            .await
+            {
+                if !bytes.is_empty() {
+                    if let Ok(decoded) =
+                        decode_subtitle_bytes_with_hint(&bytes, SubtitleEncodingHint::Utf8)
+                    {
+                        let sub_outcome = detect_intro_from_subtitle_text(
+                            &decoded,
+                            Some("ass"),
+                            req.duration_secs,
+                        );
+                        if let Some(outro) = sub_outcome.outro {
+                            controller.insert_cached_outro(target_key.clone(), outro.clone());
+                            return Some(outro);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cancel.load(Ordering::SeqCst) {
+        return None;
+    }
+
+    let (tail_start, tail_win) = recommended_outro_window_secs(req.duration_secs)?;
+    if req.sibling_paths.is_empty() || (ffmpeg_exe.is_none() && mpv_exe.is_none()) {
+        return None;
+    }
+
+    let valid_siblings = collect_valid_siblings(
+        &req.video_path,
+        &req.sibling_paths,
+        target_key,
+        path_options,
+    );
+    if valid_siblings.is_empty() {
+        return None;
+    }
+
+    let sib_tail_start = (tail_start - 60.0).max(0.0);
+    let sib_tail_win = (tail_win + 60.0).min(420.0);
+    let target_res = get_or_extract_tail_fingerprint(
+        target_canon,
+        tail_start,
+        tail_win,
+        req.audio_stream_idx,
+        ffmpeg_exe,
+        mpv_exe,
+        controller,
+        cancel,
+    )
+    .await;
+    let Ok((_, target_off, target_fp)) = target_res else {
+        return None;
+    };
+
+    let mut sib_fps: Vec<(String, CacheFileKey, f64, Arc<SpectralIntroFingerprint>)> = Vec::new();
+    for (sib_raw, sib_key, sib_canon) in valid_siblings.iter().take(2) {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        if let Ok((_, sib_off, sib_fp)) = get_or_extract_tail_fingerprint(
+            sib_canon,
+            sib_tail_start,
+            sib_tail_win,
+            None,
+            ffmpeg_exe,
+            mpv_exe,
+            controller,
+            cancel,
+        )
+        .await
+        {
+            sib_fps.push((sib_raw.clone(), sib_key.clone(), sib_off, sib_fp));
+        }
+    }
+    if sib_fps.is_empty() {
+        return None;
+    }
+
+    let target_chaps = req.chapters.clone();
+    let dur = req.duration_secs;
+    let sib_owned = sib_fps;
+    let Ok((outro_opt, sibling_ranges)) = tokio::task::spawn_blocking(move || {
+        let refs: Vec<(&str, &SpectralIntroFingerprint, f64)> = sib_owned
+            .iter()
+            .map(|(p, _, off, fp)| (p.as_str(), fp.as_ref(), *off))
+            .collect();
+        detect_outro_across_episodes(target_fp.as_ref(), target_off, &refs, &target_chaps, dur)
+    })
+    .await
+    else {
+        return None;
+    };
+
+    if let Some(ref found) = outro_opt {
+        controller.insert_cached_outro(target_key.clone(), found.clone());
+        for (sib_path, sib_s, sib_e, sib_sim) in sibling_ranges {
+            if let Some((_, sib_key, _)) = valid_siblings.iter().find(|(p, _, _)| p == &sib_path) {
+                controller.insert_cached_outro(
+                    sib_key.clone(),
+                    DetectedIntro {
+                        start_secs: sib_s,
+                        end_secs: sib_e,
+                        skip_target_secs: sib_e,
+                        kind: epilod_core::intro_detect::IntroSegmentKind::Outro,
+                        source: epilod_core::intro_detect::IntroSource::AudioMatch,
+                        confidence: found.confidence,
+                        label: "Next Episode".to_string(),
+                        similarity: Some(sib_sim),
+                        matched_episodes: found.matched_episodes,
+                    },
+                );
+            }
+        }
+    }
+    outro_opt
 }
 
 pub async fn execute_detect_intro_with_tools(
@@ -471,7 +787,8 @@ pub async fn execute_detect_intro_with_tools(
 
     // 1. Named embedded chapters (instant, zero subprocess overhead).
     let chap_outcome = detect_intro_from_chapters(&req.chapters, req.duration_secs);
-    if chap_outcome.primary_intro.is_some() {
+    let mut found_outro = chap_outcome.outro.clone();
+    if chap_outcome.primary_intro.is_some() && found_outro.is_some() {
         return Ok(chap_outcome);
     }
 
@@ -479,21 +796,60 @@ pub async fn execute_detect_intro_with_tools(
         .map_err(|e| e.to_string())?;
     let (target_key, target_canon) = cache_key_for_path(&target_pb)?;
 
-    // 2. External subtitle cue markers (.ass OP style or explicit [Opening theme] lyrics).
+    // 2. External subtitle cue markers (.ass OP/ED styles or explicit theme lyrics).
+    let mut ext_sub_outcome: Option<IntroDetectionOutcome> = None;
     if let Some(sub_raw) = req.subtitle_path.as_deref() {
         let sub_trimmed = sub_raw.trim();
         if !sub_trimmed.is_empty() {
             let dur = req.duration_secs;
             let owned_sub = sub_trimmed.to_string();
-            let sub_res = tokio::task::spawn_blocking(move || {
+            ext_sub_outcome = tokio::task::spawn_blocking(move || {
                 try_detect_from_external_sub(&owned_sub, dur, path_options)
             })
             .await
             .ok()
             .flatten();
-            if let Some(outcome) = sub_res {
-                return Ok(outcome);
+            if found_outro.is_none() {
+                found_outro = ext_sub_outcome.as_ref().and_then(|o| o.outro.clone());
             }
+        }
+    }
+
+    if chap_outcome.primary_intro.is_some() {
+        if found_outro.is_none() {
+            found_outro = detect_missing_outro(
+                &req,
+                &target_pb,
+                &target_key,
+                &target_canon,
+                ffmpeg_exe,
+                mpv_exe,
+                controller,
+                path_options,
+                &cancel,
+            )
+            .await;
+        }
+        return Ok(chap_outcome.with_outro(found_outro));
+    }
+
+    if let Some(sub_out) = ext_sub_outcome {
+        if sub_out.primary_intro.is_some() {
+            if found_outro.is_none() {
+                found_outro = detect_missing_outro(
+                    &req,
+                    &target_pb,
+                    &target_key,
+                    &target_canon,
+                    ffmpeg_exe,
+                    mpv_exe,
+                    controller,
+                    path_options,
+                    &cancel,
+                )
+                .await;
+            }
+            return Ok(sub_out.with_outro(found_outro));
         }
     }
 
@@ -512,7 +868,21 @@ pub async fn execute_detect_intro_with_tools(
         cached.start_secs = snapped_s;
         cached.end_secs = snapped_e;
         cached.skip_target_secs = snapped_e;
-        return Ok(IntroDetectionOutcome::from_segments(vec![cached]));
+        if found_outro.is_none() {
+            found_outro = detect_missing_outro(
+                &req,
+                &target_pb,
+                &target_key,
+                &target_canon,
+                ffmpeg_exe,
+                mpv_exe,
+                controller,
+                path_options,
+                &cancel,
+            )
+            .await;
+        }
+        return Ok(IntroDetectionOutcome::from_segments(vec![cached]).with_outro(found_outro));
     }
 
     // 4. Cross-episode spectral audio matching against sibling files in the playlist/folder.
@@ -523,20 +893,12 @@ pub async fn execute_detect_intro_with_tools(
         && (ffmpeg_exe.is_some() || mpv_exe.is_some())
     {
         let window_secs = recommended_intro_window_secs(req.duration_secs);
-        let candidate_paths = pick_sibling_episode_paths(&req.video_path, &req.sibling_paths, 3);
-        let mut valid_siblings: Vec<(String, CacheFileKey, PathBuf)> = Vec::new();
-        for sib_raw in candidate_paths {
-            if let Ok(sib_pb) = validate_existing_local_file_with_options(&sib_raw, path_options) {
-                if let Ok((sib_key, sib_canon)) = cache_key_for_path(&sib_pb) {
-                    if sib_key != target_key
-                        && sib_key.1 > 0
-                        && valid_siblings.iter().all(|(_, k, _)| k != &sib_key)
-                    {
-                        valid_siblings.push((sib_raw, sib_key, sib_canon));
-                    }
-                }
-            }
-        }
+        let valid_siblings = collect_valid_siblings(
+            &req.video_path,
+            &req.sibling_paths,
+            &target_key,
+            path_options,
+        );
 
         if !valid_siblings.is_empty() {
             let mut sib_fps: Vec<(String, CacheFileKey, Arc<SpectralIntroFingerprint>)> =
@@ -698,7 +1060,21 @@ pub async fn execute_detect_intro_with_tools(
                                 controller.insert_cached_intro(sib_key.clone(), sib_intro);
                             }
                         }
-                        return Ok(outcome);
+                        if found_outro.is_none() {
+                            found_outro = detect_missing_outro(
+                                &req,
+                                &target_pb,
+                                &target_key,
+                                &target_canon,
+                                ffmpeg_exe,
+                                mpv_exe,
+                                controller,
+                                path_options,
+                                &cancel,
+                            )
+                            .await;
+                        }
+                        return Ok(outcome.with_outro(found_outro));
                     }
                     // Preserve unused mut warning cleanly
                     let _ = &mut outcome;
@@ -738,9 +1114,26 @@ pub async fn execute_detect_intro_with_tools(
                             Some("ass"),
                             req.duration_secs,
                         );
+                        if found_outro.is_none() {
+                            found_outro = sub_outcome.outro.clone();
+                        }
                         if let Some(ref primary) = sub_outcome.primary_intro {
                             controller.insert_cached_intro(target_key.clone(), primary.clone());
-                            return Ok(sub_outcome);
+                            if found_outro.is_none() {
+                                found_outro = detect_missing_outro(
+                                    &req,
+                                    &target_pb,
+                                    &target_key,
+                                    &target_canon,
+                                    ffmpeg_exe,
+                                    mpv_exe,
+                                    controller,
+                                    path_options,
+                                    &cancel,
+                                )
+                                .await;
+                            }
+                            return Ok(sub_outcome.with_outro(found_outro));
                         }
                     }
                 }
@@ -752,7 +1145,7 @@ pub async fn execute_detect_intro_with_tools(
         return Err("Cancelled".to_string());
     }
 
-    // 6. Unnamed episodic chapter structural heuristic (e.g. anime OP+body+ED).
+    // 6. Unnamed episodic chapter structural heuristic & outro fallback detection.
     let file_name = target_pb
         .file_name()
         .and_then(|n| n.to_str())
@@ -760,7 +1153,24 @@ pub async fn execute_detect_intro_with_tools(
     let is_episodic = !req.sibling_paths.is_empty() || parse_episode_code(file_name).is_some();
     let struct_outcome =
         detect_intro_from_unnamed_chapter_structure(&req.chapters, req.duration_secs, is_episodic);
-    Ok(struct_outcome)
+    if found_outro.is_none() {
+        found_outro = struct_outcome.outro.clone();
+    }
+    if found_outro.is_none() {
+        found_outro = detect_missing_outro(
+            &req,
+            &target_pb,
+            &target_key,
+            &target_canon,
+            ffmpeg_exe,
+            mpv_exe,
+            controller,
+            path_options,
+            &cancel,
+        )
+        .await;
+    }
+    Ok(struct_outcome.with_outro(found_outro))
 }
 
 pub async fn execute_detect_intro(

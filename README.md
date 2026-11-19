@@ -4,9 +4,9 @@ Synchronized local watch-party desktop application for Windows 10/11 built with 
 
 ## Key Capabilities
 
-- **Zero-upload synchronized watch rooms:** Connect over Syncplay (`syncplay.pl:8999`, backup `:8998`, or custom servers) using either Epilod room codes (`XXXX-XXXX-XXXX`), literal Syncplay room names, and optional RAM-only session passwords.
-- **Native mpv playback engine:** Crisp embedded Windows child `HWND` playback with DPI-aware resize tracking, minimize/restore recovery, clean EOF replay, keyboard shortcuts (`e.code` layout-independent), and native file drag-and-drop.
-- **Arabic & multi-language subtitle tooling:** Automatic `UTF-8` / `Windows-1256` / `Windows-1252` / `Windows-1251` decoding, ASS override control, clean track-switch delay resets, and speech-envelope **Auto-Sync** (plus 2-point manual calibration fallback).
+- **Zero-upload synchronized watch rooms:** Connect over Syncplay (`syncplay.pl:8999`, backup `:8998`, or custom servers) using either Epilod room codes (`XXXX-XXXX-XXXX`), literal Syncplay room names, and optional RAM-only session passwords, with pinned recent rooms, per-member drift indicators, and optional auto-start when all ready.
+- **Native mpv playback engine:** Crisp embedded Windows child `HWND` playback with DPI-aware resize tracking, minimize/restore recovery, always-on-top & mini mode (`480×270`), global playback shortcuts, local playback resume, watched episode tracking & series continuation, clean EOF replay, keyboard shortcuts (`e.code` layout-independent), and native file drag-and-drop.
+- **Arabic & multi-language subtitle tooling:** Automatic `UTF-8` / `Windows-1256` / `Windows-1252` / `Windows-1251` decoding, RTL punctuation wrapping for Arabic SRT/VTT, ASS override control, dual subtitles (`secondary-sid`), per-file subtitle delay memory, clean track-switch delay resets, and speech-envelope **Auto-Sync** (plus 2-point manual calibration fallback).
 - **26 reliability hardening guards** across connection lifecycle, TLS framing, readiness/speed locking, managed controller rooms, subtitle extraction watchdogs, and WebView hardening.
 
 ## Repository Layout

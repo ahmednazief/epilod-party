@@ -285,6 +285,74 @@ test("resolveFollowPartyEpisode avoids mid-load interruptions and prevents bounc
   assert.equal(noBounceBack.action, "noop");
 });
 
+test("resolveFollowPartyEpisode prevents peer ping-pong loops, enforces controller authority, and trips burst breaker", async () => {
+  const { autoNext } = await loadBundle();
+  const items = [
+    ep(0, "Frieren.S01E01.mkv", "S01E01"),
+    ep(1, "Frieren.S01E02.mkv", "S01E02"),
+    ep(2, "Frieren.S01E03.mkv", "S01E03"),
+  ];
+  const now = 100_000;
+
+  // 1. Controller never follows a non-controller peer
+  const controllerIgnoresGuest = autoNext.resolveFollowPartyEpisode({
+    syncConnected: true,
+    followPartyEpisode: true,
+    participants: [
+      peer({ username: "Host", isController: true, fileName: "Frieren.S01E02.mkv" }),
+      peer({ username: "Guest", isController: false, fileName: "Frieren.S01E01.mkv" }),
+    ],
+    localUsername: "Host",
+    playlistItems: items,
+    playlistIndex: 1,
+    loadInFlight: false,
+    previousPeerFile: "Frieren.S01E02.mkv",
+    hasControllers: true,
+    localIsController: true,
+    nowMs: now,
+  });
+  assert.equal(controllerIgnoresGuest.action, "noop");
+
+  // 2. Peer catching up to Ep 2 after local user moved Ep 2 -> Ep 3 must NOT yank local user back to Ep 2
+  const noCatchUpBounce = autoNext.resolveFollowPartyEpisode({
+    syncConnected: true,
+    followPartyEpisode: true,
+    participants: [
+      peer({ username: "Friend", fileName: "Frieren.S01E02.mkv" }),
+    ],
+    localUsername: "Me",
+    playlistItems: items,
+    playlistIndex: 2,
+    loadInFlight: false,
+    previousPeerFile: "Frieren.S01E01.mkv",
+    recentLocalSwitches: [
+      { path: items[1].path, atMs: now - 1200, trigger: "manual" },
+      { path: items[2].path, atMs: now - 1200, trigger: "manual" },
+    ],
+    nowMs: now,
+  });
+  assert.equal(noCatchUpBounce.action, "noop");
+  assert.equal(noCatchUpBounce.nextPeerFile, "Frieren.S01E02.mkv");
+
+  // 3. Burst circuit breaker stops rapid follow loops (>= 3 follows within 6s)
+  const burstBlocked = autoNext.resolveFollowPartyEpisode({
+    syncConnected: true,
+    followPartyEpisode: true,
+    participants: [
+      peer({ username: "Friend", fileName: "Frieren.S01E03.mkv" }),
+    ],
+    localUsername: "Me",
+    playlistItems: items,
+    playlistIndex: 0,
+    loadInFlight: false,
+    previousPeerFile: "Frieren.S01E02.mkv",
+    recentFollowTimestamps: [now - 3000, now - 2000, now - 1000],
+    nowMs: now,
+  });
+  assert.equal(burstBlocked.action, "noop");
+  assert.equal(burstBlocked.nextPeerFile, "Frieren.S01E03.mkv");
+});
+
 test("mpv IPC, SyncStateMachine, and WatchRoom uphold auto-next loading and sync invariants", () => {
   const ipcRs = fs.readFileSync(path.join(REPO_ROOT, "src-tauri/src/mpv/ipc.rs"), "utf8");
   assert.equal(

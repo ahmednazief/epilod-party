@@ -99,6 +99,7 @@ export type SettingsTab =
   | "server"
   | "logs";
 export type SkipIntroMode = "off" | "manual" | "auto";
+export type OutroNextMode = "off" | "manual" | "auto";
 export type AutoFetchSubtitleMode = "missing" | "language" | "off";
 export type ChatTriggerPlacement = "playbar" | "edge";
 
@@ -116,10 +117,20 @@ interface AppState {
   allowNetworkShares: boolean;
   hideParticipants: boolean;
   hashFilenames: boolean;
+  autoFixFileMismatch: boolean;
+  rememberPlaybackPosition: boolean;
+  trackWatchedEpisodes: boolean;
+  fixArabicPunctuation: boolean;
+  alwaysOnTop: boolean;
+  miniMode: boolean;
+  globalShortcutsEnabled: boolean;
+  osdEnabled: boolean;
+  startWhenAllReady: boolean;
   reducedMotion: boolean;
   lowPowerMode: boolean;
   soundEffectsEnabled: boolean;
   skipIntroMode: SkipIntroMode;
+  outroNextMode: OutroNextMode;
   autoFetchSubtitles: AutoFetchSubtitleMode;
   preferredSubtitleLangs: string;
   openSubtitlesApiKey: string;
@@ -148,10 +159,20 @@ interface AppState {
   setAllowNetworkShares: (allow: boolean) => void;
   setHideParticipants: (hide: boolean) => void;
   setHashFilenames: (hash: boolean) => void;
+  setAutoFixFileMismatch: (enabled: boolean) => void;
+  setRememberPlaybackPosition: (enabled: boolean) => void;
+  setTrackWatchedEpisodes: (enabled: boolean) => void;
+  setFixArabicPunctuation: (enabled: boolean) => void;
+  setAlwaysOnTop: (enabled: boolean) => void;
+  setMiniMode: (enabled: boolean) => void;
+  setGlobalShortcutsEnabled: (enabled: boolean) => void;
+  setOsdEnabled: (enabled: boolean) => void;
+  setStartWhenAllReady: (enabled: boolean) => void;
   setReducedMotion: (reduced: boolean) => void;
   setLowPowerMode: (lowPower: boolean) => void;
   setSoundEffectsEnabled: (enabled: boolean) => void;
   setSkipIntroMode: (mode: SkipIntroMode) => void;
+  setOutroNextMode: (mode: OutroNextMode) => void;
   setAutoFetchSubtitles: (mode: AutoFetchSubtitleMode) => void;
   setPreferredSubtitleLangs: (langs: string) => void;
   setOpenSubtitlesApiKey: (apiKey: string) => void;
@@ -184,6 +205,14 @@ const initialAvatarId: AvatarId = isValidAvatarId(rawAvatarId) ? rawAvatarId : D
 const initialServer = sanitizeCustomServerEndpoint(readStorage("ep.server", DEFAULT_ENDPOINT)) || DEFAULT_ENDPOINT;
 const initialHideParticipants = readStorage("ep.hideViewers", "false") === "true";
 const initialHashFilenames = readStorage("ep.hashFilenames", "false") === "true";
+const initialAutoFixFileMismatch = readStorage("ep.autoFixFileMismatch", "true") !== "false";
+const initialRememberPlaybackPosition = readStorage("ep.rememberPlaybackPosition", "true") !== "false";
+const initialTrackWatchedEpisodes = readStorage("ep.trackWatchedEpisodes", "true") !== "false";
+const initialFixArabicPunctuation = readStorage("ep.fixArabicPunctuation", "true") !== "false";
+const initialAlwaysOnTop = readStorage("ep.alwaysOnTop", "false") === "true";
+const initialGlobalShortcutsEnabled = readStorage("ep.globalShortcutsEnabled", "false") === "true";
+const initialOsdEnabled = readStorage("ep.osdEnabled", "true") !== "false";
+const initialStartWhenAllReady = readStorage("ep.startWhenAllReady", "false") === "true";
 const initialReducedMotion = readStorage("ep.reducedMotion", "false") === "true";
 const initialLowPowerMode = readStorage("ep.lowPowerMode", "false") === "true";
 const initialAllowShares = readStorage("ep.allowNetworkShares", "false") === "true";
@@ -201,8 +230,17 @@ function readInitialSkipIntroMode(): SkipIntroMode {
   return "manual";
 }
 
+function readInitialOutroNextMode(): OutroNextMode {
+  const saved = readStorage("ep.outroNextMode", "");
+  if (saved === "off" || saved === "manual" || saved === "auto") {
+    return saved;
+  }
+  return "manual";
+}
+
 const initialSoundEffectsEnabled = readStorage("ep.soundEffects", "true") !== "false";
 const initialSkipIntroMode = readInitialSkipIntroMode();
+const initialOutroNextMode = readInitialOutroNextMode();
 const initialAutoFetchSubtitles: AutoFetchSubtitleMode = (() => {
   const saved = readStorage("ep.autoFetchSubs", "missing");
   if (saved === "missing" || saved === "language" || saved === "off") return saved;
@@ -252,10 +290,20 @@ export const useAppStore = create<AppState>((set) => ({
   allowNetworkShares: initialAllowShares,
   hideParticipants: initialHideParticipants,
   hashFilenames: initialHashFilenames,
+  autoFixFileMismatch: initialAutoFixFileMismatch,
+  rememberPlaybackPosition: initialRememberPlaybackPosition,
+  trackWatchedEpisodes: initialTrackWatchedEpisodes,
+  fixArabicPunctuation: initialFixArabicPunctuation,
+  alwaysOnTop: initialAlwaysOnTop,
+  miniMode: false,
+  globalShortcutsEnabled: initialGlobalShortcutsEnabled,
+  osdEnabled: initialOsdEnabled,
+  startWhenAllReady: initialStartWhenAllReady,
   reducedMotion: initialReducedMotion,
   lowPowerMode: initialLowPowerMode,
   soundEffectsEnabled: initialSoundEffectsEnabled,
   skipIntroMode: initialSkipIntroMode,
+  outroNextMode: initialOutroNextMode,
   autoFetchSubtitles: initialAutoFetchSubtitles,
   preferredSubtitleLangs: initialPreferredSubtitleLangs,
   openSubtitlesApiKey: initialOpenSubtitlesApiKey,
@@ -328,6 +376,48 @@ export const useAppStore = create<AppState>((set) => ({
     set({ hashFilenames });
   },
 
+  setAutoFixFileMismatch: (autoFixFileMismatch) => {
+    writeStorage("ep.autoFixFileMismatch", autoFixFileMismatch ? "true" : "false");
+    set({ autoFixFileMismatch });
+  },
+
+  setRememberPlaybackPosition: (rememberPlaybackPosition) => {
+    writeStorage("ep.rememberPlaybackPosition", rememberPlaybackPosition ? "true" : "false");
+    set({ rememberPlaybackPosition });
+  },
+
+  setTrackWatchedEpisodes: (trackWatchedEpisodes) => {
+    writeStorage("ep.trackWatchedEpisodes", trackWatchedEpisodes ? "true" : "false");
+    set({ trackWatchedEpisodes });
+  },
+
+  setFixArabicPunctuation: (fixArabicPunctuation) => {
+    writeStorage("ep.fixArabicPunctuation", fixArabicPunctuation ? "true" : "false");
+    set({ fixArabicPunctuation });
+  },
+
+  setAlwaysOnTop: (alwaysOnTop) => {
+    writeStorage("ep.alwaysOnTop", alwaysOnTop ? "true" : "false");
+    set({ alwaysOnTop });
+  },
+
+  setMiniMode: (miniMode) => set({ miniMode }),
+
+  setGlobalShortcutsEnabled: (globalShortcutsEnabled) => {
+    writeStorage("ep.globalShortcutsEnabled", globalShortcutsEnabled ? "true" : "false");
+    set({ globalShortcutsEnabled });
+  },
+
+  setOsdEnabled: (osdEnabled) => {
+    writeStorage("ep.osdEnabled", osdEnabled ? "true" : "false");
+    set({ osdEnabled });
+  },
+
+  setStartWhenAllReady: (startWhenAllReady) => {
+    writeStorage("ep.startWhenAllReady", startWhenAllReady ? "true" : "false");
+    set({ startWhenAllReady });
+  },
+
   setReducedMotion: (reducedMotion) => {
     writeStorage("ep.reducedMotion", reducedMotion ? "true" : "false");
     applyReducedMotionAttribute(reducedMotion);
@@ -346,6 +436,10 @@ export const useAppStore = create<AppState>((set) => ({
   setSkipIntroMode: (skipIntroMode) => {
     writeStorage("ep.skipIntroMode", skipIntroMode);
     set({ skipIntroMode });
+  },
+  setOutroNextMode: (outroNextMode) => {
+    writeStorage("ep.outroNextMode", outroNextMode);
+    set({ outroNextMode });
   },
 
   setAutoFetchSubtitles: (autoFetchSubtitles) => {

@@ -934,7 +934,7 @@ pub fn parse_cinemeta_search_results(
             score,
         });
     }
-    matches.sort_by(|a, b| b.score.cmp(&a.score));
+    matches.sort_by_key(|b| std::cmp::Reverse(b.score));
     matches
 }
 
@@ -998,7 +998,7 @@ pub fn parse_imdb_suggestion_results(json_str: &str, parsed: &ParsedMediaQuery) 
             score,
         });
     }
-    matches.sort_by(|a, b| b.score.cmp(&a.score));
+    matches.sort_by_key(|b| std::cmp::Reverse(b.score));
     matches
 }
 
@@ -1077,6 +1077,7 @@ fn release_similarity_bonus(release_a: &str, release_b: &str) -> i32 {
     score.min(600)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_candidate(
     lang: &str,
     match_kind: &str,
@@ -1167,7 +1168,7 @@ pub fn parse_stremio_subtitles_response(
         });
         let fps = raw
             .fps_milli
-            .filter(|&f| f >= 15_000 && f <= 120_000)
+            .filter(|&f| (15_000..=120_000).contains(&f))
             .map(|f| (f as f64) / 1000.0);
         let id = raw
             .id

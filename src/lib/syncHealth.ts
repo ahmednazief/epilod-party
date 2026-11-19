@@ -119,3 +119,39 @@ export function computeRoomSyncHealth(params: {
     statusLabel: needsResync ? `Drift ${maxDriftSecs.toFixed(1)}s` : "In sync",
   };
 }
+
+export interface ParticipantDriftInfo {
+  deltaSecs: number;
+  absSecs: number;
+  level: "ok" | "warn" | "bad";
+  label: string;
+  detail: string;
+}
+
+export function computeParticipantDrift(
+  participant: Pick<Participant, "fileName" | "fileMatch" | "position">,
+  referencePositionSecs: number,
+): ParticipantDriftInfo | null {
+  if (!participant.fileName || participant.fileMatch === "noFile") {
+    return null;
+  }
+  if (
+    !Number.isFinite(participant.position) ||
+    participant.position <= 0 ||
+    !Number.isFinite(referencePositionSecs) ||
+    referencePositionSecs <= 0
+  ) {
+    return null;
+  }
+  const deltaSecs = participant.position - referencePositionSecs;
+  const absSecs = Math.abs(deltaSecs);
+  const level: "ok" | "warn" | "bad" = absSecs < 0.5 ? "ok" : absSecs < 2.0 ? "warn" : "bad";
+  const sign = deltaSecs >= 0 ? "+" : "-";
+  return {
+    deltaSecs,
+    absSecs,
+    level,
+    label: level === "ok" ? "In sync" : "Playback drift",
+    detail: `${sign}${absSecs.toFixed(1)}s vs room`,
+  };
+}

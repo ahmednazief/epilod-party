@@ -1070,14 +1070,9 @@ export const TransportBar = memo(function TransportBar({
       {(chatTriggerPlacement === "playbar" || reactionsEnabled) && (() => {
         const showChat = chatTriggerPlacement === "playbar";
         const showReactions = reactionsEnabled;
-        const hasBoth = showChat && showReactions;
-        const halfWidth = isMini ? "w-7.5" : "w-8.5";
+        const circleDim = isMini ? "h-7 w-7" : "h-7.5 w-7.5";
         return (
-          <div
-            className={`ep-party-social-pill ${
-              isMini ? "h-7" : "h-7.5"
-            } rounded-full inline-flex items-center shrink-0`}
-          >
+          <div className="inline-flex items-center gap-1.5 shrink-0">
             {showChat && (
               <button
                 type="button"
@@ -1086,9 +1081,7 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleChat?.()}
                 aria-label="Party chat"
                 title="Party Chat (C)"
-                className={`ep-party-social-half relative h-full ${halfWidth} ${
-                  hasBoth ? "rounded-l-full rounded-r-none" : "rounded-full"
-                } inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                className={`ep-bar-pill ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
                   chatOpen
                     ? "ep-droplet-indicator text-white"
                     : "text-secondary hover:text-white"
@@ -1100,23 +1093,16 @@ export const TransportBar = memo(function TransportBar({
                   className="shrink-0"
                 />
                 {unreadChatCount > 0 && !chatOpen ? (
-                  <span className="anim-pop-in absolute -top-1 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
+                  <span className="anim-pop-in absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
                     {unreadChatCount > 9 ? "9+" : unreadChatCount}
                   </span>
                 ) : chatTypingCount > 0 && !chatOpen ? (
                   <span
                     aria-hidden="true"
-                    className="absolute top-1 right-1 h-2 w-2 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
+                    className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
                   />
                 ) : null}
               </button>
-            )}
-
-            {hasBoth && (
-              <span
-                aria-hidden="true"
-                className="w-px h-3.5 bg-white/[0.14] shrink-0"
-              />
             )}
 
             {showReactions && (
@@ -1127,9 +1113,7 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleTab("reactions")}
                 aria-label="Live party reactions"
                 title="Live party reactions (E, or keys 1–7)"
-                className={`ep-party-social-half ep-reaction-icon-btn h-full ${halfWidth} ${
-                  hasBoth ? "rounded-r-full rounded-l-none" : "rounded-full"
-                } inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                className={`ep-bar-pill ep-press ep-reaction-icon-btn ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
                   activeTab === "reactions" ? "ep-droplet-indicator" : ""
                 }`}
               >
@@ -1568,7 +1552,7 @@ export const TransportBar = memo(function TransportBar({
         type="button"
         onClick={onToggleFullscreen}
         aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-        title="Fullscreen (F)"
+        title="Fullscreen (F / Enter)"
         className={`ep-bar-icon-btn ${iconBtnSize} rounded-full flex items-center justify-center shrink-0 text-secondary hover:text-white cursor-pointer`}
       >
         <PlayerFullscreenIcon

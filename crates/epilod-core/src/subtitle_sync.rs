@@ -212,6 +212,105 @@ pub fn decode_subtitle_bytes(bytes: &[u8]) -> Result<String, SubtitleSyncError> 
     decode_subtitle_bytes_with_hint(bytes, SubtitleEncodingHint::Auto)
 }
 
+pub fn contains_arabic(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{0600}'..='\u{06FF}'
+                | '\u{0750}'..='\u{077F}'
+                | '\u{08A0}'..='\u{08FF}'
+                | '\u{FB50}'..='\u{FDFF}'
+                | '\u{FE70}'..='\u{FEFF}'
+        )
+    })
+}
+
+fn is_rtl_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | '!' | '?' | ',' | ':' | ';' | '؟' | '،' | '؛' | '…'
+    )
+}
+
+/// Wraps an Arabic SRT/VTT dialogue line with RLE/PDF (`\u{202B}...\u{202C}`)
+/// and moves any leading ASCII/Arabic sentence-ending punctuation (from flipped LTR files)
+/// back to the logical end while preserving leading ASS override tags like `{\an8}`.
+pub fn fix_rtl_punctuation_line(line: &str) -> String {
+    let trimmed = line.trim_end_matches('\r');
+    if trimmed.is_empty() || !contains_arabic(trimmed) {
+        return line.to_string();
+    }
+    if trimmed.contains('\u{202B}') || trimmed.contains('\u{200F}') {
+        return line.to_string();
+    }
+
+    // Preserve any leading ASS override block `{...}` untouched
+    let (prefix, body) = if let Some(rest) = trimmed.strip_prefix('{') {
+        if let Some(end_brace) = rest.find('}') {
+            let split_at = end_brace + 2;
+            (&trimmed[..split_at], &trimmed[split_at..])
+        } else {
+            ("", trimmed)
+        }
+    } else {
+        ("", trimmed)
+    };
+
+    if body.is_empty() || !contains_arabic(body) {
+        return line.to_string();
+    }
+
+    // If the line starts with punctuation followed by Arabic (e.g. ".مرحبا" or "...مرحبا"),
+    // move that punctuation to the logical end before wrapping in RLE/PDF.
+    let leading_punct_end = body
+        .char_indices()
+        .take_while(|&(_, c)| is_rtl_punctuation(c))
+        .last()
+        .map(|(idx, c)| idx + c.len_utf8())
+        .unwrap_or(0);
+
+    let reordered = if leading_punct_end > 0 && leading_punct_end < body.len() {
+        let rest = body[leading_punct_end..].trim_start();
+        if contains_arabic(rest) {
+            format!("{rest}{}", &body[..leading_punct_end])
+        } else {
+            body.to_string()
+        }
+    } else {
+        body.to_string()
+    };
+
+    format!("{prefix}\u{202B}{reordered}\u{202C}")
+}
+
+/// Fixes RTL punctuation on SRT/VTT subtitles only (leaves ASS/SSA untouched).
+pub fn fix_rtl_subtitles(content: &str, ext: &str) -> String {
+    if !ext.eq_ignore_ascii_case("srt") && !ext.eq_ignore_ascii_case("vtt") {
+        return content.to_string();
+    }
+    if !contains_arabic(content) {
+        return content.to_string();
+    }
+    let mut out = Vec::new();
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        let is_metadata = trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("WEBVTT")
+            || trimmed.contains("-->")
+            || trimmed.chars().all(|c| c.is_ascii_digit());
+        if is_metadata {
+            out.push(raw_line.to_string());
+        } else {
+            out.push(fix_rtl_punctuation_line(raw_line));
+        }
+    }
+    let mut joined = out.join("\n");
+    if content.ends_with('\n') && !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Fix 25: Decode UTF-8, UTF-16 LE/BE, Windows-1256 (Arabic), Windows-1252 (Western), and Windows-1251 (Cyrillic).
 pub fn decode_subtitle_bytes_with_hint(
     bytes: &[u8],
@@ -3714,5 +3813,19 @@ mod tests {
             outcome.correlation,
             outcome.confidence_z
         );
+    }
+
+    #[test]
+    fn fix_rtl_subtitles_handles_mixed_arabic_numbers_english_and_skips_ass() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nمرحبا بكم في 2026!\n...أهلاً World\n\n2\n00:00:04,000 --> 00:00:06,000\n{\\an8}كيف حالك؟\nPlain English line.\n";
+        let fixed = fix_rtl_subtitles(srt, "srt");
+        assert!(fixed.contains("\u{202B}مرحبا بكم في 2026!\u{202C}"));
+        assert!(fixed.contains("\u{202B}أهلاً World...\u{202C}"));
+        assert!(fixed.contains("{\\an8}\u{202B}كيف حالك؟\u{202C}"));
+        assert!(fixed.contains("\nPlain English line.\n"));
+
+        // ASS files must remain untouched
+        let ass = "[Events]\nDialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\an8}مرحبا!\n";
+        assert_eq!(fix_rtl_subtitles(ass, "ass"), ass);
     }
 }

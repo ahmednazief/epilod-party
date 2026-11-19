@@ -21,6 +21,7 @@ import {
 import { PlayerPauseIcon } from "./ui/PlayerIcons";
 import { MenuEncodingIcon } from "./ui/MenuIcons";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { isDesktop, safeInvoke } from "../lib/bridge";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { mpvSetSubStyle, safeMpvCall, setAllowNetworkShares } from "../lib/mpv";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
@@ -36,12 +37,16 @@ import {
   useAppStore,
   type AutoFetchSubtitleMode,
   type ChatTriggerPlacement,
+  type OutroNextMode,
   type SettingsTab,
   type SkipIntroMode,
 } from "../store/useAppStore";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { useRecentRoomsStore } from "../store/useRecentRoomsStore";
+import { useResumeStore } from "../store/useResumeStore";
+import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
 import {
   buildSubStyleParams,
   PREFERRED_SUBTITLE_LANG_OPTIONS,
@@ -49,12 +54,14 @@ import {
 } from "../store/useSubtitleStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import {
+  acquireMicMonitorSurface,
   domEventModifiersMask,
   domEventToWindowsVk,
   formatVoiceHotkey,
   onVoiceCalibration,
   onVoiceDevicesChanged,
   onVoiceLevel,
+  releaseMicMonitorSurface,
   validateVoiceHotkey,
   voiceGetDiagnostics,
   voiceGetReport,
@@ -169,10 +176,18 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const allowNetworkShares = useAppStore((s) => s.allowNetworkShares);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const hashFilenames = useAppStore((s) => s.hashFilenames);
+  const autoFixFileMismatch = useAppStore((s) => s.autoFixFileMismatch);
+  const rememberPlaybackPosition = useAppStore((s) => s.rememberPlaybackPosition);
+  const trackWatchedEpisodes = useAppStore((s) => s.trackWatchedEpisodes);
+  const fixArabicPunctuation = useAppStore((s) => s.fixArabicPunctuation);
+  const globalShortcutsEnabled = useAppStore((s) => s.globalShortcutsEnabled);
+  const osdEnabled = useAppStore((s) => s.osdEnabled);
+  const startWhenAllReady = useAppStore((s) => s.startWhenAllReady);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const lowPowerMode = useAppStore((s) => s.lowPowerMode);
   const soundEffectsEnabled = useAppStore((s) => s.soundEffectsEnabled);
   const skipIntroMode = useAppStore((s) => s.skipIntroMode);
+  const outroNextMode = useAppStore((s) => s.outroNextMode);
   const autoFetchSubtitles = useAppStore((s) => s.autoFetchSubtitles);
   const preferredSubtitleLangs = useAppStore((s) => s.preferredSubtitleLangs);
   const openSubtitlesApiKey = useAppStore((s) => s.openSubtitlesApiKey);
@@ -191,10 +206,18 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setStoreAllowShares = useAppStore((s) => s.setAllowNetworkShares);
   const setHideParticipants = useAppStore((s) => s.setHideParticipants);
   const setHashFilenames = useAppStore((s) => s.setHashFilenames);
+  const setAutoFixFileMismatch = useAppStore((s) => s.setAutoFixFileMismatch);
+  const setRememberPlaybackPosition = useAppStore((s) => s.setRememberPlaybackPosition);
+  const setTrackWatchedEpisodes = useAppStore((s) => s.setTrackWatchedEpisodes);
+  const setFixArabicPunctuation = useAppStore((s) => s.setFixArabicPunctuation);
+  const setGlobalShortcutsEnabled = useAppStore((s) => s.setGlobalShortcutsEnabled);
+  const setOsdEnabled = useAppStore((s) => s.setOsdEnabled);
+  const setStartWhenAllReady = useAppStore((s) => s.setStartWhenAllReady);
   const setReducedMotion = useAppStore((s) => s.setReducedMotion);
   const setLowPowerMode = useAppStore((s) => s.setLowPowerMode);
   const setSoundEffectsEnabled = useAppStore((s) => s.setSoundEffectsEnabled);
   const setSkipIntroMode = useAppStore((s) => s.setSkipIntroMode);
+  const setOutroNextMode = useAppStore((s) => s.setOutroNextMode);
   const setAutoFetchSubtitles = useAppStore((s) => s.setAutoFetchSubtitles);
   const setPreferredSubtitleLangs = useAppStore((s) => s.setPreferredSubtitleLangs);
   const setOpenSubtitlesApiKey = useAppStore((s) => s.setOpenSubtitlesApiKey);
@@ -356,8 +379,14 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     }
   }, [open, serverEndpoint, serverPassword, initUpdater, tab]);
 
+  const wasVoiceTabOpenRef = useRef(false);
+
   useEffect(() => {
     if (open && tab === "voice") {
+      if (!wasVoiceTabOpenRef.current) {
+        wasVoiceTabOpenRef.current = true;
+        acquireMicMonitorSurface();
+      }
       let active = true;
       let unlistenLevel: (() => void) | null = null;
       let unlistenCal: (() => void) | null = null;
@@ -402,7 +431,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
         })
         .catch(() => undefined);
       if (voiceEnabled) {
-        void voiceStartMicMonitor(voiceMicTestActive).catch(() => undefined);
+        void voiceStartMicMonitor(useVoiceStore.getState().micTestActive).catch(() => undefined);
       }
       void voiceGetDiagnostics()
         .then((diag) => {
@@ -423,13 +452,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
         unlistenDev?.();
         window.clearInterval(iv);
       };
-    } else {
+    } else if (wasVoiceTabOpenRef.current) {
+      wasVoiceTabOpenRef.current = false;
       setCapturingBind(null);
       setHotkeyMessage(null);
-      if (voiceMicTestActive) {
-        setVoiceMicTestActive(false);
+      if (releaseMicMonitorSurface() === 0) {
+        if (useVoiceStore.getState().micTestActive) {
+          setVoiceMicTestActive(false);
+        }
+        void voiceStopMicMonitor().catch(() => undefined);
       }
-      void voiceStopMicMonitor().catch(() => undefined);
     }
   }, [
     open,
@@ -437,13 +469,26 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     voiceEnabled,
     voiceInputDevice,
     voiceOutputDevice,
-    voiceMicTestActive,
     setVoiceDevices,
     setVoiceMicTestActive,
     setVoiceCalibration,
     updateVoiceConfig,
     pushNote,
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (wasVoiceTabOpenRef.current) {
+        wasVoiceTabOpenRef.current = false;
+        if (releaseMicMonitorSurface() === 0) {
+          if (useVoiceStore.getState().micTestActive) {
+            setVoiceMicTestActive(false);
+          }
+          void voiceStopMicMonitor().catch(() => undefined);
+        }
+      }
+    };
+  }, [setVoiceMicTestActive]);
 
   useEffect(() => {
     if (!capturingBind) return;
@@ -830,6 +875,89 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   />
                 </div>
 
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">Next Episode on Outro</div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Detect ending credits and show the Next Episode pill, or advance automatically.
+                    </div>
+                  </div>
+                  <SegmentedTabs<OutroNextMode>
+                    ariaLabel="Next Episode on Outro mode"
+                    size="sm"
+                    fullWidth
+                    value={outroNextMode}
+                    onChange={setOutroNextMode}
+                    items={[
+                      { value: "off", label: "Off" },
+                      { value: "manual", label: "Manual" },
+                      { value: "auto", label: "Auto-Next" },
+                    ]}
+                  />
+                </div>
+
+                <ComfortSwitchRow
+                  title="Remember playback position"
+                  description="Save your place for each video and resume automatically when playing solo."
+                  checked={rememberPlaybackPosition}
+                  onChange={setRememberPlaybackPosition}
+                />
+
+                <ComfortSwitchRow
+                  title="Track watched episodes"
+                  description="Mark episodes as watched after 90% and remember your series progress locally."
+                  checked={trackWatchedEpisodes}
+                  onChange={setTrackWatchedEpisodes}
+                />
+
+                <ComfortSwitchRow
+                  title="Fix Arabic punctuation"
+                  description="Wrap Arabic SRT/VTT lines with RTL markers so punctuation and mixed numbers render in order."
+                  checked={fixArabicPunctuation}
+                  onChange={setFixArabicPunctuation}
+                />
+
+                <ComfortSwitchRow
+                  title="Global shortcuts (Ctrl+Alt+Space / ← / →)"
+                  description="Play/pause and seek 10s even when Epilod Party is not in focus."
+                  checked={globalShortcutsEnabled}
+                  onChange={(enabled) => {
+                    setGlobalShortcutsEnabled(enabled);
+                    if (!isDesktop()) return;
+                    void safeInvoke("set_global_shortcuts_enabled", { enabled }).catch((err) => {
+                      setGlobalShortcutsEnabled(!enabled);
+                      pushNote("error", err instanceof Error ? err.message : String(err));
+                    });
+                  }}
+                />
+
+                <ComfortSwitchRow
+                  title="On-screen video notices (OSD)"
+                  description="Show brief overlay notices on the video when friends join, leave, or pause."
+                  checked={osdEnabled}
+                  onChange={setOsdEnabled}
+                />
+
+                <div className="px-3 py-2 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-white">Watch history</div>
+                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
+                      Clear saved resume positions and watched episode marks.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      useResumeStore.getState().clearAll();
+                      useSeriesProgressStore.getState().clearAll();
+                      useRecentRoomsStore.getState().clearSeriesLinks();
+                    }}
+                    className="ep-press px-3 h-8 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-xs font-medium text-secondary hover:text-white shrink-0 cursor-pointer"
+                  >
+                    Clear watch history
+                  </button>
+                </div>
+
                 <ComfortSwitchRow
                   title="Bold Subtitle Font"
                   description="Use a bolder caption weight for both Arabic and Latin subtitles."
@@ -999,6 +1127,20 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   description="Keep your local movie filename private from party servers."
                   checked={hashFilenames}
                   onChange={setHashFilenames}
+                />
+
+                <ComfortSwitchRow
+                  title="Auto-fix file differences"
+                  description="Automatically match known frame-rate differences (like 23.976 vs 25 fps) with a one-click Undo."
+                  checked={autoFixFileMismatch}
+                  onChange={setAutoFixFileMismatch}
+                />
+
+                <ComfortSwitchRow
+                  title="Start when all ready"
+                  description="Automatically start playback 2 seconds after everyone in the room marks Ready."
+                  checked={startWhenAllReady}
+                  onChange={setStartWhenAllReady}
                 />
               </div>
             )}
@@ -1804,10 +1946,42 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   <p className="text-[11px] text-muted truncate">
                     {logsPath || "In-memory session log (latest 150 events)"}
                   </p>
-                  <Button variant="secondary" size="sm" onClick={() => void loadLogs()}>
-                    <AppResetIcon clockwise size={14} className={logsLoading ? "animate-spin" : ""} />
-                    Refresh
-                  </Button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        const redact = (s: string) =>
+                          s
+                            .replace(/[A-Za-z]:\\Users\\[^\\/\s]+/gi, "C:\\Users\\<redacted>")
+                            .replace(/\/(Users|home)\/[^/\s]+/g, "/$1/<redacted>")
+                            .replace(/(password\s*[:=]\s*)\S+/gi, "$1<redacted>");
+                        const lines = logs
+                          .slice(-200)
+                          .map(
+                            (e) =>
+                              `[${new Date(e.tsMs).toISOString()}] [${e.level.toUpperCase()}] [${e.target}] ${redact(e.message)}`,
+                          );
+                        const report = [
+                          `Epilod Party Diagnostic Report`,
+                          `App Version: ${updateStatus?.currentVersion ?? "unknown"}`,
+                          `Platform: ${typeof navigator !== "undefined" ? navigator.userAgent : "unknown"}`,
+                          `--- Recent Logs (${lines.length}) ---`,
+                          ...lines,
+                        ].join("\n");
+                        void navigator.clipboard
+                          ?.writeText(report)
+                          .then(() => pushNote("success", "Diagnostic report copied (paths & passwords redacted)."))
+                          .catch(() => pushNote("error", "Could not copy diagnostic report."));
+                      }}
+                    >
+                      Copy diagnostic report
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => void loadLogs()}>
+                      <AppResetIcon clockwise size={14} className={logsLoading ? "animate-spin" : ""} />
+                      Refresh
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="ep-glass-tray h-64 overflow-hidden rounded-2xl py-2 flex flex-col">

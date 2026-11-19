@@ -171,6 +171,7 @@ export function toggleVoiceMute(): boolean {
   const store = useVoiceStore.getState();
   const next = !store.muted;
   store.setMuted(next);
+  store.flashMicCue(next);
   playSoundCue(next ? "micMuted" : "micUnmuted", { moviePlaying: isMovieActivelyPlaying() });
   return next;
 }
