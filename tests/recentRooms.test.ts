@@ -59,7 +59,7 @@ async function loadRecentRoomsBundle() {
   }
 }
 
-test("useRecentRoomsStore keeps max 10, sorts pinned first, and never stores passwords", async () => {
+test("useRecentRoomsStore keeps max 3 unpinned recent rooms, sorts pinned first, and never stores passwords", async () => {
   const store = installMockLocalStorage();
   const mod = await loadRecentRoomsBundle();
   mod.useRecentRoomsStore.getState().clearAll();
@@ -84,7 +84,8 @@ test("useRecentRoomsStore keeps max 10, sorts pinned first, and never stores pas
   }
 
   const rooms = mod.useRecentRoomsStore.getState().rooms;
-  assert.equal(rooms.length, 10);
+  assert.equal(rooms.length, 4);
+  assert.equal(rooms.filter((r: { pinned: boolean }) => !r.pinned).length, 3);
   assert.equal(rooms[0].id, firstId);
   assert.equal(rooms[0].pinned, true);
   assert.equal(rooms[0].nickname, "Friday Night");
@@ -190,4 +191,51 @@ test("useRecentRoomsStore normalizes default port :8999, keeps unpinned slots wh
   );
   assert.equal(mod.useRecentRoomsStore.getState().storageError, false);
   assert.ok(store.has("epilod.v1.recentRooms"));
+});
+
+test("getRecentRoomMediaLabel extracts show, episode, or movie names for room differentiation", async () => {
+  installMockLocalStorage();
+  const mod = await loadRecentRoomsBundle();
+
+  const seriesMap = {
+    series_sev: {
+      seriesKey: "series_sev",
+      folderPath: "D:\\Shows\\Severance.S02.1080p",
+      folderName: "Severance.S02.1080p",
+      lastEpisodeKey: "S02E03",
+      watchedKeys: ["S02E01", "S02E02"],
+      updatedAt: 1000,
+    },
+  };
+
+  assert.equal(
+    mod.getRecentRoomMediaLabel(
+      { seriesKey: "series_sev", lastFilePath: "D:\\Shows\\Severance.S02.1080p\\ep3.mkv" },
+      seriesMap,
+    ),
+    "Severance · Season 2",
+  );
+
+  assert.equal(
+    mod.getRecentRoomMediaLabel(
+      { lastFilePath: "D:\\Shows\\Breaking.Bad.S05E14.Ozymandias.1080p.BluRay.mkv" },
+      seriesMap,
+    ),
+    "Breaking Bad · S05E14",
+  );
+
+  assert.equal(
+    mod.getRecentRoomMediaLabel(
+      { lastFilePath: "D:\\Movies\\Inception.2010.1080p.BluRay.x264.mkv" },
+      seriesMap,
+    ),
+    "Inception 2010",
+  );
+
+  assert.equal(
+    mod.getRecentRoomMediaLabel({}, seriesMap, "Dune.Part.Two.2024.2160p.WEB-DL.mkv"),
+    "Dune Part Two 2024",
+  );
+
+  assert.equal(mod.getRecentRoomMediaLabel({}, seriesMap), null);
 });

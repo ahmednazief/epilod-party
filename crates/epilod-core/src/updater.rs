@@ -10,6 +10,12 @@ use thiserror::Error;
 
 pub const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const EMBEDDED_UPDATE_PUBKEY_HEX: Option<&str> = option_env!("EPILOD_UPDATE_PUBKEY");
+
+#[cfg(all(feature = "require-signed-updates", not(test)))]
+const _: &str = env!(
+    "EPILOD_UPDATE_PUBKEY",
+    "EPILOD_UPDATE_PUBKEY must be set when building with --features require-signed-updates"
+);
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/ahmednazief/epilod-party/releases/latest/download/epilod-update-manifest.json";
 pub const DEFAULT_RELEASES_API_URL: &str =

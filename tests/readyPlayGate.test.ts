@@ -240,7 +240,7 @@ test("UI components wire unified play-block & peer-not-ready handlers cleanly", 
   assert.equal(transportSrc.includes(" · Not Ready"), true);
   // Play button must NOT disable on playBlock.blocked so clicking it shows who isn't ready
   assert.match(transportSrc, /disabled=\{!loaded \|\| ctrlLock\.lockedForLocalUser\}/);
-  assert.match(transportSrc, /\{activeTab === null &&[\s\S]*feedback \?/);
+  assert.match(transportSrc, /\{activeTab === null &&[\s\S]*playBlock\.blocked/);
 
   assert.equal(shortcutsSrc.includes("toggleReadyStatus()"), true);
   assert.equal(shortcutsSrc.includes("togglePlayback({ showFeedback: true })"), true);

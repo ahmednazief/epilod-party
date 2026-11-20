@@ -1,8 +1,12 @@
+import { useEffect, useState } from "react";
 import type { PartyFileMismatch } from "../lib/fileMismatch";
+import type { LocalMatchCandidate } from "../lib/localLibrary";
 import { usePresencePayload } from "../lib/useAnimatedPresence";
 import { useNotificationStore } from "../store/useNotificationStore";
+import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import {
   AppAlertIcon,
+  AppChevronIcon,
   AppCloseIcon,
   AppFolderIcon,
   AppSeasonFolderIcon,
@@ -16,11 +20,14 @@ import {
 
 interface FileMismatchBannerProps {
   mismatch: PartyFileMismatch | null;
+  localMatches?: LocalMatchCandidate[];
+  searchingLocalMatches?: boolean;
   showWindowBar: boolean;
   inline?: boolean;
   onChooseFile: () => void;
   onChooseFolder?: () => void;
   onSwitchEpisode?: (index: number) => void;
+  onOpenLocalMatch?: (candidate: LocalMatchCandidate) => void;
   onMatchFps?: (scale: number, label: string | null) => void;
   onAlignScene?: () => void;
   onDismiss: () => void;
@@ -28,23 +35,38 @@ interface FileMismatchBannerProps {
 
 export function FileMismatchBanner({
   mismatch,
+  localMatches = [],
+  searchingLocalMatches = false,
   showWindowBar,
   inline = false,
   onChooseFile,
   onChooseFolder,
   onSwitchEpisode,
+  onOpenLocalMatch,
   onMatchFps,
   onAlignScene,
   onDismiss,
 }: FileMismatchBannerProps) {
   const notificationCount = useNotificationStore((s) => s.items.length);
   const presence = usePresencePayload(mismatch, 180);
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const mismatchSig = mismatch?.signature ?? null;
+  useEffect(() => {
+    setSelectedIdx(0);
+    setPickerOpen(false);
+  }, [mismatchSig, localMatches.length]);
 
   if (!presence.mounted || !presence.value) {
     return null;
   }
 
   const item = presence.value;
+  const activeLocalMatch =
+    !item.matchedPlaylistItem && localMatches.length > 0
+      ? localMatches[Math.min(selectedIdx, localMatches.length - 1)]
+      : null;
   const topClass =
     notificationCount >= 2
       ? "top-28"
@@ -147,6 +169,43 @@ export function FileMismatchBanner({
               </button>
             )}
 
+            {activeLocalMatch && onOpenLocalMatch && (
+              <>
+                <button
+                  type="button"
+                  title={`${activeLocalMatch.path}\n${activeLocalMatch.reason}`}
+                  onClick={() => onOpenLocalMatch(activeLocalMatch)}
+                  className="ep-warning-action ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-semibold text-white cursor-pointer max-w-[270px]"
+                >
+                  <PlayerPlayIcon size={11} className="shrink-0" />
+                  <span className="truncate">
+                    {activeLocalMatch.isCloudPlaceholder
+                      ? `Download & Sync: ${activeLocalMatch.fileName}`
+                      : `Open & Sync: ${activeLocalMatch.fileName}`}
+                  </span>
+                </button>
+                {localMatches.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen((v) => !v)}
+                    aria-expanded={pickerOpen}
+                    className="ep-bar-pill h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium text-secondary hover:text-white cursor-pointer"
+                  >
+                    <span>{localMatches.length} matches</span>
+                    <AppChevronIcon
+                      direction="right"
+                      size={10}
+                      className={`transition-transform duration-150 ${pickerOpen ? "rotate-90" : ""}`}
+                    />
+                  </button>
+                )}
+              </>
+            )}
+
+            {!activeLocalMatch && searchingLocalMatches && !item.matchedPlaylistItem && (
+              <span className="text-[10.5px] text-muted px-1">Searching your PC…</span>
+            )}
+
             {showFpsButton && (
               <button
                 type="button"
@@ -177,7 +236,7 @@ export function FileMismatchBanner({
               type="button"
               onClick={onChooseFile}
               className={`${
-                item.matchedPlaylistItem || showFpsButton || showAlignButton
+                item.matchedPlaylistItem || activeLocalMatch || showFpsButton || showAlignButton
                   ? "ep-bar-pill text-secondary hover:text-white"
                   : "ep-warning-action ep-press text-white font-semibold"
               } h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer`}
@@ -188,17 +247,54 @@ export function FileMismatchBanner({
               </span>
             </button>
 
-            {item.kind === "notOpenOnPc" && !item.matchedPlaylistItem && onChooseFolder && (
-              <button
-                type="button"
-                onClick={onChooseFolder}
-                className="ep-bar-pill h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
-              >
-                <AppSeasonFolderIcon size={12} />
-                <span>Season Folder…</span>
-              </button>
-            )}
+            {item.kind === "notOpenOnPc" &&
+              !item.matchedPlaylistItem &&
+              !activeLocalMatch &&
+              onChooseFolder && (
+                <button
+                  type="button"
+                  onClick={onChooseFolder}
+                  className="ep-bar-pill h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+                >
+                  <AppSeasonFolderIcon size={12} />
+                  <span>Season Folder…</span>
+                </button>
+              )}
           </div>
+
+          {activeLocalMatch && (
+            <div className="text-[10.5px] text-secondary/90 truncate">
+              Found in <span className="text-primary">{activeLocalMatch.folderLabel}</span> ·{" "}
+              {activeLocalMatch.reason}
+            </div>
+          )}
+
+          <AnimatedCollapse
+            open={pickerOpen && localMatches.length > 1}
+            innerClassName="pt-1 space-y-1"
+          >
+            {localMatches.map((cand, idx) => (
+              <button
+                key={cand.path}
+                type="button"
+                onClick={() => {
+                  setSelectedIdx(idx);
+                  setPickerOpen(false);
+                  onOpenLocalMatch?.(cand);
+                }}
+                className={`ep-menu-row ep-press w-full text-left rounded-xl px-2.5 py-1.5 text-[11px] flex items-center justify-between gap-2 cursor-pointer ${
+                  idx === selectedIdx
+                    ? "bg-white/[0.12] text-white"
+                    : "bg-white/[0.04] text-secondary hover:bg-white/[0.09] hover:text-white"
+                }`}
+              >
+                <span className="truncate font-medium">{cand.fileName}</span>
+                <span className="text-[10px] text-muted shrink-0">
+                  {cand.folderLabel} · {cand.reason}
+                </span>
+              </button>
+            ))}
+          </AnimatedCollapse>
         </div>
       </div>
     </div>

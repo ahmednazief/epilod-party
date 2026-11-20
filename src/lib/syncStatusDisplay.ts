@@ -1,7 +1,30 @@
 import type { SyncStatusPayload } from "./syncplay";
 
-export const DEFAULT_ENDPOINT = "syncplay.pl:8999";
+export const SYNCPLAY_ENDPOINT = "syncplay.pl:8999";
+export const CLOUD_ENDPOINT = "wss://epilod-sync.ahmednazief.workers.dev";
+// Flip to CLOUD_ENDPOINT to make Epilod Cloud (Cloudflare) the default.
+export const DEFAULT_ENDPOINT = SYNCPLAY_ENDPOINT;
 export const BACKUP_ENDPOINT = "syncplay.pl:8998";
+
+export function isCloudEndpoint(endpoint: string): boolean {
+  const low = endpoint.trim().toLowerCase();
+  return low.startsWith("wss://") || low.startsWith("ws://");
+}
+
+export function formatServerDisplayName(endpoint: string): string {
+  const trimmed = endpoint.trim();
+  const low = trimmed.toLowerCase();
+  if (low === CLOUD_ENDPOINT.toLowerCase()) {
+    return "Epilod Cloud";
+  }
+  if (low === SYNCPLAY_ENDPOINT.toLowerCase()) {
+    return "Syncplay Public";
+  }
+  if (low === BACKUP_ENDPOINT.toLowerCase()) {
+    return "Syncplay Backup (:8998)";
+  }
+  return trimmed;
+}
 
 export interface SyncDisplaySummary {
   activeEndpoint: string;
@@ -22,12 +45,14 @@ export function describeSyncEndpoint(
     status.state === "disconnected" ? configuredEndpoint : status.endpoint || configuredEndpoint;
   const isBackupServer =
     activeEndpoint.trim().toLowerCase() === BACKUP_ENDPOINT;
+  const isCloud = isCloudEndpoint(activeEndpoint);
+  const displayLabel = formatServerDisplayName(activeEndpoint);
 
   if (status.state === "connected") {
     return {
       activeEndpoint,
       isBackupServer,
-      badgeText: isBackupServer ? `${activeEndpoint} (Backup)` : activeEndpoint,
+      badgeText: isBackupServer ? `${activeEndpoint} (Backup)` : displayLabel,
       detailText: isBackupServer
         ? "Connected to backup server (:8998). Peers must also use the backup server to see this room."
         : null,
@@ -37,7 +62,7 @@ export function describeSyncEndpoint(
     return {
       activeEndpoint,
       isBackupServer,
-      badgeText: `Connecting to ${activeEndpoint}…`,
+      badgeText: `Connecting to ${displayLabel}…`,
       detailText: null,
     };
   }
@@ -45,9 +70,11 @@ export function describeSyncEndpoint(
     return {
       activeEndpoint,
       isBackupServer,
-      badgeText: `Reconnecting (${activeEndpoint}) in ${status.retryInSecs}s`,
+      badgeText: `Reconnecting (${displayLabel}) in ${status.retryInSecs}s`,
       detailText: status.suggestBackup
-        ? "Primary server unreachable — you can try switching everyone in your room to the backup server (:8998)."
+        ? isCloud
+          ? "Epilod Cloud unreachable or at daily free cap — switch to Syncplay (syncplay.pl:8999) in Settings."
+          : "Primary server unreachable — you can try switching everyone in your room to the backup server (:8998)."
         : null,
     };
   }
@@ -55,7 +82,7 @@ export function describeSyncEndpoint(
     return {
       activeEndpoint,
       isBackupServer,
-      badgeText: `Connection failed (${activeEndpoint})`,
+      badgeText: `Connection failed (${displayLabel})`,
       detailText: status.message,
     };
   }

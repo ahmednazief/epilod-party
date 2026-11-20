@@ -80,7 +80,6 @@ mod windows_app {
     use serde::Serialize;
     use std::cmp::Ordering as CmpOrdering;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use tauri::{AppHandle, Emitter, Manager, State};
@@ -610,10 +609,7 @@ mod windows_app {
             )
         })?;
 
-        Command::new(&exe)
-            .current_dir(dir_path)
-            .spawn()
-            .map_err(|e| format!("Failed launching Epilod Party: {e}"))?;
+        crate::windows_install::spawn_installed_app_unelevated(&exe, dir_path)?;
 
         app.exit(0);
         Ok(())

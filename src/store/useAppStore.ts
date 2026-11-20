@@ -1,9 +1,17 @@
 import { create } from "zustand";
+import { isDesktop } from "../lib/bridge";
+import { dpapiProtectSecret, dpapiUnprotectSecret } from "../lib/localLibrary";
 import {
   DEFAULT_AVATAR_ID,
   isValidAvatarId,
   type AvatarId,
 } from "../components/ui/ProfileAvatar";
+import {
+  DEFAULT_REACTION_EMOJIS,
+  reorderReactionPresets as moveReactionPreset,
+  replaceReactionPresetAt,
+  sanitizeReactionPresets,
+} from "../lib/reactionPresets";
 import {
   LOCAL_DISCONNECT_TAG,
   NOT_READY_TAG_PREFIX,
@@ -115,6 +123,7 @@ interface AppState {
   // Fix 05: kept strictly in RAM for the current session (never persisted to localStorage)
   serverPassword: string;
   allowNetworkShares: boolean;
+  customLibraryFolders: string[];
   hideParticipants: boolean;
   hashFilenames: boolean;
   autoFixFileMismatch: boolean;
@@ -138,6 +147,7 @@ interface AppState {
   chatPeeksEnabled: boolean;
   chatTriggerPlacement: ChatTriggerPlacement;
   recentEmojis: string[];
+  reactionPresets: string[];
   fullWidthPlayBar: boolean;
   playBarOpacity: number;
   autoCheckUpdates: boolean;
@@ -147,6 +157,8 @@ interface AppState {
   shortcutsOpen: boolean;
   selectedFilePath: string | null;
   selectedFileName: string | null;
+  pendingDeepLinkPasswordRoomId: string | null;
+  setPendingDeepLinkPasswordRoomId: (roomId: string | null) => void;
   setUsername: (name: string) => void;
   setAvatarId: (avatarId: AvatarId) => void;
   setRoomCode: (code: string) => void;
@@ -157,6 +169,8 @@ interface AppState {
   setServerEndpoint: (endpoint: string) => void;
   setServerPassword: (password: string) => void;
   setAllowNetworkShares: (allow: boolean) => void;
+  addCustomLibraryFolder: (folderPath: string) => void;
+  removeCustomLibraryFolder: (folderPath: string) => void;
   setHideParticipants: (hide: boolean) => void;
   setHashFilenames: (hash: boolean) => void;
   setAutoFixFileMismatch: (enabled: boolean) => void;
@@ -180,6 +194,9 @@ interface AppState {
   setChatPeeksEnabled: (enabled: boolean) => void;
   setChatTriggerPlacement: (placement: ChatTriggerPlacement) => void;
   pushRecentEmoji: (emoji: string) => void;
+  setReactionPresetAt: (index: number, emoji: string) => void;
+  reorderReactionPresets: (fromIndex: number, toIndex: number) => void;
+  resetReactionPresets: () => void;
   setFullWidthPlayBar: (fullWidth: boolean) => void;
   setPlayBarOpacity: (opacity: number) => void;
   setAutoCheckUpdates: (autoCheck: boolean) => void;
@@ -216,6 +233,20 @@ const initialStartWhenAllReady = readStorage("ep.startWhenAllReady", "false") ==
 const initialReducedMotion = readStorage("ep.reducedMotion", "false") === "true";
 const initialLowPowerMode = readStorage("ep.lowPowerMode", "false") === "true";
 const initialAllowShares = readStorage("ep.allowNetworkShares", "false") === "true";
+const initialCustomLibraryFolders: string[] = (() => {
+  try {
+    const parsed = JSON.parse(readStorage("ep.customLibraryFolders", "[]"));
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+        .map((x) => x.trim())
+        .slice(0, 20);
+    }
+  } catch {
+    // Ignore malformed custom library folders
+  }
+  return [];
+})();
 function readInitialSkipIntroMode(): SkipIntroMode {
   const saved = readStorage("ep.skipIntroMode", "");
   if (saved === "off" || saved === "manual" || saved === "auto") {
@@ -265,6 +296,15 @@ const initialRecentEmojis: string[] = (() => {
   }
   return [];
 })();
+const initialReactionPresets: string[] = (() => {
+  try {
+    const raw = readStorage("ep.reactionPresets", "");
+    if (!raw) return [...DEFAULT_REACTION_EMOJIS];
+    return sanitizeReactionPresets(JSON.parse(raw));
+  } catch {
+    return [...DEFAULT_REACTION_EMOJIS];
+  }
+})();
 const initialFullWidthPlayBar = readStorage("ep.fullWidthPlayBar", "true") !== "false";
 const initialPlayBarOpacity = (() => {
   const raw = readStorage("ep.playBarOpacity", String(DEFAULT_PLAY_BAR_OPACITY));
@@ -288,6 +328,7 @@ export const useAppStore = create<AppState>((set) => ({
   serverEndpoint: initialServer,
   serverPassword: "",
   allowNetworkShares: initialAllowShares,
+  customLibraryFolders: initialCustomLibraryFolders,
   hideParticipants: initialHideParticipants,
   hashFilenames: initialHashFilenames,
   autoFixFileMismatch: initialAutoFixFileMismatch,
@@ -311,6 +352,7 @@ export const useAppStore = create<AppState>((set) => ({
   chatPeeksEnabled: initialChatPeeksEnabled,
   chatTriggerPlacement: initialChatTriggerPlacement,
   recentEmojis: initialRecentEmojis,
+  reactionPresets: initialReactionPresets,
   fullWidthPlayBar: initialFullWidthPlayBar,
   playBarOpacity: initialPlayBarOpacity,
   autoCheckUpdates: initialAutoCheckUpdates,
@@ -320,6 +362,9 @@ export const useAppStore = create<AppState>((set) => ({
   shortcutsOpen: false,
   selectedFilePath: null,
   selectedFileName: null,
+  pendingDeepLinkPasswordRoomId: null,
+  setPendingDeepLinkPasswordRoomId: (pendingDeepLinkPasswordRoomId) =>
+    set({ pendingDeepLinkPasswordRoomId }),
 
   setUsername: (name) => {
     const clean = sanitizeUsername(name);
@@ -365,6 +410,27 @@ export const useAppStore = create<AppState>((set) => ({
     writeStorage("ep.allowNetworkShares", allowNetworkShares ? "true" : "false");
     set({ allowNetworkShares });
   },
+
+  addCustomLibraryFolder: (folderPath) =>
+    set((s) => {
+      const clean = folderPath.trim();
+      if (!clean) return s;
+      const lower = clean.toLowerCase();
+      if (s.customLibraryFolders.some((p) => p.toLowerCase() === lower)) {
+        return s;
+      }
+      const next = [...s.customLibraryFolders, clean].slice(0, 20);
+      writeStorage("ep.customLibraryFolders", JSON.stringify(next));
+      return { customLibraryFolders: next };
+    }),
+
+  removeCustomLibraryFolder: (folderPath) =>
+    set((s) => {
+      const lower = folderPath.trim().toLowerCase();
+      const next = s.customLibraryFolders.filter((p) => p.toLowerCase() !== lower);
+      writeStorage("ep.customLibraryFolders", JSON.stringify(next));
+      return { customLibraryFolders: next };
+    }),
 
   setHideParticipants: (hideParticipants) => {
     writeStorage("ep.hideViewers", hideParticipants ? "true" : "false");
@@ -455,8 +521,30 @@ export const useAppStore = create<AppState>((set) => ({
 
   setOpenSubtitlesApiKey: (apiKey) => {
     const clean = apiKey.trim();
-    writeStorage("ep.osApiKey", clean);
     set({ openSubtitlesApiKey: clean });
+    if (isDesktop()) {
+      try {
+        if (typeof localStorage !== "undefined") {
+          localStorage.removeItem("ep.osApiKey");
+          if (!clean) {
+            localStorage.removeItem("ep.osApiKey.dpapi");
+          }
+        }
+      } catch {
+        // Ignore storage errors
+      }
+      if (clean) {
+        void dpapiProtectSecret(clean)
+          .then((enc) => {
+            if (enc) writeStorage("ep.osApiKey.dpapi", enc);
+          })
+          .catch(() => {
+            // Do not fall back to plaintext on desktop if DPAPI fails
+          });
+      }
+    } else {
+      writeStorage("ep.osApiKey", clean);
+    }
   },
 
   setReactionsEnabled: (reactionsEnabled) => {
@@ -482,6 +570,26 @@ export const useAppStore = create<AppState>((set) => ({
       writeStorage("ep.recentEmojis", JSON.stringify(next));
       return { recentEmojis: next };
     }),
+
+  setReactionPresetAt: (index, emoji) =>
+    set((s) => {
+      const next = replaceReactionPresetAt(s.reactionPresets, index, emoji);
+      writeStorage("ep.reactionPresets", JSON.stringify(next));
+      return { reactionPresets: next };
+    }),
+
+  reorderReactionPresets: (fromIndex, toIndex) =>
+    set((s) => {
+      const next = moveReactionPreset(s.reactionPresets, fromIndex, toIndex);
+      writeStorage("ep.reactionPresets", JSON.stringify(next));
+      return { reactionPresets: next };
+    }),
+
+  resetReactionPresets: () => {
+    const next = [...DEFAULT_REACTION_EMOJIS];
+    writeStorage("ep.reactionPresets", JSON.stringify(next));
+    set({ reactionPresets: next });
+  },
 
   setFullWidthPlayBar: (fullWidthPlayBar) => {
     writeStorage("ep.fullWidthPlayBar", fullWidthPlayBar ? "true" : "false");
@@ -578,3 +686,30 @@ export const useAppStore = create<AppState>((set) => ({
     });
   },
 }));
+
+// Hydrate DPAPI-encrypted OpenSubtitles API key on desktop startup and migrate any legacy plaintext key.
+if (isDesktop() && typeof localStorage !== "undefined") {
+  const encKey = readStorage("ep.osApiKey.dpapi", "");
+  if (encKey) {
+    void dpapiUnprotectSecret(encKey)
+      .then((plain) => {
+        if (plain && !useAppStore.getState().openSubtitlesApiKey) {
+          useAppStore.setState({ openSubtitlesApiKey: plain.trim() });
+        }
+      })
+      .catch(() => {});
+  } else if (initialOpenSubtitlesApiKey) {
+    void dpapiProtectSecret(initialOpenSubtitlesApiKey)
+      .then((enc) => {
+        if (enc) {
+          writeStorage("ep.osApiKey.dpapi", enc);
+          try {
+            localStorage.removeItem("ep.osApiKey");
+          } catch {
+            // Ignore storage errors
+          }
+        }
+      })
+      .catch(() => {});
+  }
+}

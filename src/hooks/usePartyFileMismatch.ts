@@ -1,8 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isDesktop } from "../lib/bridge";
 import {
   analyzePartyFileMismatch,
   type PartyFileMismatch,
 } from "../lib/fileMismatch";
+import {
+  findLocalMediaMatches,
+  type LocalMatchCandidate,
+} from "../lib/localLibrary";
+import { extractParentFolderPath } from "../lib/seriesProgress";
 import { isIdentityTransform } from "../lib/sourceAlignment";
 import { resolveEffectiveUsername } from "../lib/syncController";
 import { applyTimelineTransform } from "../lib/timelineActions";
@@ -10,7 +16,54 @@ import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
+import { useRecentRoomsStore } from "../store/useRecentRoomsStore";
+import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
 import { useSyncStore } from "../store/useSyncStore";
+
+const localMatchCache = new Map<string, LocalMatchCandidate[]>();
+const localMatchInFlight = new Map<string, Promise<LocalMatchCandidate[]>>();
+
+export function clearLocalMatchCache(): void {
+  localMatchCache.clear();
+}
+
+async function fetchDeduplicatedLocalMatches(
+  cacheKey: string,
+  peerFileName: string,
+  peerDurationSecs: number | null,
+  savedSeriesFolders: string[],
+  recentFolders: string[],
+  customLibraryFolders: string[],
+  forceRefresh: boolean,
+): Promise<LocalMatchCandidate[]> {
+  if (!forceRefresh && localMatchCache.has(cacheKey)) {
+    return localMatchCache.get(cacheKey)!;
+  }
+  const existing = localMatchInFlight.get(cacheKey);
+  if (existing && !forceRefresh) {
+    return existing;
+  }
+  const promise = findLocalMediaMatches({
+    peerFileName,
+    peerDurationSecs,
+    savedSeriesFolders,
+    recentFolders,
+    customLibraryFolders,
+    forceRefresh,
+  })
+    .then((res) => {
+      if (localMatchCache.size > 40) {
+        localMatchCache.clear();
+      }
+      localMatchCache.set(cacheKey, res);
+      return res;
+    })
+    .finally(() => {
+      localMatchInFlight.delete(cacheKey);
+    });
+  localMatchInFlight.set(cacheKey, promise);
+  return promise;
+}
 
 /**
  * Computes and debounces Watch Party file mismatch state so brief mpv load/duration
@@ -20,6 +73,9 @@ export function usePartyFileMismatch(): {
   mismatch: PartyFileMismatch | null;
   dismissed: boolean;
   dismiss: () => void;
+  localMatches: LocalMatchCandidate[];
+  searchingLocalMatches: boolean;
+  refreshLocalMatches: () => void;
 } {
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
@@ -167,6 +223,102 @@ export function usePartyFileMismatch(): {
     markMismatchSigUndone,
   ]);
 
+  const customLibraryFolders = useAppStore((s) => s.customLibraryFolders);
+  const seriesMap = useSeriesProgressStore((s) => s.series);
+  const recentRooms = useRecentRoomsStore((s) => s.rooms);
+
+  const [localMatches, setLocalMatches] = useState<LocalMatchCandidate[]>([]);
+  const [searchingLocalMatches, setSearchingLocalMatches] = useState(false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const consumedRefreshNonceRef = useRef(0);
+  const searchGenRef = useRef(0);
+
+  const shouldSearchLocal =
+    isDesktop() &&
+    Boolean(settledMismatch) &&
+    (settledMismatch?.kind === "notOpenOnPc" || settledMismatch?.kind === "differentFile") &&
+    !settledMismatch?.matchedPlaylistItem &&
+    Boolean(settledMismatch?.targetPeerFileName?.trim());
+
+  const targetPeerFileName = shouldSearchLocal ? (settledMismatch?.targetPeerFileName ?? null) : null;
+  const targetPeerDurationSecs = shouldSearchLocal
+    ? (settledMismatch?.targetPeerDurationSecs ?? null)
+    : null;
+
+  const searchFolders = useMemo(() => {
+    const savedSeriesFolders = Object.values(seriesMap)
+      .map((s) => s.folderPath)
+      .filter(Boolean);
+    const recentFolders = recentRooms
+      .map((r) => (r.lastFilePath ? extractParentFolderPath(r.lastFilePath) : ""))
+      .filter(Boolean);
+    return {
+      savedSeriesFolders,
+      recentFolders,
+      customLibraryFolders,
+      rootsSig: `${savedSeriesFolders.join(";")}|${recentFolders.join(";")}|${customLibraryFolders.join(";")}`,
+    };
+  }, [seriesMap, recentRooms, customLibraryFolders]);
+
+  useEffect(() => {
+    if (!targetPeerFileName) {
+      searchGenRef.current += 1;
+      setLocalMatches([]);
+      setSearchingLocalMatches(false);
+      return;
+    }
+
+    const gen = ++searchGenRef.current;
+    const durBucket =
+      typeof targetPeerDurationSecs === "number" && Number.isFinite(targetPeerDurationSecs)
+        ? Math.round(targetPeerDurationSecs)
+        : 0;
+    const cacheKey = `${targetPeerFileName.toLowerCase()}|${durBucket}|${searchFolders.rootsSig}`;
+    const forceRefresh = refreshNonce > consumedRefreshNonceRef.current;
+    consumedRefreshNonceRef.current = refreshNonce;
+
+    if (!forceRefresh && localMatchCache.has(cacheKey)) {
+      setLocalMatches(localMatchCache.get(cacheKey)!);
+      setSearchingLocalMatches(false);
+      return;
+    }
+
+    setSearchingLocalMatches(true);
+    const timer = window.setTimeout(() => {
+      void fetchDeduplicatedLocalMatches(
+        cacheKey,
+        targetPeerFileName,
+        targetPeerDurationSecs,
+        searchFolders.savedSeriesFolders,
+        searchFolders.recentFolders,
+        searchFolders.customLibraryFolders,
+        forceRefresh,
+      )
+        .then((matches) => {
+          if (searchGenRef.current !== gen) return;
+          setLocalMatches(matches);
+        })
+        .catch(() => {
+          if (searchGenRef.current !== gen) return;
+          setLocalMatches([]);
+        })
+        .finally(() => {
+          if (searchGenRef.current === gen) {
+            setSearchingLocalMatches(false);
+          }
+        });
+    }, 450);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [targetPeerFileName, targetPeerDurationSecs, searchFolders, refreshNonce]);
+
+  const refreshLocalMatches = useCallback(() => {
+    clearLocalMatchCache();
+    setRefreshNonce((n) => n + 1);
+  }, []);
+
   const isAutoFixedActive =
     Boolean(settledMismatch) &&
     autoFixedMismatchSigs.includes(settledMismatch?.signature ?? "") &&
@@ -184,5 +336,8 @@ export function usePartyFileMismatch(): {
         setDismissedMismatchSig(settledMismatch.signature);
       }
     },
+    localMatches: isAutoFixedActive ? [] : localMatches,
+    searchingLocalMatches,
+    refreshLocalMatches,
   };
 }

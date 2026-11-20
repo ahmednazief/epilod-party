@@ -990,14 +990,57 @@ pub fn spawn_downloaded_updater(
         .map_err(|e| format!("Failed launching Epilod Party Setup updater: {e}"))
 }
 
+fn quote_windows_arg(raw: &str) -> String {
+    // Trim redundant trailing backslashes (except drive root like `C:\`) so a trailing `\`
+    // cannot escape the closing quote under Windows CommandLineToArgvW.
+    let trimmed = if raw.len() > 3 {
+        raw.trim_end_matches(['\\', '/'])
+    } else {
+        raw
+    };
+    let mut out = String::with_capacity(trimmed.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in trimmed.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..(backslashes * 2 + 1) {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(ch);
+            }
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
 pub fn spawn_elevated_updater(
     setup_exe: &Path,
     install_dir: &Path,
-    cache_dir: &Path,
+    _cache_dir: &Path,
 ) -> Result<(), String> {
     let pid = std::process::id();
-    let escaped_dir = install_dir.to_string_lossy().replace('"', "\"\"");
-    let params = format!("--update --dir \"{escaped_dir}\" --wait-pid {pid} --relaunch");
+    let quoted_dir = quote_windows_arg(&install_dir.to_string_lossy());
+    let params = format!("--update --dir {quoted_dir} --wait-pid {pid} --relaunch");
+
+    // Use a system-owned working directory rather than user-writable cache_dir for an elevated process.
+    let safe_work_dir = std::env::var_os("SystemRoot")
+        .map(|r| PathBuf::from(r).join("System32"))
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| install_dir.to_path_buf());
 
     let w_verb: Vec<u16> = OsStr::new("runas")
         .encode_wide()
@@ -1012,7 +1055,7 @@ pub fn spawn_elevated_updater(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let w_dir: Vec<u16> = cache_dir
+    let w_dir: Vec<u16> = safe_work_dir
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))

@@ -132,6 +132,8 @@ html.ep-video-active #root {
 
 .ep-glass-capsule {
   isolation: isolate;
+  transform: translateZ(0);
+  will-change: backdrop-filter;
   background-color: rgba(10, 10, 14, var(--ep-playbar-capsule-bg, 0.58));
   background-image: linear-gradient(
     180deg,
@@ -150,6 +152,8 @@ html.ep-video-active #root {
 
 .ep-glass-bottom-bar {
   isolation: isolate;
+  transform: translateZ(0);
+  will-change: backdrop-filter;
   background-color: rgba(10, 10, 15, var(--ep-playbar-bar-bg, 0.64));
   background-image: linear-gradient(
     180deg,
@@ -166,6 +170,8 @@ html.ep-video-active #root {
 
 .ep-glass-sheet {
   isolation: isolate;
+  transform: translateZ(0);
+  will-change: backdrop-filter;
   background: linear-gradient(
     170deg,
     rgba(255, 255, 255, 0.07) 0%,
@@ -314,6 +320,8 @@ html.ep-video-active #root {
 
 .ep-glass-submenu {
   isolation: isolate;
+  transform: translateZ(0);
+  will-change: backdrop-filter;
   background-color: rgba(10, 10, 15, 0.68);
   background-image: linear-gradient(
     180deg,
@@ -335,6 +343,8 @@ html.ep-video-active #root {
 }
 
 .ep-glass-pill {
+  isolation: isolate;
+  will-change: backdrop-filter;
   background-color: rgba(22, 22, 28, 0.36);
   background-image: linear-gradient(
     180deg,
@@ -595,6 +605,8 @@ button.ep-glass-pill:active:not(:disabled) {
 
 
 .ep-glass-btn-party {
+  isolation: isolate;
+  transform: translateZ(0);
   background-color: rgba(109, 40, 217, 0.32);
   background-image: linear-gradient(
     170deg,
@@ -627,12 +639,14 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-glass-btn-party:active:not(:disabled) {
-  transform: scale(0.975);
+  transform: translateZ(0) scale(0.975);
   transition-duration: 75ms;
   transition-timing-function: ease-out;
 }
 
 .ep-glass-btn-media {
+  isolation: isolate;
+  transform: translateZ(0);
   background-color: rgba(24, 24, 34, 0.42);
   background-image: linear-gradient(
     170deg,
@@ -666,7 +680,7 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-glass-btn-media:active:not(:disabled) {
-  transform: scale(0.975);
+  transform: translateZ(0) scale(0.975);
   transition-duration: 75ms;
   transition-timing-function: ease-out;
 }
@@ -791,6 +805,8 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-glass-primary-pill {
+  isolation: isolate;
+  transform: translateZ(0);
   background-color: rgba(124, 58, 237, 0.52);
   background-image: linear-gradient(
     175deg,
@@ -819,6 +835,7 @@ button.ep-glass-pill:active:not(:disabled) {
 .ep-glass-sheet .ep-glass-primary-pill,
 .ep-glass-well .ep-glass-primary-pill,
 .ep-glass-submenu .ep-glass-primary-pill,
+.ep-glass-reaction-sheet .ep-glass-primary-pill,
 .ep-glass-capsule .ep-glass-pill,
 .ep-glass-bottom-bar .ep-glass-pill,
 .ep-glass-sheet .ep-glass-pill,
@@ -844,12 +861,14 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-glass-primary-pill:active:not(:disabled) {
-  transform: scale(0.96);
+  transform: translateZ(0) scale(0.96);
   transition-duration: 70ms;
   transition-timing-function: ease-out;
 }
 
 .ep-glass-liquid-pill {
+  isolation: isolate;
+  transform: translateZ(0);
   background-color: rgba(16, 16, 20, 0.24);
   background-image: linear-gradient(
     175deg,
@@ -886,7 +905,7 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-glass-liquid-pill:active:not(:disabled) {
-  transform: scale(0.96);
+  transform: translateZ(0) scale(0.96);
   transition-duration: 70ms;
   transition-timing-function: ease-out;
 }
@@ -927,6 +946,8 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-glass-select {
+  isolation: isolate;
+  will-change: backdrop-filter;
   background-color: rgba(255, 255, 255, 0.065);
   background-image: linear-gradient(
     180deg,
@@ -3005,6 +3026,8 @@ button:hover > .ep-avatar-more-orb {
 }
 
 .ep-chat-hover-pill {
+  isolation: isolate;
+  will-change: backdrop-filter;
   background-color: rgba(16, 16, 24, 0.92);
   -webkit-backdrop-filter: blur(14px) saturate(135%);
   backdrop-filter: blur(14px) saturate(135%);
@@ -3243,6 +3266,8 @@ button:hover > .ep-avatar-more-orb {
 }
 
 .ep-chat-edge-rail {
+  isolation: isolate;
+  will-change: backdrop-filter;
   background-color: rgba(14, 14, 22, 0.34);
   background-image: linear-gradient(
     180deg,

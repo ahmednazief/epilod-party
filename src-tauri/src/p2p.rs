@@ -9,13 +9,14 @@ use epilod_core::p2p::{
     build_stun_binding_request, build_upnp_add_port_mapping_soap,
     build_upnp_delete_port_mapping_soap, candidate_priority, compute_birthday_probe_ports,
     decode_ep2_beacon, encode_ep2_beacon, fill_random_bytes, infer_candidate_kind,
-    parse_http_url_host_port_path, parse_igd_control_url, parse_natpmp_map_response,
-    parse_pcp_map_response, parse_ssdp_location, parse_stun_binding_response, sanitize_avatar_id,
-    sanitize_chat_id, sanitize_chat_text, sanitize_reaction_emoji, ChatFallbackPacket,
-    ChatReactFallbackPacket, P2pBeacon, P2pCandidate, P2pCandidateKind, P2pCryptoSession,
-    P2pIdentity, P2pWireFrame, ReactionFallbackPacket, ReliableChannel, VoiceRxCrypto,
-    VoiceTxCrypto, MAX_P2P_DATAGRAM_BYTES, MAX_REACTION_BURST_COUNT, MAX_VOICE_OPUS_BYTES,
-    NATPMP_PCP_PORT, SSDP_MULTICAST_ADDR, STUN_SERVERS, VOICE_FLAG_END_OF_TALK, VOICE_FLAG_RELAYED,
+    is_allowed_upnp_lan_ip, parse_http_url_host_port_path, parse_igd_control_url,
+    parse_natpmp_map_response, parse_pcp_map_response, parse_ssdp_location,
+    parse_stun_binding_response, sanitize_avatar_id, sanitize_chat_id, sanitize_chat_text,
+    sanitize_reaction_emoji, ChatFallbackPacket, ChatReactFallbackPacket, P2pBeacon, P2pCandidate,
+    P2pCandidateKind, P2pCryptoSession, P2pIdentity, P2pWireFrame, ReactionFallbackPacket,
+    ReliableChannel, VoiceRxCrypto, VoiceTxCrypto, MAX_P2P_DATAGRAM_BYTES,
+    MAX_REACTION_BURST_COUNT, MAX_VOICE_OPUS_BYTES, NATPMP_PCP_PORT, SSDP_MULTICAST_ADDR,
+    STUN_SERVERS, VOICE_FLAG_END_OF_TALK, VOICE_FLAG_RELAYED,
 };
 use epilod_core::syncplay::{
     RoomParticipantUpdate, TimelineSegment, TimelineTransform, WireFileInfo,
@@ -604,8 +605,37 @@ struct PeerSession {
     last_voice_state_rx: Option<Instant>,
     voice_blocked_peers: Vec<String>,
     bidirectional_verified: bool,
+    inbound_chat_window: (Instant, u32),
+    inbound_reaction_window: (Instant, u32),
     #[cfg(test)]
     test_drop_direct: bool,
+}
+
+impl PeerSession {
+    fn allow_inbound_chat(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.inbound_chat_window.0) >= Duration::from_secs(5) {
+            self.inbound_chat_window = (now, 0);
+        }
+        if self.inbound_chat_window.1 >= 30 {
+            return false;
+        }
+        self.inbound_chat_window.1 += 1;
+        true
+    }
+
+    fn allow_inbound_reaction(&mut self, count: u8) -> u8 {
+        let now = Instant::now();
+        if now.duration_since(self.inbound_reaction_window.0) >= Duration::from_secs(2) {
+            self.inbound_reaction_window = (now, 0);
+        }
+        if self.inbound_reaction_window.1 >= 120 {
+            return 0;
+        }
+        let allowed = (120 - self.inbound_reaction_window.1).min(count as u32) as u8;
+        self.inbound_reaction_window.1 += allowed as u32;
+        allowed
+    }
 }
 
 struct VoiceRxPeerState {
@@ -670,6 +700,7 @@ impl P2pSessionHandle {
     pub fn spawn(
         app: AppHandle,
         initial_username: String,
+        room_psk: Option<[u8; 32]>,
         network_opts: LocalPathOptions,
         beacon_tx: mpsc::Sender<String>,
         align_tx: mpsc::Sender<P2pAutoAlignment>,
@@ -682,6 +713,7 @@ impl P2pSessionHandle {
         tokio::spawn(run_p2p_actor(
             Some(app),
             initial_username,
+            room_psk,
             network_opts,
             cmd_rx,
             Arc::clone(&voice),
@@ -875,17 +907,32 @@ async fn try_upnp_port_map(local_ip: Ipv4Addr, local_port: u16) -> Option<UpnpMa
     let _ = ssdp_sock.send_to(&msearch, SSDP_MULTICAST_ADDR).await;
 
     let mut buf = [0u8; 2048];
-    let (n, _) = tokio::time::timeout(Duration::from_millis(450), ssdp_sock.recv_from(&mut buf))
+    let (n, src) = tokio::time::timeout(Duration::from_millis(450), ssdp_sock.recv_from(&mut buf))
         .await
         .ok()?
         .ok()?;
+    let IpAddr::V4(responder_ip) = src.ip() else {
+        return None;
+    };
+    if !is_allowed_upnp_lan_ip(responder_ip) {
+        return None;
+    }
     let location = parse_ssdp_location(&String::from_utf8_lossy(&buf[..n]))?;
     let (host, port, path) = parse_http_url_host_port_path(&location)?;
+    // Pin LOCATION strictly to the SSDP responder's RFC1918 LAN IPv4 address (prevents LAN SSRF).
+    let loc_ip: Ipv4Addr = host.parse().ok()?;
+    if loc_ip != responder_ip || !is_allowed_upnp_lan_ip(loc_ip) {
+        return None;
+    }
     let get_req =
         format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
     let xml = http_plain_request(&host, port, get_req.as_bytes(), 700).await?;
     let (control_url, service_type) = parse_igd_control_url(&location, &xml)?;
     let (ctrl_host, ctrl_port, ctrl_path) = parse_http_url_host_port_path(&control_url)?;
+    let ctrl_ip: Ipv4Addr = ctrl_host.parse().ok()?;
+    if ctrl_ip != responder_ip || !is_allowed_upnp_lan_ip(ctrl_ip) {
+        return None;
+    }
 
     let body =
         build_upnp_add_port_mapping_soap(&service_type, local_port, local_ip, local_port, 7200);
@@ -1641,6 +1688,7 @@ async fn broadcast_local_voice_state(
 async fn run_p2p_actor(
     app: Option<AppHandle>,
     initial_username: String,
+    room_psk: Option<[u8; 32]>,
     network_opts: LocalPathOptions,
     mut cmd_rx: mpsc::Receiver<P2pControlCmd>,
     voice_handle: Arc<VoiceTransportHandle>,
@@ -2084,6 +2132,10 @@ async fn run_p2p_actor(
                             continue;
                         }
                         let key = username.to_ascii_lowercase();
+                        const MAX_P2P_PEERS: usize = 32;
+                        if !peers.contains_key(&key) && peers.len() >= MAX_P2P_PEERS {
+                            continue;
+                        }
                         let same_session = peers.get(&key).is_some_and(|p| {
                             p.beacon.pubkey == beacon.pubkey && p.beacon.session_id == beacon.session_id
                         });
@@ -2091,10 +2143,16 @@ async fn run_p2p_actor(
                             continue;
                         }
 
-                        let crypto =
-                            local_identity.establish_with(beacon.pubkey, beacon.session_id);
-                        let (v_tx, v_rx) =
-                            local_identity.establish_voice_with(beacon.pubkey, beacon.session_id);
+                        let crypto = local_identity.establish_with_psk(
+                            beacon.pubkey,
+                            beacon.session_id,
+                            room_psk,
+                        );
+                        let (v_tx, v_rx) = local_identity.establish_voice_with_psk(
+                            beacon.pubkey,
+                            beacon.session_id,
+                            room_psk,
+                        );
                         let v_rx_tag = v_rx.rx_tag;
                         voice_rx_peers.retain(|_, s| s.peer_key != key);
                         voice_rx_peers.insert(
@@ -2143,6 +2201,8 @@ async fn run_p2p_actor(
                             last_voice_state_rx: None,
                             voice_blocked_peers: Vec::new(),
                             bidirectional_verified: false,
+                            inbound_chat_window: (Instant::now(), 0),
+                            inbound_reaction_window: (Instant::now(), 0),
                             #[cfg(test)]
                             test_drop_direct: false,
                         };
@@ -2603,10 +2663,16 @@ async fn run_p2p_actor(
                         let drop_direct = drop_direct_from
                             .iter()
                             .any(|d| d.eq_ignore_ascii_case(&username));
-                        let crypto =
-                            local_identity.establish_with(beacon.pubkey, beacon.session_id);
-                        let (v_tx, v_rx) =
-                            local_identity.establish_voice_with(beacon.pubkey, beacon.session_id);
+                        let crypto = local_identity.establish_with_psk(
+                            beacon.pubkey,
+                            beacon.session_id,
+                            room_psk,
+                        );
+                        let (v_tx, v_rx) = local_identity.establish_voice_with_psk(
+                            beacon.pubkey,
+                            beacon.session_id,
+                            room_psk,
+                        );
                         let v_rx_tag = v_rx.rx_tag;
                         voice_rx_peers.retain(|_, s| s.peer_key != key);
                         voice_rx_peers.insert(
@@ -2659,6 +2725,8 @@ async fn run_p2p_actor(
                             last_voice_state_rx: None,
                             voice_blocked_peers: Vec::new(),
                             bidirectional_verified: false,
+                            inbound_chat_window: (Instant::now(), 0),
+                            inbound_reaction_window: (Instant::now(), 0),
                             test_drop_direct: drop_direct,
                         };
                         if !drop_direct {
@@ -3417,23 +3485,19 @@ async fn dispatch_udp_event(
             }
         }
         UdpPacketEvent::Datagram(from_key, dmsg) => match dmsg {
-            P2pDatagramMessage::ChatTyping { sender, is_typing } => {
-                let sender_display: String = if sender.trim().is_empty() {
-                    peers
-                        .get(&from_key)
-                        .map(|p| p.username.clone())
-                        .unwrap_or_else(|| from_key.clone())
-                } else {
-                    sender.trim().chars().take(32).collect()
-                };
-                if sender_display.eq_ignore_ascii_case(local_username) {
+            P2pDatagramMessage::ChatTyping { is_typing, .. } => {
+                // Typing is never relayed; always bind sender identity to the authenticated P2P session.
+                let allowed = peers
+                    .get_mut(&from_key)
+                    .is_some_and(PeerSession::allow_inbound_chat);
+                if !allowed {
                     return;
                 }
-                let sender_known = sender_display.to_ascii_lowercase() == from_key
-                    || participants
-                        .values()
-                        .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
-                if !sender_known {
+                let sender_display: String = peers
+                    .get(&from_key)
+                    .map(|p| p.username.clone())
+                    .unwrap_or_else(|| from_key.clone());
+                if sender_display.eq_ignore_ascii_case(local_username) {
                     return;
                 }
                 emit_opt(
@@ -3467,7 +3531,14 @@ async fn dispatch_udp_event(
                     return;
                 };
                 let clean_avatar = sanitize_avatar_id(&avatar_id);
-                let clean_count = count.clamp(1, MAX_REACTION_BURST_COUNT);
+                let raw_count = count.clamp(1, MAX_REACTION_BURST_COUNT);
+                let clean_count = peers
+                    .get_mut(&from_key)
+                    .map(|p| p.allow_inbound_reaction(raw_count))
+                    .unwrap_or(0);
+                if clean_count == 0 {
+                    return;
+                }
 
                 let sender_display = if sender.trim().is_empty() {
                     peers
@@ -3480,6 +3551,9 @@ async fn dispatch_udp_event(
 
                 let sender_key = sender_display.to_ascii_lowercase();
                 if sender_display.eq_ignore_ascii_case(local_username) {
+                    return;
+                }
+                if ttl > 0 && sender_key != from_key {
                     return;
                 }
                 let sender_known = sender_key == from_key
@@ -3717,6 +3791,10 @@ async fn handle_udp_packet(
             if !peer.bidirectional_verified {
                 let rev_ts = epoch_ms(start_instant);
                 peer.pending_pings.insert(rev_ts, Instant::now());
+                if peer.pending_pings.len() > 24 {
+                    let cutoff = Instant::now() - Duration::from_secs(6);
+                    peer.pending_pings.retain(|_, t| *t >= cutoff);
+                }
                 if let Some(rev_pkt) = peer.crypto.seal(&P2pWireFrame::PunchPing { ts_ms: rev_ts })
                 {
                     let _ = reply_sock.send_to(&rev_pkt, active).await;
@@ -3756,6 +3834,10 @@ async fn handle_udp_packet(
             if !peer.bidirectional_verified {
                 let rev_ts = epoch_ms(start_instant);
                 peer.pending_pings.insert(rev_ts, Instant::now());
+                if peer.pending_pings.len() > 24 {
+                    let cutoff = Instant::now() - Duration::from_secs(6);
+                    peer.pending_pings.retain(|_, t| *t >= cutoff);
+                }
                 if let Some(rev_pkt) = peer.crypto.seal(&P2pWireFrame::PunchPing { ts_ms: rev_ts })
                 {
                     let _ = reply_sock.send_to(&rev_pkt, active).await;
@@ -3776,6 +3858,10 @@ async fn handle_udp_packet(
             } else if !peer.bidirectional_verified {
                 let rev_ts = epoch_ms(start_instant);
                 peer.pending_pings.insert(rev_ts, Instant::now());
+                if peer.pending_pings.len() > 24 {
+                    let cutoff = Instant::now() - Duration::from_secs(6);
+                    peer.pending_pings.retain(|_, t| *t >= cutoff);
+                }
                 if let Some(rev_pkt) = peer.crypto.seal(&P2pWireFrame::PunchPing { ts_ms: rev_ts })
                 {
                     let _ = reply_sock.send_to(&rev_pkt, active).await;
@@ -4018,6 +4104,9 @@ async fn handle_peer_app_msg(
         if sender_display.eq_ignore_ascii_case(local_username) {
             return;
         }
+        if ttl > 0 && sender_key != peer_key {
+            return;
+        }
         let sender_known = sender_key == peer_key
             || participants
                 .values()
@@ -4169,6 +4258,9 @@ async fn handle_peer_app_msg(
         if sender_display.eq_ignore_ascii_case(local_username) {
             return;
         }
+        if ttl > 0 && sender_key != peer_key {
+            return;
+        }
         let sender_known = sender_key == peer_key
             || participants
                 .values()
@@ -4178,6 +4270,12 @@ async fn handle_peer_app_msg(
         }
 
         if record_seen_chat_msg(seen_chat_msgs, &sender_key, &clean_id) {
+            let allowed = peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_chat);
+            if !allowed {
+                return;
+            }
             emit_opt(
                 app,
                 "sync://chat",
@@ -4243,6 +4341,9 @@ async fn handle_peer_app_msg(
         };
         let sender_key = sender_display.to_ascii_lowercase();
         if sender_display.eq_ignore_ascii_case(local_username) {
+            return;
+        }
+        if ttl > 0 && sender_key != peer_key {
             return;
         }
         let sender_known = sender_key == peer_key
@@ -4311,6 +4412,9 @@ async fn handle_peer_app_msg(
         };
         let sender_key = sender_display.to_ascii_lowercase();
         if sender_display.eq_ignore_ascii_case(local_username) {
+            return;
+        }
+        if ttl > 0 && sender_key != peer_key {
             return;
         }
         let sender_known = sender_key == peer_key
@@ -4626,6 +4730,7 @@ mod tests {
         tokio::spawn(run_p2p_actor(
             None,
             username.to_string(),
+            None,
             LocalPathOptions::default(),
             cmd_rx,
             Arc::clone(&voice),
@@ -5393,6 +5498,8 @@ mod tests {
                 last_voice_state_rx: Some(Instant::now()),
                 voice_blocked_peers: Vec::new(),
                 bidirectional_verified: true,
+                inbound_chat_window: (Instant::now(), 0),
+                inbound_reaction_window: (Instant::now(), 0),
                 test_drop_direct: false,
             },
         );
@@ -5467,6 +5574,8 @@ mod tests {
                 last_voice_state_rx: Some(Instant::now()),
                 voice_blocked_peers: Vec::new(),
                 bidirectional_verified: false,
+                inbound_chat_window: (Instant::now(), 0),
+                inbound_reaction_window: (Instant::now(), 0),
                 test_drop_direct: false,
             },
         );
@@ -5505,6 +5614,8 @@ mod tests {
                 last_voice_state_rx: Some(Instant::now()),
                 voice_blocked_peers: Vec::new(),
                 bidirectional_verified: true,
+                inbound_chat_window: (Instant::now(), 0),
+                inbound_reaction_window: (Instant::now(), 0),
                 test_drop_direct: false,
             },
         );

@@ -1806,10 +1806,17 @@ fn open_input_stream(
     };
 
     let (stream, cons) = if let Some(ref ll_cfg) = low_latency_cfg {
-        build_cpal_input_stream(&dev, ll_cfg, fmt, channels, Arc::clone(&cb_shared), err_cb.clone())
-            .or_else(|_| {
-                build_cpal_input_stream(&dev, &default_stream_cfg, fmt, channels, cb_shared, err_cb)
-            })
+        build_cpal_input_stream(
+            &dev,
+            ll_cfg,
+            fmt,
+            channels,
+            Arc::clone(&cb_shared),
+            err_cb.clone(),
+        )
+        .or_else(|_| {
+            build_cpal_input_stream(&dev, &default_stream_cfg, fmt, channels, cb_shared, err_cb)
+        })
     } else {
         build_cpal_input_stream(&dev, &default_stream_cfg, fmt, channels, cb_shared, err_cb)
     }
@@ -1985,7 +1992,9 @@ impl HighResSleeper {
         }
         if !self.handle.is_null() {
             let ticks_100ns = -((dur.as_nanos() / 100).max(1).min(i64::MAX as u128) as i64);
-            let ok = unsafe { SetWaitableTimer(self.handle, &ticks_100ns, 0, None, std::ptr::null(), 0) };
+            let ok = unsafe {
+                SetWaitableTimer(self.handle, &ticks_100ns, 0, None, std::ptr::null(), 0)
+            };
             if ok != 0 {
                 unsafe {
                     WaitForSingleObject(self.handle, INFINITE);
@@ -2638,7 +2647,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 if speech_prob < 0.3 && raw_db < -25.0 {
                     auto_noise_floor_db = auto_noise_floor_db * 0.992 + raw_db * 0.008;
                 }
-                let auto_th = (auto_noise_floor_db + 11.0).clamp(-56.0, -28.0);
+                let auto_th = (auto_noise_floor_db + 8.0).clamp(-58.0, -32.0);
                 (cfg.sensitivity_db * 0.35 + auto_th * 0.65).clamp(-75.0, 0.0)
             } else {
                 cfg.sensitivity_db
@@ -2646,10 +2655,10 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
             let tight_boost =
                 if cfg.cinema_tight_gate && shared.movie_playing.load(Ordering::Relaxed) {
-                    3.0
+                    1.5
                 } else {
                     0.0
-                } + if half_duplex_guard { 4.0 } else { 0.0 };
+                } + if half_duplex_guard { 1.5 } else { 0.0 };
             let eff_thresh = (base_thresh + tight_boost).clamp(-75.0, 0.0);
             let ptt_opt = match cfg.input_mode {
                 InputModeWire::Vad => None,

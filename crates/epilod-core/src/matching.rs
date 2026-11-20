@@ -497,6 +497,573 @@ pub fn compare_files(local: Option<&FileIdentity>, peer: Option<&FileIdentity>) 
     analyze_files(local, peer).status
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalMatchConfidence {
+    High,
+    Medium,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCandidateInput {
+    pub path: String,
+    pub file_name: String,
+    pub parent_folder: Option<String>,
+    pub grandparent_folder: Option<String>,
+    pub size_bytes: u64,
+    pub duration_secs: Option<f64>,
+    pub is_cloud_placeholder: bool,
+    pub in_saved_series: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMatchCandidate {
+    pub path: String,
+    pub file_name: String,
+    pub folder_label: String,
+    pub score: f64,
+    pub title_similarity: f64,
+    pub confidence: LocalMatchConfidence,
+    pub reason: String,
+    pub is_cloud_placeholder: bool,
+    pub size_bytes: u64,
+    pub duration_secs: Option<f64>,
+    pub duration_delta_secs: Option<f64>,
+}
+
+const JUNK_CLIP_TOKENS: &[&str] = &[
+    "sample",
+    "trailer",
+    "teaser",
+    "ncop",
+    "nced",
+    "creditless",
+    "featurette",
+    "extras",
+    "deleted",
+    "pv",
+];
+
+const STOPWORD_TOKENS: &[&str] = &["the", "a", "an", "of", "and"];
+
+fn fold_ascii_char(c: char) -> char {
+    match c {
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => 'a',
+        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ø' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
+        'ñ' | 'Ñ' => 'n',
+        'ç' | 'Ç' => 'c',
+        'ý' | 'ÿ' | 'Ý' => 'y',
+        _ => c,
+    }
+}
+
+fn canonicalize_title_text(raw: &str) -> String {
+    let folded: String = raw
+        .chars()
+        .map(fold_ascii_char)
+        .collect::<String>()
+        .replace('&', " and ");
+    let mut out = Vec::new();
+    for tok in folded
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+    {
+        let mapped = match tok {
+            "ii" => "2",
+            "iii" => "3",
+            "iv" => "4",
+            "vi" => "6",
+            "vii" => "7",
+            "viii" => "8",
+            "ix" => "9",
+            "pt" => "part",
+            other => other,
+        };
+        out.push(mapped.to_string());
+    }
+    out.join(" ")
+}
+
+fn is_generic_folder_or_title(norm_title: &str) -> bool {
+    if norm_title.is_empty() {
+        return true;
+    }
+    let tokens: Vec<&str> = norm_title.split_whitespace().collect();
+    if tokens.is_empty() {
+        return true;
+    }
+    if tokens.iter().all(|t| {
+        matches!(
+            *t,
+            "season"
+                | "series"
+                | "specials"
+                | "extras"
+                | "ova"
+                | "episode"
+                | "ep"
+                | "movie"
+                | "video"
+                | "film"
+                | "downloads"
+                | "videos"
+                | "desktop"
+                | "movies"
+                | "anime"
+                | "shows"
+                | "tv"
+        ) || t.chars().all(|c| c.is_ascii_digit())
+            || (t.starts_with('s') && t[1..].chars().all(|c| c.is_ascii_digit()))
+    }) {
+        return true;
+    }
+    false
+}
+
+fn parse_season_hint(folder: &str) -> Option<u32> {
+    let lower = folder.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        if (*tok == "season" || *tok == "s" || *tok == "series") && i + 1 < tokens.len() {
+            if let Ok(n) = tokens[i + 1].parse::<u32>() {
+                if (1..=99).contains(&n) {
+                    return Some(n);
+                }
+            }
+        }
+        if let Some(rest) = tok.strip_prefix('s') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(n) = rest.parse::<u32>() {
+                    if (1..=99).contains(&n) {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_bare_episode_in_folder(
+    file_name: &str,
+    parent_folder: Option<&str>,
+) -> Option<EpisodeCode> {
+    let parent = parent_folder?;
+    if parent.trim().is_empty() {
+        return None;
+    }
+    let base_id = normalize_media_identity(file_name);
+    if base_id.year.is_some() {
+        // Movies like "300 (2006).mkv" or "12 Angry Men (1957).mkv" must never be treated as episodes.
+        return None;
+    }
+    let season_hint = parse_season_hint(parent);
+    let stem = strip_media_ext(file_name).trim();
+    let tokens: Vec<&str> = stem
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let first = *tokens.first()?;
+    let bare_number_only = tokens.len() == 1 || is_generic_folder_or_title(&base_id.title);
+    if !bare_number_only && season_hint.is_none() {
+        return None;
+    }
+    if first.len() <= 3 && first.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(ep_num) = first.parse::<u32>() {
+            if (1..=400).contains(&ep_num) {
+                return Some(EpisodeCode {
+                    season: season_hint,
+                    episode: ep_num,
+                });
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_path_media_identity(
+    file_name: &str,
+    parent_folder: Option<&str>,
+    grandparent_folder: Option<&str>,
+) -> NormalizedMediaIdentity {
+    let mut id = normalize_media_identity(file_name);
+    id.title = canonicalize_title_text(&id.title);
+
+    if id.episode.is_none() {
+        if let Some(bare_ep) = parse_bare_episode_in_folder(file_name, parent_folder) {
+            id.episode = Some(bare_ep);
+            // A file starting with a bare episode number (e.g. "04 - Episode Title.mkv")
+            // carries the episode title in its filename and the series title in its parent/grandparent folder.
+            id.title.clear();
+        }
+    }
+
+    if let Some(ep) = id.episode.as_mut() {
+        if ep.season.is_none() {
+            if let Some(p) = parent_folder {
+                ep.season = parse_season_hint(p);
+            }
+        }
+    }
+
+    if is_generic_folder_or_title(&id.title) {
+        if let Some(p) = parent_folder {
+            let p_id = normalize_media_identity(p);
+            let p_title = canonicalize_title_text(&p_id.title);
+            if !is_generic_folder_or_title(&p_title) {
+                id.title = p_title;
+                if id.year.is_none() {
+                    id.year = p_id.year;
+                }
+            } else if let Some(gp) = grandparent_folder {
+                let gp_id = normalize_media_identity(gp);
+                let gp_title = canonicalize_title_text(&gp_id.title);
+                if !is_generic_folder_or_title(&gp_title) {
+                    id.title = gp_title;
+                    if id.year.is_none() {
+                        id.year = gp_id.year;
+                    }
+                }
+            }
+        }
+    }
+
+    id
+}
+
+fn title_numeric_tokens(title: &str) -> Vec<String> {
+    title
+        .split_whitespace()
+        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn has_junk_clip_token(raw_name: &str) -> Vec<&'static str> {
+    let lower = raw_name.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    JUNK_CLIP_TOKENS
+        .iter()
+        .copied()
+        .filter(|junk| tokens.contains(junk))
+        .collect()
+}
+
+fn jaro_winkler(a: &str, b: &str) -> f64 {
+    if a == b {
+        return 1.0;
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let len_a = a_chars.len();
+    let len_b = b_chars.len();
+    if len_a == 0 || len_b == 0 {
+        return 0.0;
+    }
+    let match_dist = (len_a.max(len_b) / 2).saturating_sub(1);
+    let mut a_matched = vec![false; len_a];
+    let mut b_matched = vec![false; len_b];
+    let mut matches = 0usize;
+    for i in 0..len_a {
+        let start = i.saturating_sub(match_dist);
+        let end = (i + match_dist + 1).min(len_b);
+        for j in start..end {
+            if !b_matched[j] && a_chars[i] == b_chars[j] {
+                a_matched[i] = true;
+                b_matched[j] = true;
+                matches += 1;
+                break;
+            }
+        }
+    }
+    if matches == 0 {
+        return 0.0;
+    }
+    let mut k = 0usize;
+    let mut transpositions = 0usize;
+    for i in 0..len_a {
+        if !a_matched[i] {
+            continue;
+        }
+        while !b_matched[k] {
+            k += 1;
+        }
+        if a_chars[i] != b_chars[k] {
+            transpositions += 1;
+        }
+        k += 1;
+    }
+    let m = matches as f64;
+    let jaro =
+        (m / len_a as f64 + m / len_b as f64 + (m - (transpositions as f64) / 2.0) / m) / 3.0;
+    let prefix = a_chars
+        .iter()
+        .zip(b_chars.iter())
+        .take(4)
+        .take_while(|(ca, cb)| ca == cb)
+        .count() as f64;
+    (jaro + prefix * 0.1 * (1.0 - jaro)).min(1.0)
+}
+
+pub fn compute_title_similarity(a: &str, b: &str) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if a == b {
+        return 1.0;
+    }
+    let a_compact: String = a.chars().filter(|c| !c.is_whitespace()).collect();
+    let b_compact: String = b.chars().filter(|c| !c.is_whitespace()).collect();
+    if a_compact == b_compact && !a_compact.is_empty() {
+        return 0.99;
+    }
+
+    let a_tokens: Vec<&str> = a
+        .split_whitespace()
+        .filter(|t| !STOPWORD_TOKENS.contains(t))
+        .collect();
+    let b_tokens: Vec<&str> = b
+        .split_whitespace()
+        .filter(|t| !STOPWORD_TOKENS.contains(t))
+        .collect();
+
+    let token_jaccard = if a_tokens.is_empty() || b_tokens.is_empty() {
+        0.0
+    } else {
+        let mut inter = 0usize;
+        for t in &a_tokens {
+            if b_tokens.contains(t) {
+                inter += 1;
+            }
+        }
+        let union = a_tokens.len() + b_tokens.len() - inter;
+        if union == 0 {
+            0.0
+        } else {
+            inter as f64 / union as f64
+        }
+    };
+
+    let jw = jaro_winkler(&a_compact, &b_compact);
+    let prefix_bonus = if a.starts_with(b) || b.starts_with(a) {
+        0.15
+    } else {
+        0.0
+    };
+    ((token_jaccard * 0.62) + (jw * 0.38) + prefix_bonus).min(1.0)
+}
+
+fn is_short_title(title: &str) -> bool {
+    let alnum_len = title.chars().filter(|c| c.is_ascii_alphanumeric()).count();
+    alnum_len < 4
+}
+
+pub fn score_local_candidate(
+    peer_file_name: &str,
+    peer_duration_secs: Option<f64>,
+    candidate: &LocalCandidateInput,
+) -> Option<LocalMatchCandidate> {
+    score_local_candidate_with_options(peer_file_name, peer_duration_secs, candidate, false)
+}
+
+pub fn score_local_candidate_with_options(
+    peer_file_name: &str,
+    peer_duration_secs: Option<f64>,
+    candidate: &LocalCandidateInput,
+    allow_unprobed_for_probe: bool,
+) -> Option<LocalMatchCandidate> {
+    let peer_raw_clean = peer_file_name.trim();
+    if peer_raw_clean.is_empty() {
+        return None;
+    }
+
+    // Reject junk clips (sample/trailer/ncop/etc.) unless the peer itself is also one.
+    let peer_junk = has_junk_clip_token(peer_raw_clean);
+    let local_junk = has_junk_clip_token(&candidate.file_name);
+    if local_junk.iter().any(|tok| !peer_junk.contains(tok)) {
+        return None;
+    }
+
+    let peer_dur = peer_duration_secs.filter(|d| d.is_finite() && *d > 1.0);
+    if peer_dur.is_some_and(|d| d >= 600.0)
+        && !candidate.is_cloud_placeholder
+        && candidate.size_bytes > 0
+        && candidate.size_bytes < 15 * 1024 * 1024
+        && candidate.duration_secs.is_none_or(|ld| ld < 60.0)
+    {
+        return None;
+    }
+
+    let mut peer_id = normalize_media_identity(peer_raw_clean);
+    peer_id.title = canonicalize_title_text(&peer_id.title);
+    let local_id = extract_path_media_identity(
+        &candidate.file_name,
+        candidate.parent_folder.as_deref(),
+        candidate.grandparent_folder.as_deref(),
+    );
+
+    // Hard episode/season guards
+    match (peer_id.episode, local_id.episode) {
+        (Some(pe), Some(le)) => {
+            if pe.episode != le.episode {
+                return None;
+            }
+            if let (Some(ps), Some(ls)) = (pe.season, le.season) {
+                if ps != ls {
+                    return None;
+                }
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            // Only allow episode-vs-non-episode if duration matches closely (>= 120s).
+            let dur_ok = match (peer_dur, candidate.duration_secs) {
+                (Some(pd), Some(ld)) if pd >= 120.0 && ld >= 120.0 => (pd - ld).abs() <= 2.5,
+                _ => false,
+            };
+            if !dur_ok {
+                return None;
+            }
+        }
+        (None, None) => {}
+    }
+
+    // Hard year guard when both have explicit years
+    if let (Some(py), Some(ly)) = (peer_id.year, local_id.year) {
+        if py != ly {
+            return None;
+        }
+    }
+
+    // Hard sequel / numeric token conflict guard (e.g. "Dune" vs "Dune Part 2")
+    let peer_nums = title_numeric_tokens(&peer_id.title);
+    let local_nums = title_numeric_tokens(&local_id.title);
+    if peer_nums != local_nums {
+        return None;
+    }
+
+    let title_sim = compute_title_similarity(&peer_id.title, &local_id.title);
+
+    let (dur_exact, dur_fps, dur_delta) = match (peer_dur, candidate.duration_secs) {
+        (Some(pd), Some(ld)) if pd > 1.0 && ld > 1.0 => {
+            let delta = ld - pd;
+            let exact = delta.abs() <= 3.5;
+            let fps = !exact && detect_fps_suggestion(ld, pd).is_some();
+            // Reject wildly different lengths for the same movie/episode when duration is known
+            if delta.abs() > 300.0 && !fps {
+                return None;
+            }
+            (exact, fps, Some(delta))
+        }
+        _ => (false, false, None),
+    };
+
+    let unprobed_can_probe =
+        allow_unprobed_for_probe && peer_dur.is_some() && candidate.duration_secs.is_none();
+
+    // Short titles ("Up", "It", "Her") require exact title + (year or duration confirmation)
+    if is_short_title(&peer_id.title) {
+        let year_confirmed = peer_id.year.is_some() && peer_id.year == local_id.year;
+        if title_sim < 0.98 || (!year_confirmed && !dur_exact && !dur_fps && !unprobed_can_probe) {
+            return None;
+        }
+    }
+
+    let both_episodes_match = peer_id.episode.is_some() && local_id.episode.is_some();
+    let min_sim = if dur_exact || dur_fps || unprobed_can_probe {
+        if both_episodes_match {
+            0.25
+        } else {
+            0.40
+        }
+    } else if both_episodes_match {
+        0.58
+    } else {
+        0.65
+    };
+
+    if title_sim < min_sim {
+        return None;
+    }
+
+    let mut score = title_sim * 100.0;
+    if both_episodes_match {
+        score += 20.0;
+        if peer_id.episode.and_then(|e| e.season) == local_id.episode.and_then(|e| e.season)
+            && peer_id.episode.and_then(|e| e.season).is_some()
+        {
+            score += 8.0;
+        }
+    }
+    if peer_id.year.is_some() && peer_id.year == local_id.year {
+        score += 10.0;
+    }
+    if dur_exact {
+        score += 25.0;
+    } else if dur_fps {
+        score += 15.0;
+    }
+    if candidate.in_saved_series {
+        score += 6.0;
+    }
+
+    let confidence = if (title_sim >= 0.85
+        && (both_episodes_match || peer_id.year == local_id.year || dur_exact))
+        || (dur_exact && title_sim >= 0.50)
+    {
+        LocalMatchConfidence::High
+    } else {
+        LocalMatchConfidence::Medium
+    };
+
+    let reason = if candidate.is_cloud_placeholder {
+        "Cloud placeholder (OneDrive)".to_string()
+    } else if dur_exact && both_episodes_match {
+        "Same episode & runtime".to_string()
+    } else if dur_exact {
+        "Exact runtime match".to_string()
+    } else if dur_fps {
+        "Same title · FPS differs".to_string()
+    } else if both_episodes_match && title_sim >= 0.85 {
+        "Same show & episode".to_string()
+    } else if both_episodes_match {
+        "Similar title & episode".to_string()
+    } else {
+        "Similar title".to_string()
+    };
+
+    let folder_label = candidate
+        .parent_folder
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Local folder".to_string());
+
+    Some(LocalMatchCandidate {
+        path: candidate.path.clone(),
+        file_name: candidate.file_name.clone(),
+        folder_label,
+        score,
+        title_similarity: title_sim,
+        confidence,
+        reason,
+        is_cloud_placeholder: candidate.is_cloud_placeholder,
+        size_bytes: candidate.size_bytes,
+        duration_secs: candidate.duration_secs,
+        duration_delta_secs: dur_delta,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +1248,184 @@ mod tests {
             FileMatchStatus::SameLengthDifferentEncode
         );
         assert_eq!(renamed_cmp.source_relation, SourceRelation::DifferentEncode);
+    }
+
+    #[test]
+    fn test_local_candidate_scoring_handles_messy_names_and_rejects_false_positives() {
+        let cand = |file_name: &str,
+                    parent: Option<&str>,
+                    grandparent: Option<&str>,
+                    size: u64,
+                    dur: Option<f64>| LocalCandidateInput {
+            path: format!("D:\\Media\\{file_name}"),
+            file_name: file_name.to_string(),
+            parent_folder: parent.map(str::to_string),
+            grandparent_folder: grandparent.map(str::to_string),
+            size_bytes: size,
+            duration_secs: dur,
+            is_cloud_placeholder: false,
+            in_saved_series: false,
+        };
+
+        // Folder-context episode match ("Season 2/04.mkv" vs "Breaking Bad S02E04.mkv")
+        let ep_match = score_local_candidate(
+            "[Release] Breaking.Bad.S02E04.1080p.WEB-DL.mkv",
+            Some(2820.0),
+            &cand(
+                "04.mkv",
+                Some("Season 2"),
+                Some("Breaking Bad"),
+                800_000_000,
+                Some(2821.0),
+            ),
+        )
+        .expect("should match via grandparent+parent folder context");
+        assert_eq!(ep_match.confidence, LocalMatchConfidence::High);
+
+        // Wrong episode must be hard-rejected
+        assert!(score_local_candidate(
+            "Breaking.Bad.S02E04.1080p.mkv",
+            Some(2820.0),
+            &cand(
+                "05.mkv",
+                Some("Season 2"),
+                Some("Breaking Bad"),
+                800_000_000,
+                Some(2820.0),
+            ),
+        )
+        .is_none());
+
+        // Sequel number mismatch ("Dune" vs "Dune Part Two" / "Dune 2")
+        assert!(score_local_candidate(
+            "Dune (2021) 1080p.mkv",
+            Some(9300.0),
+            &cand(
+                "Dune.Part.2.2024.1080p.mkv",
+                None,
+                None,
+                4_000_000_000,
+                Some(9960.0)
+            ),
+        )
+        .is_none());
+        assert!(score_local_candidate(
+            "Dune Part Two 2024.mkv",
+            Some(9960.0),
+            &cand("Dune (2021).mkv", None, None, 4_000_000_000, Some(9300.0)),
+        )
+        .is_none());
+
+        // Punctuation/Roman numeral equivalence ("Spider-Man" vs "SpiderMan", "Part II" vs "Part 2")
+        let spider = score_local_candidate(
+            "Spider-Man Into the Spider-Verse (2018) 1080p.mkv",
+            Some(7000.0),
+            &cand(
+                "SpiderMan.Into.The.Spider.Verse.2018.BluRay.mp4",
+                None,
+                None,
+                2_500_000_000,
+                Some(7001.0),
+            ),
+        )
+        .expect("should match across punctuation differences");
+        assert_eq!(spider.confidence, LocalMatchConfidence::High);
+
+        let roman = score_local_candidate(
+            "Dune.Part.II.2024.1080p.mkv",
+            Some(9960.0),
+            &cand(
+                "Dune Part 2 (2024).mkv",
+                None,
+                None,
+                4_000_000_000,
+                Some(9960.0),
+            ),
+        )
+        .expect("Roman numeral II should match 2");
+        assert_eq!(roman.confidence, LocalMatchConfidence::High);
+
+        // Junk sample/trailer files must be rejected
+        assert!(score_local_candidate(
+            "Dune.Part.Two.2024.1080p.mkv",
+            Some(9960.0),
+            &cand(
+                "Dune.Part.Two.2024.Sample.mkv",
+                None,
+                None,
+                45_000_000,
+                Some(45.0)
+            ),
+        )
+        .is_none());
+
+        // Short title ("It" / "Up") requires year or runtime confirmation
+        assert!(score_local_candidate(
+            "Up.2009.1080p.mkv",
+            Some(5760.0),
+            &cand("Up.mkv", None, None, 2_000_000_000, None),
+        )
+        .is_none());
+        assert!(score_local_candidate(
+            "Up.2009.1080p.mkv",
+            Some(5760.0),
+            &cand("Up (2009).mkv", None, None, 2_000_000_000, None),
+        )
+        .is_some());
+
+        // Movies starting with numbers inside a Movies folder must NOT be misparsed as episodes
+        let movie_300 = score_local_candidate(
+            "300.2006.1080p.BluRay.mkv",
+            Some(7000.0),
+            &cand(
+                "300 (2006).mkv",
+                Some("Movies"),
+                None,
+                4_000_000_000,
+                Some(7000.0),
+            ),
+        )
+        .expect("300 (2006) in Movies folder must match as a movie");
+        assert_eq!(movie_300.confidence, LocalMatchConfidence::High);
+
+        let movie_12 = score_local_candidate(
+            "12.Angry.Men.1957.1080p.mkv",
+            Some(5760.0),
+            &cand(
+                "12 Angry Men (1957).mkv",
+                Some("Movies"),
+                None,
+                3_000_000_000,
+                Some(5760.0),
+            ),
+        )
+        .expect("12 Angry Men (1957) in Movies folder must match as a movie");
+        assert_eq!(movie_12.confidence, LocalMatchConfidence::High);
+
+        // Bare episode number + episode subtitle ("04 - Cancer Man.mkv") inside "Breaking Bad/Season 1"
+        let ep_with_subtitle = score_local_candidate(
+            "Breaking.Bad.S01E04.1080p.mkv",
+            Some(2880.0),
+            &cand(
+                "04 - Cancer Man.mkv",
+                Some("Season 1"),
+                Some("Breaking Bad"),
+                900_000_000,
+                Some(2880.0),
+            ),
+        )
+        .expect("04 - Episode Title.mkv inside Show/Season 1 must inherit show title and match");
+        assert_eq!(ep_with_subtitle.confidence, LocalMatchConfidence::High);
+
+        // Unprobed short title ("Up.mkv") is eligible for probe in Pass 1, then confirmed by duration in Pass 2
+        let unprobed_up = cand("Up.mkv", Some("Movies"), None, 2_000_000_000, None);
+        assert!(score_local_candidate("Up.2009.1080p.mkv", Some(5760.0), &unprobed_up).is_none());
+        assert!(score_local_candidate_with_options(
+            "Up.2009.1080p.mkv",
+            Some(5760.0),
+            &unprobed_up,
+            true
+        )
+        .is_some());
     }
 }

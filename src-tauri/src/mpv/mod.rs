@@ -9,8 +9,9 @@ use epilod_core::mpv_ipc::{
 };
 use epilod_core::syncplay::PlayerSnapshot;
 use hwnd::{
-    capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd, is_child_window_alive,
-    mark_child_closing_and_hide, resize_child_hwnd, set_child_visible, PendingResize, PhysicalRect,
+    apply_child_hwnd_size, capture_child_backdrop_rgba, create_child_hwnd, destroy_child_hwnd,
+    is_child_window_alive, mark_child_closing_and_hide, nudge_child_hwnd_redraw, resize_child_hwnd,
+    set_child_visible, PendingResize, PhysicalRect,
 };
 use ipc::PendingReplyMap;
 use process::{resolve_fonts_dir, resolve_mpv_exe, spawn_mpv};
@@ -71,6 +72,8 @@ pub struct MpvController {
     last_app: Arc<Mutex<Option<AppHandle>>>,
     capture_busy: Arc<AtomicBool>,
     freeze_capture_busy: Arc<AtomicBool>,
+    vo_nudge_pending: Arc<AtomicBool>,
+    vo_nudge_in_flight: Arc<AtomicBool>,
     volume_reassert_cb: VolumeReassertCallback,
 }
 
@@ -100,6 +103,8 @@ impl MpvController {
             last_app: Arc::new(Mutex::new(None)),
             capture_busy: Arc::new(AtomicBool::new(false)),
             freeze_capture_busy: Arc::new(AtomicBool::new(false)),
+            vo_nudge_pending: Arc::new(AtomicBool::new(false)),
+            vo_nudge_in_flight: Arc::new(AtomicBool::new(false)),
             volume_reassert_cb: Arc::new(Mutex::new(None)),
         }
     }
@@ -158,6 +163,7 @@ impl MpvController {
     }
 
     pub fn prepare_for_load(&self) {
+        self.vo_nudge_pending.store(true, Ordering::SeqCst);
         {
             let mut def = self.deferred_load.lock().unwrap_or_else(|e| e.into_inner());
             *def = DeferredLoadState {
@@ -364,7 +370,13 @@ impl MpvController {
 
         let child_hwnd = create_child_hwnd(parent_hwnd, rect, app.clone())?;
         let seq = MPV_PIPE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let pipe_name = format!("epilod-mpv-{}-{seq}", std::process::id());
+        let mut pipe_rand = [0u8; 8];
+        epilod_core::p2p::fill_random_bytes(&mut pipe_rand);
+        let pipe_name = format!(
+            "epilod-mpv-{}-{seq}-{:016x}",
+            std::process::id(),
+            u64::from_le_bytes(pipe_rand)
+        );
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
 
         let (child, stderr_tail) = match spawn_mpv(
@@ -461,6 +473,74 @@ impl MpvController {
                 },
             );
         });
+        let runtime_for_vo_ready = Arc::clone(&self.runtime);
+        let has_media_for_vo_ready = Arc::clone(&self.has_media);
+        let ui_visible_for_vo_ready = Arc::clone(&self.ui_visible);
+        let vo_nudge_pending_cb = Arc::clone(&self.vo_nudge_pending);
+        let vo_nudge_in_flight_cb = Arc::clone(&self.vo_nudge_in_flight);
+        let vo_ready_cb: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |is_playback_restart| {
+            let should_nudge = if is_playback_restart {
+                vo_nudge_pending_cb.swap(false, Ordering::AcqRel)
+            } else {
+                vo_nudge_pending_cb.load(Ordering::Acquire)
+            };
+            if !should_nudge {
+                return;
+            }
+            if vo_nudge_in_flight_cb
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+            let runtime_nudge = Arc::clone(&runtime_for_vo_ready);
+            let has_media_nudge = Arc::clone(&has_media_for_vo_ready);
+            let ui_visible_nudge = Arc::clone(&ui_visible_for_vo_ready);
+            let in_flight_reset = Arc::clone(&vo_nudge_in_flight_cb);
+            let initial_delay_ms = if is_playback_restart { 20 } else { 40 };
+            tokio::spawn(async move {
+                struct InFlightReset(Arc<AtomicBool>);
+                impl Drop for InFlightReset {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _reset = InFlightReset(in_flight_reset);
+                tokio::time::sleep(Duration::from_millis(initial_delay_ms)).await;
+                let effective = has_media_nudge.load(Ordering::Acquire)
+                    && ui_visible_nudge.load(Ordering::Acquire);
+                if !effective {
+                    return;
+                }
+                let nudge_target = {
+                    let Ok(guard) = runtime_nudge.lock() else {
+                        return;
+                    };
+                    let Some(ref rt) = *guard else {
+                        return;
+                    };
+                    if rt.session_id != session_id {
+                        return;
+                    }
+                    rt.last_rect
+                        .filter(|r| r.width > 1 && r.height > 1)
+                        .map(|r| (rt.app.clone(), rt.hwnd, r))
+                };
+                if let Some((app_handle, hwnd, r)) = nudge_target {
+                    nudge_child_hwnd_redraw(&app_handle, hwnd, r);
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    if let Ok(guard) = runtime_nudge.lock() {
+                        if let Some(ref rt2) = *guard {
+                            if rt2.session_id == session_id {
+                                if let Some(latest_r) = rt2.last_rect {
+                                    apply_child_hwnd_size(&rt2.app, rt2.hwnd, latest_r);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
         tokio::spawn(async move {
             let reason = ipc::connect_and_run_ipc(
                 pipe_name,
@@ -475,6 +555,7 @@ impl MpvController {
                 Arc::clone(&client_seek_seq_clone),
                 Arc::clone(&volume_reassert_clone),
                 file_loaded_cb,
+                vo_ready_cb,
                 move || {
                     if let Ok(mut guard) = runtime_for_probe.try_lock() {
                         if let Some(rt) = guard.as_mut() {
@@ -719,10 +800,11 @@ impl MpvController {
             }
         }
         let busy_guard = BusyReset(Arc::clone(&self.capture_busy));
+        let shutting_down = Arc::clone(&self.shutting_down);
 
         tokio::task::spawn_blocking(move || {
             let _guard = busy_guard;
-            capture_child_backdrop_rgba(hwnd, max_width, max_height)
+            capture_child_backdrop_rgba(hwnd, max_width, max_height, &shutting_down)
         })
         .await
         .map_err(|e| format!("Backdrop capture task failed: {e}"))?

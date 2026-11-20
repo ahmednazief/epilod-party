@@ -453,7 +453,6 @@ export const TransportBar = memo(function TransportBar({
   const volume = usePlayerStore((s) => s.volume);
   const muted = usePlayerStore((s) => s.muted);
   const isFullscreen = usePlayerStore((s) => s.isFullscreen);
-  const feedback = usePlayerStore((s) => s.feedback);
 
   const setVolume = usePlayerStore((s) => s.setVolume);
 
@@ -1113,7 +1112,7 @@ export const TransportBar = memo(function TransportBar({
                 onClick={() => onToggleTab("reactions")}
                 aria-label="Live party reactions"
                 title="Live party reactions (E, or keys 1–7)"
-                className={`ep-bar-pill ep-press ep-reaction-icon-btn ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                className={`ep-bar-icon-btn ep-press ep-reaction-icon-btn ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
                   activeTab === "reactions" ? "ep-droplet-indicator" : ""
                 }`}
               >
@@ -1578,26 +1577,16 @@ export const TransportBar = memo(function TransportBar({
       }`}
     >
       {activeTab === null &&
-        (feedback ? (
+        loaded &&
+        paused &&
+        playBlock.blocked && (
           <span
-            key={feedback.id}
             data-glass-region="true"
-            className="ep-glass-pill anim-pop-in px-3 py-1 text-[11px] font-medium text-accent-soft rounded-full whitespace-nowrap"
+            className="ep-glass-pill anim-pop-in px-3 py-1 text-[11px] font-medium text-warn rounded-full whitespace-nowrap"
           >
-            {feedback.text}
+            {formatWaitingForNotReadyPill(playBlock.notReadyUsernames)}
           </span>
-        ) : (
-          loaded &&
-          paused &&
-          playBlock.blocked && (
-            <span
-              data-glass-region="true"
-              className="ep-glass-pill anim-pop-in px-3 py-1 text-[11px] font-medium text-warn rounded-full whitespace-nowrap"
-            >
-              {formatWaitingForNotReadyPill(playBlock.notReadyUsernames)}
-            </span>
-          )
-        ))}
+        )}
 
       <div
         ref={capsuleBarRef}

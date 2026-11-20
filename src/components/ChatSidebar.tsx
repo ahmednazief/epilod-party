@@ -27,7 +27,7 @@ import {
   textMentionsUsername,
   togglePartyChatReaction,
 } from "../lib/chat";
-import { filterEmojiCatalog, PRESET_REACTIONS } from "../lib/reactions";
+import { filterEmojiCatalog } from "../lib/reactions";
 import { resolveEffectiveUsername } from "../lib/syncController";
 import { useAnimatedPresence, usePresencePayload } from "../lib/useAnimatedPresence";
 import {
@@ -55,6 +55,8 @@ import {
   AppVoiceWaveIcon,
 } from "./ui/AppIcons";
 import { GlassHoverTip } from "./ui/GlassHoverTip";
+import { GlassSwitchTrack } from "./ui/GlassSwitch";
+import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { VoiceMicDeafenPills } from "./ui/VoiceQuickControls";
 import {
   PartyLeaveIcon,
@@ -136,6 +138,7 @@ export const ChatSidebar = memo(function ChatSidebar({
   const localAvatarId = useAppStore((s) => s.avatarId);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const recentEmojis = useAppStore((s) => s.recentEmojis);
+  const reactionPresets = useAppStore((s) => s.reactionPresets);
   const pushRecentEmoji = useAppStore((s) => s.pushRecentEmoji);
   const chatPeeksEnabled = useAppStore((s) => s.chatPeeksEnabled);
   const setChatPeeksEnabled = useAppStore((s) => s.setChatPeeksEnabled);
@@ -254,6 +257,16 @@ export const ChatSidebar = memo(function ChatSidebar({
 
   const replyTarget = replyToId ? (messageById.get(replyToId) ?? null) : null;
   const editTarget = editingMsgId ? (messageById.get(editingMsgId) ?? null) : null;
+  const composerBannerPayload = useMemo(
+    () =>
+      editTarget
+        ? { mode: "edit" as const, msg: editTarget }
+        : replyTarget
+          ? { mode: "reply" as const, msg: replyTarget }
+          : null,
+    [editTarget, replyTarget],
+  );
+  const composerBanner = usePresencePayload(composerBannerPayload, 250);
 
   useEffect(() => {
     if (editTarget && editTarget.isSelf) {
@@ -646,8 +659,8 @@ export const ChatSidebar = memo(function ChatSidebar({
       for (const e of recentEmojis) {
         if (!merged.includes(e)) merged.push(e);
       }
-      for (const p of PRESET_REACTIONS) {
-        if (!merged.includes(p.emoji)) merged.push(p.emoji);
+      for (const emoji of reactionPresets) {
+        if (!merged.includes(emoji)) merged.push(emoji);
       }
       for (const item of filterEmojiCatalog("", "all")) {
         if (!merged.includes(item.emoji)) merged.push(item.emoji);
@@ -658,7 +671,7 @@ export const ChatSidebar = memo(function ChatSidebar({
     return filterEmojiCatalog(q, "all")
       .slice(0, 24)
       .map((item) => item.emoji);
-  }, [emojiQuery, recentEmojis]);
+  }, [emojiQuery, recentEmojis, reactionPresets]);
 
   const remotePeerCount = Math.max(0, participants.length - 1);
   const trimmedDraftLen = Array.from(draft).length;
@@ -853,45 +866,28 @@ export const ChatSidebar = memo(function ChatSidebar({
             >
               <div className="px-1.5 pt-0.5 space-y-1.5">
                 <div className="text-[10.5px] font-medium text-muted">Chat button</div>
-                <div className="grid grid-cols-2 gap-1 p-0.5 rounded-xl bg-white/[0.04]">
-                  <button
-                    type="button"
-                    onClick={() => setChatTriggerPlacement("playbar")}
-                    className={`h-7 rounded-lg text-[11px] font-medium cursor-pointer ${
-                      chatTriggerPlacement === "playbar"
-                        ? "bg-white/[0.14] text-white"
-                        : "text-secondary hover:text-white"
-                    }`}
-                  >
-                    Play Bar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setChatTriggerPlacement("edge")}
-                    className={`h-7 rounded-lg text-[11px] font-medium cursor-pointer ${
-                      chatTriggerPlacement === "edge"
-                        ? "bg-white/[0.14] text-white"
-                        : "text-secondary hover:text-white"
-                    }`}
-                  >
-                    Right Edge
-                  </button>
-                </div>
+                <SegmentedTabs<"playbar" | "edge">
+                  ariaLabel="Chat button placement"
+                  size="sm"
+                  fullWidth
+                  value={chatTriggerPlacement}
+                  onChange={setChatTriggerPlacement}
+                  items={[
+                    { value: "playbar", label: "Play Bar" },
+                    { value: "edge", label: "Right Edge" },
+                  ]}
+                />
               </div>
 
               <button
                 type="button"
+                role="switch"
+                aria-checked={chatPeeksEnabled}
                 onClick={() => setChatPeeksEnabled(!chatPeeksEnabled)}
-                className="w-full px-2 py-1.5 rounded-xl hover:bg-white/[0.06] flex items-center justify-between gap-2 text-[11.5px] text-secondary hover:text-white cursor-pointer"
+                className="ep-menu-row ep-press w-full px-2 py-1.5 rounded-xl flex items-center justify-between gap-2 text-[11.5px] text-secondary hover:text-white cursor-pointer"
               >
                 <span>Corner peeks</span>
-                <span
-                  className={`text-[11px] font-medium ${
-                    chatPeeksEnabled ? "text-accent-soft" : "text-muted"
-                  }`}
-                >
-                  {chatPeeksEnabled ? "On" : "Off"}
-                </span>
+                <GlassSwitchTrack checked={chatPeeksEnabled} size="sm" />
               </button>
             </div>
           )}
@@ -1410,63 +1406,67 @@ export const ChatSidebar = memo(function ChatSidebar({
       </div>
 
       {/* @Mention Autocomplete */}
-      {mentionCandidates.length > 0 && (
-        <div className="px-3 pb-1.5 flex items-center gap-1.5 flex-wrap shrink-0">
-          {mentionCandidates.map((name, i) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => applyMention(name)}
-              className={`px-2.5 py-1 rounded-full text-[11.5px] font-medium cursor-pointer ${
-                i === mentionIdx
-                  ? "bg-accent/45 text-white"
-                  : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.10]"
-              }`}
-            >
-              @{name}
-            </button>
-          ))}
-        </div>
-      )}
+      <AnimatedCollapse
+        open={mentionCandidates.length > 0}
+        className="shrink-0"
+        innerClassName="px-3 pb-1.5 flex items-center gap-1.5 flex-wrap"
+      >
+        {mentionCandidates.map((name, i) => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => applyMention(name)}
+            className={`ep-press px-2.5 py-1 rounded-full text-[11.5px] font-medium cursor-pointer transition-colors duration-150 ${
+              i === mentionIdx
+                ? "bg-accent/45 text-white"
+                : "bg-white/[0.06] text-secondary hover:text-white hover:bg-white/[0.10]"
+            }`}
+          >
+            @{name}
+          </button>
+        ))}
+      </AnimatedCollapse>
 
       {/* Comfortable, Cushioned Single-Surface Composer + Separate Send Button */}
       <div className="ep-chat-composer-zone px-3 pb-5 pt-2 shrink-0">
-        {(replyTarget || editTarget) && (
-          <div className="mb-1.5 px-2.5 py-1 rounded-xl bg-white/[0.04] flex items-center justify-between gap-2 text-[11px]">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="w-[2px] h-3 rounded-full bg-accent-soft shrink-0" />
-              <span className="text-accent-soft font-medium shrink-0">
-                {editTarget
-                  ? "Editing"
-                  : `Replying to ${
-                      replyTarget!.isSelf
-                        ? "yourself"
-                        : hideParticipants
-                          ? "Friend"
-                          : replyTarget!.sender
-                    }`}
-              </span>
-              <span dir="auto" className="text-secondary/80 truncate">
-                {editTarget ? editTarget.text : replyTarget!.text}
-              </span>
+        <AnimatedCollapse open={Boolean(composerBannerPayload)} innerClassName="pb-1.5">
+          {composerBanner.value && (
+            <div className="px-2.5 py-1 rounded-xl bg-white/[0.04] flex items-center justify-between gap-2 text-[11px]">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-[2px] h-3 rounded-full bg-accent-soft shrink-0" />
+                <span className="text-accent-soft font-medium shrink-0">
+                  {composerBanner.value.mode === "edit"
+                    ? "Editing"
+                    : `Replying to ${
+                        composerBanner.value.msg.isSelf
+                          ? "yourself"
+                          : hideParticipants
+                            ? "Friend"
+                            : composerBanner.value.msg.sender
+                      }`}
+                </span>
+                <span dir="auto" className="text-secondary/80 truncate">
+                  {composerBanner.value.msg.text}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (composerBanner.value?.mode === "edit") {
+                    setEditingMsgId(null);
+                    setDraft("");
+                  } else {
+                    setReplyToId(null);
+                  }
+                }}
+                aria-label={composerBanner.value.mode === "edit" ? "Cancel edit" : "Cancel reply"}
+                className="ep-press h-5 w-5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.08] shrink-0 cursor-pointer"
+              >
+                <AppCloseIcon size={11} />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                if (editTarget) {
-                  setEditingMsgId(null);
-                  setDraft("");
-                } else {
-                  setReplyToId(null);
-                }
-              }}
-              aria-label={editTarget ? "Cancel edit" : "Cancel reply"}
-              className="h-5 w-5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.08] shrink-0 cursor-pointer"
-            >
-              <AppCloseIcon size={11} />
-            </button>
-          </div>
-        )}
+          )}
+        </AnimatedCollapse>
 
         <div className="flex items-end gap-2">
           <div

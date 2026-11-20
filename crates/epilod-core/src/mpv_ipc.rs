@@ -45,6 +45,8 @@ pub enum MpvEvent {
     Duration(f64),
     Paused(bool),
     EofReached(bool),
+    VoConfigured(bool),
+    VideoReconfig,
     Seek,
     PlaybackRestart,
     Seeking(bool),
@@ -357,6 +359,7 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
     if let Some(event_name) = obj.get("event").and_then(|v| v.as_str()) {
         match event_name {
             "file-loaded" => return Ok(MpvMessage::Event(MpvEvent::FileLoaded)),
+            "video-reconfig" => return Ok(MpvMessage::Event(MpvEvent::VideoReconfig)),
             "seek" => return Ok(MpvMessage::Event(MpvEvent::Seek)),
             "playback-restart" => return Ok(MpvMessage::Event(MpvEvent::PlaybackRestart)),
             "end-file" => {
@@ -398,6 +401,11 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
                     "eof-reached" => {
                         if let Some(eof) = data.and_then(|v| v.as_bool()) {
                             return Ok(MpvMessage::Event(MpvEvent::EofReached(eof)));
+                        }
+                    }
+                    "vo-configured" => {
+                        if let Some(configured) = data.and_then(|v| v.as_bool()) {
+                            return Ok(MpvMessage::Event(MpvEvent::VoConfigured(configured)));
                         }
                     }
                     "seeking" => {
@@ -1316,6 +1324,20 @@ mod tests {
         assert_eq!(
             parse_line(r#"{"event":"file-loaded"}"#).unwrap(),
             MpvMessage::Event(MpvEvent::FileLoaded)
+        );
+        assert_eq!(
+            parse_line(r#"{"event":"video-reconfig"}"#).unwrap(),
+            MpvMessage::Event(MpvEvent::VideoReconfig)
+        );
+        assert_eq!(
+            parse_line(r#"{"event":"property-change","id":8,"name":"vo-configured","data":true}"#)
+                .unwrap(),
+            MpvMessage::Event(MpvEvent::VoConfigured(true))
+        );
+        assert_eq!(
+            parse_line(r#"{"event":"property-change","id":8,"name":"vo-configured","data":false}"#)
+                .unwrap(),
+            MpvMessage::Event(MpvEvent::VoConfigured(false))
         );
         assert_eq!(
             parse_line(r#"{"event":"end-file","reason":"error","file_error":"loading failed"}"#)

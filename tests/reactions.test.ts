@@ -252,3 +252,58 @@ test("Shortcuts, UI components, WatchRoom, and Rust P2P/Syncplay layers wire liv
   assert.equal(rustSyncplay.includes("EP_REACTION_CHAT_PREFIX"), true);
   assert.equal(rustSyncplay.includes("sync://reaction"), true);
 });
+
+test("useAppStore and reactions support replacing, swapping, reordering, resetting, and persisting the 7 dock emojis", async () => {
+  const ls = setupMockLocalStorage();
+  ls.set("ep.reactionPresets", JSON.stringify(["🍿", "🍿", "", "bad value", "💀"]));
+  const { reactions, appStore } = await loadBundledReactionModules();
+
+  const initial = appStore.useAppStore.getState().reactionPresets;
+  assert.equal(initial.length, 7);
+  assert.equal(initial[0], "🍿");
+  assert.equal(initial[1], "💀");
+  assert.equal(new Set(initial).size, 7);
+
+  // Replace slot 2 with a new emoji
+  appStore.useAppStore.getState().setReactionPresetAt(2, "🤯");
+  assert.equal(appStore.useAppStore.getState().reactionPresets[2], "🤯");
+
+  // Assigning an emoji already in another slot swaps cleanly without duplicates
+  const beforeSwap = appStore.useAppStore.getState().reactionPresets;
+  const slot0Before = beforeSwap[0];
+  const slot2Before = beforeSwap[2];
+  appStore.useAppStore.getState().setReactionPresetAt(0, slot2Before);
+  const afterSwap = appStore.useAppStore.getState().reactionPresets;
+  assert.equal(afterSwap[0], slot2Before);
+  assert.equal(afterSwap[2], slot0Before);
+  assert.equal(new Set(afterSwap).size, 7);
+
+  // Reorder slot 0 -> slot 4
+  appStore.useAppStore.getState().reorderReactionPresets(0, 4);
+  const afterReorder = appStore.useAppStore.getState().reactionPresets;
+  assert.equal(afterReorder[4], slot2Before);
+  assert.equal(new Set(afterReorder).size, 7);
+
+  // resolvePresetReactions maps friendly catalog labels & shortcuts 1-7
+  const resolved = reactions.resolvePresetReactions(afterReorder);
+  assert.equal(resolved.length, 7);
+  assert.equal(resolved[4].emoji, slot2Before);
+  assert.equal(resolved[4].shortcut, "5");
+  assert.equal(resolved[4].label, "Mind Blown");
+
+  // Stored in localStorage
+  assert.deepEqual(JSON.parse(ls.get("ep.reactionPresets") ?? "[]"), afterReorder);
+
+  // Non-emoji non-ASCII strings are rejected while compound & keycap emojis are accepted
+  assert.equal(reactions.isValidReactionEmoji("café"), false);
+  assert.equal(reactions.isValidReactionEmoji("مضحك"), false);
+  assert.equal(reactions.isValidReactionEmoji("❤️‍🔥"), true);
+  assert.equal(reactions.isValidReactionEmoji("1️⃣"), true);
+
+  // Reset restores defaults
+  appStore.useAppStore.getState().resetReactionPresets();
+  assert.deepEqual(
+    appStore.useAppStore.getState().reactionPresets,
+    ["❤️", "😂", "😮", "😱", "😢", "🔥", "👏"],
+  );
+});

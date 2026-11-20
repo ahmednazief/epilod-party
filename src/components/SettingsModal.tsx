@@ -20,11 +20,17 @@ import {
 } from "./ui/AppIcons";
 import { PlayerPauseIcon } from "./ui/PlayerIcons";
 import { MenuEncodingIcon } from "./ui/MenuIcons";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { clearLocalMatchCache } from "../hooks/usePartyFileMismatch";
 import { isDesktop, safeInvoke } from "../lib/bridge";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { mpvSetSubStyle, safeMpvCall, setAllowNetworkShares } from "../lib/mpv";
-import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
+import {
+  CLOUD_ENDPOINT,
+  DEFAULT_ENDPOINT,
+  SYNCPLAY_ENDPOINT,
+} from "../lib/syncStatusDisplay";
 import { playSoundCue } from "../lib/soundEffects";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
@@ -228,6 +234,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setPlayBarOpacity = useAppStore((s) => s.setPlayBarOpacity);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
   const setAutoDownloadUpdates = useAppStore((s) => s.setAutoDownloadUpdates);
+  const customLibraryFolders = useAppStore((s) => s.customLibraryFolders);
+  const addCustomLibraryFolder = useAppStore((s) => s.addCustomLibraryFolder);
+  const removeCustomLibraryFolder = useAppStore((s) => s.removeCustomLibraryFolder);
   const boldSubtitles = useSubtitleStore((s) => s.bold);
   const setBoldSubtitles = useSubtitleStore((s) => s.setBold);
   const overrideAssStyle = useSubtitleStore((s) => s.overrideAssStyle);
@@ -263,12 +272,30 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const applyAndRestartUpdate = useUpdaterStore((s) => s.applyAndRestart);
 
   const [endpointDraft, setEndpointDraft] = useState(serverEndpoint);
+  const [customEndpointOpen, setCustomEndpointOpen] = useState(() => {
+    const low = serverEndpoint.trim().toLowerCase();
+    return (
+      low !== SYNCPLAY_ENDPOINT.toLowerCase() &&
+      low !== CLOUD_ENDPOINT.toLowerCase()
+    );
+  });
   const [passwordDraft, setPasswordDraft] = useState(serverPassword);
   const [endpointError, setEndpointError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsPath, setLogsPath] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [historyCleared, setHistoryCleared] = useState(false);
+  const [reportCopied, setReportCopied] = useState(false);
+  const historyTimerRef = useRef<number | null>(null);
+  const reportCopyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (historyTimerRef.current !== null) window.clearTimeout(historyTimerRef.current);
+      if (reportCopyTimerRef.current !== null) window.clearTimeout(reportCopyTimerRef.current);
+    };
+  }, []);
 
   const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
   const voiceInputDevice = useVoiceStore((s) => s.inputDevice);
@@ -370,6 +397,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   useEffect(() => {
     if (open) {
       setEndpointDraft(serverEndpoint);
+      const low = serverEndpoint.trim().toLowerCase();
+      setCustomEndpointOpen(
+        low !== SYNCPLAY_ENDPOINT.toLowerCase() &&
+          low !== CLOUD_ENDPOINT.toLowerCase(),
+      );
       setPasswordDraft(serverPassword);
       setEndpointError(null);
       if (tab === "server" || tab === "logs") {
@@ -951,10 +983,30 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       useResumeStore.getState().clearAll();
                       useSeriesProgressStore.getState().clearAll();
                       useRecentRoomsStore.getState().clearSeriesLinks();
+                      setHistoryCleared(true);
+                      if (historyTimerRef.current !== null) {
+                        window.clearTimeout(historyTimerRef.current);
+                      }
+                      historyTimerRef.current = window.setTimeout(() => {
+                        setHistoryCleared(false);
+                        historyTimerRef.current = null;
+                      }, 2200);
+                      pushNote("success", "Watch history cleared.");
                     }}
-                    className="ep-press px-3 h-8 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-xs font-medium text-secondary hover:text-white shrink-0 cursor-pointer"
+                    className={`ep-press px-3 h-8 rounded-xl inline-flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer transition-colors duration-200 ${
+                      historyCleared
+                        ? "bg-ok/15 border border-ok/35 text-ok"
+                        : "bg-white/[0.08] hover:bg-white/[0.14] border border-transparent text-secondary hover:text-white"
+                    }`}
                   >
-                    Clear watch history
+                    {historyCleared ? (
+                      <>
+                        <AppCheckIcon size={13} className="anim-pop-in" />
+                        <span>Cleared</span>
+                      </>
+                    ) : (
+                      "Clear watch history"
+                    )}
                   </button>
                 </div>
 
@@ -1886,17 +1938,89 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
             {tab === "server" && (
               <div className="anim-tab-in space-y-4">
-                <TextField
-                  label="Syncplay Server Address"
-                  value={endpointDraft}
-                  placeholder={DEFAULT_ENDPOINT}
-                  onChange={(e) => {
-                    setEndpointDraft(e.target.value);
-                    if (endpointError) setEndpointError(null);
-                  }}
-                  error={endpointError}
-                  hint="Default: syncplay.pl:8999 (backup: syncplay.pl:8998)"
-                />
+                <div className="space-y-1.5">
+                  <div className="text-xs font-medium text-white">Sync Backend Preset</div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEndpointDraft(SYNCPLAY_ENDPOINT);
+                        setCustomEndpointOpen(false);
+                        setEndpointError(null);
+                      }}
+                      className={`rounded-lg border px-3 py-2 text-left transition cursor-pointer ${
+                        !customEndpointOpen &&
+                        endpointDraft.trim().toLowerCase() === SYNCPLAY_ENDPOINT.toLowerCase()
+                          ? "border-accent bg-accent/15 text-white"
+                          : "border-white/10 bg-white/[0.03] text-secondary hover:border-white/20 hover:text-white"
+                      }`}
+                    >
+                      <div className="text-xs font-medium">Syncplay Public</div>
+                      <div className="text-[11px] opacity-75">Default · Port 8999</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEndpointDraft(CLOUD_ENDPOINT);
+                        setCustomEndpointOpen(false);
+                        setEndpointError(null);
+                      }}
+                      className={`ep-press rounded-lg border px-3 py-2 text-left transition-all duration-200 cursor-pointer ${
+                        !customEndpointOpen &&
+                        endpointDraft.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase()
+                          ? "border-accent bg-accent/15 text-white"
+                          : "border-white/10 bg-white/[0.03] text-secondary hover:border-white/20 hover:text-white"
+                      }`}
+                    >
+                      <div className="text-xs font-medium">Epilod Cloud</div>
+                      <div className="text-[11px] opacity-75">Cloudflare Edge · TLS</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomEndpointOpen(true);
+                        if (
+                          endpointDraft.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase()
+                        ) {
+                          setEndpointDraft("");
+                        }
+                        setEndpointError(null);
+                      }}
+                      className={`ep-press rounded-lg border px-3 py-2 text-left transition-all duration-200 cursor-pointer ${
+                        customEndpointOpen
+                          ? "border-accent bg-accent/15 text-white"
+                          : "border-white/10 bg-white/[0.03] text-secondary hover:border-white/20 hover:text-white"
+                      }`}
+                    >
+                      <div className="text-xs font-medium">Custom Server</div>
+                      <div className="text-[11px] opacity-75">Self-hosted / Other</div>
+                    </button>
+                  </div>
+                </div>
+
+                <AnimatedCollapse open={customEndpointOpen}>
+                  <TextField
+                    label="Sync Server Address"
+                    value={endpointDraft}
+                    placeholder={DEFAULT_ENDPOINT}
+                    onChange={(e) => {
+                      setEndpointDraft(e.target.value);
+                      if (endpointError) setEndpointError(null);
+                    }}
+                    error={endpointError}
+                    hint="Syncplay (host:port) or Epilod Cloud (wss://host). Friends in the same room must use the same server."
+                  />
+                </AnimatedCollapse>
+                <AnimatedCollapse open={!customEndpointOpen}>
+                  <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-[11.5px] text-secondary">
+                    Connected provider:{" "}
+                    <span className="font-medium text-white">
+                      {endpointDraft.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase()
+                        ? "Epilod Cloud"
+                        : "Syncplay Public"}
+                    </span>
+                  </div>
+                </AnimatedCollapse>
 
                 <TextField
                   label="Server / Room Password (Optional)"
@@ -1937,6 +2061,66 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     }}
                   />
                 </div>
+
+                <div className="pt-2 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-white">Media Library Folders</div>
+                      <div className="text-[11px] text-secondary leading-snug">
+                        Automatically searched alongside Videos &amp; Downloads when friends load a show or movie.
+                      </div>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        if (!isDesktop()) return;
+                        void openDialog({
+                          directory: true,
+                          multiple: false,
+                          title: "Add Media Library Folder",
+                        }).then((chosen) => {
+                          if (typeof chosen === "string" && chosen) {
+                            addCustomLibraryFolder(chosen);
+                            clearLocalMatchCache();
+                          }
+                        });
+                      }}
+                    >
+                      Add Folder…
+                    </Button>
+                  </div>
+
+                  {customLibraryFolders.length > 0 ? (
+                    <div className="space-y-1">
+                      {customLibraryFolders.map((folder) => (
+                        <div
+                          key={folder}
+                          className="ep-menu-row rounded-xl px-3 py-1.5 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <span className="truncate text-primary" title={folder}>
+                            {folder}
+                          </span>
+                          <button
+                            type="button"
+                            aria-label={`Remove ${folder}`}
+                            onClick={() => {
+                              removeCustomLibraryFolder(folder);
+                              clearLocalMatchCache();
+                            }}
+                            className="ep-press p-1 rounded-lg text-muted hover:text-bad hover:bg-white/[0.08] shrink-0 cursor-pointer"
+                          >
+                            <AppCloseIcon size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted">
+                      No extra folders added yet (Videos, Downloads, Desktop, and saved series folders are already included).
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1971,11 +2155,28 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                         ].join("\n");
                         void navigator.clipboard
                           ?.writeText(report)
-                          .then(() => pushNote("success", "Diagnostic report copied (paths & passwords redacted)."))
+                          .then(() => {
+                            setReportCopied(true);
+                            if (reportCopyTimerRef.current !== null) {
+                              window.clearTimeout(reportCopyTimerRef.current);
+                            }
+                            reportCopyTimerRef.current = window.setTimeout(() => {
+                              setReportCopied(false);
+                              reportCopyTimerRef.current = null;
+                            }, 2000);
+                            pushNote("success", "Diagnostic report copied (paths & passwords redacted).");
+                          })
                           .catch(() => pushNote("error", "Could not copy diagnostic report."));
                       }}
                     >
-                      Copy diagnostic report
+                      {reportCopied ? (
+                        <>
+                          <AppCheckIcon size={13} className="text-ok anim-pop-in" />
+                          <span className="text-ok">Copied</span>
+                        </>
+                      ) : (
+                        "Copy diagnostic report"
+                      )}
                     </Button>
                     <Button variant="secondary" size="sm" onClick={() => void loadLogs()}>
                       <AppResetIcon clockwise size={14} className={logsLoading ? "animate-spin" : ""} />

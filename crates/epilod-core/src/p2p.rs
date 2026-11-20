@@ -196,6 +196,26 @@ pub fn encode_ep2_beacon(beacon: &P2pBeacon) -> String {
     format!("{EP2_CHAT_PREFIX}{}", encode_base64_url(&raw))
 }
 
+fn is_valid_beacon_v4(ip: Ipv4Addr, is_lan_tag: bool) -> bool {
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+    {
+        return false;
+    }
+    if is_lan_tag {
+        ip.is_private()
+    } else {
+        !ip.is_private()
+    }
+}
+
+fn is_valid_beacon_v6(ip: Ipv6Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast() && !ip.is_unicast_link_local()
+}
+
 pub fn decode_ep2_beacon(message: &str) -> Option<P2pBeacon> {
     let payload = message.trim().strip_prefix(EP2_CHAT_PREFIX)?;
     let bytes = decode_base64_url(payload)?;
@@ -227,7 +247,7 @@ pub fn decode_ep2_beacon(message: &str) -> Option<P2pBeacon> {
                 let ip = Ipv4Addr::new(bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]);
                 let port = u16::from_be_bytes([bytes[pos + 4], bytes[pos + 5]]);
                 pos += 6;
-                if port > 0 && !ip.is_unspecified() && !ip.is_loopback() {
+                if port > 0 && is_valid_beacon_v4(ip, tag == 1) {
                     candidates.push(P2pCandidate {
                         kind: if tag == 1 {
                             P2pCandidateKind::Lan
@@ -246,7 +266,7 @@ pub fn decode_ep2_beacon(message: &str) -> Option<P2pBeacon> {
                 let ip = Ipv6Addr::from(octets);
                 let port = u16::from_be_bytes([bytes[pos + 16], bytes[pos + 17]]);
                 pos += 18;
-                if port > 0 && !ip.is_unspecified() && !ip.is_loopback() {
+                if port > 0 && is_valid_beacon_v6(ip) {
                     candidates.push(P2pCandidate {
                         kind: P2pCandidateKind::Ipv6,
                         addr: SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0)),
@@ -814,13 +834,29 @@ ST: {search_target}\r\n\r\n"
     .into_bytes()
 }
 
+/// Returns true only for RFC1918 private LAN IPv4 addresses (rejecting loopback, link-local,
+/// multicast, broadcast, unspecified, and public WAN addresses).
+pub fn is_allowed_upnp_lan_ip(ip: Ipv4Addr) -> bool {
+    ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_unspecified()
+        && !ip.is_broadcast()
+        && !ip.is_multicast()
+}
+
+fn has_unsafe_http_chars(s: &str) -> bool {
+    s.bytes()
+        .any(|b| b <= 0x20 || b >= 0x7F || matches!(b, b'@' | b'#' | b'\\'))
+}
+
 pub fn parse_ssdp_location(response: &str) -> Option<String> {
     for line in response.lines() {
         let trimmed = line.trim();
         if let Some((k, v)) = trimmed.split_once(':') {
             if k.trim().eq_ignore_ascii_case("location") {
                 let url = v.trim();
-                if url.starts_with("http://") {
+                if url.starts_with("http://") && !has_unsafe_http_chars(url) {
                     return Some(url.to_string());
                 }
             }
@@ -830,18 +866,28 @@ pub fn parse_ssdp_location(response: &str) -> Option<String> {
 }
 
 pub fn parse_http_url_host_port_path(url: &str) -> Option<(String, u16, String)> {
-    let rest = url.trim().strip_prefix("http://")?;
+    let trimmed = url.trim();
+    if trimmed.len() > 1024 || has_unsafe_http_chars(trimmed) {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("http://")?;
     let (authority, path_raw) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
         None => (rest, "/"),
     };
+    if authority.is_empty() || !path_raw.starts_with('/') {
+        return None;
+    }
     let (host, port) = if let Some((h, p)) = authority.rsplit_once(':') {
         let port = p.parse::<u16>().ok()?;
+        if port == 0 {
+            return None;
+        }
         (h.to_string(), port)
     } else {
         (authority.to_string(), 80u16)
     };
-    if host.is_empty() {
+    if host.is_empty() || has_unsafe_http_chars(&host) || has_unsafe_http_chars(path_raw) {
         return None;
     }
     Some((host, port, path_raw.to_string()))
@@ -883,17 +929,29 @@ pub fn parse_igd_control_url(base_location_url: &str, xml: &str) -> Option<(Stri
 }
 
 fn resolve_upnp_url(base_url: &str, rel_or_abs: &str) -> Option<String> {
+    let (base_host, base_port, _) = parse_http_url_host_port_path(base_url)?;
     let trimmed = rel_or_abs.trim();
-    if trimmed.starts_with("http://") {
-        return Some(trimmed.to_string());
+    if trimmed.is_empty() || trimmed.len() > 512 || has_unsafe_http_chars(trimmed) {
+        return None;
     }
-    let (host, port, _) = parse_http_url_host_port_path(base_url)?;
+    if trimmed.starts_with("http://") {
+        let (abs_host, abs_port, abs_path) = parse_http_url_host_port_path(trimmed)?;
+        // Pin controlURL strictly to the same host and port as the IGD LOCATION URL
+        // to prevent LAN SSDP SSRF against localhost or other internal services.
+        if !abs_host.eq_ignore_ascii_case(&base_host) || abs_port != base_port {
+            return None;
+        }
+        return Some(format!("http://{abs_host}:{abs_port}{abs_path}"));
+    }
+    if trimmed.contains("://") {
+        return None;
+    }
     let path = if trimmed.starts_with('/') {
         trimmed.to_string()
     } else {
         format!("/{trimmed}")
     };
-    Some(format!("http://{host}:{port}{path}"))
+    Some(format!("http://{base_host}:{base_port}{path}"))
 }
 
 pub fn build_upnp_add_port_mapping_soap(
@@ -1280,6 +1338,18 @@ pub struct P2pIdentity {
     pub session_id: u32,
 }
 
+/// Derives a 32-byte room-specific P2P pre-shared key from the room name and plaintext password
+/// using a domain separator distinct from both Cloudflare (`epilod-pw-v1:`) and Syncplay (`md5`),
+/// so the sync server cannot derive the P2P PSK or MITM P2P chat/voice sessions.
+pub fn derive_p2p_room_psk(wire_room: &str, password: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"epilod-p2p-psk-v1:");
+    h.update(wire_room.trim().as_bytes());
+    h.update(b":");
+    h.update(password.trim().as_bytes());
+    h.finalize().into()
+}
+
 impl P2pIdentity {
     pub fn generate() -> Self {
         let mut raw = [0u8; 32];
@@ -1297,12 +1367,22 @@ impl P2pIdentity {
     }
 
     pub fn establish_with(&self, peer_pubkey: [u8; 32], peer_session_id: u32) -> P2pCryptoSession {
-        P2pCryptoSession::establish(
+        self.establish_with_psk(peer_pubkey, peer_session_id, None)
+    }
+
+    pub fn establish_with_psk(
+        &self,
+        peer_pubkey: [u8; 32],
+        peer_session_id: u32,
+        room_psk: Option<[u8; 32]>,
+    ) -> P2pCryptoSession {
+        P2pCryptoSession::establish_with_psk(
             &self.secret,
             self.pubkey,
             self.session_id,
             peer_pubkey,
             peer_session_id,
+            room_psk,
         )
     }
 
@@ -1311,14 +1391,29 @@ impl P2pIdentity {
         peer_pubkey: [u8; 32],
         peer_session_id: u32,
     ) -> (VoiceTxCrypto, VoiceRxCrypto) {
+        self.establish_voice_with_psk(peer_pubkey, peer_session_id, None)
+    }
+
+    pub fn establish_voice_with_psk(
+        &self,
+        peer_pubkey: [u8; 32],
+        peer_session_id: u32,
+        room_psk: Option<[u8; 32]>,
+    ) -> (VoiceTxCrypto, VoiceRxCrypto) {
+        let (key_domain, tag_domain): (&[u8], &[u8]) = if room_psk.is_some() {
+            (b"epilod-voice-v1-psk:", b"epilod-voice-tag-v1-psk:")
+        } else {
+            (b"epilod-voice-v1:", b"epilod-voice-tag-v1:")
+        };
         let (send_cipher, recv_cipher, tx_tag, rx_tag) = derive_directional_ciphers(
-            b"epilod-voice-v1:",
-            b"epilod-voice-tag-v1:",
+            key_domain,
+            tag_domain,
             &self.secret,
             self.pubkey,
             self.session_id,
             peer_pubkey,
             peer_session_id,
+            room_psk.as_ref(),
         );
         (
             VoiceTxCrypto {
@@ -1341,6 +1436,7 @@ pub fn fill_random_bytes(dst: &mut [u8]) {
     let _ = getrandom::getrandom(dst);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn derive_directional_ciphers(
     key_domain: &[u8],
     tag_domain: &[u8],
@@ -1349,6 +1445,7 @@ fn derive_directional_ciphers(
     local_session_id: u32,
     peer_pubkey: [u8; 32],
     peer_session_id: u32,
+    room_psk: Option<&[u8; 32]>,
 ) -> (ChaCha20Poly1305, ChaCha20Poly1305, [u8; 4], [u8; 4]) {
     let shared = local_secret.diffie_hellman(&PublicKey::from(peer_pubkey));
     let local_id = (local_pubkey, local_session_id);
@@ -1366,6 +1463,9 @@ fn derive_directional_ciphers(
         h.update(key_domain);
         h.update(label);
         h.update(shared.as_bytes());
+        if let Some(psk) = room_psk {
+            h.update(psk);
+        }
         h.update(min_pub);
         h.update(min_sid.to_be_bytes());
         h.update(max_pub);
@@ -1377,6 +1477,9 @@ fn derive_directional_ciphers(
         let mut h = Sha256::new();
         h.update(tag_domain);
         h.update(shared.as_bytes());
+        if let Some(psk) = room_psk {
+            h.update(psk);
+        }
         h.update(sender_pub);
         h.update(sender_sid.to_be_bytes());
         let d: [u8; 32] = h.finalize().into();
@@ -1495,14 +1598,38 @@ impl P2pCryptoSession {
         peer_pubkey: [u8; 32],
         peer_session_id: u32,
     ) -> Self {
-        let (send_cipher, recv_cipher, tx_tag, rx_tag) = derive_directional_ciphers(
-            b"epilod-p2p-v1:",
-            b"epilod-p2p-tag-v1:",
+        Self::establish_with_psk(
             local_secret,
             local_pubkey,
             local_session_id,
             peer_pubkey,
             peer_session_id,
+            None,
+        )
+    }
+
+    pub fn establish_with_psk(
+        local_secret: &StaticSecret,
+        local_pubkey: [u8; 32],
+        local_session_id: u32,
+        peer_pubkey: [u8; 32],
+        peer_session_id: u32,
+        room_psk: Option<[u8; 32]>,
+    ) -> Self {
+        let (key_domain, tag_domain): (&[u8], &[u8]) = if room_psk.is_some() {
+            (b"epilod-p2p-v1-psk:", b"epilod-p2p-tag-v1-psk:")
+        } else {
+            (b"epilod-p2p-v1:", b"epilod-p2p-tag-v1:")
+        };
+        let (send_cipher, recv_cipher, tx_tag, rx_tag) = derive_directional_ciphers(
+            key_domain,
+            tag_domain,
+            local_secret,
+            local_pubkey,
+            local_session_id,
+            peer_pubkey,
+            peer_session_id,
+            room_psk.as_ref(),
         );
 
         Self {
@@ -1616,6 +1743,13 @@ impl ReliableChannel {
                 total,
                 data,
             } => {
+                if total == 0
+                    || total > MAX_RELIABLE_CHUNKS
+                    || idx >= total
+                    || data.len() > P2P_CHUNK_PAYLOAD_BYTES
+                {
+                    return (Vec::new(), None);
+                }
                 if self.completed_ids.contains(&msg_id) {
                     let ack = P2pWireFrame::Ack {
                         msg_id,
@@ -2172,5 +2306,114 @@ mod tests {
         assert_eq!(r2.len(), 2);
         assert!(matches!(r2[0], P2pWireFrame::Chunk { msg_id, idx: 1, .. } if msg_id == bulk_id));
         assert!(matches!(r2[1], P2pWireFrame::Chunk { msg_id, idx: 2, .. } if msg_id == bulk_id));
+    }
+
+    #[test]
+    fn upnp_rejects_ssrf_cross_host_and_crlf_smuggling() {
+        assert!(is_allowed_upnp_lan_ip(Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(is_allowed_upnp_lan_ip(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(!is_allowed_upnp_lan_ip(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!is_allowed_upnp_lan_ip(Ipv4Addr::new(169, 254, 169, 254)));
+        assert!(!is_allowed_upnp_lan_ip(Ipv4Addr::new(8, 8, 8, 8)));
+
+        let base = "http://192.168.1.1:5000/rootDesc.xml";
+        // Cross-host controlURL to localhost must be rejected
+        let evil_ssrf = "<service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>http://127.0.0.1:9222/ctl</controlURL></service>";
+        assert!(parse_igd_control_url(base, evil_ssrf).is_none());
+
+        // CRLF / whitespace smuggling in controlURL must be rejected
+        let evil_crlf = "<service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/ctl HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\nDELETE /x</controlURL></service>";
+        assert!(parse_igd_control_url(base, evil_crlf).is_none());
+
+        // Same-host absolute or relative path succeeds
+        let ok_rel = "<service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/ctl/IPConn</controlURL></service>";
+        assert_eq!(
+            parse_igd_control_url(base, ok_rel).unwrap().0,
+            "http://192.168.1.1:5000/ctl/IPConn"
+        );
+    }
+
+    #[test]
+    fn reliable_channel_rejects_oversized_or_zero_total_chunks() {
+        let mut ch = ReliableChannel::new();
+        let (acks_big, done_big) = ch.handle_frame(P2pWireFrame::Chunk {
+            msg_id: 1,
+            idx: 0,
+            total: 65535,
+            data: vec![0u8; 8],
+        });
+        assert!(acks_big.is_empty() && done_big.is_none());
+
+        let (acks_zero, done_zero) = ch.handle_frame(P2pWireFrame::Chunk {
+            msg_id: 2,
+            idx: 0,
+            total: 0,
+            data: vec![1u8],
+        });
+        assert!(acks_zero.is_empty() && done_zero.is_none());
+    }
+
+    #[test]
+    fn beacon_decode_filters_link_local_and_mismatched_candidate_kinds() {
+        let b = P2pBeacon {
+            version: 1,
+            nat_symmetric: false,
+            pubkey: [7u8; 32],
+            session_id: 42,
+            candidates: vec![
+                P2pCandidate {
+                    kind: P2pCandidateKind::Lan,
+                    addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(169, 254, 169, 254), 80)),
+                },
+                P2pCandidate {
+                    kind: P2pCandidateKind::Wan,
+                    addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 80)),
+                },
+                P2pCandidate {
+                    kind: P2pCandidateKind::Lan,
+                    addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 20), 50000)),
+                },
+            ],
+        };
+        let enc = encode_ep2_beacon(&b);
+        let dec = decode_ep2_beacon(&enc).unwrap();
+        assert_eq!(dec.candidates.len(), 1);
+        assert_eq!(
+            dec.candidates[0].addr,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 20), 50000))
+        );
+    }
+
+    #[test]
+    fn p2p_room_psk_binds_session_keys_and_blocks_mitm_without_password() {
+        let a = P2pIdentity::generate();
+        let b = P2pIdentity::generate();
+        let mallory = P2pIdentity::generate();
+        let psk = derive_p2p_room_psk("ep-room-123", "SquadSecret!2026");
+
+        let mut a_to_b = a.establish_with_psk(b.pubkey, b.session_id, Some(psk));
+        let mut b_from_a = b.establish_with_psk(a.pubkey, a.session_id, Some(psk));
+        let pkt = a_to_b
+            .seal(&P2pWireFrame::Datagram {
+                data: b"private watch party".to_vec(),
+            })
+            .unwrap();
+        assert!(b_from_a.open(&pkt).is_some());
+
+        // MITM who substitutes their own pubkey without knowing the room password cannot decrypt
+        let mut a_to_m = a.establish_with_psk(mallory.pubkey, mallory.session_id, Some(psk));
+        let mut m_from_a_no_psk = mallory.establish_with_psk(a.pubkey, a.session_id, None);
+        let mut m_from_a_wrong_psk = mallory.establish_with_psk(
+            a.pubkey,
+            a.session_id,
+            Some(derive_p2p_room_psk("ep-room-123", "WrongPass")),
+        );
+        let pkt_m = a_to_m
+            .seal(&P2pWireFrame::Datagram {
+                data: b"secret".to_vec(),
+            })
+            .unwrap();
+        assert!(m_from_a_no_psk.open(&pkt_m).is_none());
+        assert!(m_from_a_wrong_psk.open(&pkt_m).is_none());
     }
 }

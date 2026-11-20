@@ -7,6 +7,7 @@ import { NotificationStrip } from "./components/ui/NotificationStrip";
 import { AppLiquidGlassDefs } from "./components/ui/AppIcons";
 import { isDesktop } from "./lib/bridge";
 import { enqueueMpvLifecycle, mpvStop } from "./lib/mpv";
+import { subscribeAppDeepLinks } from "./lib/roomJoinHelper";
 import { isTextEntryElement } from "./lib/shortcuts";
 import { useAppStore } from "./store/useAppStore";
 import { usePlayerStore } from "./store/usePlayerStore";
@@ -41,6 +42,7 @@ export function App() {
       usePlayerStore.getState().setEngineSurfaceVisible(false);
       void enqueueMpvLifecycle(() => mpvStop().catch(() => undefined));
     }
+    return subscribeAppDeepLinks();
   }, []);
 
   useEffect(() => {

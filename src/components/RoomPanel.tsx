@@ -18,6 +18,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type F
 import { createPortal } from "react-dom";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
 import { formatUserError } from "../lib/errors";
+import { formatInviteClipboardText } from "../lib/inviteLinks";
+import type { LocalMatchCandidate } from "../lib/localLibrary";
 import {
   formatParticipantMatchBadge,
   formatReadableMediaName,
@@ -120,6 +122,7 @@ interface RoomPanelProps {
   onChooseFile?: () => void;
   onChooseFolder?: () => void;
   onSwitchEpisode?: (index: number) => void;
+  onOpenLocalMatch?: (candidate: LocalMatchCandidate) => void;
 }
 
 export const RoomPanel = memo(function RoomPanel({
@@ -127,6 +130,7 @@ export const RoomPanel = memo(function RoomPanel({
   onChooseFile,
   onChooseFolder,
   onSwitchEpisode,
+  onOpenLocalMatch,
 }: RoomPanelProps) {
   const roomCode = useAppStore((s) => s.roomCode);
   const literalRoom = useAppStore((s) => s.literalRoom);
@@ -156,7 +160,7 @@ export const RoomPanel = memo(function RoomPanel({
   const playerError = usePlayerStore((s) => s.playerError);
   const localPositionSecs = usePlayerStore((s) => s.positionSecs);
   const pushNote = useNotificationStore((s) => s.push);
-  const { mismatch } = usePartyFileMismatch();
+  const { mismatch, localMatches } = usePartyFileMismatch();
 
   const [copied, setCopied] = useState(false);
   const [joinCode, setJoinCode] = useState("");
@@ -448,7 +452,8 @@ export const RoomPanel = memo(function RoomPanel({
 
   const handleCopyRoom = async () => {
     try {
-      await navigator.clipboard.writeText(roomCode);
+      const text = formatInviteClipboardText(roomCode, literalRoom, serverEndpoint);
+      await navigator.clipboard.writeText(text);
       setCopied(true);
       const p = usePlayerStore.getState();
       playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
@@ -1016,6 +1021,7 @@ export const RoomPanel = memo(function RoomPanel({
                 </div>
                 <p className="text-[11px] text-secondary leading-snug">{mismatch.message}</p>
                 {(mismatch.matchedPlaylistItem ||
+                  (!mismatch.matchedPlaylistItem && localMatches.length > 0 && onOpenLocalMatch) ||
                   onChooseFile ||
                   (mismatch.kind === "notOpenOnPc" && onChooseFolder)) && (
                   <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
@@ -1029,12 +1035,23 @@ export const RoomPanel = memo(function RoomPanel({
                         <span>Open {mismatch.matchedPlaylistItem.label}</span>
                       </button>
                     )}
+                    {!mismatch.matchedPlaylistItem && localMatches.length > 0 && onOpenLocalMatch && (
+                      <button
+                        type="button"
+                        title={`${localMatches[0].path}\n${localMatches[0].reason}`}
+                        onClick={() => onOpenLocalMatch(localMatches[0])}
+                        className="ep-warning-action ep-press h-6 px-2.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-semibold text-white cursor-pointer max-w-[210px]"
+                      >
+                        <PlayerPlayIcon size={10} className="shrink-0" />
+                        <span className="truncate">Open &amp; Sync: {localMatches[0].fileName}</span>
+                      </button>
+                    )}
                     {onChooseFile && (
                       <button
                         type="button"
                         onClick={onChooseFile}
                         className={`${
-                          mismatch.matchedPlaylistItem
+                          mismatch.matchedPlaylistItem || localMatches.length > 0
                             ? "ep-bar-pill text-secondary hover:text-white"
                             : "ep-warning-action ep-press text-white font-semibold"
                         } h-6 px-2.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer`}
@@ -1047,6 +1064,7 @@ export const RoomPanel = memo(function RoomPanel({
                     )}
                     {mismatch.kind === "notOpenOnPc" &&
                       !mismatch.matchedPlaylistItem &&
+                      localMatches.length === 0 &&
                       onChooseFolder && (
                         <button
                           type="button"

@@ -25,9 +25,11 @@ use epilod_core::syncplay::{
     ReconnectPolicy, RoomParticipantUpdate, ServerMessage, SetUpdate, SyncAction, SyncStateMachine,
     TimelineSegment, TimelineTransform, MAX_WIRE_LINE_BYTES,
 };
-use epilod_core::validation::{validate_endpoint, LocalPathOptions};
+use epilod_core::validation::{
+    is_cloud_ws_endpoint, strip_unsafe_unicode, validate_endpoint, LocalPathOptions,
+};
 use native_tls::TlsConnector as NativeTlsConnector;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -146,10 +148,36 @@ enum SessionExit {
     Error { message: String, room_claimed: bool },
 }
 
+const PROBE_USER_PREFIX: &str = "__ep_peek_";
+
+pub fn is_probe_username(username: &str) -> bool {
+    username.trim().starts_with(PROBE_USER_PREFIX)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeRoomRequest {
+    pub id: String,
+    pub server_host: String,
+    pub room_name: String,
+    pub literal_room: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomOccupancyDto {
+    pub id: String,
+    pub ok: bool,
+    pub online_count: usize,
+    pub usernames_preview: Vec<String>,
+    pub active_media_hint: Option<String>,
+    pub checked_at: u64,
+}
+
 fn is_room_occupied_by_others(items: &[RoomParticipantUpdate], local_username: &str) -> bool {
-    items
-        .iter()
-        .any(|p| !p.username.eq_ignore_ascii_case(local_username))
+    items.iter().any(|p| {
+        !p.username.eq_ignore_ascii_case(local_username) && !is_probe_username(&p.username)
+    })
 }
 
 fn reroll_distinct_six_digit_code(current: Option<&str>) -> Option<(String, String)> {
@@ -268,30 +296,56 @@ impl SyncController {
         let voice = Arc::clone(&self.voice);
 
         let task = tokio::spawn(async move {
-            run_sync_loop(
-                app,
-                mpv,
-                valid_endpoint,
-                username,
-                wire_room,
-                shared_wire_room,
-                initial_six_digit,
-                effective_claim_empty,
-                password,
-                host_only,
-                network_opts,
-                rx,
-                local_file,
-                local_media_path,
-                local_ready,
-                timeline_transform,
-                timeline_segments,
-                has_user_alignment,
-                align_mode,
-                persisted_host,
-                voice,
-            )
-            .await;
+            if is_cloud_ws_endpoint(&valid_endpoint) {
+                crate::cloud_sync::run_cloud_sync_loop(
+                    app,
+                    mpv,
+                    valid_endpoint,
+                    username,
+                    wire_room,
+                    shared_wire_room,
+                    initial_six_digit,
+                    effective_claim_empty,
+                    password,
+                    host_only,
+                    network_opts,
+                    rx,
+                    local_file,
+                    local_media_path,
+                    local_ready,
+                    timeline_transform,
+                    timeline_segments,
+                    has_user_alignment,
+                    align_mode,
+                    voice,
+                )
+                .await;
+            } else {
+                run_sync_loop(
+                    app,
+                    mpv,
+                    valid_endpoint,
+                    username,
+                    wire_room,
+                    shared_wire_room,
+                    initial_six_digit,
+                    effective_claim_empty,
+                    password,
+                    host_only,
+                    network_opts,
+                    rx,
+                    local_file,
+                    local_media_path,
+                    local_ready,
+                    timeline_transform,
+                    timeline_segments,
+                    has_user_alignment,
+                    align_mode,
+                    persisted_host,
+                    voice,
+                )
+                .await;
+            }
         });
 
         let mut guard = self
@@ -369,30 +423,56 @@ impl SyncController {
         let persisted_host = Arc::clone(&self.persisted_host);
         let voice = Arc::clone(&self.voice);
         let task = tokio::spawn(async move {
-            run_sync_loop(
-                app,
-                mpv,
-                endpoint,
-                username,
-                wire_room,
-                shared_wire_room,
-                None,
-                false,
-                password,
-                host_only,
-                network_opts,
-                rx,
-                local_file,
-                local_media_path,
-                local_ready,
-                timeline_transform,
-                timeline_segments,
-                has_user_alignment,
-                align_mode,
-                persisted_host,
-                voice,
-            )
-            .await;
+            if is_cloud_ws_endpoint(&endpoint) {
+                crate::cloud_sync::run_cloud_sync_loop(
+                    app,
+                    mpv,
+                    endpoint,
+                    username,
+                    wire_room,
+                    shared_wire_room,
+                    None,
+                    false,
+                    password,
+                    host_only,
+                    network_opts,
+                    rx,
+                    local_file,
+                    local_media_path,
+                    local_ready,
+                    timeline_transform,
+                    timeline_segments,
+                    has_user_alignment,
+                    align_mode,
+                    voice,
+                )
+                .await;
+            } else {
+                run_sync_loop(
+                    app,
+                    mpv,
+                    endpoint,
+                    username,
+                    wire_room,
+                    shared_wire_room,
+                    None,
+                    false,
+                    password,
+                    host_only,
+                    network_opts,
+                    rx,
+                    local_file,
+                    local_media_path,
+                    local_ready,
+                    timeline_transform,
+                    timeline_segments,
+                    has_user_alignment,
+                    align_mode,
+                    persisted_host,
+                    voice,
+                )
+                .await;
+            }
         });
         let mut guard = self
             .runtime
@@ -720,6 +800,37 @@ async fn read_unbuffered_line_async(stream: &mut TcpStream) -> Result<String, St
         }
     }
     String::from_utf8(buf).map_err(|_| "Invalid UTF-8 from Syncplay server.".to_string())
+}
+
+/// Hard-bounded async line reader preventing remote OOM if a Syncplay server streams bytes
+/// without a newline (`BufReader::lines()` / `read_line()` allocate unboundedly).
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::with_capacity(256);
+    let n = {
+        let mut limited = reader.take((max_bytes as u64).saturating_add(1));
+        limited.read_until(b'\n', &mut buf).await?
+    };
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Syncplay wire line exceeded maximum allowed size.",
+        ));
+    }
+    if buf.ends_with(b"\n") {
+        buf.pop();
+        if buf.ends_with(b"\r") {
+            buf.pop();
+        }
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 line"))
 }
 
 enum WireStream {
@@ -1348,7 +1459,7 @@ where
     let mut participants: HashMap<String, RoomParticipantUpdate> = HashMap::new();
     let mut manually_not_ready = false;
     let mut manually_not_ready_peers: HashSet<String> = HashSet::new();
-    let mut lines = BufReader::new(reader).lines();
+    let mut buf_reader = BufReader::new(reader);
     let mut connected_emitted = false;
     let mut awaiting_empty_claim = claim_empty;
     let mut rerolled_emitted = false;
@@ -1381,9 +1492,14 @@ where
     let (p2p_chat_fallback_tx, mut p2p_chat_fallback_rx) = mpsc::channel::<ChatFallbackPacket>(32);
     let (p2p_chat_react_fallback_tx, mut p2p_chat_react_fallback_rx) =
         mpsc::channel::<ChatReactFallbackPacket>(32);
+    let room_psk = password
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| epilod_core::p2p::derive_p2p_room_psk(wire_room, p));
     let p2p = P2pSessionHandle::spawn(
         app.clone(),
         username.to_string(),
+        room_psk,
         network_opts,
         p2p_beacon_tx,
         p2p_align_tx,
@@ -1428,7 +1544,7 @@ where
                 )
                 .await;
             }
-            maybe_line = lines.next_line() => {
+            maybe_line = read_bounded_line(&mut buf_reader, MAX_WIRE_LINE_BYTES) => {
                 let line = match maybe_line {
                     Ok(Some(l)) => l,
                     Ok(None) => break Err("Syncplay connection closed by server.".to_string()),
@@ -1509,6 +1625,9 @@ where
                         }
                         participants.clear();
                         for item in items {
+                            if is_probe_username(&item.username) {
+                                continue;
+                            }
                             participants.insert(item.username.clone(), item);
                         }
                         manually_not_ready_peers.retain(|name| {
@@ -1556,6 +1675,9 @@ where
                         for upd in updates {
                             match upd {
                                 SetUpdate::UserJoined { username: u } => {
+                                    if is_probe_username(&u) {
+                                        continue;
+                                    }
                                     let key = u.to_ascii_lowercase();
                                     left_peers_in_batch.remove(&key);
                                     peer_left_events.retain(|name| !name.eq_ignore_ascii_case(&u));
@@ -1568,6 +1690,9 @@ where
                                     refresh_list = true;
                                 }
                                 SetUpdate::UserLeft { username: u } => {
+                                    if is_probe_username(&u) {
+                                        continue;
+                                    }
                                     let is_local = u.eq_ignore_ascii_case(&active_username);
                                     let prev_len = participants.len();
                                     participants.retain(|k, _| !k.eq_ignore_ascii_case(&u));
@@ -1587,6 +1712,9 @@ where
                                     is_ready,
                                     manually_initiated,
                                 } => {
+                                    if is_probe_username(&u) {
+                                        continue;
+                                    }
                                     let is_local = u.eq_ignore_ascii_case(&active_username);
                                     let was_ready = find_participant_mut(&mut participants, &u)
                                         .and_then(|p| p.is_ready)
@@ -1619,12 +1747,18 @@ where
                                     }
                                 }
                                 SetUpdate::File { username: u, file } => {
+                                    if is_probe_username(&u) {
+                                        continue;
+                                    }
                                     let entry =
                                         upsert_participant_mut(&mut participants, &u, wire_room);
                                     entry.file = Some(file);
                                     changed = true;
                                 }
                                 SetUpdate::FileCleared { username: u } => {
+                                    if is_probe_username(&u) {
+                                        continue;
+                                    }
                                     if let Some(entry) = find_participant_mut(&mut participants, &u)
                                     {
                                         entry.file = None;
@@ -1636,6 +1770,9 @@ where
                                     username: u,
                                     is_controller,
                                 } => {
+                                    if is_probe_username(&u) {
+                                        continue;
+                                    }
                                     let entry =
                                         upsert_participant_mut(&mut participants, &u, wire_room);
                                     entry.is_controller = is_controller;
@@ -1811,13 +1948,19 @@ where
                                 && any_peer_has_file
                                 && !compatible_peer_exists;
                         let loading_media_now = mpv.is_loading_media();
-                        let suppress_unauth_state = unauthorized_actor.is_some()
-                            && (authoritative_playstate.is_some()
-                                || should_enforce_authoritative_playstate(
-                                    &participants,
-                                    &active_username,
-                                    &room_control,
-                                ));
+                        let probe_actor = st
+                            .playstate
+                            .as_ref()
+                            .and_then(|ps| ps.set_by.as_deref())
+                            .is_some_and(is_probe_username);
+                        let suppress_unauth_state = probe_actor
+                            || (unauthorized_actor.is_some()
+                                && (authoritative_playstate.is_some()
+                                    || should_enforce_authoritative_playstate(
+                                        &participants,
+                                        &active_username,
+                                        &room_control,
+                                    )));
                         let effective_state = if loading_media_now
                             || all_peers_incompatible
                             || suppress_unauth_state
@@ -1922,7 +2065,7 @@ where
                         }
                     }
                     Ok(ServerMessage::Chat { username: sender, message }) => {
-                        if awaiting_empty_claim {
+                        if awaiting_empty_claim || is_probe_username(&sender) {
                             continue;
                         }
                         let trimmed = message.trim();
@@ -3042,6 +3185,278 @@ fn collect_blocking_not_ready_peers(
     names
 }
 
+fn is_hashed_wire_filename(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.len() == 12 && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn read_probe_line<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<String, String> {
+    let maybe_line = tokio::time::timeout(
+        Duration::from_millis(1600),
+        read_bounded_line(reader, MAX_WIRE_LINE_BYTES),
+    )
+    .await
+    .map_err(|_| "Timed out waiting for Syncplay probe response.".to_string())?
+    .map_err(|e| format!("Probe read failed: {e}"))?;
+    maybe_line.ok_or_else(|| "Syncplay server closed probe connection.".to_string())
+}
+
+async fn probe_endpoint_batch<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: R,
+    mut writer: W,
+    targets: &[(String, String)],
+    checked_at: u64,
+) -> Vec<RoomOccupancyDto> {
+    let mut buf_reader = BufReader::new(reader);
+    let mut rand_bytes = [0u8; 2];
+    epilod_core::p2p::fill_random_bytes(&mut rand_bytes);
+    let probe_user = format!(
+        "{PROBE_USER_PREFIX}{:02x}{:02x}",
+        rand_bytes[0], rand_bytes[1]
+    );
+
+    let mut out = Vec::with_capacity(targets.len());
+    let Some((_, first_wire)) = targets.first() else {
+        return out;
+    };
+
+    let hello = encode_hello(&probe_user, first_wire, None);
+    if writer.write_all(hello.as_bytes()).await.is_err() {
+        return targets
+            .iter()
+            .map(|(id, _)| RoomOccupancyDto {
+                id: id.clone(),
+                ok: false,
+                online_count: 0,
+                usernames_preview: Vec::new(),
+                active_media_hint: None,
+                checked_at,
+            })
+            .collect();
+    }
+
+    let mut active_probe_user = probe_user.clone();
+    let mut hello_ok = false;
+    for _ in 0..8 {
+        let Ok(line) = read_probe_line(&mut buf_reader).await else {
+            break;
+        };
+        match parse_server_line(&line) {
+            Ok(ServerMessage::Hello { username, .. }) => {
+                if !username.is_empty() {
+                    active_probe_user = username;
+                }
+                hello_ok = true;
+                break;
+            }
+            Ok(ServerMessage::Error(_)) => break,
+            _ => continue,
+        }
+    }
+
+    if !hello_ok {
+        return targets
+            .iter()
+            .map(|(id, _)| RoomOccupancyDto {
+                id: id.clone(),
+                ok: false,
+                online_count: 0,
+                usernames_preview: Vec::new(),
+                active_media_hint: None,
+                checked_at,
+            })
+            .collect();
+    }
+
+    for (idx, (id, wire_room)) in targets.iter().enumerate() {
+        if idx > 0 {
+            let set_room = serde_json::json!({ "Set": { "room": { "name": wire_room } } });
+            let line = format!("{set_room}\r\n");
+            if writer.write_all(line.as_bytes()).await.is_err() {
+                out.push(RoomOccupancyDto {
+                    id: id.clone(),
+                    ok: false,
+                    online_count: 0,
+                    usernames_preview: Vec::new(),
+                    active_media_hint: None,
+                    checked_at,
+                });
+                continue;
+            }
+        }
+        if writer.write_all(b"{\"List\":null}\r\n").await.is_err() {
+            out.push(RoomOccupancyDto {
+                id: id.clone(),
+                ok: false,
+                online_count: 0,
+                usernames_preview: Vec::new(),
+                active_media_hint: None,
+                checked_at,
+            });
+            continue;
+        }
+
+        let mut list_items: Option<Vec<RoomParticipantUpdate>> = None;
+        for _ in 0..12 {
+            let Ok(line) = read_probe_line(&mut buf_reader).await else {
+                break;
+            };
+            match parse_server_line(&line) {
+                Ok(ServerMessage::List(items)) => {
+                    let probe_in_target_room = items.iter().any(|p| {
+                        p.username.eq_ignore_ascii_case(&active_probe_user) && p.room == *wire_room
+                    });
+                    if !probe_in_target_room {
+                        // Ignore stale List from a prior room switch and wait for this room's List.
+                        continue;
+                    }
+                    list_items = Some(items);
+                    break;
+                }
+                Ok(ServerMessage::Error(_)) => break,
+                _ => continue,
+            }
+        }
+
+        if let Some(items) = list_items {
+            let mut usernames = Vec::new();
+            let mut media_hint: Option<String> = None;
+            for item in items {
+                if item.room != *wire_room
+                    || item.username.eq_ignore_ascii_case(&active_probe_user)
+                    || is_probe_username(&item.username)
+                {
+                    continue;
+                }
+                usernames.push(item.username.clone());
+                if media_hint.is_none() {
+                    if let Some(file) = &item.file {
+                        let clean = strip_unsafe_unicode(&file.name);
+                        let trimmed = clean.trim();
+                        if !trimmed.is_empty() && !is_hashed_wire_filename(trimmed) {
+                            media_hint = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+            let online_count = usernames.len();
+            usernames.truncate(4);
+            out.push(RoomOccupancyDto {
+                id: id.clone(),
+                ok: true,
+                online_count,
+                usernames_preview: usernames,
+                active_media_hint: media_hint,
+                checked_at,
+            });
+        } else {
+            out.push(RoomOccupancyDto {
+                id: id.clone(),
+                ok: false,
+                online_count: 0,
+                usernames_preview: Vec::new(),
+                active_media_hint: None,
+                checked_at,
+            });
+        }
+    }
+
+    out
+}
+
+pub async fn probe_pinned_rooms(rooms: Vec<ProbeRoomRequest>) -> Vec<RoomOccupancyDto> {
+    let checked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut by_endpoint: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut invalid_results: Vec<RoomOccupancyDto> = Vec::new();
+
+    for req in rooms.into_iter().take(5) {
+        let Ok(endpoint) = validate_endpoint(&req.server_host) else {
+            invalid_results.push(RoomOccupancyDto {
+                id: req.id,
+                ok: false,
+                online_count: 0,
+                usernames_preview: Vec::new(),
+                active_media_hint: None,
+                checked_at,
+            });
+            continue;
+        };
+        let Ok(wire_room) = resolve_syncplay_room(&req.room_name, req.literal_room) else {
+            invalid_results.push(RoomOccupancyDto {
+                id: req.id,
+                ok: false,
+                online_count: 0,
+                usernames_preview: Vec::new(),
+                active_media_hint: None,
+                checked_at,
+            });
+            continue;
+        };
+        by_endpoint
+            .entry(endpoint)
+            .or_default()
+            .push((req.id, wire_room));
+    }
+
+    let mut results = invalid_results;
+    for (endpoint, targets) in by_endpoint {
+        if is_cloud_ws_endpoint(&endpoint) {
+            let batch = crate::cloud_sync::probe_cloud_rooms(&endpoint, &targets, checked_at).await;
+            results.extend(batch);
+            continue;
+        }
+        let batch_fut = async {
+            let Ok((wire, _)) = establish_connection(&endpoint).await else {
+                return targets
+                    .iter()
+                    .map(|(id, _)| RoomOccupancyDto {
+                        id: id.clone(),
+                        ok: false,
+                        online_count: 0,
+                        usernames_preview: Vec::new(),
+                        active_media_hint: None,
+                        checked_at,
+                    })
+                    .collect::<Vec<_>>();
+            };
+            match wire {
+                WireStream::Plain(tcp) => {
+                    let (r, w) = tokio::io::split(tcp);
+                    probe_endpoint_batch(r, w, &targets, checked_at).await
+                }
+                WireStream::Tls(tls) => {
+                    let (r, w) = tokio::io::split(tls);
+                    probe_endpoint_batch(r, w, &targets, checked_at).await
+                }
+            }
+        };
+
+        let mut batch_res = match tokio::time::timeout(Duration::from_secs(4), batch_fut).await {
+            Ok(v) => v,
+            Err(_) => targets
+                .iter()
+                .map(|(id, _)| RoomOccupancyDto {
+                    id: id.clone(),
+                    ok: false,
+                    online_count: 0,
+                    usernames_preview: Vec::new(),
+                    active_media_hint: None,
+                    checked_at,
+                })
+                .collect(),
+        };
+        results.append(&mut batch_res);
+    }
+
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3258,5 +3673,26 @@ mod tests {
         assert!(code.chars().all(|c| c.is_ascii_digit()));
         assert!(wire.starts_with("ep-"));
         assert_eq!(wire, resolve_syncplay_room(&code, false).unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_rejects_oversized_lines_without_unbounded_read() {
+        let ok_data = b"{\"Hello\":{}}\r\nsecond\n";
+        let mut r = BufReader::new(&ok_data[..]);
+        assert_eq!(
+            read_bounded_line(&mut r, 64).await.unwrap().as_deref(),
+            Some("{\"Hello\":{}}")
+        );
+        assert_eq!(
+            read_bounded_line(&mut r, 64).await.unwrap().as_deref(),
+            Some("second")
+        );
+        assert_eq!(read_bounded_line(&mut r, 64).await.unwrap(), None);
+
+        // Oversized stream with no newline must fail cleanly at the bound
+        let huge = vec![b'A'; MAX_WIRE_LINE_BYTES + 1024];
+        let mut r_huge = BufReader::new(&huge[..]);
+        let err = read_bounded_line(&mut r_huge, MAX_WIRE_LINE_BYTES).await;
+        assert!(err.is_err());
     }
 }

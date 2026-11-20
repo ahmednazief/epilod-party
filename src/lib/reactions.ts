@@ -1,3 +1,13 @@
+import {
+  DEFAULT_REACTION_EMOJIS,
+  isValidReactionEmoji,
+  PRESET_REACTIONS,
+  REACTION_PRESET_COUNT,
+  reorderReactionPresets,
+  replaceReactionPresetAt,
+  sanitizeReactionPresets,
+  type PresetReaction,
+} from "./reactionPresets";
 import { playReactionSoundCue } from "./soundEffects";
 import { resolveEffectiveUsername } from "./syncController";
 import { syncSendReaction } from "./syncplay";
@@ -6,21 +16,16 @@ import { usePlayerStore } from "../store/usePlayerStore";
 import { enqueueReactionBurst } from "../store/useReactionStore";
 import { useSyncStore } from "../store/useSyncStore";
 
-export interface PresetReaction {
-  emoji: string;
-  label: string;
-  shortcut: string;
-}
-
-export const PRESET_REACTIONS: readonly PresetReaction[] = [
-  { emoji: "❤️", label: "Love", shortcut: "1" },
-  { emoji: "😂", label: "Laugh", shortcut: "2" },
-  { emoji: "😮", label: "Whoa", shortcut: "3" },
-  { emoji: "😱", label: "Scared", shortcut: "4" },
-  { emoji: "😢", label: "Cry", shortcut: "5" },
-  { emoji: "🔥", label: "Fire", shortcut: "6" },
-  { emoji: "👏", label: "Clap", shortcut: "7" },
-] as const;
+export {
+  DEFAULT_REACTION_EMOJIS,
+  isValidReactionEmoji,
+  PRESET_REACTIONS,
+  REACTION_PRESET_COUNT,
+  reorderReactionPresets,
+  replaceReactionPresetAt,
+  sanitizeReactionPresets,
+  type PresetReaction,
+};
 
 export type EmojiCategory = "faces" | "hype" | "cinema" | "hands";
 
@@ -143,7 +148,26 @@ export const EMOJI_CATALOG: readonly EmojiCatalogItem[] = [
   { emoji: "🧠", name: "Brain", keywords: "smart 200iq genius plot", category: "hands" },
 ] as const;
 
-const PRESET_SET = new Set(PRESET_REACTIONS.map((p) => p.emoji));
+const LABEL_BY_EMOJI: Map<string, string> = (() => {
+  const map = new Map<string, string>();
+  for (const preset of PRESET_REACTIONS) {
+    map.set(preset.emoji, preset.label);
+  }
+  for (const item of EMOJI_CATALOG) {
+    if (!map.has(item.emoji)) {
+      map.set(item.emoji, item.name);
+    }
+  }
+  return map;
+})();
+
+export function resolvePresetReactions(emojis: readonly string[]): PresetReaction[] {
+  return sanitizeReactionPresets(emojis).map((emoji, idx) => ({
+    emoji,
+    label: LABEL_BY_EMOJI.get(emoji) ?? "Reaction",
+    shortcut: String(idx + 1),
+  }));
+}
 
 const pendingWireCounts = new Map<string, number>();
 let wireFlushTimer: number | null = null;
@@ -201,7 +225,7 @@ export function triggerPartyReaction(
     });
   }
 
-  if (options?.recordRecent && !PRESET_SET.has(clean)) {
+  if (options?.recordRecent && !app.reactionPresets.includes(clean)) {
     app.pushRecentEmoji(clean);
   }
 

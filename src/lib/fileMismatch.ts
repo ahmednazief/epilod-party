@@ -34,6 +34,8 @@ export interface PartyFileMismatch {
   peerChipTitle: string | null;
   mismatchedUsernames: string[];
   matchedPlaylistItem: MatchedPlaylistTarget | null;
+  targetPeerFileName?: string | null;
+  targetPeerDurationSecs?: number | null;
   sourceRelation: SourceRelation | null;
   suggestedFpsScale: number | null;
   suggestedFpsLabel: string | null;
@@ -206,7 +208,11 @@ function isPeerUnresolvedMismatch(
 
 function pickPrimaryMismatchPeer(peers: readonly Participant[]): Participant {
   return (
+    peers.find((p) => p.isHost && p.fileMatch === "differentFile") ??
+    peers.find((p) => p.isAdmin && p.fileMatch === "differentFile") ??
     peers.find((p) => p.isController && p.fileMatch === "differentFile") ??
+    peers.find((p) => p.isHost) ??
+    peers.find((p) => p.isAdmin) ??
     peers.find((p) => p.isController) ??
     peers.find((p) => p.fileMatch === "differentFile") ??
     peers[0]
@@ -246,7 +252,11 @@ export function analyzePartyFileMismatch(
   }
 
   if (!localHasFile) {
-    const primary = remotePeersWithFile.find((p) => p.isController) ?? remotePeersWithFile[0];
+    const primary =
+      remotePeersWithFile.find((p) => p.isHost) ??
+      remotePeersWithFile.find((p) => p.isAdmin) ??
+      remotePeersWithFile.find((p) => p.isController) ??
+      remotePeersWithFile[0];
     const primaryInfo = formatReadableMediaName(primary.fileName);
     const peerNames = remotePeersWithFile.map((p) => p.username);
     const namesLabel = formatNameList(peerNames);
@@ -287,6 +297,8 @@ export function analyzePartyFileMismatch(
       peerChipTitle: null,
       mismatchedUsernames: peerNames,
       matchedPlaylistItem: findPlaylistMatch(primary.fileName, input.playlistItems, null),
+      targetPeerFileName: primaryInfo.isPrivate ? null : (primary.fileName ?? null),
+      targetPeerDurationSecs: primary.fileDuration ?? null,
       sourceRelation: primary.sourceRelation ?? null,
       suggestedFpsScale: null,
       suggestedFpsLabel: null,
@@ -390,6 +402,9 @@ export function analyzePartyFileMismatch(
       input.localFileName,
       input.currentPlaylistIndex,
     ),
+    targetPeerFileName:
+      kind === "differentFile" && !primaryInfo.isPrivate ? (primary.fileName ?? null) : null,
+    targetPeerDurationSecs: kind === "differentFile" ? (primary.fileDuration ?? null) : null,
     sourceRelation: primary.sourceRelation ?? null,
     suggestedFpsScale,
     suggestedFpsLabel: kind === "fpsMismatch" ? (primary.suggestedFpsLabel ?? null) : null,

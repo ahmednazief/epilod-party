@@ -1,13 +1,20 @@
 import { create } from "zustand";
+import { getFileDisplayName } from "../lib/fileDrop";
 import { loadJson, saveJson } from "../lib/persist";
+import {
+  formatDisplayMediaTitle,
+  formatEpisodeBadge,
+  formatSeasonFolderTitle,
+  parseEpisodeCode,
+} from "../lib/playlist";
+import type { SeriesProgressEntry } from "../lib/seriesProgress";
 import {
   sanitizeCustomServerEndpoint,
   validateServerEndpointInput,
 } from "../lib/webviewHardening";
 
-export const RECENT_ROOMS_MAX = 10;
+export const RECENT_ROOMS_MAX = 3;
 export const PINNED_ROOMS_MAX = 20;
-export const RECENT_UNPINNED_FLOOR = 5;
 const STORAGE_KEY = "recentRooms";
 
 export interface RecentRoomEntry {
@@ -16,9 +23,11 @@ export interface RecentRoomEntry {
   serverHost: string;
   literalRoom: boolean;
   hasPassword: boolean;
+  encryptedPassword?: string;
   hostOnly?: boolean;
   nickname?: string;
   seriesKey?: string;
+  lastFilePath?: string;
   lastJoinedAt: number;
   pinned: boolean;
 }
@@ -29,6 +38,29 @@ export function normalizeRecentServerHost(serverHost: string): string {
     return validated.endpoint;
   }
   return sanitizeCustomServerEndpoint(serverHost) || serverHost.trim();
+}
+
+export function getRecentRoomMediaLabel(
+  room: Pick<RecentRoomEntry, "seriesKey" | "lastFilePath">,
+  seriesMap: Record<string, SeriesProgressEntry>,
+  activeMediaHint?: string | null,
+): string | null {
+  const seriesEntry = room.seriesKey ? seriesMap[room.seriesKey] : undefined;
+  if (seriesEntry?.folderName) {
+    return formatSeasonFolderTitle(seriesEntry.folderName);
+  }
+
+  const rawSource = room.lastFilePath || activeMediaHint || "";
+  if (!rawSource.trim()) return null;
+
+  const fileName = getFileDisplayName(rawSource);
+  const display = formatDisplayMediaTitle(fileName);
+  if (display.subtitle) {
+    const epCode = parseEpisodeCode(fileName);
+    return epCode ? `${display.subtitle} · ${formatEpisodeBadge(epCode)}` : display.subtitle;
+  }
+
+  return display.title || fileName || null;
 }
 
 export function buildRecentRoomId(
@@ -52,12 +84,8 @@ export function sortRecentRooms(rooms: readonly RecentRoomEntry[]): RecentRoomEn
 function trimRecentRooms(rooms: readonly RecentRoomEntry[]): RecentRoomEntry[] {
   const sorted = sortRecentRooms(rooms);
   const pinned = sorted.filter((r) => r.pinned).slice(0, PINNED_ROOMS_MAX);
-  const unpinned = sorted.filter((r) => !r.pinned);
-  const unpinnedLimit =
-    pinned.length < RECENT_ROOMS_MAX
-      ? RECENT_ROOMS_MAX - pinned.length
-      : RECENT_UNPINNED_FLOOR;
-  return [...pinned, ...unpinned.slice(0, unpinnedLimit)];
+  const unpinned = sorted.filter((r) => !r.pinned).slice(0, RECENT_ROOMS_MAX);
+  return [...pinned, ...unpinned];
 }
 
 function sanitizeLoadedRecentRooms(raw: unknown): RecentRoomEntry[] {
@@ -88,6 +116,14 @@ function sanitizeLoadedRecentRooms(raw: unknown): RecentRoomEntry[] {
       typeof rec.seriesKey === "string" && rec.seriesKey.trim()
         ? rec.seriesKey.trim()
         : undefined;
+    const lastFilePath =
+      typeof rec.lastFilePath === "string" && rec.lastFilePath.trim()
+        ? rec.lastFilePath.trim()
+        : undefined;
+    const encryptedPassword =
+      typeof rec.encryptedPassword === "string" && rec.encryptedPassword.trim()
+        ? rec.encryptedPassword.trim()
+        : undefined;
 
     const normalized: RecentRoomEntry = {
       id,
@@ -95,9 +131,11 @@ function sanitizeLoadedRecentRooms(raw: unknown): RecentRoomEntry[] {
       serverHost: cleanHost,
       literalRoom,
       hasPassword: Boolean(rec.hasPassword),
+      encryptedPassword,
       hostOnly: rec.hostOnly ? true : undefined,
       nickname,
       seriesKey,
+      lastFilePath,
       lastJoinedAt,
       pinned,
     };
@@ -109,8 +147,10 @@ function sanitizeLoadedRecentRooms(raw: unknown): RecentRoomEntry[] {
       byId.set(id, {
         ...normalized,
         pinned: existing.pinned || normalized.pinned,
+        encryptedPassword: normalized.encryptedPassword ?? existing.encryptedPassword,
         nickname: normalized.nickname ?? existing.nickname,
         seriesKey: normalized.seriesKey ?? existing.seriesKey,
+        lastFilePath: normalized.lastFilePath ?? existing.lastFilePath,
         lastJoinedAt: Math.max(existing.lastJoinedAt, normalized.lastJoinedAt),
       });
     }
@@ -129,10 +169,13 @@ interface RecentRoomsState {
     hostOnly?: boolean;
     nickname?: string;
     seriesKey?: string;
+    lastFilePath?: string;
   }) => void;
   togglePin: (id: string) => void;
   setNickname: (id: string, nickname: string) => void;
   setSeriesKey: (id: string, seriesKey: string) => void;
+  setLastFilePath: (id: string, filePath: string) => void;
+  setEncryptedPassword: (id: string, encryptedPassword: string | undefined) => void;
   clearSeriesLinks: () => void;
   removeRoom: (id: string) => void;
   clearAll: () => void;
@@ -156,6 +199,7 @@ export const useRecentRoomsStore = create<RecentRoomsState>((set, get) => {
       hostOnly,
       nickname,
       seriesKey,
+      lastFilePath,
     }) => {
       const cleanRoom = roomName.trim();
       const cleanHost = normalizeRecentServerHost(serverHost);
@@ -169,9 +213,11 @@ export const useRecentRoomsStore = create<RecentRoomsState>((set, get) => {
         serverHost: cleanHost,
         literalRoom,
         hasPassword,
+        encryptedPassword: hasPassword ? existing?.encryptedPassword : undefined,
         hostOnly: hostOnly ?? existing?.hostOnly,
         nickname: nickname?.trim().slice(0, 40) || existing?.nickname,
         seriesKey: seriesKey || existing?.seriesKey,
+        lastFilePath: lastFilePath?.trim() || existing?.lastFilePath,
         lastJoinedAt: Date.now(),
         pinned: existing?.pinned ?? false,
       };
@@ -197,6 +243,31 @@ export const useRecentRoomsStore = create<RecentRoomsState>((set, get) => {
       const cleanKey = seriesKey.trim();
       commit(
         get().rooms.map((r) => (r.id === id ? { ...r, seriesKey: cleanKey || undefined } : r)),
+      );
+    },
+
+    setLastFilePath: (id, filePath) => {
+      const cleanPath = filePath.trim();
+      if (!cleanPath) return;
+      const existing = get().rooms.find((r) => r.id === id);
+      if (!existing || existing.lastFilePath === cleanPath) return;
+      commit(
+        get().rooms.map((r) => (r.id === id ? { ...r, lastFilePath: cleanPath } : r)),
+      );
+    },
+
+    setEncryptedPassword: (id, encryptedPassword) => {
+      const clean = encryptedPassword?.trim() || undefined;
+      commit(
+        get().rooms.map((r) =>
+          r.id === id
+            ? {
+                ...r,
+                encryptedPassword: clean,
+                hasPassword: clean ? true : r.hasPassword,
+              }
+            : r,
+        ),
       );
     },
 

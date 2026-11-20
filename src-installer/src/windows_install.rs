@@ -36,9 +36,11 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
-    AccessCheck, DuplicateToken, MapGenericMask, SecurityImpersonation, DACL_SECURITY_INFORMATION,
+    AccessCheck, DuplicateToken, DuplicateTokenEx, GetTokenInformation, MapGenericMask,
+    SecurityImpersonation, TokenElevation, TokenPrimary, DACL_SECURITY_INFORMATION,
     GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PRIVILEGE_SET,
-    PSECURITY_DESCRIPTOR, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
+    PSECURITY_DESCRIPTOR, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
+    TOKEN_IMPERSONATE, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS,
@@ -55,16 +57,17 @@ use windows_sys::Win32::System::Registry::{
     KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    ReleaseMutex, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    CreateMutexW, CreateProcessWithTokenW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, ReleaseMutex, TerminateProcess, WaitForSingleObject,
+    LOGON_WITH_PROFILE, PROCESS_INFORMATION, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, STARTUPINFOW,
 };
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Programs, SHGetKnownFolderPath, ShellExecuteW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, MessageBoxW, PostMessageW, IDYES, MB_ICONERROR,
-    MB_ICONWARNING, MB_OK, MB_YESNO, SW_SHOWNORMAL, WM_CLOSE,
+    EnumWindows, GetShellWindow, GetWindowThreadProcessId, MessageBoxW, PostMessageW, IDYES,
+    MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_YESNO, SW_SHOWNORMAL, WM_CLOSE,
 };
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -73,6 +76,7 @@ const UNINSTALL_ROOT_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\
 const UNINSTALL_REG_SUBKEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\EpilodParty";
 const OPEN_WITH_APP_SUBKEY: &str = r"Software\Classes\Applications\Epilod Party.exe";
+const EPILOD_PROTOCOL_SUBKEY: &str = r"Software\Classes\epilod";
 const INSTANCE_MUTEX_NAME: &str = r"Local\EpilodParty_Installer_Instance";
 const WEBVIEW2_DOWNLOAD_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
 const REPO_URL: &str = "https://github.com/ahmednazief/epilod-party";
@@ -1274,11 +1278,16 @@ fn capture_integration_backup(
 
     let open_with_cmd = format!(r"{OPEN_WITH_APP_SUBKEY}\shell\open\command");
     let open_with_sup = format!(r"{OPEN_WITH_APP_SUBKEY}\SupportedTypes");
+    let proto_icon = format!(r"{EPILOD_PROTOCOL_SUBKEY}\DefaultIcon");
+    let proto_cmd = format!(r"{EPILOD_PROTOCOL_SUBKEY}\shell\open\command");
     let keys = vec![
         read_hkcu_key_snapshot(UNINSTALL_REG_SUBKEY),
         read_hkcu_key_snapshot(OPEN_WITH_APP_SUBKEY),
         read_hkcu_key_snapshot(&open_with_cmd),
         read_hkcu_key_snapshot(&open_with_sup),
+        read_hkcu_key_snapshot(EPILOD_PROTOCOL_SUBKEY),
+        read_hkcu_key_snapshot(&proto_icon),
+        read_hkcu_key_snapshot(&proto_cmd),
     ];
 
     WindowsIntegrationBackup { files, keys }
@@ -1540,6 +1549,9 @@ impl SystemIntegrator for WindowsIntegrator {
                 delete_hkcu_tree(OPEN_WITH_APP_SUBKEY)?;
             }
 
+            write_protocol_handler_registry(&exe_path)?;
+            created_registry_keys.push(format!(r"HKCU\{EPILOD_PROTOCOL_SUBKEY}"));
+
             Ok(())
         })();
 
@@ -1638,6 +1650,9 @@ impl SystemIntegrator for WindowsIntegrator {
             warnings.push(e);
         }
         if let Err(e) = delete_hkcu_tree(OPEN_WITH_APP_SUBKEY) {
+            warnings.push(e);
+        }
+        if let Err(e) = delete_hkcu_tree(EPILOD_PROTOCOL_SUBKEY) {
             warnings.push(e);
         }
         if let Some(rec) = receipt {
@@ -1990,6 +2005,36 @@ fn write_open_with_registry(exe_path: &Path) -> Result<(), String> {
     r3
 }
 
+fn write_protocol_handler_registry(exe_path: &Path) -> Result<(), String> {
+    let hkey_proto = reg_create_hkcu(EPILOD_PROTOCOL_SUBKEY)?;
+    let r1 = (|| -> Result<(), String> {
+        reg_set_str(hkey_proto, "", "URL:Epilod Party Protocol")?;
+        reg_set_str(hkey_proto, "URL Protocol", "")
+    })();
+    unsafe {
+        RegCloseKey(hkey_proto);
+    }
+    r1?;
+
+    let icon_key = format!(r"{EPILOD_PROTOCOL_SUBKEY}\DefaultIcon");
+    let hkey_icon = reg_create_hkcu(&icon_key)?;
+    let icon_val = format!("\"{}\",0", exe_path.display());
+    let r2 = reg_set_str(hkey_icon, "", &icon_val);
+    unsafe {
+        RegCloseKey(hkey_icon);
+    }
+    r2?;
+
+    let cmd_key = format!(r"{EPILOD_PROTOCOL_SUBKEY}\shell\open\command");
+    let hkey_cmd = reg_create_hkcu(&cmd_key)?;
+    let cmd_val = format!("\"{}\" \"%1\"", exe_path.display());
+    let r3 = reg_set_str(hkey_cmd, "", &cmd_val);
+    unsafe {
+        RegCloseKey(hkey_cmd);
+    }
+    r3
+}
+
 pub fn run_silent_uninstall_flow(target_dir: Option<&Path>, remove_user_data: bool) -> i32 {
     let resolved_dir = target_dir
         .and_then(|p| resolve_install_dir(&p.to_string_lossy()).ok())
@@ -2023,6 +2068,107 @@ pub fn run_silent_uninstall_flow(target_dir: Option<&Path>, remove_user_data: bo
             1
         }
     }
+}
+
+fn is_current_process_elevated() -> bool {
+    let mut token: HANDLE = ptr::null_mut();
+    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    let Some(_guard) = HandleGuard::new(token) else {
+        return false;
+    };
+    if ok == 0 {
+        return false;
+    }
+    let mut elev = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut ret_len: u32 = 0;
+    let q_ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut elev as *mut TOKEN_ELEVATION).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+    };
+    q_ok != 0 && elev.TokenIsElevated != 0
+}
+
+fn try_spawn_via_explorer_token(exe: &Path, work_dir: &Path) -> bool {
+    unsafe {
+        let shell_hwnd = GetShellWindow();
+        if shell_hwnd.is_null() {
+            return false;
+        }
+        let mut shell_pid: u32 = 0;
+        GetWindowThreadProcessId(shell_hwnd, &mut shell_pid);
+        if shell_pid == 0 {
+            return false;
+        }
+        let shell_proc = OpenProcess(PROCESS_QUERY_INFORMATION, 0, shell_pid);
+        let Some(_proc_guard) = HandleGuard::new(shell_proc) else {
+            return false;
+        };
+        let mut shell_token: HANDLE = ptr::null_mut();
+        if OpenProcessToken(shell_proc, TOKEN_DUPLICATE, &mut shell_token) == 0 {
+            return false;
+        }
+        let Some(_tok_guard) = HandleGuard::new(shell_token) else {
+            return false;
+        };
+        let mut primary_token: HANDLE = ptr::null_mut();
+        let dup_ok = DuplicateTokenEx(
+            shell_token,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE,
+            ptr::null(),
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary_token,
+        );
+        if dup_ok == 0 {
+            return false;
+        }
+        let Some(_prim_guard) = HandleGuard::new(primary_token) else {
+            return false;
+        };
+
+        let w_exe = to_wide_null(exe.as_os_str());
+        let w_dir = to_wide_null(work_dir.as_os_str());
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let created = CreateProcessWithTokenW(
+            primary_token,
+            LOGON_WITH_PROFILE,
+            w_exe.as_ptr(),
+            ptr::null_mut(),
+            0,
+            ptr::null(),
+            w_dir.as_ptr(),
+            &si,
+            &mut pi,
+        );
+        if created != 0 {
+            let _ = HandleGuard::new(pi.hThread);
+            let _ = HandleGuard::new(pi.hProcess);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Launches the installed Epilod Party app. When Setup itself is running elevated (e.g. updating
+/// an install under Program Files), de-elevates via Explorer's medium-IL shell token so the main
+/// app (WebView2, mpv, ffmpeg, P2P) does not inherit Administrator privileges.
+pub fn spawn_installed_app_unelevated(exe: &Path, work_dir: &Path) -> Result<(), String> {
+    if is_current_process_elevated() && try_spawn_via_explorer_token(exe, work_dir) {
+        return Ok(());
+    }
+    Command::new(exe)
+        .current_dir(work_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed launching Epilod Party: {e}"))
 }
 
 pub fn run_silent_install_flow(
@@ -2089,7 +2235,7 @@ pub fn run_silent_install_flow(
             if relaunch {
                 let dir_path = Path::new(&resolved_dir);
                 if let Some(exe) = installed_exe_path(dir_path) {
-                    let _ = Command::new(&exe).current_dir(dir_path).spawn();
+                    let _ = spawn_installed_app_unelevated(&exe, dir_path);
                 }
             }
             0

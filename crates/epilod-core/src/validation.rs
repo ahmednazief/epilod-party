@@ -6,7 +6,7 @@ pub const MAX_ENDPOINT_CHARS: usize = 264;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ValidationError {
-    #[error("Server endpoint must be host:port (e.g. syncplay.pl:8999).")]
+    #[error("Server endpoint must be host:port (e.g. syncplay.pl:8999) or wss://host.")]
     InvalidEndpointFormat,
     #[error("Unsafe or unsupported file path.")]
     UnsafeLocalPath,
@@ -61,14 +61,86 @@ pub fn strip_unsafe_unicode(s: &str) -> String {
         .collect()
 }
 
+pub fn is_cloud_ws_endpoint(endpoint: &str) -> bool {
+    let lower = endpoint.trim().to_ascii_lowercase();
+    lower.starts_with("wss://") || lower.starts_with("ws://")
+}
+
+fn is_valid_hostname(host: &str) -> bool {
+    if host.is_empty()
+        || host.contains(':')
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+    {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
 pub fn validate_endpoint(raw: &str) -> Result<String, ValidationError> {
     let trimmed = raw.trim();
     if trimmed.is_empty()
         || trimmed.len() > MAX_ENDPOINT_CHARS
         || has_unsafe_unicode(trimmed)
-        || trimmed.contains("://")
         || trimmed.chars().any(|c| c.is_whitespace())
     {
+        return Err(ValidationError::InvalidEndpointFormat);
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("wss://") || lower.starts_with("ws://") {
+        let is_tls = lower.starts_with("wss://");
+        let scheme = if is_tls { "wss://" } else { "ws://" };
+        let rest = trimmed[scheme.len()..].trim_end_matches('/');
+        if rest.is_empty()
+            || rest.contains('/')
+            || rest.contains('?')
+            || rest.contains('#')
+            || rest.contains('@')
+        {
+            return Err(ValidationError::InvalidEndpointFormat);
+        }
+        let (host, port_opt) = if let Some(colon) = rest.rfind(':') {
+            let h = &rest[..colon];
+            let p_str = &rest[colon + 1..];
+            if p_str.is_empty() || p_str.len() > 5 || !p_str.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(ValidationError::InvalidEndpointFormat);
+            }
+            let port: u16 = p_str
+                .parse()
+                .map_err(|_| ValidationError::InvalidEndpointFormat)?;
+            if port == 0 {
+                return Err(ValidationError::InvalidEndpointFormat);
+            }
+            (h, Some(port))
+        } else {
+            (rest, None)
+        };
+        if !is_valid_hostname(host) {
+            return Err(ValidationError::InvalidEndpointFormat);
+        }
+        if !is_tls {
+            let h_low = host.to_ascii_lowercase();
+            let is_local = h_low == "localhost" || h_low == "127.0.0.1";
+            if !cfg!(debug_assertions) || !is_local {
+                return Err(ValidationError::InvalidEndpointFormat);
+            }
+        }
+        return match port_opt {
+            Some(port) => Ok(format!("{scheme}{host}:{port}")),
+            None => Ok(format!("{scheme}{host}")),
+        };
+    }
+
+    if trimmed.contains("://") {
         return Err(ValidationError::InvalidEndpointFormat);
     }
 
@@ -94,19 +166,7 @@ pub fn validate_endpoint(raw: &str) -> Result<String, ValidationError> {
         }
         let host = &trimmed[..colon];
         let port_str = &trimmed[colon + 1..];
-        if host.contains(':') || host.starts_with('.') || host.ends_with('.') || host.contains("..")
-        {
-            return Err(ValidationError::InvalidEndpointFormat);
-        }
-        let valid_labels = host.split('.').all(|label| {
-            !label.is_empty()
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        });
-        if !valid_labels {
+        if !is_valid_hostname(host) {
             return Err(ValidationError::InvalidEndpointFormat);
         }
         (host.to_string(), port_str)

@@ -4,6 +4,9 @@ export interface ResumeEntry {
   positionSecs: number;
   durationSecs: number;
   updatedAt: number;
+  filePath?: string;
+  fileName?: string;
+  linkedRoomId?: string;
 }
 
 export const RESUME_MIN_SECS = 30;

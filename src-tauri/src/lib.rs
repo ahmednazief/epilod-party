@@ -1,7 +1,11 @@
 pub mod autosync;
 
 #[cfg(windows)]
+pub mod cloud_sync;
+#[cfg(windows)]
 pub mod intro;
+#[cfg(windows)]
+pub mod media_library;
 #[cfg(windows)]
 pub mod mpv;
 #[cfg(windows)]
@@ -208,12 +212,24 @@ mod windows_app {
     static DECODED_SUB_SEQ: AtomicU64 = AtomicU64::new(1);
 
     use crate::intro::{execute_detect_intro, IntroDetectController, IntroDetectRequest};
+    use crate::media_library::{
+        check_local_files_exist as check_local_files_exist_impl,
+        dpapi_protect_secret as dpapi_protect_impl, dpapi_unprotect_secret as dpapi_unprotect_impl,
+        FindLocalMatchesRequest, MediaLibraryState,
+    };
+    use crate::syncplay::{
+        probe_pinned_rooms as probe_pinned_rooms_impl, ProbeRoomRequest, RoomOccupancyDto,
+    };
     use crate::voice::{
         list_voice_devices, VoiceConfigDto, VoiceController, VoiceDeviceListDto,
         VoiceDiagnosticsDto,
     };
     use epilod_core::intro_detect::IntroDetectionOutcome;
+    use epilod_core::matching::LocalMatchCandidate;
     use epilod_core::mpv_ipc::MpvChapter;
+    use epilod_core::room_code::{parse_invite_link, DeepLinkInvite};
+
+    const DEEP_LINK_PIPE_NAME: &str = r"\\.\pipe\EpilodParty_DeepLink_v1";
 
     pub struct AppState {
         pub mpv: Arc<MpvController>,
@@ -221,6 +237,8 @@ mod windows_app {
         pub voice: Arc<VoiceController>,
         pub autosync: Arc<AutoSyncController>,
         pub intro_detect: Arc<IntroDetectController>,
+        pub media_library: Arc<MediaLibraryState>,
+        pub pending_deep_link: Arc<Mutex<Option<DeepLinkInvite>>>,
         pub logger: Arc<Mutex<RingLogger>>,
         pub rate_guard: Arc<Mutex<CommandRateGuard>>,
         pub network_policy: Arc<NetworkSharePolicy>,
@@ -1639,7 +1657,251 @@ mod windows_app {
         Ok(state.voice.build_voice_report(&ver, &entries))
     }
 
+    #[tauri::command]
+    async fn consume_pending_deep_link(
+        state: State<'_, AppState>,
+    ) -> Result<Option<DeepLinkInvite>, String> {
+        let mut guard = state
+            .pending_deep_link
+            .lock()
+            .map_err(|_| "Deep link lock poisoned".to_string())?;
+        Ok(guard.take())
+    }
+
+    #[tauri::command]
+    async fn probe_pinned_rooms(
+        state: State<'_, AppState>,
+        rooms: Vec<ProbeRoomRequest>,
+    ) -> Result<Vec<RoomOccupancyDto>, String> {
+        check_rate(&state, "probe_pinned_rooms", 4, Duration::from_secs(20))?;
+        Ok(probe_pinned_rooms_impl(rooms).await)
+    }
+
+    #[tauri::command]
+    async fn find_local_media_matches(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        request: FindLocalMatchesRequest,
+    ) -> Result<Vec<LocalMatchCandidate>, String> {
+        check_rate(
+            &state,
+            "find_local_media_matches",
+            12,
+            Duration::from_secs(10),
+        )?;
+        let opts = state.network_policy.options();
+        Ok(state.media_library.find_matches(&app, request, opts).await)
+    }
+
+    #[tauri::command]
+    async fn check_local_files_exist(
+        state: State<'_, AppState>,
+        paths: Vec<String>,
+    ) -> Result<Vec<bool>, String> {
+        let opts = state.network_policy.options();
+        tokio::task::spawn_blocking(move || check_local_files_exist_impl(&paths, opts))
+            .await
+            .map_err(|e| format!("Failed checking file existence: {e}"))
+    }
+
+    #[tauri::command]
+    async fn dpapi_protect_secret(plaintext: String) -> Result<String, String> {
+        tokio::task::spawn_blocking(move || dpapi_protect_impl(&plaintext))
+            .await
+            .map_err(|e| format!("Failed protecting secret: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn dpapi_unprotect_secret(encoded: String) -> Result<String, String> {
+        tokio::task::spawn_blocking(move || dpapi_unprotect_impl(&encoded))
+            .await
+            .map_err(|e| format!("Failed restoring secret: {e}"))?
+    }
+
+    fn extract_startup_deep_link() -> Option<DeepLinkInvite> {
+        std::env::args()
+            .skip(1)
+            .find_map(|arg| parse_invite_link(&arg))
+    }
+
+    fn try_forward_deep_link_to_running_instance(invite: &DeepLinkInvite) -> bool {
+        use std::io::Write;
+        for _ in 0..4 {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(DEEP_LINK_PIPE_NAME)
+            {
+                let payload = format!("{}\n", invite.uri);
+                if file.write_all(payload.as_bytes()).is_ok() && file.flush().is_ok() {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(75));
+        }
+        false
+    }
+
+    fn ensure_epilod_protocol_registered() {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
+            REG_OPTION_NON_VOLATILE, REG_SZ,
+        };
+
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let norm = exe
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if norm.contains("/target/debug/") || norm.contains("/target/release/") {
+            // Do not overwrite user's installed protocol handler during local cargo runs.
+            return;
+        }
+
+        fn wide(s: &str) -> Vec<u16> {
+            OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+        unsafe fn set_sz(hkey: HKEY, name: &str, val: &str) {
+            let wname = wide(name);
+            let wval = wide(val);
+            let name_ptr = if name.is_empty() {
+                std::ptr::null()
+            } else {
+                wname.as_ptr()
+            };
+            let _ = RegSetValueExW(
+                hkey,
+                name_ptr,
+                0,
+                REG_SZ,
+                wval.as_ptr() as *const u8,
+                (wval.len() * 2) as u32,
+            );
+        }
+
+        unsafe {
+            let subkey = wide(r"Software\Classes\epilod");
+            let mut hkey: HKEY = std::ptr::null_mut();
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut hkey,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                set_sz(hkey, "", "URL:Epilod Party Protocol");
+                set_sz(hkey, "URL Protocol", "");
+                RegCloseKey(hkey);
+            }
+
+            let icon_key = wide(r"Software\Classes\epilod\DefaultIcon");
+            let mut hicon: HKEY = std::ptr::null_mut();
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                icon_key.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut hicon,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                set_sz(hicon, "", &format!("\"{}\",0", exe.display()));
+                RegCloseKey(hicon);
+            }
+
+            let cmd_key = wide(r"Software\Classes\epilod\shell\open\command");
+            let mut hcmd: HKEY = std::ptr::null_mut();
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                cmd_key.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut hcmd,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                set_sz(hcmd, "", &format!("\"{}\" \"%1\"", exe.display()));
+                RegCloseKey(hcmd);
+            }
+        }
+    }
+
+    fn spawn_deep_link_pipe_listener(app: AppHandle) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        tauri::async_runtime::spawn(async move {
+            let mut first = true;
+            loop {
+                let mut opts = ServerOptions::new();
+                if first {
+                    opts.first_pipe_instance(true);
+                    first = false;
+                }
+                let Ok(server) = opts.create(DEEP_LINK_PIPE_NAME) else {
+                    break;
+                };
+                if server.connect().await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut reader = BufReader::new(server.take(2048));
+                    let mut line = String::new();
+                    if let Ok(Ok(n)) = tokio::time::timeout(
+                        Duration::from_millis(500),
+                        reader.read_line(&mut line),
+                    )
+                    .await
+                    {
+                        if n > 0 {
+                            if let Some(invite) = parse_invite_link(&line) {
+                                if let Some(state) = app_clone.try_state::<AppState>() {
+                                    if let Ok(mut guard) = state.pending_deep_link.lock() {
+                                        *guard = Some(invite.clone());
+                                    }
+                                }
+                                if let Some(win) = app_clone.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app_clone.emit("app://deep-link", invite);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     pub fn run() {
+        let initial_deep_link = extract_startup_deep_link();
+        if let Some(ref invite) = initial_deep_link {
+            if try_forward_deep_link_to_running_instance(invite) {
+                return;
+            }
+        }
+        ensure_epilod_protocol_registered();
         crate::updater::spawn_startup_cache_cleanup();
 
         let log_path: Option<PathBuf> = std::env::var_os("LOCALAPPDATA")
@@ -1679,6 +1941,7 @@ mod windows_app {
         let sync = Arc::new(SyncController::new());
         sync.set_voice_controller(Arc::clone(&voice));
         let voice_for_destroy = Arc::clone(&voice);
+        let sync_for_destroy = Arc::clone(&sync);
 
         let app_state = AppState {
             mpv,
@@ -1686,6 +1949,8 @@ mod windows_app {
             voice,
             autosync: Arc::new(AutoSyncController::new()),
             intro_detect: Arc::new(IntroDetectController::new()),
+            media_library: Arc::new(MediaLibraryState::default()),
+            pending_deep_link: Arc::new(Mutex::new(initial_deep_link)),
             logger,
             rate_guard: Arc::new(Mutex::new(CommandRateGuard::new())),
             network_policy: Arc::new(NetworkSharePolicy::new(false)),
@@ -1742,6 +2007,10 @@ mod windows_app {
                 tauri::WindowEvent::Destroyed => {
                     watchdog_stop_for_event.store(true, Ordering::Release);
                     voice_for_destroy.shutdown();
+                    let sync_shutdown = Arc::clone(&sync_for_destroy);
+                    tauri::async_runtime::spawn(async move {
+                        sync_shutdown.disconnect().await;
+                    });
                 }
                 _ => {}
             })
@@ -1756,6 +2025,8 @@ mod windows_app {
                     }
                     let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 }
+
+                spawn_deep_link_pipe_listener(app.handle().clone());
 
                 // Lightweight UI-thread heartbeat watchdog: detects and logs main-thread stalls.
                 let app_handle = app.handle().clone();
@@ -1885,6 +2156,12 @@ mod windows_app {
                 sync_send_chat_react,
                 sync_send_chat_typing,
                 scan_media_paths,
+                consume_pending_deep_link,
+                probe_pinned_rooms,
+                find_local_media_matches,
+                check_local_files_exist,
+                dpapi_protect_secret,
+                dpapi_unprotect_secret,
                 set_global_shortcuts_enabled,
                 log_frontend_event,
                 get_logs_snapshot,

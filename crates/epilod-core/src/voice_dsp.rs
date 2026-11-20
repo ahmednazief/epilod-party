@@ -434,7 +434,7 @@ impl Default for VoiceDenoiser {
 }
 
 impl VoiceDenoiser {
-    const SPEECH_HANGOVER_FRAMES: u8 = 12; // 120 ms tail protection
+    const SPEECH_HANGOVER_FRAMES: u8 = 22; // 220 ms tail protection against word-end clipping
     const TARGET_RNNOISE_RMS: f32 = 0.063; // ~ -24 dBFS (RNNoise training sweet spot)
     const MAX_PRE_GAIN: f32 = 2.0; // +6 dB bounded lift for quiet mics without amplifying room fans
     const SUBFRAME_LEN: usize = 120; // 2.5 ms @ 48 kHz
@@ -652,7 +652,7 @@ impl Default for VoiceGate {
 }
 
 impl VoiceGate {
-    const HANGOVER_TARGET_FRAMES: usize = 25; // 25 * 10 ms = 250 ms
+    const HANGOVER_TARGET_FRAMES: usize = 40; // 40 * 10 ms = 400 ms (Discord-style hold)
     const RAMP_SAMPLES: usize = 240; // 5 ms @ 48 kHz
 
     pub fn new() -> Self {
@@ -716,7 +716,7 @@ impl VoiceGate {
             ptt
         } else if self.is_open {
             self.speech_streak = 0;
-            let hold_ok = (vad_assisted && speech_prob >= 0.35) || db >= (threshold_db - 4.0);
+            let hold_ok = (vad_assisted && speech_prob >= 0.25) || db >= (threshold_db - 6.0);
             if hold_ok {
                 self.hangover_frames = Self::HANGOVER_TARGET_FRAMES;
                 true
@@ -730,10 +730,10 @@ impl VoiceGate {
             self.speech_streak = 0;
             db >= threshold_db
         } else if speech_prob >= 0.65 && db >= (threshold_db + 3.0) {
-            // Immediate open on clear speech onset
+            // Immediate open on clear speech onset (strict enough to reject 10 ms clicks)
             self.speech_streak = 0;
             true
-        } else if speech_prob >= 0.48 && db >= threshold_db {
+        } else if speech_prob >= 0.40 && db >= (threshold_db - 1.5) {
             // 20 ms confirmation rejects 10 ms keyboard/mouse clicks while catching soft speech
             self.speech_streak = self.speech_streak.saturating_add(1);
             if self.speech_streak >= 2 {
@@ -1111,7 +1111,7 @@ impl PeerJitterBuffer {
             started: false,
             in_talkspurt: false,
             last_eot_seen: false,
-            target_frames: 1, // 20 ms initial low-latency cushion
+            target_frames: 2, // 40 ms initial cushion prevents micro-cutoffs on talkspurt start
             stall_cushion_frames: 0,
             frames: BTreeMap::new(),
             interarrival_jitter_ms: 0.0,
@@ -1652,14 +1652,14 @@ mod tests {
         assert!(out[0][0].abs() < 0.001);
         assert!(out[0][VOICE_FRAME_10MS - 1].abs() > 0.0);
 
-        // Dropping below threshold stays open for 25 hangover frames (250 ms)
-        for _ in 0..25 {
+        // Dropping below threshold stays open for 40 hangover frames (400 ms)
+        for _ in 0..40 {
             let (c, is_open, _) =
                 gate.process_10ms(&quiet, 0.0, -40.0, true, None, false, &mut out);
             assert_eq!(c, 1);
             assert!(is_open);
         }
-        // 26th quiet frame starts closing with ramp-down, then goes silent
+        // 41st quiet frame starts closing with ramp-down, then goes silent
         let (c_close, _, _) = gate.process_10ms(&quiet, 0.0, -40.0, true, None, false, &mut out);
         assert_eq!(c_close, 1);
         let (c_closed, is_open_after, _) =
@@ -2241,7 +2241,7 @@ mod tests {
     #[test]
     fn jitter_buffer_ignores_dtx_silence_gaps_and_trims_drift_fast() {
         let mut jb = PeerJitterBuffer::new();
-        assert_eq!(jb.target_delay_ms(), 20);
+        assert_eq!(jb.target_delay_ms(), 40);
 
         // Talkspurt 1: 4 packets spaced by 20 ms
         for i in 1..=4u16 {
@@ -2257,6 +2257,8 @@ mod tests {
             );
             let _ = jb.pop_step();
         }
+        // Drain the initial 2-frame (40 ms) jitter cushion to reach end-of-talk
+        let _ = jb.pop_step();
         assert!(!jb.is_active());
 
         // 5-second natural pause before Talkspurt 2 (ts_48k stayed frozen during silence)

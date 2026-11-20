@@ -8,15 +8,25 @@ import {
   type ReactNode,
 } from "react";
 import {
+  DEFAULT_REACTION_EMOJIS,
   EMOJI_CATEGORY_TABS,
   filterEmojiCatalog,
-  PRESET_REACTIONS,
+  REACTION_PRESET_COUNT,
+  resolvePresetReactions,
   triggerPartyReaction,
   type EmojiCategory,
 } from "../lib/reactions";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { useAppStore } from "../store/useAppStore";
-import { AppCloseIcon, AppSearchIcon } from "./ui/AppIcons";
+import { AnimatedCollapse } from "./ui/AnimatedCollapse";
+import {
+  AppCheckIcon,
+  AppChevronIcon,
+  AppCloseIcon,
+  AppEditIcon,
+  AppResetIcon,
+  AppSearchIcon,
+} from "./ui/AppIcons";
 import { PlayerReactionPickerIcon } from "./ui/PlayerIcons";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 
@@ -27,10 +37,10 @@ interface HoldTimerState {
 
 function isDirectEmojiInput(raw: string): boolean {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > 24 || /^[\x00-\x7F]+$/.test(trimmed)) {
+  if (!trimmed || trimmed.length > 24 || /\s/.test(trimmed)) {
     return false;
   }
-  return !/\s/.test(trimmed);
+  return /[\p{Extended_Pictographic}\u20E3]/u.test(trimmed);
 }
 
 interface EmojiHoldButtonProps {
@@ -91,7 +101,26 @@ function EmojiHoldButton({
 
 export const ReactionPopover = memo(function ReactionPopover() {
   const recentEmojis = useAppStore((s) => s.recentEmojis);
+  const reactionPresets = useAppStore((s) => s.reactionPresets);
+  const setReactionPresetAt = useAppStore((s) => s.setReactionPresetAt);
+  const reorderReactionPresets = useAppStore((s) => s.reorderReactionPresets);
+  const resetReactionPresets = useAppStore((s) => s.resetReactionPresets);
+
+  const presetReactions = useMemo(
+    () => resolvePresetReactions(reactionPresets),
+    [reactionPresets],
+  );
+  const isDefaultPresets = useMemo(
+    () =>
+      reactionPresets.length === DEFAULT_REACTION_EMOJIS.length &&
+      reactionPresets.every((emoji, i) => emoji === DEFAULT_REACTION_EMOJIS[i]),
+    [reactionPresets],
+  );
+
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState(0);
+  const [draggingSlot, setDraggingSlot] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<"all" | EmojiCategory>("all");
   const [pulsingEmoji, setPulsingEmoji] = useState<string | null>(null);
@@ -106,6 +135,12 @@ export const ReactionPopover = memo(function ReactionPopover() {
   const prevHoveredIdxRef = useRef<number | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const presetBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const slotBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const slotDragRef = useRef<{
+    activeIdx: number;
+    startX: number;
+    moved: boolean;
+  } | null>(null);
   const [dropletBox, setDropletBox] = useState<{
     left: number;
     top: number;
@@ -141,12 +176,20 @@ export const ReactionPopover = memo(function ReactionPopover() {
   }, [stopHold]);
 
   useEffect(() => {
+    if (!pickerOpen) {
+      setCustomizing(false);
+      setDraggingSlot(null);
+      slotDragRef.current = null;
+    }
+  }, [pickerOpen]);
+
+  useEffect(() => {
     window.dispatchEvent(new Event("ep:glass-layout"));
     const t = window.setTimeout(() => {
       window.dispatchEvent(new Event("ep:glass-layout"));
     }, 65);
     return () => window.clearTimeout(t);
-  }, [pickerOpen, sheetPresence.mounted]);
+  }, [pickerOpen, sheetPresence.mounted, customizing]);
 
   const enterHoveredIdx = useCallback((idx: number) => {
     const btn = presetBtnRefs.current[idx];
@@ -223,11 +266,101 @@ export const ReactionPopover = memo(function ReactionPopover() {
 
   const hintItem =
     hoveredIdx !== null
-      ? PRESET_REACTIONS[hoveredIdx]
+      ? presetReactions[hoveredIdx]
       : displayHintIdx !== null
-        ? PRESET_REACTIONS[displayHintIdx]
+        ? presetReactions[displayHintIdx]
         : null;
   const hintVisible = hoveredIdx !== null;
+
+  const flashPulse = useCallback((emoji: string) => {
+    setPulsingEmoji(emoji);
+    if (pulseTimerRef.current !== null) {
+      window.clearTimeout(pulseTimerRef.current);
+    }
+    pulseTimerRef.current = window.setTimeout(() => setPulsingEmoji(null), 165);
+  }, []);
+
+  const assignEmojiToSelectedSlot = useCallback(
+    (emoji: string) => {
+      setReactionPresetAt(selectedSlot, emoji);
+      flashPulse(emoji);
+      setSelectedSlot((prev) => (prev + 1) % REACTION_PRESET_COUNT);
+    },
+    [flashPulse, selectedSlot, setReactionPresetAt],
+  );
+
+  const handleCatalogStartHold = useCallback(
+    (emoji: string, recordRecent = false) => {
+      if (customizing) {
+        stopHold();
+        assignEmojiToSelectedSlot(emoji);
+        return;
+      }
+      startHold(emoji, recordRecent);
+    },
+    [assignEmojiToSelectedSlot, customizing, startHold, stopHold],
+  );
+
+  const handleCatalogKeyboardFire = useCallback(
+    (emoji: string, recordRecent = false) => {
+      if (customizing) {
+        assignEmojiToSelectedSlot(emoji);
+        return;
+      }
+      fireEmoji(emoji, recordRecent);
+    },
+    [assignEmojiToSelectedSlot, customizing, fireEmoji],
+  );
+
+  const moveSelectedSlot = useCallback(
+    (delta: -1 | 1) => {
+      const target = selectedSlot + delta;
+      if (target < 0 || target >= REACTION_PRESET_COUNT) return;
+      reorderReactionPresets(selectedSlot, target);
+      setSelectedSlot(target);
+    },
+    [reorderReactionPresets, selectedSlot],
+  );
+
+  useEffect(() => {
+    if (draggingSlot === null) return;
+    const onPointerMove = (e: PointerEvent) => {
+      const drag = slotDragRef.current;
+      if (!drag) return;
+      if (!drag.moved && Math.abs(e.clientX - drag.startX) < 6) {
+        return;
+      }
+      drag.moved = true;
+      let targetIdx = drag.activeIdx;
+      for (let i = 0; i < REACTION_PRESET_COUNT; i++) {
+        const el = slotBtnRefs.current[i];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right) {
+          targetIdx = i;
+          break;
+        }
+      }
+      if (targetIdx !== drag.activeIdx) {
+        reorderReactionPresets(drag.activeIdx, targetIdx);
+        drag.activeIdx = targetIdx;
+        setDraggingSlot(targetIdx);
+        setSelectedSlot(targetIdx);
+      }
+    };
+    const onPointerUp = () => {
+      slotDragRef.current = null;
+      setDraggingSlot(null);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, [draggingSlot, reorderReactionPresets]);
 
   return (
     <div className="flex flex-col items-center gap-2.5 select-none pointer-events-none">
@@ -241,38 +374,155 @@ export const ReactionPopover = memo(function ReactionPopover() {
               : "ep-popover-bloom"
           }`}
         >
-          <div className="relative flex items-center">
-            <AppSearchIcon
-              size={13}
-              className="pointer-events-none absolute left-3 text-white/60"
-            />
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search or paste any emoji (Win + .)"
-              aria-label="Search emojis"
-              className="ep-glass-input w-full h-8.5 pl-8.5 pr-8 text-xs text-primary placeholder:text-white/45 rounded-full focus:outline-none"
-            />
-            {query && (
-              <button
-                type="button"
-                onClick={() => setQuery("")}
-                aria-label="Clear search"
-                className="ep-bar-icon-btn absolute right-1.5 h-6 w-6 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
-              >
-                <AppCloseIcon size={12} />
-              </button>
-            )}
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex-1 flex items-center min-w-0">
+              <AppSearchIcon
+                size={13}
+                className="pointer-events-none absolute left-3 text-white/60"
+              />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={
+                  customizing
+                    ? `Pick or paste emoji for slot ${selectedSlot + 1}…`
+                    : "Search or paste any emoji (Win + .)"
+                }
+                aria-label="Search emojis"
+                className="ep-glass-input w-full h-8.5 pl-8.5 pr-8 text-xs text-primary placeholder:text-white/45 rounded-full focus:outline-none"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  aria-label="Clear search"
+                  className="ep-bar-icon-btn absolute right-1.5 h-6 w-6 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
+                >
+                  <AppCloseIcon size={12} />
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setCustomizing((v) => !v)}
+              aria-pressed={customizing}
+              title={customizing ? "Done editing quick bar" : "Change & reorder the 7 quick emojis"}
+              className={`ep-press h-8.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium shrink-0 cursor-pointer transition-colors ${
+                customizing
+                  ? "ep-glass-primary-pill text-white"
+                  : "bg-white/[0.08] hover:bg-white/[0.14] text-secondary hover:text-white"
+              }`}
+            >
+              {customizing ? <AppCheckIcon size={12} /> : <AppEditIcon size={12} />}
+              <span>{customizing ? "Done" : "Edit 1–7"}</span>
+            </button>
           </div>
+
+          <AnimatedCollapse open={customizing}>
+            <div className="ep-glass-tray rounded-2xl p-2 space-y-2">
+              <div className="flex items-center justify-between gap-2 px-0.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-white/65">
+                  Drag or ← → to reorder · Tap slot to replace
+                </span>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    disabled={selectedSlot <= 0}
+                    onClick={() => moveSelectedSlot(-1)}
+                    aria-label="Move slot left"
+                    title="Move left"
+                    className="ep-press h-6 w-6 rounded-lg bg-white/[0.08] hover:bg-white/[0.15] disabled:opacity-30 flex items-center justify-center text-white cursor-pointer disabled:cursor-default"
+                  >
+                    <AppChevronIcon direction="left" size={11} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={selectedSlot >= REACTION_PRESET_COUNT - 1}
+                    onClick={() => moveSelectedSlot(1)}
+                    aria-label="Move slot right"
+                    title="Move right"
+                    className="ep-press h-6 w-6 rounded-lg bg-white/[0.08] hover:bg-white/[0.15] disabled:opacity-30 flex items-center justify-center text-white cursor-pointer disabled:cursor-default"
+                  >
+                    <AppChevronIcon direction="right" size={11} />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDefaultPresets}
+                    onClick={resetReactionPresets}
+                    aria-label="Reset quick emojis to defaults"
+                    title="Reset to default 7 emojis"
+                    className="ep-press h-6 px-2 rounded-lg bg-white/[0.08] hover:bg-white/[0.15] disabled:opacity-30 inline-flex items-center gap-1 text-[10px] font-medium text-secondary hover:text-white cursor-pointer disabled:cursor-default"
+                  >
+                    <AppResetIcon size={10} />
+                    <span>Reset</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-7 gap-1 touch-none">
+                {presetReactions.map((item, idx) => {
+                  const isSelected = selectedSlot === idx;
+                  const isDragging = draggingSlot === idx;
+                  return (
+                    <button
+                      key={`slot-${idx}`}
+                      ref={(el) => {
+                        slotBtnRefs.current[idx] = el;
+                      }}
+                      type="button"
+                      aria-label={`Slot ${idx + 1}: ${item.label}`}
+                      aria-pressed={isSelected}
+                      title={`Slot ${idx + 1} (${item.label}) — Click to replace or drag to reorder`}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        setSelectedSlot(idx);
+                        slotDragRef.current = {
+                          activeIdx: idx,
+                          startX: e.clientX,
+                          moved: false,
+                        };
+                        setDraggingSlot(idx);
+                      }}
+                      onClick={(e) => {
+                        if (e.detail === 0) setSelectedSlot(idx);
+                      }}
+                      className={`relative h-10 rounded-xl flex flex-col items-center justify-center transition-all cursor-grab active:cursor-grabbing ${
+                        isSelected
+                          ? "bg-accent/25 ring-1.5 ring-accent-soft text-white"
+                          : "bg-white/[0.06] hover:bg-white/[0.12] text-white/90"
+                      } ${isDragging ? "scale-105 opacity-90" : ""}`}
+                    >
+                      <span className="ep-reaction-emoji-glyph text-[18px] leading-none">
+                        {item.emoji}
+                      </span>
+                      <span className="text-[9px] font-semibold text-white/55 leading-none mt-0.5 num">
+                        {idx + 1}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </AnimatedCollapse>
 
           {customPasteEmoji && (
             <button
               type="button"
-              onClick={() => fireEmoji(customPasteEmoji, true)}
+              onClick={() =>
+                customizing
+                  ? assignEmojiToSelectedSlot(customPasteEmoji)
+                  : fireEmoji(customPasteEmoji, true)
+              }
               className="ep-glass-primary-pill ep-press w-full h-8.5 px-3.5 rounded-full flex items-center justify-between text-xs font-medium text-white cursor-pointer"
             >
-              <span>Send custom emoji</span>
+              <span>
+                {customizing
+                  ? `Set slot ${selectedSlot + 1} to custom emoji`
+                  : "Send custom emoji"}
+              </span>
               <span className="text-lg leading-none">{customPasteEmoji}</span>
             </button>
           )}
@@ -288,12 +538,16 @@ export const ReactionPopover = memo(function ReactionPopover() {
                     key={`recent-${emoji}`}
                     emoji={emoji}
                     label={`Recent emoji ${emoji}`}
-                    title={`${emoji} — Click or hold`}
+                    title={
+                      customizing
+                        ? `${emoji} — Assign to slot ${selectedSlot + 1}`
+                        : `${emoji} — Click or hold`
+                    }
                     recordRecent
                     dataPulsing={pulsingEmoji === emoji}
-                    onStartHold={startHold}
+                    onStartHold={handleCatalogStartHold}
                     onStopHold={stopHold}
-                    onKeyboardFire={fireEmoji}
+                    onKeyboardFire={handleCatalogKeyboardFire}
                     className="ep-reaction-tile h-8 w-8 rounded-xl flex items-center justify-center text-[18px] leading-none cursor-pointer"
                   >
                     <span className="ep-reaction-emoji-glyph">{emoji}</span>
@@ -312,20 +566,28 @@ export const ReactionPopover = memo(function ReactionPopover() {
             onChange={setCategory}
           />
 
-          <div className="ep-menu-scroll max-h-44 overflow-y-auto overflow-x-hidden pr-1">
+          <div
+            className={`ep-menu-scroll ${
+              customizing ? "max-h-36" : "max-h-44"
+            } overflow-y-auto overflow-x-hidden pr-1`}
+          >
             {filteredCatalog.length > 0 ? (
-              <div className="grid grid-cols-7 gap-1">
+              <div className="grid grid-cols-7 gap-1 touch-none">
                 {filteredCatalog.map((item) => (
                   <EmojiHoldButton
                     key={`${item.category}-${item.emoji}-${item.name}`}
                     emoji={item.emoji}
                     label={item.name}
-                    title={`${item.name} — Click or hold`}
+                    title={
+                      customizing
+                        ? `${item.name} — Assign to slot ${selectedSlot + 1}`
+                        : `${item.name} — Click or hold`
+                    }
                     recordRecent
                     dataPulsing={pulsingEmoji === item.emoji}
-                    onStartHold={startHold}
+                    onStartHold={handleCatalogStartHold}
                     onStopHold={stopHold}
-                    onKeyboardFire={fireEmoji}
+                    onKeyboardFire={handleCatalogKeyboardFire}
                     className="ep-reaction-tile h-9 w-full rounded-xl flex items-center justify-center text-[20px] leading-none cursor-pointer"
                   >
                     <span className="ep-reaction-emoji-glyph">{item.emoji}</span>
@@ -403,7 +665,7 @@ export const ReactionPopover = memo(function ReactionPopover() {
               <span
                 data-morphing={dropletMorphing ? "true" : "false"}
                 data-pressing={
-                  hoveredIdx !== null && pulsingEmoji === PRESET_REACTIONS[hoveredIdx]?.emoji
+                  hoveredIdx !== null && pulsingEmoji === presetReactions[hoveredIdx]?.emoji
                     ? "true"
                     : "false"
                 }
@@ -411,18 +673,23 @@ export const ReactionPopover = memo(function ReactionPopover() {
               />
             </span>
 
-            {PRESET_REACTIONS.map((item, idx) => {
+            {presetReactions.map((item, idx) => {
               const isHovered = hoveredIdx === idx;
               const isPulsing = pulsingEmoji === item.emoji;
+              const isSelectedForEdit = customizing && selectedSlot === idx;
               return (
                 <button
-                  key={item.emoji}
+                  key={`dock-${idx}`}
                   ref={(el) => {
                     presetBtnRefs.current[idx] = el;
                   }}
                   type="button"
                   aria-label={`React ${item.label} (${item.shortcut})`}
-                  title={`${item.label} (${item.shortcut}) — Click or hold to stream`}
+                  title={
+                    customizing
+                      ? `Slot ${idx + 1} (${item.label}) — Click to select for editing`
+                      : `${item.label} (${item.shortcut}) — Click or hold to stream`
+                  }
                   onMouseEnter={() => enterHoveredIdx(idx)}
                   onFocus={() => enterHoveredIdx(idx)}
                   onBlur={() => {
@@ -432,16 +699,26 @@ export const ReactionPopover = memo(function ReactionPopover() {
                     if (e.button !== 0) return;
                     e.preventDefault();
                     enterHoveredIdx(idx);
-                    startHold(item.emoji, false);
+                    if (customizing) {
+                      setSelectedSlot(idx);
+                    } else {
+                      startHold(item.emoji, false);
+                    }
                   }}
                   onPointerUp={stopHold}
                   onPointerLeave={stopHold}
                   onPointerCancel={stopHold}
                   onClick={(e) => {
                     if (e.detail !== 0) return;
-                    fireEmoji(item.emoji, false);
+                    if (customizing) {
+                      setSelectedSlot(idx);
+                    } else {
+                      fireEmoji(item.emoji, false);
+                    }
                   }}
-                  className="relative z-[1] h-10 w-10 rounded-full flex items-center justify-center cursor-pointer focus:outline-none"
+                  className={`relative z-[1] h-10 w-10 rounded-full flex items-center justify-center cursor-pointer focus:outline-none ${
+                    isSelectedForEdit ? "ring-1.5 ring-accent-soft bg-accent/15" : ""
+                  }`}
                 >
                   <span
                     className={`ep-reaction-emoji-glyph text-[21px] transition-transform duration-150 ease-[var(--spring-fluid)] ${

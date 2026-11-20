@@ -1,3 +1,6 @@
+use crate::cloud_sync::CLOUD_DEFAULT_ENDPOINT;
+use crate::validation::{strip_unsafe_unicode, validate_endpoint};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -5,6 +8,8 @@ pub const ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 pub const DEFAULT_ENDPOINT: &str = "syncplay.pl:8999";
 pub const BACKUP_ENDPOINT: &str = "syncplay.pl:8998";
 pub const MAX_STANDARD_ROOM_CHARS: usize = 64;
+pub const EPILOD_JOIN_URI_PREFIX: &str = "epilod://join/";
+pub const MAX_INVITE_URI_CHARS: usize = 512;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RoomCodeError {
@@ -123,6 +128,165 @@ pub fn resolve_syncplay_room(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepLinkInvite {
+    pub uri: String,
+    pub room_name: String,
+    pub literal_room: bool,
+    pub server_host: Option<String>,
+}
+
+fn percent_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        let is_unreserved =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode_component(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+pub fn format_invite_link(
+    room_input: &str,
+    literal_room: bool,
+    server_host: Option<&str>,
+) -> Option<String> {
+    let canonical_room = if literal_room {
+        normalize_standard_room_name(room_input).ok()?
+    } else {
+        normalize(room_input).ok()?
+    };
+
+    let mut params: Vec<String> = Vec::new();
+    if literal_room {
+        params.push("literal=1".to_string());
+    }
+    if let Some(raw_host) = server_host {
+        let trimmed_host = raw_host.trim().trim_end_matches('/');
+        if trimmed_host.eq_ignore_ascii_case(CLOUD_DEFAULT_ENDPOINT) {
+            params.push("cloud=1".to_string());
+        } else if let Ok(valid_host) = validate_endpoint(raw_host) {
+            if !valid_host.eq_ignore_ascii_case(DEFAULT_ENDPOINT) {
+                params.push(format!("host={}", percent_encode_component(&valid_host)));
+            }
+        }
+    }
+
+    let encoded_room = percent_encode_component(&canonical_room);
+    if params.is_empty() {
+        Some(format!("{EPILOD_JOIN_URI_PREFIX}{encoded_room}"))
+    } else {
+        Some(format!(
+            "{EPILOD_JOIN_URI_PREFIX}{encoded_room}?{}",
+            params.join("&")
+        ))
+    }
+}
+
+pub fn parse_invite_link(raw: &str) -> Option<DeepLinkInvite> {
+    let clean = strip_unsafe_unicode(raw);
+    let trimmed = clean
+        .trim()
+        .trim_matches(|c| matches!(c, '"' | '\'' | '<' | '>'));
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_INVITE_URI_CHARS {
+        return None;
+    }
+
+    let prefix_len = EPILOD_JOIN_URI_PREFIX.len();
+    let lower_prefix: String = trimmed.chars().take(prefix_len).collect();
+    if !lower_prefix.eq_ignore_ascii_case(EPILOD_JOIN_URI_PREFIX) {
+        return None;
+    }
+
+    let rest = trimmed.get(prefix_len..)?;
+    if rest.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let without_fragment = rest.split('#').next().unwrap_or(rest);
+    let (raw_room_part, raw_query) = match without_fragment.split_once('?') {
+        Some((r, q)) => (r, Some(q)),
+        None => (without_fragment, None),
+    };
+    let raw_room_part = raw_room_part.trim_end_matches('/');
+    if raw_room_part.is_empty() || raw_room_part.contains('/') {
+        return None;
+    }
+
+    let decoded_room = percent_decode_component(raw_room_part)?;
+    let mut literal_room = false;
+    let mut server_host: Option<String> = None;
+
+    if let Some(query) = raw_query {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            if k.eq_ignore_ascii_case("literal") {
+                literal_room = matches!(v, "1" | "true" | "TRUE");
+            } else if k.eq_ignore_ascii_case("cloud") {
+                if matches!(v, "1" | "true" | "TRUE") {
+                    server_host = Some(CLOUD_DEFAULT_ENDPOINT.to_string());
+                }
+            } else if k.eq_ignore_ascii_case("host") && !v.is_empty() {
+                let decoded_host = percent_decode_component(v)?;
+                let trimmed_decoded = decoded_host.trim().trim_end_matches('/');
+                if trimmed_decoded.eq_ignore_ascii_case(CLOUD_DEFAULT_ENDPOINT) {
+                    server_host = Some(CLOUD_DEFAULT_ENDPOINT.to_string());
+                } else {
+                    let valid_host = validate_endpoint(&decoded_host).ok()?;
+                    if !valid_host.eq_ignore_ascii_case(DEFAULT_ENDPOINT) {
+                        server_host = Some(valid_host);
+                    }
+                }
+            }
+        }
+    }
+
+    let room_name = if literal_room {
+        normalize_standard_room_name(&decoded_room).ok()?
+    } else {
+        normalize(&decoded_room).ok()?
+    };
+
+    let uri = format_invite_link(&room_name, literal_room, server_host.as_deref())?;
+    Some(DeepLinkInvite {
+        uri,
+        room_name,
+        literal_room,
+        server_host,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +385,40 @@ mod tests {
         assert!(is_six_digit_code("482 915"));
         assert!(!is_six_digit_code("K7M4-P9X2-W8N5"));
         assert!(!is_six_digit_code("MovieNight"));
+    }
+
+    #[test]
+    fn invite_deep_links_roundtrip_and_reject_bad_inputs() {
+        let link = format_invite_link("482 915", false, Some(DEFAULT_ENDPOINT)).unwrap();
+        assert_eq!(link, "epilod://join/482915");
+        let parsed = parse_invite_link(&link).unwrap();
+        assert_eq!(
+            parsed,
+            DeepLinkInvite {
+                uri: "epilod://join/482915".into(),
+                room_name: "482915".into(),
+                literal_room: false,
+                server_host: None,
+            }
+        );
+
+        let custom =
+            format_invite_link("Movie Night 2026", true, Some("sync.example.org:8999")).unwrap();
+        assert_eq!(
+            custom,
+            "epilod://join/Movie%20Night%202026?literal=1&host=sync.example.org%3A8999"
+        );
+        let parsed_custom = parse_invite_link(&format!("  <{custom}>  ")).unwrap();
+        assert_eq!(parsed_custom.room_name, "Movie Night 2026");
+        assert!(parsed_custom.literal_room);
+        assert_eq!(
+            parsed_custom.server_host.as_deref(),
+            Some("sync.example.org:8999")
+        );
+
+        assert!(parse_invite_link("epilod://join/../../etc/passwd").is_none());
+        assert!(parse_invite_link("epilod://join/notacode").is_none());
+        assert!(parse_invite_link("epilod://join/482915?host=bad host").is_none());
+        assert!(parse_invite_link("https://example.com/join/482915").is_none());
     }
 }

@@ -25,6 +25,25 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isDesktop } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
 import { getFileDisplayName } from "../lib/fileDrop";
+import {
+  buildContinueWatchingItems,
+  type ContinueWatchingItem,
+} from "../lib/continueWatching";
+import {
+  formatInviteClipboardText,
+  parseInviteLink,
+} from "../lib/inviteLinks";
+import {
+  checkLocalFilesExist,
+  dpapiProtectSecret,
+  probePinnedRooms,
+  type RoomOccupancyDto,
+} from "../lib/localLibrary";
+import {
+  applyDeepLinkInvite,
+  loadMediaForRecentRoom as loadMediaForRecentRoomShared,
+  resolveSavedRoomPassword,
+} from "../lib/roomJoinHelper";
 import { scanMediaPaths } from "../lib/playlist";
 import {
   buildSeriesKey,
@@ -34,17 +53,22 @@ import {
 } from "../lib/seriesProgress";
 import { isTextEntryElement } from "../lib/shortcuts";
 import { playSoundCue } from "../lib/soundEffects";
-import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
+import {
+  DEFAULT_ENDPOINT,
+  formatServerDisplayName,
+} from "../lib/syncStatusDisplay";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import {
+  getRecentRoomMediaLabel,
   normalizeRecentServerHost,
   useRecentRoomsStore,
   type RecentRoomEntry,
 } from "../store/useRecentRoomsStore";
+import { useResumeStore } from "../store/useResumeStore";
 import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
 import { useUpdaterStore } from "../store/useUpdaterStore";
 import { TitleBar } from "./TitleBar";
@@ -88,7 +112,10 @@ export function formatRoomCodeDisplay(code: string): string {
 export function HomeScreen() {
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
+  const serverEndpoint = useAppStore((s) => s.serverEndpoint);
   const serverPassword = useAppStore((s) => s.serverPassword);
+  const pendingDeepLinkPasswordRoomId = useAppStore((s) => s.pendingDeepLinkPasswordRoomId);
+  const setPendingDeepLinkPasswordRoomId = useAppStore((s) => s.setPendingDeepLinkPasswordRoomId);
   const literalRoomStored = useAppStore((s) => s.literalRoom);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
   const setUsername = useAppStore((s) => s.setUsername);
@@ -119,23 +146,110 @@ export function HomeScreen() {
   const [editingRoomId, setEditingRoomId] = useState<string | null>(null);
   const [editingRoomNickname, setEditingRoomNickname] = useState("");
   const [passwordRoomId, setPasswordRoomId] = useState<string | null>(null);
+  const [rememberRoomPassword, setRememberRoomPassword] = useState(false);
   const [pendingRecentHostOnly, setPendingRecentHostOnly] = useState(false);
   const [missingSeriesKey, setMissingSeriesKey] = useState<string | null>(null);
+  const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
+  const [occupancyById, setOccupancyById] = useState<Record<string, RoomOccupancyDto>>({});
+  const [probingPinned, setProbingPinned] = useState(false);
+  const [missingFilePaths, setMissingFilePaths] = useState<Record<string, boolean>>({});
+  const lastProbeAtRef = useRef(0);
   const verifyTimerRef = useRef<number | null>(null);
+  const joiningMediaRef = useRef(false);
   const profileRef = useRef<HTMLDivElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const recentRooms = useRecentRoomsStore((s) => s.rooms);
   const recentRoomsStorageError = useRecentRoomsStore((s) => s.storageError);
   const togglePinRecentRoom = useRecentRoomsStore((s) => s.togglePin);
   const setRecentRoomNickname = useRecentRoomsStore((s) => s.setNickname);
+  const setRecentRoomSeriesKey = useRecentRoomsStore((s) => s.setSeriesKey);
+  const setRecentRoomEncryptedPassword = useRecentRoomsStore((s) => s.setEncryptedPassword);
   const removeRecentRoom = useRecentRoomsStore((s) => s.removeRoom);
   const seriesMap = useSeriesProgressStore((s) => s.series);
   const relocateSeriesFolder = useSeriesProgressStore((s) => s.relocateSeriesFolder);
-  const continueSeriesList = Object.values(seriesMap)
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, 3);
+  const removeSeries = useSeriesProgressStore((s) => s.removeSeries);
+  const resumeEntries = useResumeStore((s) => s.entries);
+  const removeResumePosition = useResumeStore((s) => s.removePosition);
+
+  const pinnedRooms = recentRooms.filter((r) => r.pinned);
+  const unpinnedRooms = recentRooms.filter((r) => !r.pinned);
+  const continueItems = buildContinueWatchingItems(seriesMap, resumeEntries, recentRooms, 4);
   const profilePopover = useAnimatedPresence(editingName, 170);
   const dragBanner = useAnimatedPresence(isDragActive, 170);
+
+  const refreshPinnedOccupancy = async (force = false) => {
+    if (!isDesktop() || pinnedRooms.length === 0 || probingPinned) return;
+    const now = Date.now();
+    if (!force && now - lastProbeAtRef.current < 25_000) return;
+    lastProbeAtRef.current = now;
+    setProbingPinned(true);
+    try {
+      const results = await probePinnedRooms(
+        pinnedRooms.slice(0, 5).map((r) => ({
+          id: r.id,
+          serverHost: r.serverHost,
+          roomName: r.roomName,
+          literalRoom: r.literalRoom,
+        })),
+      );
+      setOccupancyById((prev) => {
+        const next = { ...prev };
+        for (const item of results) {
+          next[item.id] = item;
+        }
+        return next;
+      });
+    } catch {
+      // Probe failures are non-fatal (rate limit or offline)
+    } finally {
+      setProbingPinned(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isDesktop() || pinnedRooms.length === 0) return;
+    void refreshPinnedOccupancy(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedRooms.length]);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    const paths = recentRooms
+      .map((r) => r.lastFilePath)
+      .filter((p): p is string => Boolean(p));
+    if (paths.length === 0) return;
+    let active = true;
+    void checkLocalFilesExist(paths).then((existsList) => {
+      if (!active) return;
+      const map: Record<string, boolean> = {};
+      paths.forEach((p, idx) => {
+        map[p] = !existsList[idx];
+      });
+      setMissingFilePaths(map);
+    });
+    return () => {
+      active = false;
+    };
+  }, [recentRooms]);
+
+  useEffect(() => {
+    if (!pendingDeepLinkPasswordRoomId) return;
+    const targetRoom = recentRooms.find((r) => r.id === pendingDeepLinkPasswordRoomId);
+    setPendingDeepLinkPasswordRoomId(null);
+    if (!targetRoom) return;
+    setServerEndpoint(targetRoom.serverHost);
+    setStandardRoomName(targetRoom.literalRoom);
+    setJoinInput(targetRoom.roomName);
+    setPasswordRoomId(targetRoom.id);
+    setRememberRoomPassword(Boolean(targetRoom.encryptedPassword));
+    setPendingRecentHostOnly(Boolean(targetRoom.hostOnly));
+    setLobbyView("party");
+    setShowOptions(true);
+    setError("Enter the room password to join.");
+    window.setTimeout(() => {
+      passwordInputRef.current?.focus();
+    }, 80);
+  }, [pendingDeepLinkPasswordRoomId, recentRooms, setPendingDeepLinkPasswordRoomId, setServerEndpoint]);
 
   useEffect(() => {
     if (!editingName) return;
@@ -234,7 +348,106 @@ export function HomeScreen() {
     return true;
   };
 
-  const handleContinueSeries = async (entry: SeriesProgressEntry) => {
+  const loadMediaForRecentRoom = async (room: RecentRoomEntry): Promise<boolean> => {
+    return loadMediaForRecentRoomShared(room, seriesMap);
+  };
+
+  const enterSeriesOrLinkedParty = async (
+    linkedRoom: RecentRoomEntry | undefined,
+    solo = false,
+  ) => {
+    if (solo || !linkedRoom) {
+      enterRoom("", false, false);
+      return;
+    }
+    if (!ensureValidName()) return;
+    const hostOnly = Boolean(linkedRoom.hostOnly);
+    setServerEndpoint(linkedRoom.serverHost);
+    setStandardRoomName(linkedRoom.literalRoom);
+    setJoinInput(linkedRoom.roomName);
+
+    if (!linkedRoom.hasPassword) {
+      setServerPassword("");
+      setPasswordRoomId(null);
+      setPendingRecentHostOnly(false);
+      enterRoom(linkedRoom.roomName, linkedRoom.literalRoom, hostOnly);
+      return;
+    }
+
+    const savedPass = await resolveSavedRoomPassword(linkedRoom);
+    if (savedPass) {
+      setServerPassword(savedPass);
+      setPasswordRoomId(null);
+      setPendingRecentHostOnly(false);
+      enterRoom(linkedRoom.roomName, linkedRoom.literalRoom, hostOnly);
+      return;
+    }
+
+    if (passwordRoomId !== linkedRoom.id || !serverPassword) {
+      if (passwordRoomId !== linkedRoom.id) {
+        setServerPassword("");
+      }
+      setPasswordRoomId(linkedRoom.id);
+      setRememberRoomPassword(Boolean(linkedRoom.encryptedPassword));
+      setPendingRecentHostOnly(hostOnly);
+      setLobbyView("party");
+      setShowOptions(true);
+      setError("Enter the room password to join.");
+      window.setTimeout(() => {
+        passwordInputRef.current?.focus();
+      }, 80);
+      return;
+    }
+
+    setPasswordRoomId(null);
+    setPendingRecentHostOnly(false);
+    enterRoom(linkedRoom.roomName, linkedRoom.literalRoom, hostOnly);
+  };
+
+  const handleContinueMovie = async (
+    item: ContinueWatchingItem,
+    options?: { solo?: boolean },
+  ) => {
+    const resumeEntry = item.resumeEntry;
+    if (!resumeEntry?.filePath || joiningMediaRef.current) return;
+    joiningMediaRef.current = true;
+    setError(null);
+    try {
+      const existsList = await checkLocalFilesExist([resumeEntry.filePath]);
+      if (isDesktop() && !existsList[0]) {
+        if (item.resumeKey) {
+          removeResumePosition(item.resumeKey);
+        }
+        setError("That movie file was moved or deleted.");
+        return;
+      }
+      const scan = await scanMediaPaths([resumeEntry.filePath]);
+      if (scan.items.length > 0) {
+        const idx = Math.max(0, Math.min(scan.items.length - 1, scan.activeIndex));
+        usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName);
+        const target = scan.items[idx];
+        setSelectedFile(target.path, target.fileName);
+      } else {
+        usePlaylistStore.getState().clearPlaylist();
+        setSelectedFile(
+          resumeEntry.filePath,
+          resumeEntry.fileName || getFileDisplayName(resumeEntry.filePath),
+        );
+      }
+      await enterSeriesOrLinkedParty(item.linkedRoom, Boolean(options?.solo));
+    } catch {
+      setError("Could not open movie file.");
+    } finally {
+      joiningMediaRef.current = false;
+    }
+  };
+
+  const handleContinueSeries = async (
+    entry: SeriesProgressEntry,
+    options?: { solo?: boolean },
+  ) => {
+    if (joiningMediaRef.current) return;
+    joiningMediaRef.current = true;
     setError(null);
     setMissingSeriesKey(null);
     try {
@@ -247,14 +460,20 @@ export function HomeScreen() {
       usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName || entry.folderName);
       const target = scan.items[idx];
       setSelectedFile(target.path, target.fileName);
-      enterRoom("", false, false);
+      const linkedRoom = useRecentRoomsStore
+        .getState()
+        .rooms.find((r) => r.seriesKey === entry.seriesKey);
+      await enterSeriesOrLinkedParty(linkedRoom, Boolean(options?.solo));
     } catch {
       setMissingSeriesKey(entry.seriesKey);
+    } finally {
+      joiningMediaRef.current = false;
     }
   };
 
   const handleLocateSeriesFolder = async (entry: SeriesProgressEntry) => {
-    if (!isDesktop()) return;
+    if (!isDesktop() || joiningMediaRef.current) return;
+    joiningMediaRef.current = true;
     try {
       const picked = await open({
         directory: true,
@@ -268,16 +487,25 @@ export function HomeScreen() {
         setError("No video files found in that folder.");
         return;
       }
+      const prevLinkedRoom = recentRooms.find((r) => r.seriesKey === entry.seriesKey);
       const newKey = relocateSeriesFolder(entry.seriesKey, dir, scan.folderName || entry.folderName);
+      if (prevLinkedRoom && newKey) {
+        setRecentRoomSeriesKey(prevLinkedRoom.id, newKey);
+      }
       const updated = newKey ? useSeriesProgressStore.getState().getSeries(newKey) : entry;
       setMissingSeriesKey(null);
       const idx = pickInitialSeriesIndex(scan.items, updated);
       usePlaylistStore.getState().setPlaylist(scan.items, idx, scan.folderName || entry.folderName);
       const target = scan.items[idx];
       setSelectedFile(target.path, target.fileName);
-      enterRoom("", false, false);
+      const linkedRoom = newKey
+        ? useRecentRoomsStore.getState().rooms.find((r) => r.seriesKey === newKey)
+        : prevLinkedRoom;
+      await enterSeriesOrLinkedParty(linkedRoom, false);
     } catch (err) {
       setError(formatUserError(err));
+    } finally {
+      joiningMediaRef.current = false;
     }
   };
 
@@ -357,10 +585,25 @@ export function HomeScreen() {
 
   const handleCopyDraft = async () => {
     try {
-      await navigator.clipboard.writeText(draftRoomCode);
+      const text = formatInviteClipboardText(draftRoomCode, false, serverEndpoint);
+      await navigator.clipboard.writeText(text);
       setCopiedDraft(true);
       playSoundCue("codeCopied");
       setTimeout(() => setCopiedDraft(false), 1600);
+    } catch {
+      // Clipboard may be restricted outside secure focus
+    }
+  };
+
+  const handleCopyRoomInvite = async (room: RecentRoomEntry) => {
+    try {
+      const text = formatInviteClipboardText(room.roomName, room.literalRoom, room.serverHost);
+      await navigator.clipboard.writeText(text);
+      setCopiedRoomId(room.id);
+      playSoundCue("codeCopied");
+      window.setTimeout(() => {
+        setCopiedRoomId((prev) => (prev === room.id ? null : prev));
+      }, 1600);
     } catch {
       // Clipboard may be restricted outside secure focus
     }
@@ -388,6 +631,14 @@ export function HomeScreen() {
     try {
       const clip = await navigator.clipboard.readText();
       if (!clip) return;
+      const invite = parseInviteLink(clip);
+      if (invite) {
+        if (!ensureValidName()) return;
+        setError(null);
+        playSoundCue("codeCopied");
+        await applyDeepLinkInvite(invite);
+        return;
+      }
       if (standardRoomName) {
         setJoinInput(sanitizeRoomCodeInput(clip, true));
         if (error) setError(null);
@@ -395,7 +646,7 @@ export function HomeScreen() {
       }
       const digits = clip.replace(/\D/g, "").slice(0, 6);
       if (!digits) {
-        setError("Clipboard does not contain a 6-digit room code.");
+        setError("Clipboard does not contain a 6-digit room code or invite link.");
         return;
       }
       setJoinInput(digits);
@@ -411,15 +662,17 @@ export function HomeScreen() {
   const handleCreateRoom = () => {
     if (!ensureValidName()) return;
     try {
-      void navigator.clipboard?.writeText(draftRoomCode).catch(() => undefined);
+      const text = formatInviteClipboardText(draftRoomCode, false, serverEndpoint);
+      void navigator.clipboard?.writeText(text).catch(() => undefined);
     } catch {
       // ignore
     }
     enterRoom(draftRoomCode, false, hostOnlyCreate, true);
   };
 
-  const handleJoinRoom = (e: FormEvent) => {
+  const handleJoinRoom = async (e: FormEvent) => {
     e.preventDefault();
+    if (joiningMediaRef.current) return;
     if (!ensureValidName()) return;
     const cleaned = sanitizeRoomCodeInput(joinInput, standardRoomName);
     if (cleaned.length < (standardRoomName ? 1 : 6)) {
@@ -430,13 +683,43 @@ export function HomeScreen() {
       );
       return;
     }
+    const pendingRoom = passwordRoomId
+      ? recentRooms.find((r) => r.id === passwordRoomId)
+      : undefined;
     const hostOnly = Boolean(passwordRoomId && pendingRecentHostOnly);
     setPasswordRoomId(null);
     setPendingRecentHostOnly(false);
+    if (pendingRoom) {
+      if (rememberRoomPassword && serverPassword) {
+        try {
+          const encrypted = await dpapiProtectSecret(serverPassword);
+          if (encrypted) {
+            setRecentRoomEncryptedPassword(pendingRoom.id, encrypted);
+          }
+        } catch {
+          // Ignore DPAPI failure; password still works for current session
+        }
+      } else if (!rememberRoomPassword && pendingRoom.encryptedPassword) {
+        setRecentRoomEncryptedPassword(pendingRoom.id, undefined);
+      }
+      if (!useAppStore.getState().selectedFilePath) {
+        joiningMediaRef.current = true;
+        try {
+          const loaded = await loadMediaForRecentRoom(pendingRoom);
+          if (!loaded) {
+            usePlaylistStore.getState().clearPlaylist();
+            setSelectedFile(null, null);
+          }
+        } finally {
+          joiningMediaRef.current = false;
+        }
+      }
+    }
     enterRoom(cleaned, standardRoomName, hostOnly);
   };
 
-  const handleJoinRecentRoom = (room: RecentRoomEntry) => {
+  const handleJoinRecentRoom = async (room: RecentRoomEntry) => {
+    if (joiningMediaRef.current) return;
     if (!ensureValidName()) return;
     setError(null);
     setServerEndpoint(room.serverHost);
@@ -448,6 +731,35 @@ export function HomeScreen() {
       setServerPassword("");
       setPasswordRoomId(null);
       setPendingRecentHostOnly(false);
+      joiningMediaRef.current = true;
+      try {
+        const loaded = await loadMediaForRecentRoom(room);
+        if (!loaded) {
+          usePlaylistStore.getState().clearPlaylist();
+          setSelectedFile(null, null);
+        }
+      } finally {
+        joiningMediaRef.current = false;
+      }
+      enterRoom(room.roomName, room.literalRoom, hostOnly);
+      return;
+    }
+
+    const savedPass = await resolveSavedRoomPassword(room);
+    if (savedPass) {
+      setServerPassword(savedPass);
+      setPasswordRoomId(null);
+      setPendingRecentHostOnly(false);
+      joiningMediaRef.current = true;
+      try {
+        const loaded = await loadMediaForRecentRoom(room);
+        if (!loaded) {
+          usePlaylistStore.getState().clearPlaylist();
+          setSelectedFile(null, null);
+        }
+      } finally {
+        joiningMediaRef.current = false;
+      }
       enterRoom(room.roomName, room.literalRoom, hostOnly);
       return;
     }
@@ -457,7 +769,9 @@ export function HomeScreen() {
         setServerPassword("");
       }
       setPasswordRoomId(room.id);
+      setRememberRoomPassword(Boolean(room.encryptedPassword));
       setPendingRecentHostOnly(hostOnly);
+      setLobbyView("party");
       setShowOptions(true);
       setError("Enter the room password to join.");
       window.setTimeout(() => {
@@ -468,6 +782,30 @@ export function HomeScreen() {
 
     setPasswordRoomId(null);
     setPendingRecentHostOnly(false);
+    if (rememberRoomPassword && serverPassword) {
+      try {
+        const encrypted = await dpapiProtectSecret(serverPassword);
+        if (encrypted) {
+          setRecentRoomEncryptedPassword(room.id, encrypted);
+        }
+      } catch {
+        // Ignore DPAPI failure; password still works for current session
+      }
+    } else if (!rememberRoomPassword && room.encryptedPassword) {
+      setRecentRoomEncryptedPassword(room.id, undefined);
+    }
+    if (!useAppStore.getState().selectedFilePath) {
+      joiningMediaRef.current = true;
+      try {
+        const loaded = await loadMediaForRecentRoom(room);
+        if (!loaded) {
+          usePlaylistStore.getState().clearPlaylist();
+          setSelectedFile(null, null);
+        }
+      } finally {
+        joiningMediaRef.current = false;
+      }
+    }
     enterRoom(room.roomName, room.literalRoom, hostOnly);
   };
 
@@ -750,46 +1088,214 @@ export function HomeScreen() {
               </button>
             </div>
 
-            {continueSeriesList.length > 0 && (
+            {continueItems.length > 0 && (
               <div className="w-full max-w-[440px] ep-glass-sheet rounded-[20px] p-3.5 space-y-2">
                 <div className="text-[11px] font-medium uppercase tracking-wider text-muted px-1">
                   Continue watching
                 </div>
                 <div className="space-y-1.5">
-                  {continueSeriesList.map((entry) => {
-                    const isMissing = missingSeriesKey === entry.seriesKey;
+                  {continueItems.map((item) => {
+                    const isSeries = item.kind === "series" && Boolean(item.seriesEntry);
+                    const isMissing = isSeries && missingSeriesKey === item.seriesEntry?.seriesKey;
+                    const linkedRoomLabel = item.linkedRoom
+                      ? item.linkedRoom.nickname ||
+                        (item.linkedRoom.literalRoom
+                          ? item.linkedRoom.roomName
+                          : formatRoomCodeDisplay(item.linkedRoom.roomName))
+                      : null;
                     return (
                       <div
-                        key={entry.seriesKey}
-                        className="ep-menu-row rounded-xl px-3 py-2 flex items-center justify-between gap-2.5 text-xs"
+                        key={item.id}
+                        className="ep-menu-row relative overflow-hidden rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-xs group"
                       >
                         <button
                           type="button"
-                          onClick={() => void handleContinueSeries(entry)}
+                          title={
+                            linkedRoomLabel
+                              ? `Resume in Watch Party (${linkedRoomLabel})`
+                              : undefined
+                          }
+                          onClick={() => {
+                            if (item.kind === "series" && item.seriesEntry) {
+                              void handleContinueSeries(item.seriesEntry);
+                            } else {
+                              void handleContinueMovie(item);
+                            }
+                          }}
                           className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
                         >
-                          <PlayerEpisodesIcon size={15} className="text-accent-soft shrink-0" />
-                          <span className="truncate font-medium text-white">
-                            {entry.folderName}
-                          </span>
-                          {entry.lastEpisodeKey && (
+                          {item.kind === "series" ? (
+                            <PlayerEpisodesIcon size={15} className="text-accent-soft shrink-0" />
+                          ) : (
+                            <MenuMediaDiscIcon size={15} className="text-accent-soft shrink-0" />
+                          )}
+                          <span className="truncate font-medium text-white">{item.title}</span>
+                          {item.badgeText && (
                             <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10px] text-secondary num shrink-0">
-                              {entry.lastEpisodeKey}
+                              {item.badgeText}
+                            </span>
+                          )}
+                          {item.timeLeftLabel && (
+                            <span className="text-[10px] text-muted num shrink-0">
+                              {item.timeLeftLabel}
+                            </span>
+                          )}
+                          {linkedRoomLabel && (
+                            <span className="px-1.5 py-0.5 rounded-full bg-accent/18 text-[10px] text-accent-soft truncate max-w-[100px] shrink-0">
+                              Party · {linkedRoomLabel}
                             </span>
                           )}
                         </button>
-                        {isMissing && (
+                        {!isMissing && item.linkedRoom && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (item.kind === "series" && item.seriesEntry) {
+                                void handleContinueSeries(item.seriesEntry, { solo: true });
+                              } else {
+                                void handleContinueMovie(item, { solo: true });
+                              }
+                            }}
+                            title="Watch alone instead"
+                            className="ep-press px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-[11px] text-secondary hover:text-white shrink-0 cursor-pointer"
+                          >
+                            Solo
+                          </button>
+                        )}
+                        {isMissing && item.seriesEntry && (
                           <div className="flex items-center gap-1.5 shrink-0">
                             <span className="text-[11px] text-warn">Folder not found</span>
                             <button
                               type="button"
-                              onClick={() => void handleLocateSeriesFolder(entry)}
+                              onClick={() => void handleLocateSeriesFolder(item.seriesEntry!)}
                               className="ep-press px-2 py-1 rounded-lg bg-white/[0.1] hover:bg-white/[0.16] text-[11px] text-white cursor-pointer"
                             >
                               Locate folder
                             </button>
                           </div>
                         )}
+                        {!isMissing && (
+                          <button
+                            type="button"
+                            aria-label={`Remove ${item.title} from continue watching`}
+                            title="Remove"
+                            onClick={() => {
+                              if (item.kind === "series" && item.seriesEntry) {
+                                removeSeries(item.seriesEntry.seriesKey);
+                              } else if (item.resumeKey) {
+                                removeResumePosition(item.resumeKey);
+                              }
+                            }}
+                            className="ep-press p-1 rounded-lg text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-bad hover:bg-white/[0.08] shrink-0 cursor-pointer transition-opacity"
+                          >
+                            <X size={12} />
+                          </button>
+                        )}
+                        {item.progressRatio !== null && (
+                          <div
+                            aria-hidden="true"
+                            className="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-white/[0.06]"
+                          >
+                            <div
+                              className="h-full bg-accent/85"
+                              style={{ width: `${Math.round(item.progressRatio * 100)}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {pinnedRooms.length > 0 && (
+              <div className="w-full max-w-[440px] ep-glass-sheet rounded-[20px] p-3.5 space-y-2">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                    Pinned rooms
+                  </span>
+                  <button
+                    type="button"
+                    disabled={probingPinned}
+                    onClick={() => void refreshPinnedOccupancy(true)}
+                    title="Check who is inside pinned rooms"
+                    aria-label="Refresh pinned room status"
+                    className="ep-press inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer disabled:opacity-50"
+                  >
+                    <AppResetIcon
+                      clockwise
+                      size={11}
+                      className={probingPinned ? "animate-spin" : ""}
+                    />
+                    <span>{probingPinned ? "Checking" : "Check"}</span>
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  {pinnedRooms.slice(0, 4).map((room) => {
+                    const occ = occupancyById[room.id];
+                    const hasPeople = Boolean(occ?.ok && occ.onlineCount > 0);
+                    const occTooltip = hasPeople
+                      ? `${occ.usernamesPreview.join(", ")}${occ.activeMediaHint ? ` · ${occ.activeMediaHint}` : ""}`
+                      : undefined;
+                    const codeLabel = room.literalRoom
+                      ? room.roomName
+                      : formatRoomCodeDisplay(room.roomName);
+                    const mediaLabel = getRecentRoomMediaLabel(
+                      room,
+                      seriesMap,
+                      occ?.activeMediaHint,
+                    );
+                    const roomLabel = room.nickname || mediaLabel || codeLabel;
+                    return (
+                      <div
+                        key={room.id}
+                        className="ep-menu-row rounded-xl px-3 py-1.5 flex items-center justify-between gap-2 text-xs group"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => void handleJoinRecentRoom(room)}
+                          title={
+                            occTooltip ||
+                            (room.lastFilePath
+                              ? `Will open: ${getFileDisplayName(room.lastFilePath)}`
+                              : `Join ${roomLabel}`)
+                          }
+                          className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
+                        >
+                          <Pin size={12} className="text-accent-soft shrink-0" />
+                          <span className="truncate font-medium text-white">{roomLabel}</span>
+                          {(room.nickname || mediaLabel) && (
+                            <span className="text-[11px] text-muted num truncate">
+                              {codeLabel}
+                            </span>
+                          )}
+                          {hasPeople && (
+                            <span
+                              title={occTooltip}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-ok/15 border border-ok/30 text-[10px] font-medium text-ok num shrink-0"
+                            >
+                              <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                              <span>{occ.onlineCount} watching</span>
+                            </span>
+                          )}
+                          {room.hasPassword && (
+                            <Lock
+                              size={11}
+                              className="text-muted shrink-0"
+                              aria-label="Password protected"
+                            />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyRoomInvite(room)}
+                          aria-label={`Copy invite for ${roomLabel}`}
+                          title="Copy invite link & code"
+                          className="ep-press p-1 rounded-lg text-muted hover:text-white hover:bg-white/[0.08] shrink-0 cursor-pointer"
+                        >
+                          <PartyCopyIcon copied={copiedRoomId === room.id} size={12} />
+                        </button>
                       </div>
                     );
                   })}
@@ -808,6 +1314,12 @@ export function HomeScreen() {
                     verifyTimerRef.current = null;
                   }
                   setVerifyingJoin(false);
+                  if (passwordRoomId) {
+                    setPasswordRoomId(null);
+                    setPendingRecentHostOnly(false);
+                    usePlaylistStore.getState().clearPlaylist();
+                    setSelectedFile(null, null);
+                  }
                   setLobbyView("entry");
                   setError(null);
                 }}
@@ -984,7 +1496,7 @@ export function HomeScreen() {
                       type="password"
                       value={serverPassword}
                       maxLength={128}
-                      placeholder="Optional room password (kept only this session)"
+                      placeholder="Optional room password"
                       aria-label="Room password"
                       onChange={(e) => {
                         setServerPassword(e.target.value);
@@ -1002,6 +1514,18 @@ export function HomeScreen() {
                       </button>
                     )}
                   </form>
+                  {passwordRoomId && (
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={rememberRoomPassword}
+                      onClick={() => setRememberRoomPassword((v) => !v)}
+                      className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-2.5 py-1.5 text-left text-xs text-secondary hover:text-white cursor-pointer"
+                    >
+                      <span>Remember password on this PC</span>
+                      <GlassSwitchTrack checked={rememberRoomPassword} size="sm" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="switch"
@@ -1030,16 +1554,38 @@ export function HomeScreen() {
                 <div className="pt-2 border-t border-white/[0.08] space-y-1.5">
                   <div className="flex items-center justify-between px-1">
                     <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
-                      Recent rooms
+                      {pinnedRooms.length > 0 && unpinnedRooms.length > 0
+                        ? "Pinned & recent rooms"
+                        : pinnedRooms.length > 0
+                          ? "Pinned rooms"
+                          : "Recent rooms"}
                     </span>
-                    {recentRoomsStorageError && (
-                      <span className="text-[10px] text-warn">
-                        Could not save changes to disk
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {pinnedRooms.length > 0 && (
+                        <button
+                          type="button"
+                          disabled={probingPinned}
+                          onClick={() => void refreshPinnedOccupancy(true)}
+                          title="Check who is inside pinned rooms"
+                          className="ep-press inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer disabled:opacity-50"
+                        >
+                          <AppResetIcon
+                            clockwise
+                            size={10}
+                            className={probingPinned ? "animate-spin" : ""}
+                          />
+                          <span>{probingPinned ? "Checking" : "Check"}</span>
+                        </button>
+                      )}
+                      {recentRoomsStorageError && (
+                        <span className="text-[10px] text-warn">
+                          Could not save changes to disk
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="space-y-1 max-h-40 overflow-y-auto pr-0.5">
-                    {recentRooms.map((room: RecentRoomEntry) => {
+                  <div className="space-y-1 max-h-44 overflow-y-auto pr-0.5">
+                    {recentRooms.map((room: RecentRoomEntry, index: number) => {
                       const isEditing = editingRoomId === room.id;
                       const isCustomHost =
                         normalizeRecentServerHost(room.serverHost).toLowerCase() !==
@@ -1047,120 +1593,169 @@ export function HomeScreen() {
                       const lastEpKey = room.seriesKey
                         ? seriesMap[room.seriesKey]?.lastEpisodeKey
                         : undefined;
+                      const occ = room.pinned ? occupancyById[room.id] : undefined;
+                      const hasPeople = Boolean(occ?.ok && occ.onlineCount > 0);
+                      const fileMissing = Boolean(room.lastFilePath && missingFilePaths[room.lastFilePath]);
+                      const mediaTooltip = room.lastFilePath
+                        ? fileMissing
+                          ? `File moved: ${getFileDisplayName(room.lastFilePath)}`
+                          : `Will open: ${getFileDisplayName(room.lastFilePath)}`
+                        : `Server: ${formatServerDisplayName(room.serverHost)}`;
+                      const codeLabel = room.literalRoom
+                        ? room.roomName
+                        : formatRoomCodeDisplay(room.roomName);
+                      const mediaLabel = getRecentRoomMediaLabel(
+                        room,
+                        seriesMap,
+                        occ?.activeMediaHint,
+                      );
+                      const primaryLabel = room.nickname || mediaLabel || codeLabel;
+                      const showSecondaryCode = Boolean(room.nickname || mediaLabel);
+                      const showRecentDivider =
+                        pinnedRooms.length > 0 &&
+                        unpinnedRooms.length > 0 &&
+                        index === pinnedRooms.length;
                       return (
-                        <div
-                          key={room.id}
-                          className="ep-menu-row rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs group"
-                        >
-                          {isEditing ? (
-                            <form
-                              onSubmit={(e) => {
-                                e.preventDefault();
-                                setRecentRoomNickname(room.id, editingRoomNickname);
-                                setEditingRoomId(null);
-                              }}
-                              className="flex-1 flex items-center gap-1.5 min-w-0"
-                            >
-                              <input
-                                type="text"
-                                autoFocus
-                                value={editingRoomNickname}
-                                placeholder="Room nickname…"
-                                maxLength={40}
-                                onChange={(e) => setEditingRoomNickname(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Escape") setEditingRoomId(null);
-                                }}
-                                className="ep-glass-input flex-1 h-7 px-2 rounded-lg text-xs text-primary min-w-0 focus:outline-none"
-                              />
-                              <button
-                                type="submit"
-                                className="ep-press px-2 h-7 rounded-lg bg-white/[0.1] text-[11px] text-white cursor-pointer"
-                              >
-                                Save
-                              </button>
-                            </form>
-                          ) : (
-                            <button
-                              type="button"
-                              title={`Server: ${room.serverHost}`}
-                              onClick={() => handleJoinRecentRoom(room)}
-                              className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
-                            >
-                              <span className="truncate font-medium text-primary group-hover:text-white">
-                                {room.nickname ||
-                                  (room.literalRoom
-                                    ? room.roomName
-                                    : formatRoomCodeDisplay(room.roomName))}
-                              </span>
-                              {room.nickname && (
-                                <span className="text-[11px] text-muted num truncate">
-                                  {room.literalRoom
-                                    ? room.roomName
-                                    : formatRoomCodeDisplay(room.roomName)}
-                                </span>
-                              )}
-                              {isCustomHost && (
-                                <span className="text-[10px] text-muted truncate max-w-[110px] shrink-0">
-                                  {room.serverHost}
-                                </span>
-                              )}
-                              {lastEpKey && (
-                                <span
-                                  title={`Last watched: ${lastEpKey}`}
-                                  className="px-1.5 py-0.5 rounded-full bg-white/[0.06] text-[10px] text-accent-soft num shrink-0"
-                                >
-                                  Last: {lastEpKey}
-                                </span>
-                              )}
-                              {room.hasPassword && (
-                                <Lock
-                                  size={11}
-                                  className="text-muted shrink-0"
-                                  aria-label="Password protected"
-                                />
-                              )}
-                            </button>
-                          )}
-
-                          {!isEditing && (
-                            <div className="flex items-center gap-0.5 shrink-0">
-                              <button
-                                type="button"
-                                aria-label={room.pinned ? "Unpin room" : "Pin room"}
-                                title={room.pinned ? "Unpin" : "Pin"}
-                                onClick={() => togglePinRecentRoom(room.id)}
-                                className={`ep-press p-1 rounded-lg cursor-pointer ${
-                                  room.pinned
-                                    ? "text-accent-soft bg-white/[0.08]"
-                                    : "text-muted hover:text-white hover:bg-white/[0.08]"
-                                }`}
-                              >
-                                <Pin size={12} />
-                              </button>
-                              <button
-                                type="button"
-                                aria-label="Rename room"
-                                title="Nickname"
-                                onClick={() => {
-                                  setEditingRoomId(room.id);
-                                  setEditingRoomNickname(room.nickname ?? "");
-                                }}
-                                className="ep-press p-1 rounded-lg text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
-                              >
-                                <AppEditIcon size={12} />
-                              </button>
-                              <button
-                                type="button"
-                                aria-label="Remove recent room"
-                                title="Remove"
-                                onClick={() => removeRecentRoom(room.id)}
-                                className="ep-press p-1 rounded-lg text-muted hover:text-bad hover:bg-white/[0.08] cursor-pointer"
-                              >
-                                <X size={12} />
-                              </button>
+                        <div key={room.id}>
+                          {showRecentDivider && (
+                            <div className="pt-1 pb-0.5 px-1 text-[10px] uppercase tracking-wider text-muted/80">
+                              Recent
                             </div>
                           )}
+                          <div className="ep-menu-row rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs group">
+                            {isEditing ? (
+                              <form
+                                onSubmit={(e) => {
+                                  e.preventDefault();
+                                  setRecentRoomNickname(room.id, editingRoomNickname);
+                                  setEditingRoomId(null);
+                                }}
+                                className="flex-1 flex items-center gap-1.5 min-w-0"
+                              >
+                                <input
+                                  type="text"
+                                  autoFocus
+                                  value={editingRoomNickname}
+                                  placeholder="Room nickname…"
+                                  maxLength={40}
+                                  onChange={(e) => setEditingRoomNickname(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Escape") setEditingRoomId(null);
+                                  }}
+                                  className="ep-glass-input flex-1 h-7 px-2 rounded-lg text-xs text-primary min-w-0 focus:outline-none"
+                                />
+                                <button
+                                  type="submit"
+                                  className="ep-press px-2 h-7 rounded-lg bg-white/[0.1] text-[11px] text-white cursor-pointer"
+                                >
+                                  Save
+                                </button>
+                              </form>
+                            ) : (
+                              <button
+                                type="button"
+                                title={
+                                  hasPeople
+                                    ? `${occ?.usernamesPreview.join(", ")}${occ?.activeMediaHint ? ` · ${occ.activeMediaHint}` : ""}`
+                                    : mediaTooltip
+                                }
+                                onClick={() => void handleJoinRecentRoom(room)}
+                                className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
+                              >
+                                <span className="truncate font-medium text-primary group-hover:text-white">
+                                  {primaryLabel}
+                                </span>
+                                {showSecondaryCode && (
+                                  <span className="text-[11px] text-muted num truncate">
+                                    {codeLabel}
+                                  </span>
+                                )}
+                                {hasPeople && (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-ok/15 border border-ok/30 text-[10px] text-ok num shrink-0">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                                    <span>{occ?.onlineCount}</span>
+                                  </span>
+                                )}
+                                {isCustomHost && (
+                                  <span className="text-[10px] text-muted truncate max-w-[110px] shrink-0">
+                                    {formatServerDisplayName(room.serverHost)}
+                                  </span>
+                                )}
+                                {lastEpKey && (
+                                  <span
+                                    title={`Last watched: ${lastEpKey}`}
+                                    className="px-1.5 py-0.5 rounded-full bg-white/[0.06] text-[10px] text-accent-soft num shrink-0"
+                                  >
+                                    Last: {lastEpKey}
+                                  </span>
+                                )}
+                                {fileMissing && (
+                                  <span className="text-[10px] text-warn shrink-0">
+                                    File moved
+                                  </span>
+                                )}
+                                {room.hasPassword && (
+                                  <Lock
+                                    size={11}
+                                    className="text-muted shrink-0"
+                                    aria-label={
+                                      room.encryptedPassword
+                                        ? "Password saved on this PC"
+                                        : "Password protected"
+                                    }
+                                  />
+                                )}
+                              </button>
+                            )}
+
+                            {!isEditing && (
+                              <div className="flex items-center gap-0.5 shrink-0">
+                                <button
+                                  type="button"
+                                  aria-label="Copy room invite"
+                                  title="Copy invite link & code"
+                                  onClick={() => void handleCopyRoomInvite(room)}
+                                  className="ep-press p-1 rounded-lg text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                                >
+                                  <PartyCopyIcon copied={copiedRoomId === room.id} size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={room.pinned ? "Unpin room" : "Pin room"}
+                                  title={room.pinned ? "Unpin" : "Pin"}
+                                  onClick={() => togglePinRecentRoom(room.id)}
+                                  className={`ep-press p-1 rounded-lg cursor-pointer ${
+                                    room.pinned
+                                      ? "text-accent-soft bg-white/[0.08]"
+                                      : "text-muted hover:text-white hover:bg-white/[0.08]"
+                                  }`}
+                                >
+                                  <Pin size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="Rename room"
+                                  title="Nickname"
+                                  onClick={() => {
+                                    setEditingRoomId(room.id);
+                                    setEditingRoomNickname(room.nickname ?? "");
+                                  }}
+                                  className="ep-press p-1 rounded-lg text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                                >
+                                  <AppEditIcon size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="Remove recent room"
+                                  title="Remove"
+                                  onClick={() => removeRecentRoom(room.id)}
+                                  className="ep-press p-1 rounded-lg text-muted hover:text-bad hover:bg-white/[0.08] cursor-pointer"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       );
                     })}

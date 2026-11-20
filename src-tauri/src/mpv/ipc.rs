@@ -32,6 +32,7 @@ pub async fn connect_and_run_ipc<F>(
     client_seek_seq: Arc<AtomicU64>,
     volume_reassert_cb: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     file_loaded_cb: Arc<dyn Fn() + Send + Sync>,
+    vo_ready_cb: Arc<dyn Fn(bool) + Send + Sync>,
     check_child_exited: F,
 ) -> String
 where
@@ -69,6 +70,7 @@ where
         encode_observe(5, 5, "eof-reached"),
         encode_observe(6, 6, "chapter-list"),
         encode_observe(7, 7, "seeking"),
+        encode_observe(8, 8, "vo-configured"),
     ];
     for c in init_cmds {
         if writer_half.write_all(c.as_bytes()).await.is_err() {
@@ -141,6 +143,7 @@ where
                     }
                 }
                 MpvEvent::PlaybackRestart => {
+                    vo_ready_cb(true);
                     if !loading_media.load(Ordering::SeqCst) {
                         let all_restarted = pending_seek
                             .lock()
@@ -152,6 +155,10 @@ where
                         }
                     }
                 }
+                MpvEvent::VoConfigured(true) | MpvEvent::VideoReconfig => {
+                    vo_ready_cb(false);
+                }
+                MpvEvent::VoConfigured(false) => {}
                 MpvEvent::Seeking(seeking) => {
                     if !loading_media.load(Ordering::SeqCst) {
                         let settled = pending_seek

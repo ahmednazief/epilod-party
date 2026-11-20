@@ -8,9 +8,20 @@ import {
 
 const STORAGE_KEY = "resumePositions";
 
+interface ResumeSaveMeta {
+  filePath?: string | null;
+  fileName?: string | null;
+  linkedRoomId?: string | null;
+}
+
 interface ResumeState {
   entries: Record<string, ResumeEntry>;
-  savePosition: (fileKey: string, positionSecs: number, durationSecs: number) => void;
+  savePosition: (
+    fileKey: string,
+    positionSecs: number,
+    durationSecs: number,
+    meta?: ResumeSaveMeta,
+  ) => void;
   getPosition: (fileKey: string) => ResumeEntry | null;
   removePosition: (fileKey: string) => void;
   clearAll: () => void;
@@ -19,7 +30,7 @@ interface ResumeState {
 export const useResumeStore = create<ResumeState>((set, get) => ({
   entries: loadJson<Record<string, ResumeEntry>>(STORAGE_KEY, {}),
 
-  savePosition: (fileKey, positionSecs, durationSecs) => {
+  savePosition: (fileKey, positionSecs, durationSecs, meta) => {
     if (!fileKey) return;
     const action = shouldSaveResumePosition(positionSecs, durationSecs);
     if (action === "skip") return;
@@ -29,14 +40,22 @@ export const useResumeStore = create<ResumeState>((set, get) => ({
       }
       return;
     }
+    const existing = get().entries[fileKey];
+    const cleanPath = meta?.filePath?.trim() || existing?.filePath;
+    const cleanName = meta?.fileName?.trim() || existing?.fileName;
+    const cleanRoomId = meta?.linkedRoomId?.trim() || existing?.linkedRoomId;
+    const entry: ResumeEntry = {
+      positionSecs: Math.floor(positionSecs),
+      durationSecs: Math.round(durationSecs),
+      updatedAt: Date.now(),
+      ...(cleanPath ? { filePath: cleanPath } : {}),
+      ...(cleanName ? { fileName: cleanName } : {}),
+      ...(cleanRoomId ? { linkedRoomId: cleanRoomId } : {}),
+    };
     const next = trimLruMap(
       {
         ...get().entries,
-        [fileKey]: {
-          positionSecs: Math.floor(positionSecs),
-          durationSecs: Math.round(durationSecs),
-          updatedAt: Date.now(),
-        },
+        [fileKey]: entry,
       },
       RESUME_MAX_ENTRIES,
     );

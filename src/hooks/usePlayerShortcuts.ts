@@ -11,7 +11,7 @@ import {
 import { skipActiveOrUpcomingIntro } from "../lib/introActions";
 import { toggleMutePlayback, togglePlayback, toggleReadyStatus } from "../lib/playerActions";
 import { toggleVoiceMute } from "../lib/voiceActions";
-import { PRESET_REACTIONS, triggerPartyReaction } from "../lib/reactions";
+import { resolvePresetReactions, triggerPartyReaction } from "../lib/reactions";
 import { nextClientSeekSeq, stepSharedRelativeSeek } from "../lib/seekCoalesce";
 import { isTextEntryElement, shouldEnterToggleFullscreen } from "../lib/shortcuts";
 import {
@@ -166,10 +166,11 @@ export function usePlayerShortcuts({
           onToggleReactions?.();
           return;
         }
+        const activePresets = resolvePresetReactions(appState.reactionPresets);
         const presetByKey =
-          PRESET_REACTIONS.find((p) => p.shortcut === e.key) ??
+          activePresets.find((p) => p.shortcut === e.key) ??
           (e.code.startsWith("Digit")
-            ? PRESET_REACTIONS[Number(e.code.slice(5)) - 1]
+            ? activePresets[Number(e.code.slice(5)) - 1]
             : undefined);
         if (presetByKey) {
           e.preventDefault();
@@ -221,10 +222,9 @@ export function usePlayerShortcuts({
         return;
       }
 
-      // Volume
+      // Volume (adjust without waking hidden play bar)
       if (e.code === "ArrowUp" || e.code === "ArrowDown") {
         e.preventDefault();
-        onWakeChrome?.();
         const delta = e.code === "ArrowUp" ? 5 : -5;
         const nextVol = Math.max(0, Math.min(130, player.volume + delta));
         player.setVolume(nextVol);

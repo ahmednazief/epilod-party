@@ -33,6 +33,7 @@ param(
     [switch]$OverwriteRelease,
     [switch]$Draft,
     [switch]$Prerelease,
+    [switch]$AllowUnsigned,
 
     [string]$Repo = "ahmednazief/epilod-party"
 )
@@ -317,7 +318,9 @@ if (-not $SkipBuild) {
 # 2. Check signing key alignment
 $hasPubKey = -not [string]::IsNullOrWhiteSpace($env:EPILOD_UPDATE_PUBKEY)
 $hasPrivKey = -not [string]::IsNullOrWhiteSpace($env:EPILOD_SIGNING_PRIVATE_KEY)
-if ($hasPubKey -and -not $hasPrivKey) {
+if (-not $AllowUnsigned -and (-not $hasPubKey -or -not $hasPrivKey)) {
+    $toolFailures.Add("Release builds require both EPILOD_UPDATE_PUBKEY and EPILOD_SIGNING_PRIVATE_KEY (or -SigningKey). Pass -AllowUnsigned only for local unsigned test builds.")
+} elseif ($hasPubKey -and -not $hasPrivKey) {
     $toolFailures.Add("EPILOD_UPDATE_PUBKEY is set in environment, so EPILOD_SIGNING_PRIVATE_KEY (or -SigningKey) is required to sign the release manifest.")
 } elseif ($hasPrivKey -and -not $hasPubKey) {
     Write-Warning "EPILOD_SIGNING_PRIVATE_KEY is set, but EPILOD_UPDATE_PUBKEY is not set in environment; compiled binaries will only enforce signatures if EPILOD_UPDATE_PUBKEY is embedded during build."

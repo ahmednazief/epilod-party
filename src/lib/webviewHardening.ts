@@ -21,10 +21,24 @@ export function sanitizeRoomCodeInput(raw: string, literalRoom = false): string 
 }
 
 export function sanitizeCustomServerEndpoint(raw: string): string {
-  let clean = stripUnsafeUnicode(raw).trim();
-  clean = clean.replace(/^(syncplay|wss?|https?):\/\//i, "");
-  clean = clean.split(/[/?#]/)[0] ?? "";
-  return clean.slice(0, 128);
+  const clean = stripUnsafeUnicode(raw).trim();
+  const wsMatch = /^(wss?):\/\//i.exec(clean);
+  if (wsMatch) {
+    const scheme = wsMatch[1].toLowerCase();
+    const rest = clean.slice(wsMatch[0].length).split(/[/?#]/)[0] ?? "";
+    if (!rest) return "";
+    return `${scheme}://${rest}`.slice(0, 128);
+  }
+  const httpsMatch = /^https:\/\//i.exec(clean);
+  if (httpsMatch) {
+    const rest = clean.slice(httpsMatch[0].length).split(/[/?#]/)[0] ?? "";
+    if (rest.toLowerCase().endsWith(".workers.dev")) {
+      return `wss://${rest}`.slice(0, 128);
+    }
+  }
+  const stripped = clean.replace(/^(syncplay|https?):\/\//i, "");
+  const hostPort = stripped.split(/[/?#]/)[0] ?? "";
+  return hostPort.slice(0, 128);
 }
 
 export interface EndpointValidation {
@@ -38,6 +52,38 @@ export function validateServerEndpointInput(raw: string): EndpointValidation {
   if (!clean) {
     return { ok: false, reason: "Server address cannot be empty." };
   }
+
+  const wsMatch = /^(wss?):\/\/(.+)$/i.exec(clean);
+  if (wsMatch) {
+    const scheme = wsMatch[1].toLowerCase();
+    const rest = wsMatch[2].replace(/\/+$/, "");
+    if (!rest || /\s/.test(rest) || rest.includes("@")) {
+      return { ok: false, reason: "Server hostname contains invalid characters." };
+    }
+    const lastColon = rest.lastIndexOf(":");
+    let host = rest;
+    let portSuffix = "";
+    if (lastColon > 0) {
+      host = rest.slice(0, lastColon);
+      const portStr = rest.slice(lastColon + 1);
+      if (!/^\d+$/.test(portStr)) {
+        return { ok: false, reason: "Server port must be a valid number (1–65535)." };
+      }
+      const port = Number.parseInt(portStr, 10);
+      if (port < 1 || port > 65535) {
+        return { ok: false, reason: "Server port must be between 1 and 65535." };
+      }
+      portSuffix = `:${port}`;
+    }
+    if (!host || !/^[A-Za-z0-9.-]+$/.test(host) || host.startsWith(".") || host.endsWith(".")) {
+      return { ok: false, reason: "Server hostname contains invalid characters." };
+    }
+    if (scheme === "ws" && host.toLowerCase() !== "localhost" && host !== "127.0.0.1") {
+      return { ok: false, reason: "Cloud endpoints must use wss:// (TLS)." };
+    }
+    return { ok: true, endpoint: `${scheme}://${host}${portSuffix}` };
+  }
+
   const lastColon = clean.lastIndexOf(":");
   let host = clean;
   let port = 8999;

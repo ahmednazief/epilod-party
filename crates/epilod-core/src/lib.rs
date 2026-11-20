@@ -1,3 +1,4 @@
+pub mod cloud_sync;
 pub mod ed25519;
 pub mod intro_detect;
 pub mod logging;

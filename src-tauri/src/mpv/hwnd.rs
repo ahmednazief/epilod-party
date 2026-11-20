@@ -17,9 +17,9 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, IsWindow,
     IsWindowVisible, RegisterClassExW, SetWindowLongPtrW, SetWindowPos, CS_DBLCLKS, GWLP_USERDATA,
-    HWND_BOTTOM, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY,
-    WM_PARENTNOTIFY, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+    HWND_BOTTOM, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+    SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_NCDESTROY, WM_PARENTNOTIFY, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
 };
 
 #[link(name = "user32")]
@@ -282,6 +282,52 @@ pub fn resize_child_hwnd(
     }
 }
 
+pub fn apply_child_hwnd_size(app: &AppHandle, hwnd: isize, rect: PhysicalRect) {
+    if hwnd == 0 || rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    let _ = app.run_on_main_thread(move || unsafe {
+        if IsWindow(hwnd as HWND) == 0 {
+            return;
+        }
+        SetWindowPos(
+            hwnd as HWND,
+            HWND_BOTTOM,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_FRAMECHANGED,
+        );
+        let _ = RedrawWindow(
+            hwnd as HWND,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME,
+        );
+    });
+}
+
+pub fn nudge_child_hwnd_redraw(app: &AppHandle, hwnd: isize, rect: PhysicalRect) {
+    if hwnd == 0 || rect.width <= 1 || rect.height <= 1 {
+        return;
+    }
+    let _ = app.run_on_main_thread(move || unsafe {
+        if IsWindow(hwnd as HWND) == 0 || IsWindowVisible(hwnd as HWND) == 0 {
+            return;
+        }
+        SetWindowPos(
+            hwnd as HWND,
+            HWND_BOTTOM,
+            rect.x,
+            rect.y,
+            rect.width - 1,
+            rect.height,
+            SWP_NOACTIVATE | SWP_NOCOPYBITS,
+        );
+    });
+}
+
 pub fn set_child_visible(app: &AppHandle, hwnd: isize, visible: bool) {
     if hwnd == 0 {
         return;
@@ -404,8 +450,9 @@ pub fn capture_child_backdrop_rgba(
     hwnd: isize,
     max_width: i32,
     max_height: i32,
+    closing: &AtomicBool,
 ) -> Result<Vec<u8>, String> {
-    if hwnd == 0 {
+    if hwnd == 0 || closing.load(Ordering::Acquire) {
         return Ok(Vec::new());
     }
     const PW_RENDERFULLCONTENT: u32 = 2;
@@ -415,8 +462,7 @@ pub fn capture_child_backdrop_rgba(
         if IsWindow(hwnd_ptr) == 0 || IsWindowVisible(hwnd_ptr) == 0 {
             return Ok(Vec::new());
         }
-        let ctx_ptr = GetWindowLongPtrW(hwnd_ptr, GWLP_USERDATA) as *const SurfaceContext;
-        if !ctx_ptr.is_null() && (*ctx_ptr).closing.load(Ordering::Acquire) {
+        if closing.load(Ordering::Acquire) {
             return Ok(Vec::new());
         }
 
