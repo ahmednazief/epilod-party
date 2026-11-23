@@ -176,6 +176,7 @@ export function formatControllerLockReason(lock: ControllerLockState): string {
 
 export function formatControlNoticeMessage(
   notice: ControlNoticePayload,
+  roomControl?: Pick<RoomControlState, "hostControlActive" | "localIsHost" | "localIsAdmin">,
 ): { level: "info" | "warn" | "success"; text: string; feedback?: string } | null {
   const actor = notice.actor?.trim() || "The host";
   switch (notice.kind) {
@@ -208,7 +209,18 @@ export function formatControlNoticeMessage(
         text: "Room host left — playback controls unlocked.",
         feedback: "Controls unlocked",
       };
+    case "hostReconnected":
+      return {
+        level: "info",
+        text: `${actor} reconnected as room host.`,
+      };
     case "guestBlocked":
+      if (roomControl?.hostControlActive && !roomControl.localIsHost && !roomControl.localIsAdmin) {
+        return {
+          level: "warn",
+          text: `Only ${actor} (room host) can control playback.`,
+        };
+      }
       return {
         level: "warn",
         text: `Blocked playback change from ${actor} (host-only room).`,

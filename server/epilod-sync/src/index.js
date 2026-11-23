@@ -1,6 +1,40 @@
 export { RoomDO } from "./room.js";
 
 const MAX_PEEK_ROOMS = 8;
+const TEXT_ENCODER = new TextEncoder();
+
+const CONTINENT_TO_HINT = {
+  EU: "weur",
+  NA: "enam",
+  AS: "apac",
+  OC: "oc",
+  SA: "sam",
+  AF: "afr",
+};
+
+export function pickLocationHint(request) {
+  const continent = request?.cf?.continent;
+  if (typeof continent === "string" && CONTINENT_TO_HINT[continent]) {
+    return CONTINENT_TO_HINT[continent];
+  }
+  return undefined;
+}
+
+function getRoomStub(env, room, request) {
+  const hint = pickLocationHint(request);
+  if (hint) {
+    return env.ROOMS.get(env.ROOMS.idFromName(room), { locationHint: hint });
+  }
+  return env.ROOMS.getByName(room);
+}
+
+async function hashClientIp(ip) {
+  const data = TEXT_ENCODER.encode("epilod-ip-v1:" + (ip || "unknown"));
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest).slice(0, 8))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 function sanitizeRoomId(raw) {
   if (typeof raw !== "string") return "";
@@ -25,10 +59,11 @@ function jsonResponse(body, status = 200, extraHeaders = {}) {
 // Per-IP edge rate limit (Workers Rate Limiting binding). Fails open if the binding is
 // unavailable so a limiter outage can never take rooms down.
 async function isRateLimited(request, env, kind) {
-  if (!env.RL) return false;
+  const limiter = kind === "ws" && env.RL_WS ? env.RL_WS : env.RL;
+  if (!limiter) return false;
   try {
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const { success } = await env.RL.limit({ key: kind + ":" + ip });
+    const { success } = await limiter.limit({ key: kind + ":" + ip });
     return !success;
   } catch {
     return false;
@@ -60,16 +95,19 @@ export default {
         .map(sanitizeRoomId)
         .filter(Boolean);
       const rooms = Array.from(new Set([...repeated, ...commaList])).slice(0, MAX_PEEK_ROOMS);
+      const proofsParam = url.searchParams.get("proofs") || "";
+      const proofList = proofsParam ? proofsParam.split(",") : [];
 
       if (rooms.length === 0) {
         return jsonResponse({ ok: true, rooms: {} });
       }
 
       const entries = await Promise.all(
-        rooms.map(async (room) => {
+        rooms.map(async (room, idx) => {
           try {
-            const stub = env.ROOMS.getByName(room);
-            const info = await stub.peek();
+            const stub = getRoomStub(env, room, request);
+            const proof = proofList[idx] || url.searchParams.get("proof") || null;
+            const info = await stub.peek(proof);
             return [room, info];
           } catch {
             return [
@@ -104,8 +142,13 @@ export default {
         return jsonResponse({ ok: false, error: "Rate limited" }, 429, { "Retry-After": "30" });
       }
 
-      const stub = env.ROOMS.get(env.ROOMS.idFromName(room), { locationHint: "weur" });
-      return stub.fetch(request);
+      const clientIpHash = await hashClientIp(request.headers.get("CF-Connecting-IP") || "unknown");
+      const headers = new Headers(request.headers);
+      headers.set("X-Epilod-Client", clientIpHash);
+      const fwdReq = new Request(request.url, { headers, method: request.method });
+
+      const stub = getRoomStub(env, room, request);
+      return stub.fetch(fwdReq);
     }
 
     return jsonResponse({ ok: false, error: "Not found" }, 404);

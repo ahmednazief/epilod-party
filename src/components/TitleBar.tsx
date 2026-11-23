@@ -144,20 +144,22 @@ export function TitleBar({ leftSlot, rightActions, onOpenUpdates, glassControls 
       const win = getCurrentWindow();
       if (next) {
         const wasMax = await win.isMaximized();
+        if (wasMax) {
+          await win.unmaximize();
+        }
         const size = await win.innerSize();
         savedMiniBounds = {
           width: size.width,
           height: size.height,
           wasMaximized: wasMax,
         };
-        if (wasMax) {
-          await win.unmaximize();
-        }
+        await win.setMinSize(new LogicalSize(360, 200));
         await win.setSize(new LogicalSize(480, 270));
         await win.setAlwaysOnTop(true);
       } else {
         const prev = savedMiniBounds;
         savedMiniBounds = null;
+        await win.setMinSize(new LogicalSize(1024, 640));
         await win.setAlwaysOnTop(useAppStore.getState().alwaysOnTop);
         if (prev) {
           await win.setSize(new PhysicalSize(prev.width, prev.height));

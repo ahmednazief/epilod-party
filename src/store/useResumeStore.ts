@@ -24,6 +24,7 @@ interface ResumeState {
   ) => void;
   getPosition: (fileKey: string) => ResumeEntry | null;
   removePosition: (fileKey: string) => void;
+  hydrateEntries: (entries: Record<string, ResumeEntry>) => void;
   clearAll: () => void;
 }
 
@@ -74,6 +75,12 @@ export const useResumeStore = create<ResumeState>((set, get) => ({
     delete next[fileKey];
     saveJson(STORAGE_KEY, next);
     set({ entries: next });
+  },
+
+  hydrateEntries: (entries) => {
+    const clean = trimLruMap(entries, RESUME_MAX_ENTRIES);
+    saveJson(STORAGE_KEY, clean);
+    set({ entries: clean });
   },
 
   clearAll: () => {

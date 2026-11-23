@@ -133,7 +133,6 @@ html.ep-video-active #root {
 .ep-glass-capsule {
   isolation: isolate;
   transform: translateZ(0);
-  will-change: backdrop-filter;
   background-color: rgba(10, 10, 14, var(--ep-playbar-capsule-bg, 0.58));
   background-image: linear-gradient(
     180deg,
@@ -153,7 +152,6 @@ html.ep-video-active #root {
 .ep-glass-bottom-bar {
   isolation: isolate;
   transform: translateZ(0);
-  will-change: backdrop-filter;
   background-color: rgba(10, 10, 15, var(--ep-playbar-bar-bg, 0.64));
   background-image: linear-gradient(
     180deg,
@@ -171,7 +169,6 @@ html.ep-video-active #root {
 .ep-glass-sheet {
   isolation: isolate;
   transform: translateZ(0);
-  will-change: backdrop-filter;
   background: linear-gradient(
     170deg,
     rgba(255, 255, 255, 0.07) 0%,
@@ -321,7 +318,6 @@ html.ep-video-active #root {
 .ep-glass-submenu {
   isolation: isolate;
   transform: translateZ(0);
-  will-change: backdrop-filter;
   background-color: rgba(10, 10, 15, 0.68);
   background-image: linear-gradient(
     180deg,
@@ -339,12 +335,11 @@ html.ep-video-active #root {
 }
 
 .ep-top-scrim {
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0) 100%);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.68) 0%, rgba(0, 0, 0, 0.22) 55%, rgba(0, 0, 0, 0) 100%);
 }
 
 .ep-glass-pill {
   isolation: isolate;
-  will-change: backdrop-filter;
   background-color: rgba(22, 22, 28, 0.36);
   background-image: linear-gradient(
     180deg,
@@ -606,17 +601,19 @@ button.ep-glass-pill:active:not(:disabled) {
 
 .ep-glass-btn-party {
   isolation: isolate;
+  overflow: hidden;
   transform: translateZ(0);
-  background-color: rgba(109, 40, 217, 0.32);
+  background-color: rgba(109, 40, 217, 0.36);
   background-image: linear-gradient(
-    170deg,
-    rgba(255, 255, 255, 0.26) 0%,
-    rgba(139, 92, 246, 0.16) 46%,
-    rgba(91, 33, 182, 0.24) 100%
+    180deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(139, 92, 246, 0.10) 55%,
+    rgba(91, 33, 182, 0.22) 100%
   );
+  background-clip: padding-box;
   border: 1px solid rgba(221, 214, 254, 0.30);
-  -webkit-backdrop-filter: blur(18px) saturate(165%) brightness(1.06);
-  backdrop-filter: blur(18px) saturate(165%) brightness(1.06);
+  -webkit-backdrop-filter: blur(18px) saturate(150%) brightness(1.04);
+  backdrop-filter: blur(18px) saturate(150%) brightness(1.04);
   box-shadow:
     inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.48),
     inset 0 -1px 0.5px 0 rgba(196, 181, 253, 0.20),
@@ -646,18 +643,19 @@ button.ep-glass-pill:active:not(:disabled) {
 
 .ep-glass-btn-media {
   isolation: isolate;
+  overflow: hidden;
   transform: translateZ(0);
-  background-color: rgba(24, 24, 34, 0.42);
+  background-color: rgba(24, 24, 34, 0.44);
   background-image: linear-gradient(
-    170deg,
-    rgba(255, 255, 255, 0.22) 0%,
-    rgba(255, 255, 255, 0.06) 46%,
-    rgba(255, 255, 255, 0.02) 76%,
-    rgba(255, 255, 255, 0.10) 100%
+    180deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.04) 58%,
+    rgba(255, 255, 255, 0.08) 100%
   );
+  background-clip: padding-box;
   border: 1px solid rgba(255, 255, 255, 0.22);
-  -webkit-backdrop-filter: blur(18px) saturate(155%) brightness(1.05);
-  backdrop-filter: blur(18px) saturate(155%) brightness(1.05);
+  -webkit-backdrop-filter: blur(18px) saturate(145%) brightness(1.03);
+  backdrop-filter: blur(18px) saturate(145%) brightness(1.03);
   box-shadow:
     inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.42),
     inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.12),
@@ -947,7 +945,6 @@ button.ep-glass-pill:active:not(:disabled) {
 
 .ep-glass-select {
   isolation: isolate;
-  will-change: backdrop-filter;
   background-color: rgba(255, 255, 255, 0.065);
   background-image: linear-gradient(
     180deg,
@@ -963,7 +960,9 @@ button.ep-glass-pill:active:not(:disabled) {
     0 4px 12px -6px rgba(0, 0, 0, 0.42);
 }
 
-.ep-glass-capsule .ep-glass-select {
+.ep-glass-capsule .ep-glass-select,
+.ep-glass-sheet .ep-glass-select,
+.ep-glass-submenu .ep-glass-select {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -1129,9 +1128,7 @@ button.ep-glass-pill:active:not(:disabled) {
   backdrop-filter: blur(16px) saturate(150%);
   background-clip: padding-box;
   border: 1px solid rgba(255, 255, 255, 0.24);
-  box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.28),
-    0 2px 10px rgba(0, 0, 0, 0.42);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.28);
   transition:
     transform 130ms var(--ease-glass),
     background-color 115ms var(--ease-glass),
@@ -1179,9 +1176,7 @@ button.ep-glass-pill:active:not(:disabled) {
 .ep-orb-play:hover:not(:disabled) {
   background-color: rgba(139, 92, 246, 0.44);
   border-color: rgba(237, 233, 254, 0.48);
-  box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.40),
-    0 4px 14px rgba(0, 0, 0, 0.48);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.40);
 }
 
 .ep-orb-play:hover:not(:disabled)::before {
@@ -1227,7 +1222,6 @@ button.ep-glass-pill:active:not(:disabled) {
 }
 
 .ep-reaction-icon-btn svg {
-  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55));
   transition:
     transform 260ms var(--spring-fluid),
     filter 220ms var(--ease-glass);
@@ -1236,7 +1230,6 @@ button.ep-glass-pill:active:not(:disabled) {
 .ep-reaction-icon-btn:hover:not(:disabled) svg,
 .ep-reaction-icon-btn[aria-pressed="true"] svg {
   transform: scale(1.13);
-  filter: drop-shadow(0 3px 10px rgba(251, 191, 36, 0.44));
 }
 
 .ep-reaction-icon-btn:active:not(:disabled) svg {
@@ -1257,7 +1250,6 @@ button.ep-glass-pill:active:not(:disabled) {
 
 .ep-vol-btn {
   position: relative;
-  overflow: hidden;
   isolation: isolate;
 }
 
@@ -1555,39 +1547,6 @@ button.ep-glass-pill:active:not(:disabled) {
     0 4px 14px -4px rgba(248, 113, 113, 0.32);
 }
 
-.ep-party-social-half {
-  background-color: transparent;
-  border: none;
-  box-shadow: none;
-  transition:
-    background-color 110ms var(--ease-glass),
-    color 95ms var(--ease-glass);
-}
-
-.ep-party-social-half:hover:not(:disabled) {
-  background-color: rgba(255, 255, 255, 0.11);
-}
-
-.ep-party-social-half:active:not(:disabled) {
-  background-color: rgba(255, 255, 255, 0.17);
-}
-
-.ep-party-social-half.ep-droplet-indicator {
-  border-color: transparent;
-  box-shadow:
-    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.24),
-    inset 0 -1px 0.5px 0 rgba(196, 181, 253, 0.10);
-}
-
-.ep-party-social-half.ep-droplet-indicator:hover:not(:disabled) {
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.16) 0%,
-    rgba(139, 92, 246, 0.22) 48%,
-    rgba(124, 58, 237, 0.20) 100%
-  );
-}
-
 .ep-bar-icon-btn {
   background-color: transparent;
   border: 1px solid transparent;
@@ -1744,6 +1703,46 @@ button.ep-glass-pill:active:not(:disabled) {
   background: linear-gradient(
     180deg,
     rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
+.ep-glass-thumb-preview {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transform: translateZ(0);
+  background-color: rgba(14, 14, 20, 0.34);
+  background-image: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.24) 0%,
+    rgba(255, 255, 255, 0.06) 42%,
+    rgba(255, 255, 255, 0.02) 76%,
+    rgba(255, 255, 255, 0.14) 100%
+  );
+  background-clip: padding-box;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  -webkit-backdrop-filter: blur(22px) saturate(165%) brightness(1.06);
+  backdrop-filter: blur(22px) saturate(165%) brightness(1.06);
+  box-shadow:
+    inset 0 1px 0.5px 0 rgba(255, 255, 255, 0.62),
+    inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 16px 0 rgba(255, 255, 255, 0.08),
+    0 18px 40px -10px rgba(0, 0, 0, 0.68),
+    0 4px 14px -4px rgba(0, 0, 0, 0.42);
+}
+
+.ep-glass-thumb-preview::before {
+  content: "";
+  position: absolute;
+  inset: 1px 12px auto 12px;
+  height: 26%;
+  border-radius: 9999px;
+  pointer-events: none;
+  z-index: 2;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.28) 0%,
     rgba(255, 255, 255, 0) 100%
   );
 }
@@ -2462,17 +2461,6 @@ button:hover > .ep-avatar-more-orb {
   }
 }
 
-@keyframes ep-drawer-in {
-  from {
-    opacity: 0;
-    transform: translateX(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
 @keyframes ep-drop-float {
   0%,
   100% {
@@ -2487,17 +2475,6 @@ button:hover > .ep-avatar-more-orb {
   from {
     opacity: 0;
     transform: translateY(8px) scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes ep-chrome-in {
-  from {
-    opacity: 0;
-    transform: translateY(-6px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -2534,6 +2511,57 @@ button:hover > .ep-avatar-more-orb {
 
 .anim-pop-out {
   animation: ep-pop-out 160ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+@keyframes ep-voter-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.62);
+  }
+  62% {
+    opacity: 1;
+    transform: translateY(2px) scale(1.09);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.ep-voter-pop {
+  animation: ep-voter-pop 380ms var(--spring-fluid) both;
+}
+
+.ep-glass-rating-bar {
+  position: relative;
+  isolation: isolate;
+  transform: translateZ(0);
+  background-color: rgba(20, 20, 28, 0.36);
+  background-image: linear-gradient(
+    170deg,
+    rgba(255, 255, 255, 0.20) 0%,
+    rgba(255, 255, 255, 0.05) 48%,
+    rgba(255, 255, 255, 0.10) 100%
+  );
+  background-clip: padding-box;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  -webkit-backdrop-filter: blur(18px) saturate(135%) brightness(1.04);
+  backdrop-filter: blur(18px) saturate(135%) brightness(1.04);
+  box-shadow:
+    inset 0 1px 0.8px 0 rgba(255, 255, 255, 0.52),
+    inset 0 -1px 0.6px 0 rgba(255, 255, 255, 0.14),
+    0 14px 36px -10px rgba(0, 0, 0, 0.45);
+}
+
+.ep-glass-rating-tile {
+  background-color: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.16);
+}
+
+.ep-glass-rating-tile:hover {
+  background-color: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.26);
 }
 
 .ep-popover-bloom {
@@ -2592,17 +2620,9 @@ button:hover > .ep-avatar-more-orb {
   animation: ep-tab-in 180ms var(--spring-soft) both;
 }
 
-.anim-drawer-in {
-  animation: ep-drawer-in 220ms var(--spring-soft) both;
-}
-
 .anim-drawer-bloom {
   transform-origin: bottom center;
   animation: ep-drawer-bloom 280ms var(--spring-fluid) both;
-}
-
-.anim-chrome-in {
-  animation: ep-chrome-in 240ms var(--spring-soft) both;
 }
 
 .anim-submenu-push {
@@ -2699,8 +2719,8 @@ button:hover > .ep-avatar-more-orb {
 
 .ep-switch-slide {
   transition:
-    transform 300ms var(--spring-fluid),
-    translate 300ms var(--spring-fluid);
+    transform 260ms var(--spring-soft),
+    translate 260ms var(--spring-soft);
 }
 
 .ep-switch-thumb {
@@ -2727,7 +2747,7 @@ button:hover > .ep-avatar-more-orb {
     inset 0 -1px 0.5px 0 rgba(255, 255, 255, 0.11),
     inset 0 0 0 1px rgba(255, 255, 255, 0.14),
     inset 0 0 14px 0 rgba(255, 255, 255, 0.045),
-    0 8px 22px -6px rgba(0, 0, 0, 0.62);
+    0 10px 26px -4px rgba(0, 0, 0, 0.44);
   transition:
     transform 400ms cubic-bezier(0.22, 1.32, 0.36, 1),
     height 300ms var(--spring-fluid),
@@ -3027,7 +3047,6 @@ button:hover > .ep-avatar-more-orb {
 
 .ep-chat-hover-pill {
   isolation: isolate;
-  will-change: backdrop-filter;
   background-color: rgba(16, 16, 24, 0.92);
   -webkit-backdrop-filter: blur(14px) saturate(135%);
   backdrop-filter: blur(14px) saturate(135%);
@@ -3267,7 +3286,6 @@ button:hover > .ep-avatar-more-orb {
 
 .ep-chat-edge-rail {
   isolation: isolate;
-  will-change: backdrop-filter;
   background-color: rgba(14, 14, 22, 0.34);
   background-image: linear-gradient(
     180deg,
@@ -3388,17 +3406,17 @@ button:hover > .ep-avatar-more-orb {
 @keyframes ep-voice-bar-osc {
   0%,
   100% {
-    transform: scaleY(0.62);
+    transform: scaleY(0.38);
   }
   50% {
-    transform: scaleY(1.12);
+    transform: scaleY(1.22);
   }
 }
 
 .ep-voice-wave-speaking .ep-voice-wave-bar {
   transform-box: fill-box;
   transform-origin: center;
-  animation: ep-voice-bar-osc 640ms var(--spring-fluid) infinite;
+  animation: ep-voice-bar-osc 520ms var(--spring-fluid) infinite;
 }
 
 .ep-voice-wave-speaking .ep-voice-wave-bar:nth-child(2) {
@@ -3416,15 +3434,19 @@ button:hover > .ep-avatar-more-orb {
 @keyframes ep-speaking-ring-pulse {
   0%,
   100% {
-    box-shadow: 0 0 6px rgba(56, 189, 248, 0.42);
+    box-shadow:
+      0 0 0 1px rgba(56, 189, 248, 0.35),
+      0 0 8px rgba(56, 189, 248, 0.45);
   }
   50% {
-    box-shadow: 0 0 12px rgba(56, 189, 248, 0.78);
+    box-shadow:
+      0 0 0 3px rgba(56, 189, 248, 0.22),
+      0 0 14px rgba(56, 189, 248, 0.78);
   }
 }
 
 .ep-speaking-ring {
-  animation: ep-speaking-ring-pulse 1.5s ease-in-out infinite;
+  animation: ep-speaking-ring-pulse 1.25s ease-in-out infinite;
 }
 }
 
@@ -3443,9 +3465,7 @@ button:hover > .ep-avatar-more-orb {
   .anim-tab-in,
   .anim-submenu-push,
   .anim-submenu-pop,
-  .anim-drawer-in,
   .anim-drawer-bloom,
-  .anim-chrome-in,
   .ep-collapse,
   .ep-collapse-liquid,
   .ep-collapse-liquid > .ep-collapse-inner,
@@ -3515,4 +3535,10 @@ button:hover > .ep-avatar-more-orb {
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
   transition-timing-function: var(--ease-calm) !important;
+}
+
+html[data-app-hidden="true"] *,
+html[data-app-hidden="true"] *::before,
+html[data-app-hidden="true"] *::after {
+  animation-play-state: paused !important;
 }

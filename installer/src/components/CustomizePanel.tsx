@@ -65,7 +65,7 @@ export function CustomizePanel({
       : null);
 
   return (
-    <div className="ep-view-enter w-full max-w-[364px] space-y-2">
+    <div className="ep-view-enter my-auto w-full max-w-[364px] space-y-2">
       <div className="ep-glass-well rounded-2xl px-3 py-1.5 space-y-1">
         <div className="flex items-center justify-between gap-2 text-[11.5px]">
           <label htmlFor="ep-install-dir" className="text-white/50">

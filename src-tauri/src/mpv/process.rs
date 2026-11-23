@@ -103,6 +103,9 @@ pub fn spawn_mpv(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start mpv.exe: {e}"))?;
+    if let Some(pid) = child.id() {
+        crate::job_object::assign_pid_to_kill_job(pid);
+    }
     let stderr_tail = Arc::new(MpvStderrTail::default());
     if let Some(stderr) = child.stderr.take() {
         let tail_clone = Arc::clone(&stderr_tail);

@@ -870,49 +870,95 @@ fn is_short_title(title: &str) -> bool {
     alnum_len < 4
 }
 
-pub fn score_local_candidate(
-    peer_file_name: &str,
-    peer_duration_secs: Option<f64>,
-    candidate: &LocalCandidateInput,
-) -> Option<LocalMatchCandidate> {
-    score_local_candidate_with_options(peer_file_name, peer_duration_secs, candidate, false)
+#[derive(Debug, Clone)]
+pub struct PreparedPeerQuery {
+    pub peer_dur: Option<f64>,
+    pub peer_id: NormalizedMediaIdentity,
+    pub peer_nums: Vec<String>,
+    pub peer_junk: Vec<&'static str>,
+    pub short_title: bool,
 }
 
-pub fn score_local_candidate_with_options(
-    peer_file_name: &str,
-    peer_duration_secs: Option<f64>,
-    candidate: &LocalCandidateInput,
+impl PreparedPeerQuery {
+    pub fn new(peer_file_name: &str, peer_duration_secs: Option<f64>) -> Option<Self> {
+        let peer_raw_clean = peer_file_name.trim();
+        if peer_raw_clean.is_empty() {
+            return None;
+        }
+        let peer_junk = has_junk_clip_token(peer_raw_clean);
+        let peer_dur = peer_duration_secs.filter(|d| d.is_finite() && *d > 1.0);
+        let mut peer_id = normalize_media_identity(peer_raw_clean);
+        peer_id.title = canonicalize_title_text(&peer_id.title);
+        let peer_nums = title_numeric_tokens(&peer_id.title);
+        let short_title = is_short_title(&peer_id.title);
+        Some(Self {
+            peer_dur,
+            peer_id,
+            peer_nums,
+            peer_junk,
+            short_title,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedLocalCandidate {
+    pub local_id: NormalizedMediaIdentity,
+    pub local_nums: Vec<String>,
+    pub local_junk: Vec<&'static str>,
+}
+
+impl PreparedLocalCandidate {
+    pub fn new(
+        file_name: &str,
+        parent_folder: Option<&str>,
+        grandparent_folder: Option<&str>,
+    ) -> Self {
+        let local_junk = has_junk_clip_token(file_name);
+        let local_id = extract_path_media_identity(file_name, parent_folder, grandparent_folder);
+        let local_nums = title_numeric_tokens(&local_id.title);
+        Self {
+            local_id,
+            local_nums,
+            local_junk,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn score_prepared_local_candidate_parts(
+    peer: &PreparedPeerQuery,
+    local: &PreparedLocalCandidate,
+    path: &str,
+    file_name: &str,
+    parent_folder: Option<&str>,
+    size_bytes: u64,
+    duration_secs: Option<f64>,
+    is_cloud_placeholder: bool,
+    in_saved_series: bool,
     allow_unprobed_for_probe: bool,
 ) -> Option<LocalMatchCandidate> {
-    let peer_raw_clean = peer_file_name.trim();
-    if peer_raw_clean.is_empty() {
-        return None;
-    }
-
     // Reject junk clips (sample/trailer/ncop/etc.) unless the peer itself is also one.
-    let peer_junk = has_junk_clip_token(peer_raw_clean);
-    let local_junk = has_junk_clip_token(&candidate.file_name);
-    if local_junk.iter().any(|tok| !peer_junk.contains(tok)) {
-        return None;
-    }
-
-    let peer_dur = peer_duration_secs.filter(|d| d.is_finite() && *d > 1.0);
-    if peer_dur.is_some_and(|d| d >= 600.0)
-        && !candidate.is_cloud_placeholder
-        && candidate.size_bytes > 0
-        && candidate.size_bytes < 15 * 1024 * 1024
-        && candidate.duration_secs.is_none_or(|ld| ld < 60.0)
+    if local
+        .local_junk
+        .iter()
+        .any(|tok| !peer.peer_junk.contains(tok))
     {
         return None;
     }
 
-    let mut peer_id = normalize_media_identity(peer_raw_clean);
-    peer_id.title = canonicalize_title_text(&peer_id.title);
-    let local_id = extract_path_media_identity(
-        &candidate.file_name,
-        candidate.parent_folder.as_deref(),
-        candidate.grandparent_folder.as_deref(),
-    );
+    let peer_dur = peer.peer_dur;
+    if peer_dur.is_some_and(|d| d >= 600.0)
+        && !is_cloud_placeholder
+        && size_bytes > 0
+        && size_bytes < 15 * 1024 * 1024
+        && duration_secs.is_none_or(|ld| ld < 60.0)
+    {
+        return None;
+    }
+
+    let peer_id = &peer.peer_id;
+    let local_id = &local.local_id;
 
     // Hard episode/season guards
     match (peer_id.episode, local_id.episode) {
@@ -928,7 +974,7 @@ pub fn score_local_candidate_with_options(
         }
         (Some(_), None) | (None, Some(_)) => {
             // Only allow episode-vs-non-episode if duration matches closely (>= 120s).
-            let dur_ok = match (peer_dur, candidate.duration_secs) {
+            let dur_ok = match (peer_dur, duration_secs) {
                 (Some(pd), Some(ld)) if pd >= 120.0 && ld >= 120.0 => (pd - ld).abs() <= 2.5,
                 _ => false,
             };
@@ -947,15 +993,13 @@ pub fn score_local_candidate_with_options(
     }
 
     // Hard sequel / numeric token conflict guard (e.g. "Dune" vs "Dune Part 2")
-    let peer_nums = title_numeric_tokens(&peer_id.title);
-    let local_nums = title_numeric_tokens(&local_id.title);
-    if peer_nums != local_nums {
+    if peer.peer_nums != local.local_nums {
         return None;
     }
 
     let title_sim = compute_title_similarity(&peer_id.title, &local_id.title);
 
-    let (dur_exact, dur_fps, dur_delta) = match (peer_dur, candidate.duration_secs) {
+    let (dur_exact, dur_fps, dur_delta) = match (peer_dur, duration_secs) {
         (Some(pd), Some(ld)) if pd > 1.0 && ld > 1.0 => {
             let delta = ld - pd;
             let exact = delta.abs() <= 3.5;
@@ -970,10 +1014,10 @@ pub fn score_local_candidate_with_options(
     };
 
     let unprobed_can_probe =
-        allow_unprobed_for_probe && peer_dur.is_some() && candidate.duration_secs.is_none();
+        allow_unprobed_for_probe && peer_dur.is_some() && duration_secs.is_none();
 
     // Short titles ("Up", "It", "Her") require exact title + (year or duration confirmation)
-    if is_short_title(&peer_id.title) {
+    if peer.short_title {
         let year_confirmed = peer_id.year.is_some() && peer_id.year == local_id.year;
         if title_sim < 0.98 || (!year_confirmed && !dur_exact && !dur_fps && !unprobed_can_probe) {
             return None;
@@ -1014,7 +1058,7 @@ pub fn score_local_candidate_with_options(
     } else if dur_fps {
         score += 15.0;
     }
-    if candidate.in_saved_series {
+    if in_saved_series {
         score += 6.0;
     }
 
@@ -1027,7 +1071,7 @@ pub fn score_local_candidate_with_options(
         LocalMatchConfidence::Medium
     };
 
-    let reason = if candidate.is_cloud_placeholder {
+    let reason = if is_cloud_placeholder {
         "Cloud placeholder (OneDrive)".to_string()
     } else if dur_exact && both_episodes_match {
         "Same episode & runtime".to_string()
@@ -1043,25 +1087,68 @@ pub fn score_local_candidate_with_options(
         "Similar title".to_string()
     };
 
-    let folder_label = candidate
-        .parent_folder
-        .clone()
-        .filter(|s| !s.trim().is_empty())
+    let folder_label = parent_folder
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .unwrap_or_else(|| "Local folder".to_string());
 
     Some(LocalMatchCandidate {
-        path: candidate.path.clone(),
-        file_name: candidate.file_name.clone(),
+        path: path.to_string(),
+        file_name: file_name.to_string(),
         folder_label,
         score,
         title_similarity: title_sim,
         confidence,
         reason,
-        is_cloud_placeholder: candidate.is_cloud_placeholder,
-        size_bytes: candidate.size_bytes,
-        duration_secs: candidate.duration_secs,
+        is_cloud_placeholder,
+        size_bytes,
+        duration_secs,
         duration_delta_secs: dur_delta,
     })
+}
+
+pub fn score_prepared_local_candidate(
+    peer: &PreparedPeerQuery,
+    local: &PreparedLocalCandidate,
+    candidate: &LocalCandidateInput,
+    allow_unprobed_for_probe: bool,
+) -> Option<LocalMatchCandidate> {
+    score_prepared_local_candidate_parts(
+        peer,
+        local,
+        &candidate.path,
+        &candidate.file_name,
+        candidate.parent_folder.as_deref(),
+        candidate.size_bytes,
+        candidate.duration_secs,
+        candidate.is_cloud_placeholder,
+        candidate.in_saved_series,
+        allow_unprobed_for_probe,
+    )
+}
+
+pub fn score_local_candidate(
+    peer_file_name: &str,
+    peer_duration_secs: Option<f64>,
+    candidate: &LocalCandidateInput,
+) -> Option<LocalMatchCandidate> {
+    score_local_candidate_with_options(peer_file_name, peer_duration_secs, candidate, false)
+}
+
+pub fn score_local_candidate_with_options(
+    peer_file_name: &str,
+    peer_duration_secs: Option<f64>,
+    candidate: &LocalCandidateInput,
+    allow_unprobed_for_probe: bool,
+) -> Option<LocalMatchCandidate> {
+    let peer = PreparedPeerQuery::new(peer_file_name, peer_duration_secs)?;
+    let local = PreparedLocalCandidate::new(
+        &candidate.file_name,
+        candidate.parent_folder.as_deref(),
+        candidate.grandparent_folder.as_deref(),
+    );
+    score_prepared_local_candidate(&peer, &local, candidate, allow_unprobed_for_probe)
 }
 
 #[cfg(test)]

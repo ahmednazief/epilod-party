@@ -14,7 +14,7 @@ import {
   AppVoiceTuneIcon,
   AppVoiceWaveIcon,
 } from "./ui/AppIcons";
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
 import { formatUserError } from "../lib/errors";
@@ -31,16 +31,25 @@ import {
   FPS_PRESETS,
   isIdentityTransform,
 } from "../lib/sourceAlignment";
+import { isTextEntryElement } from "../lib/shortcuts";
 import { playSoundCue } from "../lib/soundEffects";
 import { getControllerLockState, resolveEffectiveUsername } from "../lib/syncController";
 import { computeParticipantDrift } from "../lib/syncHealth";
 import {
   enqueueSyncLifecycle,
+  onSyncHealth,
+  syncPrewarm,
   syncReconnect,
   syncSetRoomAdmin,
   syncSwitchBackup,
+  type SyncHealthPayload,
 } from "../lib/syncplay";
-import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
+import {
+  DEFAULT_ENDPOINT,
+  describeSyncEndpoint,
+  isCloudEndpoint,
+  SYNCPLAY_ENDPOINT,
+} from "../lib/syncStatusDisplay";
 import {
   LOCAL_DISCONNECT_TAG,
   NOT_READY_TAG_PREFIX,
@@ -60,6 +69,9 @@ import { sanitizeRoomCodeInput } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { clearPartyChat } from "../store/useChatStore";
+import { clearReactions } from "../store/useReactionStore";
+import { useSubtitleStore } from "../store/useSubtitleStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { formatRoomCodeDisplay, generateRoomCode } from "./HomeScreen";
 import { formatClock } from "./TransportBar";
@@ -125,6 +137,111 @@ interface RoomPanelProps {
   onOpenLocalMatch?: (candidate: LocalMatchCandidate) => void;
 }
 
+const ParticipantDriftBadge = memo(function ParticipantDriftBadge({
+  participant,
+  hostPeerPos,
+}: {
+  participant: Parameters<typeof computeParticipantDrift>[0];
+  hostPeerPos: number | null;
+}) {
+  const liveRoomPositionSecs = useSyncStore((s) =>
+    hostPeerPos !== null && hostPeerPos > 0 ? 0 : s.liveRoomPositionSecs,
+  );
+  const refPos = hostPeerPos !== null && hostPeerPos > 0 ? hostPeerPos : liveRoomPositionSecs;
+  const driftInfo = computeParticipantDrift(participant, refPos);
+  if (!driftInfo) return null;
+  const dotClass =
+    driftInfo.level === "ok"
+      ? "bg-ok"
+      : driftInfo.level === "warn"
+        ? "bg-warn"
+        : "bg-bad";
+  return (
+    <GlassHoverTip
+      label={driftInfo.label}
+      detail={driftInfo.detail}
+      accent={driftInfo.level}
+    >
+      <span
+        aria-label={`${driftInfo.label}: ${driftInfo.detail}`}
+        className="inline-flex items-center justify-center h-4 px-1 rounded-full bg-white/[0.06] cursor-default shrink-0"
+      >
+        <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
+      </span>
+    </GlassHoverTip>
+  );
+});
+
+const RoomAlignReadout = memo(function RoomAlignReadout({
+  timelineScale,
+}: {
+  timelineScale: number;
+}) {
+  const liveRoomPositionSecs = useSyncStore((s) => s.liveRoomPositionSecs);
+  const localPositionSecs = usePlayerStore((s) => s.positionSecs);
+  const liveAlignDelta = localPositionSecs - timelineScale * liveRoomPositionSecs;
+
+  return (
+    <div className="p-2 rounded-xl bg-white/[0.05] border border-white/[0.08] space-y-2">
+      <div className="text-[11px] text-secondary leading-snug">
+        Scrub your video to the same moment your friend is on, then click{" "}
+        <span className="text-white font-medium">Match Here</span>.
+      </div>
+      <div className="flex items-center justify-between text-[11px] num">
+        <span className="text-muted">
+          Friend:{" "}
+          <span className="text-white font-medium">
+            {formatClock(liveRoomPositionSecs)}
+          </span>
+        </span>
+        <span className="text-muted">
+          Yours:{" "}
+          <span className="text-accent-soft font-medium">
+            {formatClock(localPositionSecs)}
+          </span>
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => void captureSceneAnchor()}
+          className="ep-glass-primary-pill ep-press flex-1 h-7.5 rounded-xl inline-flex items-center justify-center gap-1.5 text-[11px] font-medium text-white cursor-pointer"
+        >
+          <PartyAlignSceneIcon size={12} />
+          <span>Match Here ({formatSignedOffset(liveAlignDelta)})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => void setSceneAlignMode(false)}
+          className="ep-bar-icon-btn ep-press h-7.5 px-2.5 rounded-xl text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+});
+
+const SecondAnchorButton = memo(function SecondAnchorButton({
+  anchorRoomSecs,
+}: {
+  anchorRoomSecs: number;
+}) {
+  const localPositionSecs = usePlayerStore((s) => Math.floor(s.positionSecs));
+  if (Math.abs(localPositionSecs - anchorRoomSecs) < 30) {
+    return null;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => void captureSecondDriftAnchor()}
+      className="ep-menu-row ep-press w-full px-2 py-1 rounded-lg text-[10.5px] text-accent-soft hover:text-white text-left cursor-pointer"
+    >
+      Still drifting? Set 2nd anchor point here to calibrate FPS
+    </button>
+  );
+});
+
 export const RoomPanel = memo(function RoomPanel({
   onClose,
   onChooseFile,
@@ -155,10 +272,8 @@ export const RoomPanel = memo(function RoomPanel({
   const alignAnchor1 = useSyncStore((s) => s.alignAnchor1);
   const timelineSegments = useSyncStore((s) => s.timelineSegments);
   const p2pStatus = useSyncStore((s) => s.p2pStatus);
-  const liveRoomPositionSecs = useSyncStore((s) => s.liveRoomPositionSecs);
   const localLoaded = usePlayerStore((s) => s.loaded);
   const playerError = usePlayerStore((s) => s.playerError);
-  const localPositionSecs = usePlayerStore((s) => s.positionSecs);
   const pushNote = useNotificationStore((s) => s.push);
   const { mismatch, localMatches } = usePartyFileMismatch();
 
@@ -186,6 +301,8 @@ export const RoomPanel = memo(function RoomPanel({
     origin: string;
   } | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const healthCopyTimerRef = useRef<number | null>(null);
 
   const openSettings = useAppStore((s) => s.openSettings);
   const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
@@ -208,6 +325,48 @@ export const RoomPanel = memo(function RoomPanel({
   const setVoicePeerVolume = useVoiceStore((s) => s.setPeerVolume);
   const [btPreJoinConfirm, setBtPreJoinConfirm] = useState(false);
   const [voiceSetupOpen, setVoiceSetupOpen] = useState(false);
+  const [syncHealth, setSyncHealth] = useState<SyncHealthPayload | null>(null);
+  const [healthCopied, setHealthCopied] = useState(false);
+  const [draftMidMovieCode, setDraftMidMovieCode] = useState(() => generateRoomCode());
+  const prewarmedMidMovieRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!open || roomCode) return;
+    const ep = (serverEndpoint || DEFAULT_ENDPOINT).trim();
+    const key = `${ep}|${draftMidMovieCode}`;
+    if (!ep || prewarmedMidMovieRef.current === key) return;
+    prewarmedMidMovieRef.current = key;
+    void syncPrewarm(ep, draftMidMovieCode);
+  }, [open, roomCode, serverEndpoint, draftMidMovieCode]);
+
+  useEffect(() => {
+    if (!open || roomCode || literalRoom) return;
+    const cleaned = joinCode.replace(/\D/g, "");
+    if (cleaned.length !== 6) return;
+    const ep = (serverEndpoint || DEFAULT_ENDPOINT).trim();
+    const key = `${ep}|${cleaned}`;
+    if (!ep || prewarmedMidMovieRef.current === key) return;
+    const timer = window.setTimeout(() => {
+      prewarmedMidMovieRef.current = key;
+      void syncPrewarm(ep, cleaned);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [open, roomCode, literalRoom, joinCode, serverEndpoint]);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void onSyncHealth((payload) => {
+      if (active) setSyncHealth(payload);
+    }).then((fn) => {
+      if (active) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
   const voiceCaptureHealthy =
     voiceStreamStatus !== "micBusy" &&
     voiceStreamStatus !== "reconnecting" &&
@@ -298,14 +457,16 @@ export const RoomPanel = memo(function RoomPanel({
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         setOpenMemberUser(null);
       }
     };
     window.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
       window.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
   }, [openMemberUser]);
 
@@ -324,6 +485,8 @@ export const RoomPanel = memo(function RoomPanel({
       const r = btn.getBoundingClientRect();
       const vw = window.innerWidth || 1280;
       const vh = window.innerHeight || 720;
+      const stageEl = document.querySelector<HTMLElement>('[data-showcase-stage="true"]');
+      const stageRight = stageEl ? stageEl.getBoundingClientRect().right : vw;
       const menuWidth = 244;
       const sheet = btn.closest('.ep-glass-sheet, [data-glass-region="true"]');
       const sheetRect = sheet ? sheet.getBoundingClientRect() : null;
@@ -331,7 +494,7 @@ export const RoomPanel = memo(function RoomPanel({
       // Prefer opening cleanly beside the Watch Party sheet (right side if space allows, else left)
       if (sheetRect) {
         const clampedTop = Math.max(12, Math.min(Math.round(r.top - 10), vh - 290));
-        if (sheetRect.left >= menuWidth + 22 && sheetRect.left > vw - sheetRect.right) {
+        if (sheetRect.left >= menuWidth + 22 && sheetRect.left > stageRight - sheetRect.right) {
           setVoiceSetupCoords({
             left: Math.round(sheetRect.left - menuWidth - 10),
             top: clampedTop,
@@ -339,7 +502,7 @@ export const RoomPanel = memo(function RoomPanel({
           });
           return;
         }
-        if (vw - sheetRect.right >= menuWidth + 22) {
+        if (stageRight - sheetRect.right >= menuWidth + 22) {
           setVoiceSetupCoords({
             left: Math.round(sheetRect.right + 10),
             top: clampedTop,
@@ -357,7 +520,7 @@ export const RoomPanel = memo(function RoomPanel({
         }
       }
 
-      const left = Math.max(12, Math.min(r.right - menuWidth, vw - menuWidth - 12));
+      const left = Math.max(12, Math.min(r.right - menuWidth, stageRight - menuWidth - 12));
       const spaceBelow = vh - r.bottom - 14;
       const spaceAbove = r.top - 14;
       if (spaceBelow < 240 && spaceAbove > spaceBelow) {
@@ -409,14 +572,16 @@ export const RoomPanel = memo(function RoomPanel({
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         setVoiceSetupOpen(false);
       }
     };
     window.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
       window.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
   }, [voiceSetupOpen]);
 
@@ -436,6 +601,12 @@ export const RoomPanel = memo(function RoomPanel({
     return () => {
       if (verifyTimerRef.current !== null) {
         window.clearTimeout(verifyTimerRef.current);
+      }
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      if (healthCopyTimerRef.current !== null) {
+        window.clearTimeout(healthCopyTimerRef.current);
       }
     };
   }, []);
@@ -457,7 +628,13 @@ export const RoomPanel = memo(function RoomPanel({
       setCopied(true);
       const p = usePlayerStore.getState();
       playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
-      window.setTimeout(() => setCopied(false), 1800);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        copyTimerRef.current = null;
+        setCopied(false);
+      }, 1800);
     } catch {
       pushNote("info", `Room code: ${roomCode}`);
     }
@@ -474,6 +651,9 @@ export const RoomPanel = memo(function RoomPanel({
   };
 
   const handleSwitchBackup = () => {
+    const targetEndpoint = isCloudEndpoint(endpointSummary.activeEndpoint)
+      ? SYNCPLAY_ENDPOINT
+      : undefined;
     void enqueueSyncLifecycle(async () => {
       try {
         await syncSwitchBackup({
@@ -482,8 +662,14 @@ export const RoomPanel = memo(function RoomPanel({
           literalRoom,
           password: serverPassword || null,
           hostOnly: hostOnlyRoom,
+          targetEndpoint,
         });
-        pushNote("info", "Switching room to backup connection route.");
+        pushNote(
+          "info",
+          targetEndpoint
+            ? "Switching room to Syncplay fallback server."
+            : "Switching room to backup connection route.",
+        );
       } catch (err) {
         pushNote("error", formatUserError(err, "Backup route switch failed."));
       }
@@ -494,6 +680,10 @@ export const RoomPanel = memo(function RoomPanel({
     setHostOnlyRoom(false);
     setRoomCode("");
     useSyncStore.getState().reset();
+    useVoiceStore.getState().resetSession();
+    clearPartyChat();
+    clearReactions();
+    useSubtitleStore.getState().clearSharedSubtitles();
     const noteStore = useNotificationStore.getState();
     noteStore.dismissByTagPrefix(NOT_READY_TAG_PREFIX);
     noteStore.dismissByTagPrefix(PEER_LEFT_TAG_PREFIX);
@@ -543,7 +733,8 @@ export const RoomPanel = memo(function RoomPanel({
   };
 
   const handleStartPartyMidMovie = () => {
-    const code = generateRoomCode();
+    const code = draftMidMovieCode;
+    setDraftMidMovieCode(generateRoomCode());
     try {
       void navigator.clipboard?.writeText(code).catch(() => undefined);
     } catch {
@@ -640,10 +831,18 @@ export const RoomPanel = memo(function RoomPanel({
           : hasSourceDifference
             ? "Adjust for source"
             : "0.0s";
-  const canSetSecondAnchor =
-    Boolean(alignAnchor1) &&
-    Math.abs((alignMode ? liveRoomPositionSecs : localPositionSecs) - (alignAnchor1?.roomSecs ?? 0)) >= 30;
-  const liveAlignDelta = localPositionSecs - timelineScale * liveRoomPositionSecs;
+  const hostPeer = useMemo(
+    () =>
+      roomControl.hostUsername
+        ? participants.find(
+            (hp) =>
+              hp.username.trim().toLowerCase() ===
+              roomControl.hostUsername?.trim().toLowerCase(),
+          )
+        : undefined,
+    [participants, roomControl.hostUsername],
+  );
+  const hostPeerPos = hostPeer && hostPeer.position > 0 ? hostPeer.position : null;
   const roomActiveSpeakers = getActiveVoiceSpeakerNames(effectiveUsername, {
     joined: voiceJoined,
     muted: voiceMuted,
@@ -765,44 +964,90 @@ export const RoomPanel = memo(function RoomPanel({
   }, [voiceSetupOpen, voiceSetupPresence.mounted]);
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 gap-2.5">
+    <div
+      className="flex flex-col flex-1 min-h-0 gap-2.5"
+      onContextMenu={(e) => {
+        if (isTextEntryElement(e.target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
       {/* Unified Minimal Header */}
       <div className="flex items-center justify-between gap-2 shrink-0 px-2 pt-0.5">
         <div className="flex items-center gap-2 min-w-0">
           <WatchPartyIcon bare size={16} className="shrink-0" />
           <span className="text-[13px] font-semibold text-white truncate">Watch Party</span>
           {roomCode && (
-            <span
-              className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${
-                status.state === "error"
-                  ? "text-bad"
-                  : status.state === "reconnecting"
-                    ? "text-warn"
-                    : syncConnected
-                      ? "text-secondary"
-                      : "text-muted"
-              }`}
+            <GlassHoverTip
+              disabled={!syncConnected || !syncHealth}
+              label={
+                healthCopied
+                  ? "Copied diagnostics"
+                  : syncHealth
+                    ? `RTT ${syncHealth.rttMs !== null ? `${Math.round(syncHealth.rttMs)}ms` : "—"} · Drift ${syncHealth.driftSecs.toFixed(2)}s`
+                    : "Connected"
+              }
+              detail={
+                healthCopied
+                  ? undefined
+                  : syncHealth
+                    ? `Jitter ${Math.round(syncHealth.jitterMs)}ms · Click to copy`
+                    : undefined
+              }
+              accent={syncConnected ? "ok" : "warn"}
             >
-              <StatusDot
-                tone={
+              <button
+                type="button"
+                disabled={!syncConnected || !syncHealth}
+                onClick={() => {
+                  if (!syncHealth) return;
+                  void navigator.clipboard
+                    ?.writeText(JSON.stringify(syncHealth, null, 2))
+                    .catch(() => undefined);
+                  setHealthCopied(true);
+                  if (healthCopyTimerRef.current !== null) {
+                    window.clearTimeout(healthCopyTimerRef.current);
+                  }
+                  healthCopyTimerRef.current = window.setTimeout(() => {
+                    healthCopyTimerRef.current = null;
+                    setHealthCopied(false);
+                  }, 1500);
+                }}
+                className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${
+                  syncConnected && syncHealth ? "cursor-pointer hover:text-white" : "cursor-default"
+                } ${
                   status.state === "error"
-                    ? "bad"
-                    : syncConnected
-                      ? "ok"
-                      : "warn"
-                }
-                pulse={!syncConnected}
-              />
-              <span>
-                {status.state === "error"
-                  ? "Paused"
-                  : status.state === "reconnecting"
-                    ? "Reconnecting"
-                    : syncConnected
-                      ? "Connected"
-                      : "Connecting…"}
-              </span>
-            </span>
+                    ? "text-bad"
+                    : status.state === "reconnecting"
+                      ? "text-warn"
+                      : syncConnected
+                        ? "text-secondary"
+                        : "text-muted"
+                }`}
+              >
+                <StatusDot
+                  tone={
+                    status.state === "error"
+                      ? "bad"
+                      : syncConnected
+                        ? "ok"
+                        : "warn"
+                  }
+                  pulse={!syncConnected}
+                />
+                <span>
+                  {status.state === "error"
+                    ? "Paused"
+                    : status.state === "reconnecting"
+                      ? "Reconnecting"
+                      : syncConnected
+                        ? healthCopied
+                          ? "Copied"
+                          : "Connected"
+                        : "Connecting…"}
+                </span>
+              </button>
+            </GlassHoverTip>
           )}
         </div>
 
@@ -885,6 +1130,8 @@ export const RoomPanel = memo(function RoomPanel({
             {literalRoom ? (
               <form onSubmit={handleJoinPartyMidMovie} className="flex items-center gap-2">
                 <input
+                  id="room-panel-join-name"
+                  name="roomPanelJoinName"
                   type="text"
                   value={joinCode}
                   placeholder="Exact room name…"
@@ -1142,7 +1389,9 @@ export const RoomPanel = memo(function RoomPanel({
                           : roomActiveSpeakers.length > 0
                             ? roomActiveSpeakers.length === 1
                               ? `${roomActiveSpeakers[0]} speaking`
-                              : `${roomActiveSpeakers.slice(0, 2).join(", ")} speaking`
+                              : roomActiveSpeakers.length === 2
+                                ? `${roomActiveSpeakers[0]}, ${roomActiveSpeakers[1]} speaking`
+                                : `${roomActiveSpeakers[0]}, ${roomActiveSpeakers[1]} +${roomActiveSpeakers.length - 2} speaking`
                             : voiceDeafened
                               ? "Deafened"
                               : voiceMuted
@@ -1501,8 +1750,9 @@ export const RoomPanel = memo(function RoomPanel({
                   <div
                     key={p.username}
                     onContextMenu={(e) => {
-                      if (!hasMemberActions) return;
                       e.preventDefault();
+                      e.stopPropagation();
+                      if (!hasMemberActions) return;
                       toggleMemberMenu(peerKey);
                     }}
                     className="px-2 py-1.5 rounded-xl flex items-start gap-2.5 min-w-0 hover:bg-white/[0.045] transition-colors"
@@ -1604,41 +1854,21 @@ export const RoomPanel = memo(function RoomPanel({
                               </button>
                             </GlassHoverTip>
                           )}
-                          {(() => {
-                            const hostPeer = roomControl.hostUsername
-                              ? participants.find(
-                                  (hp) =>
-                                    hp.username.trim().toLowerCase() ===
-                                    roomControl.hostUsername?.trim().toLowerCase(),
-                                )
-                              : undefined;
-                            const refPos =
-                              hostPeer && hostPeer.position > 0
-                                ? hostPeer.position
-                                : liveRoomPositionSecs;
-                            const driftInfo = computeParticipantDrift(p, refPos);
-                            if (!driftInfo) return null;
-                            const dotClass =
-                              driftInfo.level === "ok"
-                                ? "bg-ok"
-                                : driftInfo.level === "warn"
-                                  ? "bg-warn"
-                                  : "bg-bad";
-                            return (
-                              <GlassHoverTip
-                                label={driftInfo.label}
-                                detail={driftInfo.detail}
-                                accent={driftInfo.level}
-                              >
-                                <span
-                                  aria-label={`${driftInfo.label}: ${driftInfo.detail}`}
-                                  className="inline-flex items-center justify-center h-4 px-1 rounded-full bg-white/[0.06] cursor-default shrink-0"
-                                >
-                                  <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
-                                </span>
-                              </GlassHoverTip>
-                            );
-                          })()}
+                          <ParticipantDriftBadge participant={p} hostPeerPos={hostPeerPos} />
+                          {!isSelf && (p.buffering || (typeof p.lagSecs === "number" && Math.abs(p.lagSecs) >= 1.5)) && (
+                            <span
+                              title={
+                                p.buffering
+                                  ? `${p.username} is buffering`
+                                  : `Behind by ${Math.abs(p.lagSecs ?? 0).toFixed(1)}s`
+                              }
+                              className="px-1.5 py-0.5 rounded-full bg-warn/15 text-warn text-[10px] font-medium num shrink-0"
+                            >
+                              {p.buffering
+                                ? "Buffering"
+                                : `${(p.lagSecs ?? 0) > 0 ? "-" : "+"}${Math.abs(p.lagSecs ?? 0).toFixed(1)}s`}
+                            </span>
+                          )}
                           <GlassHoverTip
                             label={p.isReady ? "Ready" : "Not ready"}
                             detail={p.isReady ? "Ready to watch" : "Waiting for video"}
@@ -1706,7 +1936,8 @@ export const RoomPanel = memo(function RoomPanel({
             </div>
           )}
 
-          {showTimingControls && (
+          {showTimingControls &&
+            (hasSourceDifference || hasTimelineAlignment || alignMode || probingAudio || timingOpen ? (
               <div className="flex flex-col pt-1">
                 <button
                   type="button"
@@ -1803,43 +2034,7 @@ export const RoomPanel = memo(function RoomPanel({
                     )}
 
                     {alignMode ? (
-                      <div className="p-2 rounded-xl bg-white/[0.05] border border-white/[0.08] space-y-2">
-                        <div className="text-[11px] text-secondary leading-snug">
-                          Scrub your video to the same moment your friend is on, then click{" "}
-                          <span className="text-white font-medium">Match Here</span>.
-                        </div>
-                        <div className="flex items-center justify-between text-[11px] num">
-                          <span className="text-muted">
-                            Friend:{" "}
-                            <span className="text-white font-medium">
-                              {formatClock(liveRoomPositionSecs)}
-                            </span>
-                          </span>
-                          <span className="text-muted">
-                            Yours:{" "}
-                            <span className="text-accent-soft font-medium">
-                              {formatClock(localPositionSecs)}
-                            </span>
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => void captureSceneAnchor()}
-                            className="ep-glass-primary-pill ep-press flex-1 h-7.5 rounded-xl inline-flex items-center justify-center gap-1.5 text-[11px] font-medium text-white cursor-pointer"
-                          >
-                            <PartyAlignSceneIcon size={12} />
-                            <span>Match Here ({formatSignedOffset(liveAlignDelta)})</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void setSceneAlignMode(false)}
-                            className="ep-bar-icon-btn ep-press h-7.5 px-2.5 rounded-xl text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
+                      <RoomAlignReadout timelineScale={timelineScale} />
                     ) : (
                       <div className="flex items-center gap-1.5">
                         <button
@@ -1865,14 +2060,8 @@ export const RoomPanel = memo(function RoomPanel({
                       </div>
                     )}
 
-                    {canSetSecondAnchor && !alignMode && (
-                      <button
-                        type="button"
-                        onClick={() => void captureSecondDriftAnchor()}
-                        className="ep-menu-row ep-press w-full px-2 py-1 rounded-lg text-[10.5px] text-accent-soft hover:text-white text-left cursor-pointer"
-                      >
-                        Still drifting? Set 2nd anchor point here to calibrate FPS
-                      </button>
+                    {alignAnchor1 && !alignMode && (
+                      <SecondAnchorButton anchorRoomSecs={alignAnchor1.roomSecs} />
                     )}
 
                     <div className="space-y-1">
@@ -1929,7 +2118,18 @@ export const RoomPanel = memo(function RoomPanel({
                   </div>
                 </AnimatedCollapse>
               </div>
-          )}
+            ) : (
+              <div className="pt-0.5 flex justify-end px-1">
+                <button
+                  type="button"
+                  onClick={() => setTimingOpen(true)}
+                  className="ep-press inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium text-muted hover:text-white hover:bg-white/[0.06] cursor-pointer"
+                >
+                  <AppSlidersIcon size={11} />
+                  <span>Timing &amp; Sync</span>
+                </button>
+              </div>
+            ))}
         </div>
       )}
 

@@ -2,7 +2,6 @@ use crate::validation::strip_unsafe_unicode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use thiserror::Error;
 
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 20;
@@ -624,13 +623,6 @@ pub fn parse_server_line(line: &str) -> Result<ServerMessage, SyncplayParseError
     Err(SyncplayParseError::Unrecognized)
 }
 
-pub fn parse_server_messages(raw: &str) -> Vec<Result<ServerMessage, SyncplayParseError>> {
-    raw.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(parse_server_line)
-        .collect()
-}
-
 fn parse_wire_file(obj: &Map<String, Value>) -> Option<WireFileInfo> {
     let name = obj
         .get("name")
@@ -778,6 +770,68 @@ impl TimelineSegment {
         }
         .sanitized()
     }
+}
+
+/// Maps a room-timeline timestamp into local file coordinates, respecting piecewise
+/// cut segments and `hold_room_until_secs` pause windows.
+pub fn map_room_to_local_piecewise(
+    room_secs: f64,
+    transform: TimelineTransform,
+    segments: &[TimelineSegment],
+) -> f64 {
+    if !segments.is_empty() {
+        let idx = segments
+            .partition_point(|seg| seg.room_start_secs <= room_secs)
+            .saturating_sub(1);
+        let seg = segments[idx];
+        if seg.hold_room_until_secs.is_some_and(|u| room_secs < u) {
+            return seg.offset_secs.max(0.0);
+        }
+        return seg.to_transform().room_to_local_raw(room_secs).max(0.0);
+    }
+    transform.room_to_local(room_secs, None)
+}
+
+/// Maps a local file timestamp back into room-timeline coordinates using `segments` when
+/// piecewise alignment is active, breaking ambiguous overlaps toward `hint_room_secs`.
+pub fn map_local_to_room_piecewise(
+    local_secs: f64,
+    transform: TimelineTransform,
+    segments: &[TimelineSegment],
+    hint_room_secs: Option<f64>,
+) -> f64 {
+    if segments.len() <= 1 {
+        return segments
+            .first()
+            .map(|s| s.to_transform())
+            .unwrap_or(transform)
+            .local_to_room(local_secs);
+    }
+    let anchor = hint_room_secs.unwrap_or(local_secs);
+    let mut best_room: Option<(f64, f64)> = None;
+    for (i, seg) in segments.iter().enumerate() {
+        if seg.hold_room_until_secs.is_some() {
+            continue;
+        }
+        let r_lo = seg.room_start_secs;
+        let r_hi = segments
+            .get(i + 1)
+            .map(|n| n.room_start_secs)
+            .unwrap_or(f64::INFINITY);
+        let mapped = seg.to_transform().local_to_room(local_secs);
+        if mapped >= r_lo - 0.75 && mapped <= r_hi + 0.75 {
+            let dist = (mapped - anchor).abs();
+            if best_room.is_none_or(|(_, best_d)| dist < best_d) {
+                best_room = Some((mapped.max(0.0), dist));
+            }
+        }
+    }
+    best_room.map(|(r, _)| r).unwrap_or_else(|| {
+        let idx = segments
+            .partition_point(|seg| seg.room_start_secs <= anchor)
+            .saturating_sub(1);
+        segments[idx].to_transform().local_to_room(local_secs)
+    })
 }
 
 /// Snaps a measured two-point slope to an exact standard cinema/PAL/NTSC ratio when within tolerance,
@@ -956,29 +1010,12 @@ impl SyncStateMachine {
         if self.segments.len() <= 1 {
             return self.transform.local_to_room(local_secs);
         }
-        let mut best_room: Option<(f64, f64)> = None;
-        for (i, seg) in self.segments.iter().enumerate() {
-            if seg.hold_room_until_secs.is_some() {
-                continue;
-            }
-            let r_lo = seg.room_start_secs;
-            let r_hi = self
-                .segments
-                .get(i + 1)
-                .map(|n| n.room_start_secs)
-                .unwrap_or(f64::INFINITY);
-            let mapped = seg.to_transform().local_to_room(local_secs);
-            if mapped >= r_lo - 0.75 && mapped <= r_hi + 0.75 {
-                let dist = (mapped - self.local_pos).abs();
-                if best_room.is_none_or(|(_, best_d)| dist < best_d) {
-                    best_room = Some((mapped.max(0.0), dist));
-                }
-            }
-        }
-        best_room.map(|(r, _)| r).unwrap_or_else(|| {
-            self.active_transform_at(self.local_pos)
-                .local_to_room(local_secs)
-        })
+        map_local_to_room_piecewise(
+            local_secs,
+            self.transform,
+            &self.segments,
+            Some(self.local_pos),
+        )
     }
 
     pub fn estimated_room_position(&self, now_secs: f64) -> f64 {
@@ -1469,6 +1506,32 @@ impl ReconnectPolicy {
         Some(delay)
     }
 
+    /// Full-jitter exponential backoff in milliseconds (`0..=min(10s, 500ms * 2^attempt)`).
+    pub fn next_delay_millis_with<F>(&mut self, mut rand_below: F) -> Option<u64>
+    where
+        F: FnMut(u64) -> u64,
+    {
+        if self.attempt >= self.max_attempts {
+            return None;
+        }
+        let exp = self.attempt.min(5);
+        let cap_ms = (500u64.saturating_mul(1u64 << exp)).min(10_000);
+        let jittered = if cap_ms == 0 {
+            0
+        } else {
+            rand_below(cap_ms.saturating_add(1)).min(cap_ms)
+        };
+        self.attempt += 1;
+        Some(jittered)
+    }
+
+    pub fn next_delay_millis(&mut self) -> Option<u64> {
+        let mut buf = [0u8; 8];
+        crate::p2p::fill_random_bytes(&mut buf);
+        let r = u64::from_le_bytes(buf);
+        self.next_delay_millis_with(|upper| if upper == 0 { 0 } else { r % upper })
+    }
+
     pub fn on_connected(&mut self) {
         self.attempt = 0;
     }
@@ -1484,11 +1547,6 @@ impl ReconnectPolicy {
     pub fn circuit_open(&self) -> bool {
         self.attempt >= self.max_attempts
     }
-}
-
-#[derive(Debug, Default)]
-pub struct RoomParticipantTracker {
-    pub participants: HashMap<String, RoomParticipantUpdate>,
 }
 
 #[cfg(test)]
@@ -1883,10 +1941,10 @@ mod tests {
         );
 
         let nan_json = r#"{"State":{"ping":{"latencyCalculation":NaN,"clientRtt":Infinity}}}"#;
-        assert!(parse_server_messages(nan_json)[0].is_err());
+        assert!(parse_server_line(nan_json).is_err());
 
         let overflow = r#"{"State":{"ping":{"latencyCalculation":1e999,"clientRtt":1e309}}}"#;
-        assert!(parse_server_messages(overflow)[0].is_err());
+        assert!(parse_server_line(overflow).is_err());
     }
 
     #[test]

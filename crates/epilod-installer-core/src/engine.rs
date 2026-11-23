@@ -190,6 +190,17 @@ where
 
     // 2. Pre-Install Existing File Verification (SHA-256 compare against target manifest)
     let previous_receipt = read_receipt(&target_dir);
+    if let Some(ref prev) = previous_receipt {
+        if crate::semver::compare_versions(&manifest.version, &prev.version)
+            == Some(std::cmp::Ordering::Less)
+            && !clean_options.allow_downgrade
+        {
+            return Err(format!(
+                "Installed version v{} is newer than package v{}. Pass allow_downgrade to replace it.",
+                prev.version, manifest.version
+            ));
+        }
+    }
     let mut reused_paths = BTreeSet::new();
     let mut files_to_write = Vec::new();
     let mut verified_existing_bytes = 0u64;

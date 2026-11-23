@@ -53,8 +53,12 @@ export function AnimatedCollapse({
       className={`ep-collapse ${className}`}
       data-open={revealed ? "true" : "false"}
       aria-hidden={!open}
+      inert={!open}
+      style={{ transitionDuration: `${durationMs}ms` }}
     >
-      <div className={`ep-collapse-inner ${innerClassName}`}>{children}</div>
+      <div className="ep-collapse-inner">
+        {innerClassName ? <div className={innerClassName}>{children}</div> : children}
+      </div>
     </div>
   );
 }

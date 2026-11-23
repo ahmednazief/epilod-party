@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { playSoundCue } from "../lib/soundEffects";
+import { usePlayerStore } from "./usePlayerStore";
 
 export type NotificationKind = "info" | "success" | "warn" | "error";
 
@@ -31,6 +33,7 @@ interface NotificationState {
 }
 
 let nextId = 1;
+let lastErrorToneAtMs = 0;
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 
 function clearTimer(id: number): void {
@@ -73,6 +76,14 @@ export const useNotificationStore = create<NotificationState>((set, get) => {
         set((state) => ({
           items: [...state.items.slice(-2), { id, kind, message, tag, action }],
         }));
+      }
+      if (kind === "error") {
+        const nowMs = Date.now();
+        if (nowMs - lastErrorToneAtMs >= 1500) {
+          lastErrorToneAtMs = nowMs;
+          const player = usePlayerStore.getState();
+          playSoundCue("errorTone", { moviePlaying: player.loaded && !player.paused });
+        }
       }
       if (ttlMs > 0) {
         const handle = setTimeout(() => {

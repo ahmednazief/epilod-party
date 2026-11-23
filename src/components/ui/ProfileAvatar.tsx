@@ -873,9 +873,13 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
               })}
               <button
                 type="button"
-                onClick={() => setExpanded(true)}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setExpanded(true);
+                }}
                 aria-expanded={expanded}
                 aria-hidden={expanded || undefined}
+                inert={expanded || undefined}
                 tabIndex={expanded ? -1 : undefined}
                 aria-label={`Show ${hiddenCount} more characters`}
                 title={`Show ${hiddenCount} more characters`}

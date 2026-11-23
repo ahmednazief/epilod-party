@@ -3,6 +3,7 @@ import {
   getLastCapturedBackdropFrame,
   mpvSeek,
   mpvSetAudioTrack,
+  mpvSetDialogueBoost,
   mpvSetLoop,
   mpvSetMute,
   mpvSetPause,
@@ -38,9 +39,16 @@ import {
 } from "./syncReady";
 import type { MpvTrack } from "./mpv";
 import {
+  deriveSeriesKeyForFile,
+  getSeriesTrackPref,
+  pickMatchingSubTrack,
+  saveSeriesTrackPref,
+} from "./seriesTrackPrefs";
+import {
   formatTrackAnnouncement,
   isBitmapSubtitleTrack,
   isClosedCaptionTrack,
+  normalizeSubtitleLang,
   selectAudioTrack,
   selectSubTrack,
 } from "./tracks";
@@ -93,6 +101,7 @@ import { useSyncStore } from "../store/useSyncStore";
 export interface AudioActionDeps {
   mpvSetMute?: (muted: boolean) => Promise<void>;
   mpvSetAudioTrack?: (aid: number | null) => Promise<void>;
+  mpvSetDialogueBoost?: (enabled: boolean) => Promise<void>;
 }
 
 export interface LoopActionDeps {
@@ -155,6 +164,24 @@ export function toggleMutePlayback(deps?: AudioActionDeps): void {
   setMutePlayback(nextMuted, { flash: true, deps });
 }
 
+export function setDialogueBoostPlayback(
+  enabled: boolean,
+  options?: { flash?: boolean; deps?: Pick<AudioActionDeps, "mpvSetDialogueBoost"> },
+): void {
+  const player = usePlayerStore.getState();
+  const setBoost = options?.deps?.mpvSetDialogueBoost ?? mpvSetDialogueBoost;
+  player.setDialogueBoost(enabled);
+  if (options?.flash !== false) {
+    player.flashFeedback(enabled ? "Dialogue Boost On" : "Dialogue Boost Off");
+  }
+  safeMpvCall(setBoost(enabled), "setDialogueBoostPlayback:mpvSetDialogueBoost");
+}
+
+export function toggleDialogueBoost(deps?: Pick<AudioActionDeps, "mpvSetDialogueBoost">): void {
+  const next = !usePlayerStore.getState().dialogueBoost;
+  setDialogueBoostPlayback(next, { flash: true, deps });
+}
+
 /**
  * Selects an audio track or "Mute / Off" (`aid === null`) while keeping `muted`
  * state and mpv `mute` synchronized with track selection.
@@ -186,6 +213,12 @@ export function selectAudioTrackOption(aid: number | null, deps?: AudioActionDep
   }
 
   player.setTracks(withSelectedAudioTrack(player.tracks, aid));
+  const chosenTrack = player.tracks.find((t) => t.type === "audio" && t.id === aid);
+  const audioLang = normalizeSubtitleLang(chosenTrack?.lang);
+  if (audioLang) {
+    const seriesKey = deriveSeriesKeyForFile(useAppStore.getState().selectedFilePath);
+    saveSeriesTrackPref(seriesKey, { audioLang });
+  }
   safeMpvCall(
     selectAudioTrack(aid, { mpvSetAudioTrack: setAudioTrack }),
     "selectAudioTrackOption",
@@ -208,7 +241,12 @@ function replayFromStartForLoop(reasonContext: string, deps?: LoopActionDeps): v
   const connected = sync.status.state === "connected";
   const aligning = connected && sync.alignMode;
   const effectiveUsername = resolveEffectiveUsername(sync.status, app.username);
-  const lock = getControllerLockState(connected, sync.participants, effectiveUsername);
+  const lock = getControllerLockState(
+    connected,
+    sync.participants,
+    effectiveUsername,
+    sync.roomControl,
+  );
   if (connected && !aligning && lock.lockedForLocalUser) {
     return;
   }
@@ -256,7 +294,12 @@ export function toggleLoopPlayback(deps?: LoopActionDeps): void {
   const connected = sync.status.state === "connected";
   const aligning = connected && sync.alignMode;
   const effectiveUsername = resolveEffectiveUsername(sync.status, app.username);
-  const lock = getControllerLockState(connected, sync.participants, effectiveUsername);
+  const lock = getControllerLockState(
+    connected,
+    sync.participants,
+    effectiveUsername,
+    sync.roomControl,
+  );
 
   if (connected && !aligning && lock.lockedForLocalUser) {
     useNotificationStore
@@ -335,6 +378,7 @@ export function detectAndSyncLoopWrap(
     connected,
     sync.participants,
     resolveEffectiveUsername(sync.status, app.username),
+    sync.roomControl,
   );
   if (lock.lockedForLocalUser) {
     return lastWrapSyncAt;
@@ -493,13 +537,49 @@ export function autoEnableEmbeddedSubtitle(tracks: readonly MpvTrack[]): void {
     return;
   }
   const activeFile = (useAppStore.getState().selectedFilePath ?? "").toLowerCase();
-  const signature = `${activeFile}::${subs.map((t) => `${t.id}:${t.external ? "e" : "i"}`).join("|")}`;
+  const embeddedSubs = subs.filter((t) => !t.external);
+  const sigPart =
+    embeddedSubs.length > 0
+      ? `emb:${embeddedSubs.map((t) => t.id).join("|")}`
+      : `ext:${subs.map((t) => t.id).join("|")}`;
+  const signature = `${activeFile}::${sigPart}`;
   if (signature === lastAutoSubSignature) return;
   lastAutoSubSignature = signature;
 
   const sub = useSubtitleStore.getState();
-  sub.setVisible(true);
   const currentSelected = subs.find((t) => t.selected);
+  if (currentSelected?.external) {
+    sub.setVisible(true);
+    pushSubStyle(true);
+    return;
+  }
+
+  const seriesPref = getSeriesTrackPref(
+    deriveSeriesKeyForFile(useAppStore.getState().selectedFilePath),
+  );
+  if (seriesPref?.subLang === "off") {
+    sub.setVisible(false);
+    safeMpvCall(mpvSetSubTrack(null));
+    pushSubStyle(false);
+    return;
+  }
+
+  sub.setVisible(true);
+  if (seriesPref?.subLang) {
+    const prefMatch = pickMatchingSubTrack(
+      subs,
+      seriesPref.subLang,
+      usePlayerStore.getState().detectedSubLangs,
+    );
+    if (prefMatch) {
+      if (!currentSelected || currentSelected.id !== prefMatch.id) {
+        safeMpvCall(mpvSetSubTrack(prefMatch.id));
+      }
+      pushSubStyle(true);
+      return;
+    }
+  }
+
   const pick = pickPreferredSubtitleTrack(subs);
   if (!currentSelected) {
     safeMpvCall(mpvSetSubTrack(pick.id));

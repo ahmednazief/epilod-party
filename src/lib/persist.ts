@@ -35,16 +35,6 @@ export function saveJson<T>(name: string, value: T): boolean {
   }
 }
 
-export function removeStored(name: string): void {
-  try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(versionedKey(name));
-    }
-  } catch {
-    // Ignore storage removal errors
-  }
-}
-
 export interface LruTimestamped {
   updatedAt: number;
 }

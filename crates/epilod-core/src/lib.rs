@@ -4,7 +4,6 @@ pub mod intro_detect;
 pub mod logging;
 pub mod matching;
 pub mod media_align;
-pub mod models;
 pub mod mpv_ipc;
 pub mod opensubtitles;
 pub mod p2p;

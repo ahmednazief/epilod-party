@@ -13,11 +13,10 @@ use epilod_core::logging::{sanitize_log_text, LogEntry};
 use epilod_core::mpv_ipc::set_volume_cmd;
 use epilod_core::p2p::MAX_VOICE_OPUS_BYTES;
 use epilod_core::voice_dsp::{
-    frame_dbfs, mix_mono_peers_to_stereo, soft_limit, AdaptiveBitrateController,
-    AdaptiveNlmsEchoCanceller, BiquadHighPass, EchoCanceller, JitterPacket, NoiseSuppressionMode,
-    NoopEchoCanceller, PeerJitterBuffer, PeerRxLeveler, SpeakerEchoDetector, VoiceCalibrator,
-    VoiceCompressor, VoiceDenoiser, VoiceGate, VOICE_FRAME_10MS, VOICE_FRAME_20MS,
-    VOICE_SAMPLE_RATE,
+    frame_dbfs, mix_mono_peers_to_stereo, soft_limit, AdaptiveBitrateController, BiquadHighPass,
+    EchoCanceller, JitterPacket, NoiseSuppressionMode, NoopEchoCanceller, PeerJitterBuffer,
+    PeerRxLeveler, SpeakerEchoDetector, VoiceCalibrator, VoiceCompressor, VoiceDenoiser, VoiceGate,
+    WebRtcAec3Canceller, VOICE_FRAME_10MS, VOICE_FRAME_20MS, VOICE_SAMPLE_RATE,
 };
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
@@ -723,6 +722,7 @@ struct SharedVoiceRuntime {
     output_device_dirty: AtomicBool,
     loopback_device_dirty: AtomicBool,
     hotplug_watcher_started: AtomicBool,
+    hotplug_stop: AtomicBool,
     stop_flag: AtomicBool,
     epoch: AtomicU8,
     bitrate_kbps: AtomicU32,
@@ -897,6 +897,7 @@ impl VoiceController {
             output_device_dirty: AtomicBool::new(false),
             loopback_device_dirty: AtomicBool::new(false),
             hotplug_watcher_started: AtomicBool::new(false),
+            hotplug_stop: AtomicBool::new(false),
             stop_flag: AtomicBool::new(false),
             epoch: AtomicU8::new(1),
             bitrate_kbps: AtomicU32::new(48),
@@ -1014,8 +1015,11 @@ impl VoiceController {
                         .store(false, Ordering::Release);
                     return;
                 };
-                loop {
+                while !shared.hotplug_stop.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(350));
+                    if shared.hotplug_stop.load(Ordering::Acquire) {
+                        break;
+                    }
                     if dirty.swap(false, Ordering::AcqRel) {
                         shared.mark_config_device_changes(true, true);
                         if let Some(ref app) =
@@ -1025,6 +1029,9 @@ impl VoiceController {
                         }
                     }
                 }
+                shared
+                    .hotplug_watcher_started
+                    .store(false, Ordering::Release);
             });
     }
 
@@ -1315,6 +1322,7 @@ impl VoiceController {
     }
 
     pub fn shutdown(&self) {
+        self.shared.hotplug_stop.store(true, Ordering::Release);
         self.shared.in_voice.store(false, Ordering::Release);
         self.shared.mic_monitor.store(false, Ordering::Release);
         self.shared
@@ -1419,6 +1427,12 @@ impl VoiceController {
                 let _ = t.join();
             }
         }
+    }
+}
+
+impl Drop for VoiceController {
+    fn drop(&mut self) {
+        self.shared.hotplug_stop.store(true, Ordering::Release);
     }
 }
 
@@ -1584,13 +1598,24 @@ fn setup_and_run_wasapi_comm_capture(
         bool,
     )> {
         let enumerator = DeviceEnumerator::new().ok()?;
-        let input_dev = if selected_input == "default" || selected_input.trim().is_empty() {
+        let input_dev = if !chosen_name.trim().is_empty() {
+            find_wasapi_device_by_name(&enumerator, Direction::Capture, chosen_name).or_else(
+                || {
+                    if selected_input == "default" || selected_input.trim().is_empty() {
+                        enumerator
+                            .get_default_device_for_role(Direction::Capture, Role::Communications)
+                            .or_else(|_| enumerator.get_default_device(Direction::Capture))
+                            .ok()
+                    } else {
+                        None
+                    }
+                },
+            )?
+        } else {
             enumerator
                 .get_default_device_for_role(Direction::Capture, Role::Communications)
                 .or_else(|_| enumerator.get_default_device(Direction::Capture))
                 .ok()?
-        } else {
-            find_wasapi_device_by_name(&enumerator, Direction::Capture, chosen_name)?
         };
 
         let mut audio_client = input_dev.get_iaudioclient().ok()?;
@@ -1836,7 +1861,7 @@ fn open_input_stream(
     })
 }
 
-/// Captures system render loopback (movie audio + peer voices) for echo guard & NLMS AEC.
+/// Captures system render loopback (movie audio + peer voices) for echo guard & WebRTC AEC3.
 fn open_loopback_stream(
     selected_output: &str,
     err_flag: Arc<AtomicBool>,
@@ -2264,7 +2289,7 @@ fn drain_mono_stream_to_48k(
 fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let mut hpf = BiquadHighPass::new_80hz_48k();
     let mut noop_aec = NoopEchoCanceller;
-    let mut nlms_aec = AdaptiveNlmsEchoCanceller::new();
+    let mut webrtc_aec3 = WebRtcAec3Canceller::new();
     let mut echo_detector = SpeakerEchoDetector::new();
     let mut calibrator: Option<(VoiceCalibrator, Instant, u8)> = None;
     let mut denoiser = VoiceDenoiser::new();
@@ -2341,11 +2366,11 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
         // Update active AEC backend label cleanly
         let backend_label = if cfg.aec_enabled {
-            "adaptive-nlms"
+            "webrtc-aec3"
         } else if live_comm_aec || comm_aec_supported {
             "windows-comm"
         } else if cfg.echo_guard_enabled {
-            "adaptive-nlms+guard"
+            "webrtc-aec3+guard"
         } else {
             "none"
         };
@@ -2411,7 +2436,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             mono_48k_fifo.clear();
             hpf.reset();
             noop_aec.reset();
-            nlms_aec.reset();
+            webrtc_aec3.reset();
             echo_detector.reset();
             denoiser.reset();
             gate.reset();
@@ -2426,6 +2451,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             lb_resampler = None;
             lb_raw_accum.clear();
             lb_mono_48k_fifo.clear();
+            webrtc_aec3.reset();
         }
 
         if active_loopback.is_none() && !loopback_attempted {
@@ -2470,7 +2496,21 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 Err((status_code, denied, msg)) => {
                     let _delay = watchdog.on_open_failure(now_ms);
                     shared.permission_denied.store(denied, Ordering::Release);
-                    shared.set_stream_status(status_code, Some(msg));
+                    shared.set_stream_status(status_code, Some(msg.clone()));
+                    if shared.calibrate_requested.swap(false, Ordering::AcqRel) {
+                        if let Some(ref app) =
+                            *shared.app_handle.read().unwrap_or_else(|e| e.into_inner())
+                        {
+                            let _ = app.emit(
+                                "voice://calibration",
+                                serde_json::json!({
+                                    "phase": "error",
+                                    "progress": 0,
+                                    "message": msg,
+                                }),
+                            );
+                        }
+                    }
                     std::thread::sleep(Duration::from_millis(50));
                     continue;
                 }
@@ -2562,20 +2602,22 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 shared.emit_status_snapshot();
             }
 
-            let use_nlms =
+            let use_aec =
                 cfg.aec_enabled || (cfg.echo_guard_enabled && detected_leak && !live_comm_aec);
-            if use_nlms {
-                nlms_aec.set_delay_frames(echo_detector.best_lag_frames());
+            if use_aec {
+                webrtc_aec3.set_delay_ms((echo_detector.best_lag_frames() as i32) * 10);
                 let ref_slice = far_frame.unwrap_or([0.0; VOICE_FRAME_10MS]);
-                nlms_aec.process_10ms(&frame_10ms, Some(&ref_slice), &mut aec_out);
+                webrtc_aec3.process_10ms(&frame_10ms, Some(&ref_slice), &mut aec_out);
             } else {
                 noop_aec.process_10ms(&frame_10ms, None, &mut aec_out);
             }
 
-            // Gentle speaker-echo guard: runs only if hardware Comm AEC isn't suppressing movie leak
+            // Gentle speaker-echo guard: runs only when hardware Comm AEC isn't active and WebRTC AEC3
+            // lacks a live loopback reference so full-duplex double-talk stays unattenuated under AEC3.
             let half_duplex_guard = cfg.echo_guard_enabled
                 && detected_leak
                 && !live_comm_aec
+                && (!use_aec || active_loopback.is_none())
                 && (shared.duck.is_remote_speaking() || far_rms > 0.025);
             if half_duplex_guard {
                 for s in &mut aec_out {
@@ -3094,16 +3136,21 @@ fn run_mix_rx_thread(
                 }
             }
 
-            if has_audio {
+            let ov = overrides.get(key);
+            let peer_muted = ov.is_some_and(|o| o.muted);
+
+            if has_audio && !peer_muted && !deafened {
                 let db = frame_dbfs(&decoded_buf);
-                if db > -52.0 && !deafened {
+                if db > -52.0 {
                     state.last_speaking_at = Some(Instant::now());
                     state.is_speaking = true;
                 }
             }
-            if state
-                .last_speaking_at
-                .is_some_and(|t| t.elapsed() >= Duration::from_millis(220))
+            if peer_muted
+                || deafened
+                || state
+                    .last_speaking_at
+                    .is_some_and(|t| t.elapsed() >= Duration::from_millis(220))
             {
                 state.is_speaking = false;
             }
@@ -3112,8 +3159,7 @@ fn run_mix_rx_thread(
             }
 
             if has_audio && !deafened {
-                let ov = overrides.get(key);
-                if ov.is_some_and(|o| o.muted) {
+                if peer_muted {
                     continue;
                 }
                 state.leveler.process_in_place(&mut decoded_buf);
@@ -3273,7 +3319,7 @@ fn run_mix_rx_thread(
             shared
                 .far_end_rms_bits
                 .store(0.0f32.to_bits(), Ordering::Relaxed);
-            // Keep fallback reference advancing continuously during silence so NLMS ref stays time-aligned
+            // Keep fallback reference advancing continuously during silence so WebRTC AEC3 ref stays time-aligned
             let mut q = shared
                 .far_end_ref_fifo
                 .lock()

@@ -9,6 +9,7 @@ import {
 } from "../store/useIntroStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
+import { useRatingStore } from "../store/useRatingStore";
 import { AppCloseIcon } from "./ui/AppIcons";
 import { PlayerSkipEpisodeIcon } from "./ui/PlayerIcons";
 
@@ -57,6 +58,19 @@ export const NextEpisodeOverlay = memo(function NextEpisodeOverlay({
   const autoAdvancedOutroKeys = useIntroStore((s) => s.autoAdvancedOutroKeys);
   const dismissOutro = useIntroStore((s) => s.dismissOutro);
   const markOutroAutoAdvanced = useIntroStore((s) => s.markOutroAutoAdvanced);
+  const waitingForRating = useRatingStore(
+    (s) => s.open && s.activeKey !== null && s.myScoreByKey[s.activeKey] == null,
+  );
+  const [ratingWaitExpired, setRatingWaitExpired] = useState(false);
+
+  useEffect(() => {
+    if (!waitingForRating) {
+      setRatingWaitExpired(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setRatingWaitExpired(true), 15000);
+    return () => window.clearTimeout(timer);
+  }, [waitingForRating]);
 
   const effectiveIntros = useMemo(
     () => getEffectiveIntroSegments(segments, manualIntro),
@@ -131,7 +145,8 @@ export const NextEpisodeOverlay = memo(function NextEpisodeOverlay({
     outroNextMode === "auto" &&
     !paused &&
     Boolean(currentKey) &&
-    !autoAdvancedOutroKeys.includes(currentKey);
+    !autoAdvancedOutroKeys.includes(currentKey) &&
+    (!waitingForRating || ratingWaitExpired);
 
   const [autoProgress, setAutoProgress] = useState(0);
 

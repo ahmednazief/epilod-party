@@ -128,8 +128,13 @@ export function VoiceQuickSettingsTray({
     return () => window.clearTimeout(timer);
   }, [open, view]);
 
+  const refreshTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+      }
       if (wasOpenRef.current) {
         wasOpenRef.current = false;
         if (releaseMicMonitorSurface() === 0) {
@@ -156,7 +161,13 @@ export function VoiceQuickSettingsTray({
       .then((d) => setDevices(d))
       .catch(() => undefined)
       .finally(() => {
-        window.setTimeout(() => setRefreshing(false), 300);
+        if (refreshTimerRef.current !== null) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => {
+          refreshTimerRef.current = null;
+          setRefreshing(false);
+        }, 300);
       });
   };
 
@@ -328,7 +339,7 @@ export function VoiceQuickSettingsTray({
             value={sensitivityDb}
             alwaysShowThumb
             formatTooltip={(v) => `${Math.round(v)} dB`}
-            onChange={(v) => updateConfig({ sensitivityDb: Math.round(v) })}
+            onChange={(v) => updateConfig({ sensitivityDb: Math.round(v), autoSensitivity: false })}
           />
         </div>
 

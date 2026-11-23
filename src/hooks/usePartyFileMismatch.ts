@@ -154,7 +154,8 @@ export function usePartyFileMismatch(): {
       return;
     }
 
-    const delayMs = loaded && !hasDuration ? 750 : 300;
+    const delayMs =
+      rawMismatch?.kind === "notOpenOnPc" ? 80 : loaded && !hasDuration ? 750 : 300;
     const timer = window.setTimeout(() => {
       setSettledMismatch(latestRawRef.current);
     }, delayMs);
@@ -240,6 +241,7 @@ export function usePartyFileMismatch(): {
     !settledMismatch?.matchedPlaylistItem &&
     Boolean(settledMismatch?.targetPeerFileName?.trim());
 
+  const isNotOpenOnPc = settledMismatch?.kind === "notOpenOnPc";
   const targetPeerFileName = shouldSearchLocal ? (settledMismatch?.targetPeerFileName ?? null) : null;
   const targetPeerDurationSecs = shouldSearchLocal
     ? (settledMismatch?.targetPeerDurationSecs ?? null)
@@ -284,6 +286,7 @@ export function usePartyFileMismatch(): {
     }
 
     setSearchingLocalMatches(true);
+    const searchDebounceMs = isNotOpenOnPc ? 80 : 450;
     const timer = window.setTimeout(() => {
       void fetchDeduplicatedLocalMatches(
         cacheKey,
@@ -307,12 +310,12 @@ export function usePartyFileMismatch(): {
             setSearchingLocalMatches(false);
           }
         });
-    }, 450);
+    }, searchDebounceMs);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [targetPeerFileName, targetPeerDurationSecs, searchFolders, refreshNonce]);
+  }, [targetPeerFileName, targetPeerDurationSecs, isNotOpenOnPc, searchFolders, refreshNonce]);
 
   const refreshLocalMatches = useCallback(() => {
     clearLocalMatchCache();

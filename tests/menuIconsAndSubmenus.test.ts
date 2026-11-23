@@ -259,7 +259,7 @@ test("Rounded floating menus clip corners with overflow-hidden shells and scroll
 
   const selectMenu = readRepoFile("src/components/ui/SelectMenu.tsx");
   assert.doesNotMatch(selectMenu, /ep-glass-submenu[^"]*overflow-y-auto/);
-  assert.match(selectMenu, /ep-glass-submenu fixed z-50 overflow-hidden rounded-2xl py-2 flex flex-col/);
+  assert.match(selectMenu, /ep-glass-submenu fixed z-\[80\] overflow-hidden rounded-2xl py-2 flex flex-col/);
   assert.match(selectMenu, /ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1\.5/);
 
   const watchRoom = readRepoFile("src/components/WatchRoom.tsx");

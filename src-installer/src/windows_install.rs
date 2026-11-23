@@ -500,6 +500,10 @@ pub fn local_user_data_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("EpilodParty"))
 }
 
+pub fn roaming_user_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("Epilod Party").join("userdata"))
+}
+
 fn is_cargo_dev_dir(dir: &Path) -> bool {
     let norm = dir
         .to_string_lossy()
@@ -1684,6 +1688,24 @@ impl SystemIntegrator for WindowsIntegrator {
                             warnings.push(format!(
                                 "Could not remove all local user data in {}: {err}",
                                 dir.display()
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(roaming_dir) = roaming_user_data_dir() {
+                if roaming_dir.is_dir() {
+                    match remove_dir_all_resilient(&roaming_dir) {
+                        Ok(()) => {
+                            removed_user_data = true;
+                            if let Some(parent) = roaming_dir.parent() {
+                                let _ = std::fs::remove_dir(parent);
+                            }
+                        }
+                        Err(err) => {
+                            warnings.push(format!(
+                                "Could not remove all roaming user data in {}: {err}",
+                                roaming_dir.display()
                             ));
                         }
                     }

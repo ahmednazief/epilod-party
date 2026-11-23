@@ -51,13 +51,29 @@ export function ViewportPlaceholder({
             <h3 className="text-sm font-medium text-white">Playback Engine Issue</h3>
             <p className="text-xs text-secondary leading-relaxed">{playerError}</p>
           </div>
-          <div className="flex items-center gap-2 pt-1">
+          <div
+            className={
+              onRetryPlayer
+                ? "grid grid-cols-2 gap-2.5 w-full pt-1"
+                : "flex items-center justify-center pt-1"
+            }
+          >
             {onRetryPlayer && (
-              <Button variant="primary" size="sm" onClick={onRetryPlayer}>
+              <Button
+                variant="primary"
+                size="sm"
+                className="w-full justify-center"
+                onClick={onRetryPlayer}
+              >
                 Retry Player
               </Button>
             )}
-            <Button variant="secondary" size="sm" onClick={onChooseFile}>
+            <Button
+              variant="secondary"
+              size="sm"
+              className={onRetryPlayer ? "w-full justify-center" : ""}
+              onClick={onChooseFile}
+            >
               Choose Another File
             </Button>
           </div>

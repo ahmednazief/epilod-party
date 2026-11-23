@@ -33,6 +33,12 @@ import {
   formatWaitingForNotReadyPill,
   getPlayBlockState,
 } from "../lib/syncReady";
+import {
+  cancelSeekbarThumbnails,
+  generateSeekbarThumbnails,
+  getThumbnailFrameStyle,
+  type ThumbnailSprite,
+} from "../lib/thumbnails";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import { isParticipantSpeaking } from "../lib/voiceActions";
 import { useAppStore } from "../store/useAppStore";
@@ -154,6 +160,41 @@ export function resolvePlayBarLayout(outerWidth: number): PlayBarLayout {
   };
 }
 
+function applyPlayBarFitLevel(base: PlayBarLayout, fitLevel: number): PlayBarLayout {
+  if (fitLevel <= 0 || base.tier === "mini") return base;
+  const next = { ...base };
+  // Step 1: drop only the optional Resync text label first.
+  if (fitLevel >= 1) {
+    next.showResyncLabel = false;
+  }
+  // Step 2: trim extra inline avatars & slim the volume slider (never hide volume yet).
+  if (fitLevel >= 2) {
+    next.maxVisibleAvatars = Math.min(next.maxVisibleAvatars, 2);
+    next.showPartyCount = false;
+    if (next.volumeSliderWidth === "lg" || next.volumeSliderWidth === "md") {
+      next.volumeSliderWidth = "sm";
+    }
+  }
+  // Step 3: collapse remaining text labels (Ready / Episodes / CC / Audio), keep volume slider.
+  if (fitLevel >= 3) {
+    next.maxVisibleAvatars = Math.min(next.maxVisibleAvatars, 1);
+    next.showTextLabels = false;
+    if (next.volumeSliderWidth !== "none") {
+      next.volumeSliderWidth = "xs";
+    }
+  }
+  // Step 4: last-resort compact mode before 2-row stacking.
+  if (fitLevel >= 4) {
+    next.volumeSliderWidth = "none";
+    next.maxVisibleAvatars = 0;
+    next.showPartyAvatarsInline = false;
+  }
+  if (fitLevel >= 5) {
+    next.isTwoRowControls = true;
+  }
+  return next;
+}
+
 function getPlayBarLayoutKey(layout: PlayBarLayout): string {
   return [
     layout.tier,
@@ -204,6 +245,31 @@ function PlaybackScrubber({
   const introSegments = useIntroStore((s) => s.segments);
   const manualIntro = useIntroStore((s) => s.manualIntro);
   const skipIntroEnabled = useAppStore((s) => s.skipIntroMode !== "off");
+  const selectedFilePath = useAppStore((s) => s.selectedFilePath);
+  const seekbarThumbnails = useAppStore((s) => s.seekbarThumbnails);
+  const introDetecting = useIntroStore((s) => s.detecting);
+  const [thumbSprite, setThumbSprite] = useState<ThumbnailSprite | null>(null);
+
+  useEffect(() => {
+    setThumbSprite(null);
+    if (!seekbarThumbnails || !loaded || !selectedFilePath || durationSecs < 15 || introDetecting) {
+      if (!introDetecting) void cancelSeekbarThumbnails();
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void generateSeekbarThumbnails(selectedFilePath, durationSecs)
+        .then((sprite) => {
+          if (active && sprite) setThumbSprite(sprite);
+        })
+        .catch(() => undefined);
+    }, 800);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      void cancelSeekbarThumbnails();
+    };
+  }, [durationSecs, introDetecting, loaded, seekbarThumbnails, selectedFilePath]);
   const introHighlight = useMemo(() => {
     if (!skipIntroEnabled) return null;
     const effective = getEffectiveIntroSegments(introSegments, manualIntro);
@@ -270,6 +336,31 @@ function PlaybackScrubber({
           introHighlight && val >= introHighlight.start && val <= introHighlight.end
             ? `${formatClock(val)} · ${introHighlight.kind === "recap" ? "Recap" : "Intro"}`
             : formatClock(val)
+        }
+        renderPreview={
+          !compact && thumbSprite
+            ? (val) => {
+                const inIntro = Boolean(
+                  introHighlight && val >= introHighlight.start && val <= introHighlight.end,
+                );
+                return (
+                  <div className="relative rounded-xl overflow-hidden bg-black/85 ring-1 ring-white/20 shadow-inner">
+                    <div style={getThumbnailFrameStyle(thumbSprite, val)} />
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-black/75 via-black/30 to-transparent" />
+                    <div className="ep-glass-pill absolute bottom-1.5 left-1/2 -translate-x-1/2 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full whitespace-nowrap">
+                      {inIntro && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.85)]" />
+                      )}
+                      <span className="text-[11px] font-semibold num text-white/95 tracking-tight">
+                        {inIntro
+                          ? `${formatClock(val)} · ${introHighlight?.kind === "recap" ? "Recap" : "Intro"}`
+                          : formatClock(val)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }
+            : undefined
         }
         step={0.5}
         disabled={disabled}
@@ -352,7 +443,17 @@ const ResyncButton = memo(function ResyncButton({
   const flashFeedback = usePlayerStore((s) => s.flashFeedback);
   const pushNote = useNotificationStore((s) => s.push);
   const [busy, setBusy] = useState(false);
+  const resyncTimerRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (resyncTimerRef.current !== null) {
+        window.clearTimeout(resyncTimerRef.current);
+      }
+    };
+  }, []);
+
+  const liveRoomPositionSecs = useSyncStore((s) => s.liveRoomPositionSecs);
   const effectiveUser = resolveEffectiveUsername(syncStatus, username);
   const health = computeRoomSyncHealth({
     syncStatus,
@@ -360,6 +461,7 @@ const ResyncButton = memo(function ResyncButton({
     localUsername: effectiveUser,
     localLoaded: loaded,
     localPositionSecs: posFloored,
+    roomPositionSecs: liveRoomPositionSecs,
     timelineOffsetSecs,
     timelineScale,
     timelineSegments,
@@ -370,12 +472,18 @@ const ResyncButton = memo(function ResyncButton({
     setBusy(true);
     try {
       await syncForceResync();
-      playSoundCue("peerReady", { moviePlaying: loaded && !paused });
+      playSoundCue("resyncSnap", { moviePlaying: loaded && !paused });
       flashFeedback("Resynced with room");
     } catch (err) {
       pushNote("error", formatUserError(err, "Could not resync with room."));
     } finally {
-      window.setTimeout(() => setBusy(false), 450);
+      if (resyncTimerRef.current !== null) {
+        window.clearTimeout(resyncTimerRef.current);
+      }
+      resyncTimerRef.current = window.setTimeout(() => {
+        resyncTimerRef.current = null;
+        setBusy(false);
+      }, 450);
     }
   };
 
@@ -388,18 +496,20 @@ const ResyncButton = memo(function ResyncButton({
   return (
     <button
       type="button"
-      disabled={busy}
+      disabled={busy || !loaded}
       onClick={() => void handleResync()}
       aria-label="Resync with room"
       title={
-        health.needsResync
-          ? `Resync now (${health.statusLabel}) — snaps playback & connection back in sync`
-          : "Force instant resync with party timestamp"
+        !loaded
+          ? "Load a video file first"
+          : health.needsResync
+            ? `Resync now (${health.statusLabel}${health.maxDriftSecs >= 2.0 ? ` · ${health.maxDriftSecs.toFixed(1)}s drift` : ""}) — snaps playback back in sync`
+            : "Force instant resync with party timestamp"
       }
-      className={`${sizeClass} rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-60 ${
+      className={`ep-bar-icon-btn relative ${sizeClass} rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
         health.needsResync
-          ? "ep-press bg-warn/20 border border-warn/45 text-warn hover:bg-warn/30"
-          : "ep-bar-icon-btn text-secondary hover:text-white"
+          ? "text-amber-300 hover:text-amber-200"
+          : "text-secondary hover:text-white"
       }`}
     >
       <PlayerResyncIcon
@@ -407,11 +517,13 @@ const ResyncButton = memo(function ResyncButton({
         size={15}
         className={`shrink-0 ${busy ? "animate-spin" : ""}`}
       />
-      {showLabel && (
-        <span className="whitespace-nowrap">
-          {health.maxDriftSecs >= 2.0 ? `Resync · ${health.maxDriftSecs.toFixed(1)}s` : "Resync"}
-        </span>
+      {health.needsResync && !showLabel && (
+        <span
+          aria-hidden="true"
+          className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.9)]"
+        />
       )}
+      {showLabel && <span className="whitespace-nowrap">Resync</span>}
     </button>
   );
 });
@@ -552,8 +664,17 @@ export const TransportBar = memo(function TransportBar({
 
   const outerBarRef = useRef<HTMLDivElement | null>(null);
   const capsuleBarRef = useRef<HTMLDivElement | null>(null);
-  const [barLayout, setBarLayout] = useState<PlayBarLayout>(() =>
+  const leftCellRef = useRef<HTMLDivElement | null>(null);
+  const centerCellRef = useRef<HTMLDivElement | null>(null);
+  const rightCellRef = useRef<HTMLDivElement | null>(null);
+  const lastMeasuredWidthRef = useRef<number>(0);
+  const [fitLevel, setFitLevel] = useState(0);
+  const [baseLayout, setBaseLayout] = useState<PlayBarLayout>(() =>
     resolvePlayBarLayout(typeof window !== "undefined" ? window.innerWidth : 1024),
+  );
+  const barLayout = useMemo(
+    () => applyPlayBarFitLevel(baseLayout, fitLevel),
+    [baseLayout, fitLevel],
   );
   const layoutKey = getPlayBarLayoutKey(barLayout);
 
@@ -564,9 +685,13 @@ export const TransportBar = memo(function TransportBar({
     const syncStageMetrics = () => {
       const w = outerEl.clientWidth;
       if (w > 0) {
+        if (Math.abs(w - lastMeasuredWidthRef.current) > 12) {
+          lastMeasuredWidthRef.current = w;
+          setFitLevel(0);
+        }
         const next = resolvePlayBarLayout(w);
         const nextKey = getPlayBarLayoutKey(next);
-        setBarLayout((prev) => (getPlayBarLayoutKey(prev) === nextKey ? prev : next));
+        setBaseLayout((prev) => (getPlayBarLayoutKey(prev) === nextKey ? prev : next));
       }
       const capsuleEl = capsuleBarRef.current;
       const stageEl = outerEl.closest<HTMLElement>('[data-stage-container="true"]');
@@ -584,6 +709,25 @@ export const TransportBar = memo(function TransportBar({
       ro?.disconnect();
     };
   }, [fullWidthPlayBar, layoutKey]);
+
+  // Step down density automatically only when left + center + right genuinely exceed the capsule's inner width.
+  useLayoutEffect(() => {
+    if (barLayout.isTwoRowControls || fitLevel >= 5) return;
+    const capsuleEl = capsuleBarRef.current;
+    const leftEl = leftCellRef.current;
+    const centerEl = centerCellRef.current;
+    const rightEl = rightCellRef.current;
+    if (!capsuleEl || !leftEl || !centerEl || !rightEl) return;
+    const cs = window.getComputedStyle(capsuleEl);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const innerW = capsuleEl.clientWidth - padX;
+    const sideMax = Math.max(0, (innerW - centerEl.offsetWidth - 24) / 2);
+    const leftTooWide = leftEl.scrollWidth > sideMax + 4;
+    const rightTooWide = rightEl.scrollWidth > sideMax + 4;
+    if (leftTooWide || rightTooWide) {
+      setFitLevel((lvl) => Math.min(5, lvl + 1));
+    }
+  });
 
   const rightDockRef = useRef<HTMLDivElement | null>(null);
   const rightBtnRefs = useRef<Partial<Record<RightCapsuleTab, HTMLButtonElement | null>>>({});
@@ -1150,7 +1294,7 @@ export const TransportBar = memo(function TransportBar({
 
   const volumeControl = (
     <div
-      className={`flex items-center gap-1 shrink-0 ${
+      className={`group/vol relative flex items-center gap-1 shrink-0 ${
         barLayout.volumeSliderWidth !== "none" ? "pl-0.5" : ""
       }`}
       onWheel={(e) => {
@@ -1159,6 +1303,41 @@ export const TransportBar = memo(function TransportBar({
         }
       }}
     >
+      {barLayout.volumeSliderWidth === "none" && (
+        <div className="pointer-events-none opacity-0 translate-y-1 group-hover/vol:pointer-events-auto group-hover/vol:opacity-100 group-hover/vol:translate-y-0 group-focus-within/vol:pointer-events-auto group-focus-within/vol:opacity-100 group-focus-within/vol:translate-y-0 transition-all duration-150 absolute bottom-full left-1/2 -translate-x-1/2 pb-2 z-40">
+          <div className="ep-glass-submenu rounded-full px-3 py-2 flex items-center gap-2 shadow-lg">
+            <div className="w-24 shrink-0">
+              <Scrubber
+                ariaLabel="Volume"
+                value={muted ? 0 : volume}
+                min={0}
+                max={130}
+                step={1}
+                tooltipPlacement="top"
+                tooltipVariant="plain"
+                formatTooltip={(v) => `${Math.round(v)}%`}
+                onChange={(v) => {
+                  const rounded = Math.round(v);
+                  if (muted && rounded > 0) {
+                    setMutePlayback(false, { flash: false });
+                  }
+                  setVolume(rounded);
+                  throttledVol.call(rounded);
+                }}
+                onCommit={(v) => {
+                  throttledVol.cancel();
+                  const rounded = Math.round(v);
+                  setVolume(rounded);
+                  safeMpvCall(mpvSetVolume(rounded), "mpvSetVolume");
+                }}
+              />
+            </div>
+            <span className="text-[10.5px] font-medium text-secondary num w-8 text-right shrink-0">
+              {muted ? 0 : Math.round(volume)}%
+            </span>
+          </div>
+        </div>
+      )}
       <GlassHoverTip
         label="Auto-ducking movie"
         detail="Lowering volume while friends speak"
@@ -1186,7 +1365,7 @@ export const TransportBar = memo(function TransportBar({
           {duckingActive && (
             <span
               aria-hidden="true"
-              className="anim-pop-in absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-[#38BDF8] ep-speaking-ring"
+              className="anim-pop-in absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[#38BDF8] ep-speaking-ring"
             />
           )}
         </button>
@@ -1339,15 +1518,17 @@ export const TransportBar = memo(function TransportBar({
         onClick={handlePlayPause}
         aria-label={paused ? "Play" : "Pause"}
         title={
-          ctrlLock.lockedForLocalUser
-            ? formatControllerLockReason(ctrlLock)
-            : paused && playBlock.message
-              ? playBlock.message
-              : paused
-                ? "Play (Space)"
-                : "Pause (Space)"
+          !loaded
+            ? "Choose a video file to start"
+            : ctrlLock.lockedForLocalUser
+              ? formatControllerLockReason(ctrlLock)
+              : paused && playBlock.message
+                ? playBlock.message
+                : paused
+                  ? "Play (Space)"
+                  : "Pause (Space)"
         }
-        className={`ep-orb-play relative z-10 ${playOrbSize} rounded-full flex items-center justify-center disabled:pointer-events-none cursor-pointer`}
+        className={`ep-orb-play relative z-10 ${playOrbSize} rounded-full flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
       >
         {paused ? (
           <PlayerPlayIcon key="play" size={isMini ? 21 : 24} className="relative z-10 anim-icon-pop" />
@@ -1629,7 +1810,9 @@ export const TransportBar = memo(function TransportBar({
         {barLayout.tier === "mini" ? (
           <div className="flex flex-col gap-1.5 pt-0.5">
             <div className="flex items-center justify-center">
+              <div ref={centerCellRef} className="shrink-0">
               {transportCluster}
+            </div>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 w-full min-w-0">
               <div className="inline-flex items-center gap-0.5 shrink-0">
@@ -1644,13 +1827,17 @@ export const TransportBar = memo(function TransportBar({
         ) : barLayout.isTwoRowControls ? (
           <div className="flex flex-col gap-1.5 pt-0.5">
             <div className="flex items-center justify-center">
+              <div ref={centerCellRef} className="shrink-0">
               {transportCluster}
             </div>
+            </div>
             <div className="flex items-center justify-between gap-2 w-full min-w-0">
-              <div className="flex items-center gap-0.5 shrink-0">
-                {partyControls}
+              <div className="flex items-center gap-0.5 min-w-0">
+                <div className="flex items-center gap-0.5 shrink-0">
+                  {partyControls}
+                </div>
+                {volumeControl}
               </div>
-              {volumeControl}
               <div className="flex items-center gap-0.5 shrink-0">
                 {mediaItems}
               </div>
@@ -1663,7 +1850,8 @@ export const TransportBar = memo(function TransportBar({
             }`}
           >
             <div
-              className={`flex items-center min-w-0 max-w-full justify-self-start ${
+              ref={leftCellRef}
+              className={`flex items-center min-w-0 max-w-full overflow-x-clip overflow-y-visible justify-self-start ${
                 isCompactGap ? "gap-0.5" : "gap-1.5"
               }`}
             >
@@ -1671,10 +1859,13 @@ export const TransportBar = memo(function TransportBar({
               {volumeControl}
             </div>
 
-            {transportCluster}
+            <div ref={centerCellRef} className="shrink-0">
+              {transportCluster}
+            </div>
 
             <div
-              className={`flex items-center min-w-0 max-w-full justify-self-end ${
+              ref={rightCellRef}
+              className={`flex items-center min-w-0 max-w-full overflow-x-clip overflow-y-visible justify-self-end ${
                 isCompactGap ? "gap-0.5" : "gap-1"
               }`}
             >

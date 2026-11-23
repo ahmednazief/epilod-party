@@ -411,14 +411,6 @@ export async function browseInstallDirectory(currentDir: string): Promise<string
   return null;
 }
 
-export async function checkInstallDirectory(path: string): Promise<number | null> {
-  if (isTauriEnv()) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<number | null>("check_install_dir", { path });
-  }
-  return 142 * 1024 * 1024 * 1024;
-}
-
 export async function preflightInstallDir(path: string): Promise<PreflightResult> {
   if (isTauriEnv()) {
     const { invoke } = await import("@tauri-apps/api/core");

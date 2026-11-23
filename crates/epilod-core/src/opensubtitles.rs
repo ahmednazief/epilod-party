@@ -14,10 +14,6 @@ const OPENSUBTITLES_MIN_FILE_BYTES: u64 = (OPENSUBTITLES_HASH_CHUNK as u64) * 2;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum OpenSubtitlesError {
-    #[error("OpenSubtitles API key cannot be blank.")]
-    MissingApiKey,
-    #[error("OpenSubtitles User-Agent cannot be blank.")]
-    MissingUserAgent,
     #[error("Unsafe archive entry path rejected: {0}")]
     UnsafeArchivePath(String),
     #[error("Unsupported archive entry file type: {0}")]
@@ -41,27 +37,6 @@ pub struct SubtitleFileRef {
     pub file_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubtitleAttributes {
-    pub subtitle_id: Option<String>,
-    pub language: Option<String>,
-    pub download_count: Option<u64>,
-    pub release: Option<String>,
-    pub files: Vec<SubtitleFileRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubtitleItem {
-    pub id: String,
-    pub attributes: SubtitleAttributes,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubtitlesSearchResponse {
-    pub total_count: Option<u64>,
-    pub data: Vec<SubtitleItem>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub file_id: u64,
@@ -72,22 +47,6 @@ pub struct DownloadResponse {
     pub link: String,
     pub file_name: Option<String>,
     pub remaining: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiErrorResponse {
-    pub message: Option<String>,
-    pub status: Option<u16>,
-}
-
-pub fn validate_headers(api_key: &str, user_agent: &str) -> Result<(), OpenSubtitlesError> {
-    if api_key.trim().is_empty() {
-        return Err(OpenSubtitlesError::MissingApiKey);
-    }
-    if user_agent.trim().is_empty() {
-        return Err(OpenSubtitlesError::MissingUserAgent);
-    }
-    Ok(())
 }
 
 pub fn build_search_query_string(params: &SearchParams) -> String {
@@ -1445,12 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_header_and_query_builder() {
-        assert_eq!(
-            validate_headers("", "EpilodParty/0.1"),
-            Err(OpenSubtitlesError::MissingApiKey)
-        );
-        assert!(validate_headers("key123", "EpilodParty/0.1").is_ok());
+    fn test_query_builder() {
         let qs = build_search_query_string(&SearchParams {
             moviehash: Some("0123456789abcdef".into()),
             moviebytesize: Some(1_234_567),

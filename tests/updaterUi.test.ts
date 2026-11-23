@@ -177,8 +177,9 @@ test("TitleBar, SettingsModal, HomeScreen, and App expose TitleBar update pill &
   assert.equal(settingsSrc.includes('{ value: "updates", label: "Updates" }'), true);
   assert.equal(settingsSrc.includes("Restart & Update to v"), true);
   assert.equal(settingsSrc.includes("scaleX("), true);
-  assert.equal(settingsSrc.includes("Automatic updates"), true);
-  assert.equal(settingsSrc.includes("Check for updates automatically"), true);
+  assert.equal(settingsSrc.includes("App Updates"), true);
+  assert.equal(settingsSrc.includes("setAutoDownloadUpdates"), true);
+  assert.equal(settingsSrc.includes("setAutoCheckUpdates"), true);
   assert.equal(settingsSrc.includes("Ed25519 Signed"), true);
   assert.equal(settingsSrc.includes("SHA-256 Verified:"), true);
 

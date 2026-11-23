@@ -425,15 +425,6 @@ pub fn parse_and_validate_manifest_with_signature(
     parse_and_validate_manifest_with_pubkey(bytes, current_version, EMBEDDED_UPDATE_PUBKEY_HEX)
 }
 
-pub fn parse_and_validate_manifest(
-    bytes: &[u8],
-    current_version: &str,
-) -> Result<(ReleaseManifest, UpdateAvailability), UpdateError> {
-    let (manifest, availability, _) =
-        parse_and_validate_manifest_with_signature(bytes, current_version)?;
-    Ok((manifest, availability))
-}
-
 #[derive(Deserialize)]
 struct GitHubReleaseApiAsset {
     name: String,
@@ -981,7 +972,7 @@ mod tests {
         let sha = "a".repeat(64);
         let url = "https://github.com/ahmednazief/epilod-party/releases/download/v0.2.0/Epilod.Party.Setup.exe";
 
-        let (_, avail) = parse_and_validate_manifest(
+        let (_, avail, _) = parse_and_validate_manifest_with_signature(
             &sample_manifest_json("v0.2.0", url, &sha, 94_000_000, None),
             "0.1.0",
         )
@@ -989,7 +980,7 @@ mod tests {
         assert_eq!(avail, UpdateAvailability::UpdateAvailable);
 
         // Same version -> UpToDate
-        let (_, same) = parse_and_validate_manifest(
+        let (_, same, _) = parse_and_validate_manifest_with_signature(
             &sample_manifest_json("0.1.0", url, &sha, 94_000_000, None),
             "0.1.0",
         )
@@ -997,7 +988,7 @@ mod tests {
         assert_eq!(same, UpdateAvailability::UpToDate);
 
         // Older version -> UpToDate (never downgrades automatically)
-        let (_, older) = parse_and_validate_manifest(
+        let (_, older, _) = parse_and_validate_manifest_with_signature(
             &sample_manifest_json("0.0.9", url, &sha, 94_000_000, None),
             "0.1.0",
         )
@@ -1005,7 +996,7 @@ mod tests {
         assert_eq!(older, UpdateAvailability::UpToDate);
 
         // Enforce minSupportedVersion
-        let err = parse_and_validate_manifest(
+        let err = parse_and_validate_manifest_with_signature(
             &sample_manifest_json("0.5.0", url, &sha, 94_000_000, Some("0.3.0")),
             "0.1.0",
         )
@@ -1014,7 +1005,7 @@ mod tests {
 
         // Invalid checksum
         assert_eq!(
-            parse_and_validate_manifest(
+            parse_and_validate_manifest_with_signature(
                 &sample_manifest_json("0.2.0", url, "bad", 94_000_000, None),
                 "0.1.0"
             )
@@ -1023,7 +1014,7 @@ mod tests {
         );
         // Too small
         assert_eq!(
-            parse_and_validate_manifest(
+            parse_and_validate_manifest_with_signature(
                 &sample_manifest_json("0.2.0", url, &sha, 100, None),
                 "0.1.0"
             )

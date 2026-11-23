@@ -48,10 +48,6 @@ export function nextClientSeekSeq(): number {
   return clientSeekSeq;
 }
 
-export function getCurrentClientSeekSeq(): number {
-  return clientSeekSeq;
-}
-
 /** Rejects stale in-flight `mpv://time` events emitted before Rust observed our latest seek. */
 export function shouldAcceptMpvTimeEvent(
   eventSeekSeq: number | undefined,

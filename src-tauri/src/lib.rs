@@ -1,4 +1,5 @@
 pub mod autosync;
+pub mod job_object;
 
 #[cfg(windows)]
 pub mod cloud_sync;
@@ -12,10 +13,12 @@ pub mod mpv;
 pub mod p2p;
 #[cfg(windows)]
 pub mod sparse_align;
+pub mod storage;
 #[cfg(windows)]
 pub mod subtitles;
 #[cfg(windows)]
 pub mod syncplay;
+pub mod thumbnails;
 #[cfg(windows)]
 pub mod updater;
 #[cfg(windows)]
@@ -62,6 +65,18 @@ pub struct DragRestoreBounds {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+pub fn scale_logical_min_size(min_w: i32, min_h: i32, scale_factor: f64) -> (i32, i32) {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    (
+        ((min_w as f64) * scale).round() as i32,
+        ((min_h as f64) * scale).round() as i32,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -189,11 +204,15 @@ mod windows_app {
     use crate::syncplay::{LocalFileMeta, SyncCommand, SyncController};
     use epilod_core::logging::{LogLevel, LogsSnapshot, RingLogger};
     use epilod_core::mpv_ipc::{
-        loadfile_cmd, set_aid_cmd, set_aspect_cmd, set_loop_cmd, set_mute_cmd, set_pause_cmd,
-        set_secondary_sub_delay_cmd, set_secondary_sub_pos_cmd, set_secondary_sub_track_cmd,
-        set_sid_cmd, set_speed_cmd, set_sub_delay_cmd, set_sub_style_cmds_with_bold,
-        set_video_margin_right_cmd, set_volume_cmd, show_osd_text_cmd, sub_add_cmd_with_title,
-        sub_remove_cmd,
+        loadfile_cmd, set_aid_cmd, set_aspect_mode_cmds, set_dialogue_boost_cmd, set_loop_cmd,
+        set_mute_cmd, set_pause_cmd, set_secondary_sub_delay_cmd, set_secondary_sub_pos_cmd,
+        set_secondary_sub_track_cmd, set_sid_cmd, set_speed_cmd, set_sub_delay_cmd,
+        set_sub_style_cmds_with_bold, set_video_margin_right_cmd, set_volume_cmd,
+        show_osd_text_cmd, sub_add_cmd_with_title, sub_remove_cmd,
+    };
+    use epilod_core::p2p::{
+        sanitize_chat_id, sanitize_shared_subtitle_ext, sanitize_shared_subtitle_name,
+        MAX_SHARED_SUBTITLE_BYTES,
     };
     use epilod_core::room_code::BACKUP_ENDPOINT;
     use epilod_core::subtitle_sync::{
@@ -210,6 +229,7 @@ mod windows_app {
     use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
     static DECODED_SUB_SEQ: AtomicU64 = AtomicU64::new(1);
+    static SHARED_SUB_SEQ: AtomicU64 = AtomicU64::new(1);
 
     use crate::intro::{execute_detect_intro, IntroDetectController, IntroDetectRequest};
     use crate::media_library::{
@@ -238,7 +258,9 @@ mod windows_app {
         pub autosync: Arc<AutoSyncController>,
         pub intro_detect: Arc<IntroDetectController>,
         pub media_library: Arc<MediaLibraryState>,
+        pub thumbnails: Arc<crate::thumbnails::ThumbnailController>,
         pub pending_deep_link: Arc<Mutex<Option<DeepLinkInvite>>>,
+        pub pending_open_file: Arc<Mutex<Option<String>>>,
         pub logger: Arc<Mutex<RingLogger>>,
         pub rate_guard: Arc<Mutex<CommandRateGuard>>,
         pub network_policy: Arc<NetworkSharePolicy>,
@@ -379,7 +401,7 @@ mod windows_app {
         state.autosync.cancel();
         state.intro_detect.cancel();
         state.mpv.prepare_for_load();
-        state.mpv.set_media_loaded(true);
+        state.mpv.set_media_loaded(false);
         let pause_req = state.mpv.next_request_id();
         let _ = state.mpv.send_command(set_pause_cmd(pause_req, true));
 
@@ -473,8 +495,20 @@ mod windows_app {
     #[tauri::command]
     async fn mpv_set_aspect_mode(state: State<'_, AppState>, aspect: String) -> Result<(), String> {
         let safe = sanitize_aspect_mode(&aspect).map_err(|e| e.to_string())?;
+        let first_id = state.mpv.next_request_id_range(2);
+        for cmd in set_aspect_mode_cmds(first_id, safe) {
+            state.mpv.send_command(cmd)?;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn mpv_set_dialogue_boost(
+        state: State<'_, AppState>,
+        enabled: bool,
+    ) -> Result<(), String> {
         let req = state.mpv.next_request_id();
-        state.mpv.send_command(set_aspect_cmd(req, safe))
+        state.mpv.send_command(set_dialogue_boost_cmd(req, enabled))
     }
 
     #[tauri::command]
@@ -524,6 +558,7 @@ mod windows_app {
             || lower.starts_with("epilod_synced_")
             || lower.starts_with("embedded_")
             || lower.starts_with("autosync_")
+            || lower.starts_with("shared_")
     }
 
     fn derive_external_sub_title(path: &Path, explicit_title: Option<&str>) -> Option<String> {
@@ -560,12 +595,20 @@ mod windows_app {
                 let valid = validate_existing_local_file_with_options(&path, opts)
                     .map_err(|e| e.to_string())?;
                 let title = derive_external_sub_title(&valid, display_title.as_deref());
+                let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
+                // Bitmap/companion subtitle formats (VobSub .idx/.sub, PGS .sup) must not be
+                // text-transcoded or moved away from their companion files.
+                if ext.eq_ignore_ascii_case("idx") || ext.eq_ignore_ascii_case("sup") {
+                    return Ok((valid.to_string_lossy().into_owned(), title));
+                }
                 match std::fs::read(&valid) {
                     Ok(bytes) => {
-                        let ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("srt");
+                        let utf8_str = std::str::from_utf8(&bytes).ok();
+                        if ext.eq_ignore_ascii_case("sub") && utf8_str.is_none() {
+                            return Ok((valid.to_string_lossy().into_owned(), title));
+                        }
                         let is_srt_or_vtt =
                             ext.eq_ignore_ascii_case("srt") || ext.eq_ignore_ascii_case("vtt");
-                        let utf8_str = std::str::from_utf8(&bytes).ok();
                         let needs_rtl_fix =
                             apply_fix_rtl && is_srt_or_vtt && utf8_str.is_some_and(contains_arabic);
                         let needs_transcode = hint != SubtitleEncodingHint::Auto
@@ -579,7 +622,12 @@ mod windows_app {
                             } else {
                                 decoded
                             };
-                            let sub_dir = std::env::temp_dir().join("epilod-subs");
+                            let sub_dir = std::env::var_os("LOCALAPPDATA")
+                                .map(PathBuf::from)
+                                .unwrap_or_else(std::env::temp_dir)
+                                .join("EpilodParty")
+                                .join("cache")
+                                .join("subs");
                             std::fs::create_dir_all(&sub_dir)
                                 .map_err(|e| format!("Failed creating temp subtitle dir: {e}"))?;
                             let seq = DECODED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -628,7 +676,7 @@ mod windows_app {
         override_ass: Option<bool>,
     ) -> Result<(), String> {
         let safe_color = sanitize_hex_color(&color).map_err(|e| e.to_string())?;
-        let first_id = state.mpv.next_request_id();
+        let first_id = state.mpv.next_request_id_range(8);
         let cmds = set_sub_style_cmds_with_bold(
             first_id,
             font.trim(),
@@ -640,9 +688,6 @@ mod windows_app {
             override_ass.unwrap_or(false),
             bold.unwrap_or(false),
         );
-        for _ in 1..cmds.len() {
-            let _ = state.mpv.next_request_id();
-        }
         for c in cmds {
             state.mpv.send_command(c)?;
         }
@@ -926,10 +971,12 @@ mod windows_app {
                             wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
                             let _ = GetWindowPlacement(hwnd, &mut wp);
 
-                            let normal_w =
-                                (wp.rcNormalPosition.right - wp.rcNormalPosition.left).max(1024);
-                            let normal_h =
-                                (wp.rcNormalPosition.bottom - wp.rcNormalPosition.top).max(640);
+                            let scale = win_for_ui.scale_factor().unwrap_or(1.0);
+                            let (min_w_phys, min_h_phys) = scale_logical_min_size(1024, 640, scale);
+                            let normal_w = (wp.rcNormalPosition.right - wp.rcNormalPosition.left)
+                                .max(min_w_phys);
+                            let normal_h = (wp.rcNormalPosition.bottom - wp.rcNormalPosition.top)
+                                .max(min_h_phys);
                             let target = compute_drag_restore_bounds(
                                 cursor_pt.x,
                                 cursor_pt.y,
@@ -941,7 +988,7 @@ mod windows_app {
                                     work_rect.bottom,
                                 ),
                                 (normal_w, normal_h),
-                                (1024, 640),
+                                (min_w_phys, min_h_phys),
                             );
 
                             let ws_dx = work_rect.left - mon_rect.left;
@@ -1106,6 +1153,17 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn sync_prewarm(endpoint: String, room_code: Option<String>) -> bool {
+        let Ok(valid) = epilod_core::validation::validate_endpoint(&endpoint) else {
+            return false;
+        };
+        if !epilod_core::validation::is_cloud_ws_endpoint(&valid) {
+            return false;
+        }
+        crate::cloud_sync::prewarm_cloud(&valid, room_code.as_deref()).await
+    }
+
+    #[tauri::command]
     async fn sync_disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
         state.voice.leave_voice();
         state.sync.disconnect().await;
@@ -1137,8 +1195,19 @@ mod windows_app {
         literal_room: Option<bool>,
         password: Option<String>,
         host_only: Option<bool>,
+        target_endpoint: Option<String>,
     ) -> Result<(), String> {
         let clean_user = sanitize_username(&username).map_err(|e| e.to_string())?;
+        let chosen_endpoint = match target_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => {
+                epilod_core::validation::validate_endpoint(raw).map_err(|e| e.to_string())?
+            }
+            None => BACKUP_ENDPOINT.to_string(),
+        };
         {
             let mut rg = state
                 .rate_guard
@@ -1146,7 +1215,7 @@ mod windows_app {
                 .map_err(|_| "Rate guard poisoned".to_string())?;
             if !check_sync_connect_allowed(
                 &mut rg,
-                BACKUP_ENDPOINT,
+                &chosen_endpoint,
                 &room_code,
                 true,
                 Instant::now(),
@@ -1159,7 +1228,7 @@ mod windows_app {
             .connect(
                 app,
                 Arc::clone(&state.mpv),
-                BACKUP_ENDPOINT.to_string(),
+                chosen_endpoint,
                 clean_user,
                 room_code,
                 literal_room.unwrap_or(false),
@@ -1299,6 +1368,24 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn sync_send_rating_vote(
+        state: State<'_, AppState>,
+        key: String,
+        score: u8,
+        avatar_id: Option<String>,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_rating_vote", 20, Duration::from_secs(5))?;
+        if !(1..=10).contains(&score) {
+            return Err("Rating score must be between 1 and 10.".to_string());
+        }
+        let clean_key = epilod_core::p2p::sanitize_rating_key(&key)
+            .ok_or_else(|| "Invalid rating key.".to_string())?;
+        let clean_avatar = epilod_core::p2p::sanitize_avatar_id(avatar_id.as_deref().unwrap_or(""));
+        state.sync.send_rating_vote(clean_key, score, clean_avatar);
+        Ok(())
+    }
+
+    #[tauri::command]
     async fn sync_send_reaction(
         state: State<'_, AppState>,
         emoji: String,
@@ -1386,6 +1473,147 @@ mod windows_app {
             .ok_or_else(|| "Unsupported reaction emoji.".to_string())?;
         state.sync.send_chat_react(clean_id, clean_emoji);
         Ok(())
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ShareSubtitleResultDto {
+        id: String,
+        file_name: String,
+        size_bytes: usize,
+    }
+
+    #[tauri::command]
+    async fn sync_share_subtitle(
+        state: State<'_, AppState>,
+        path: String,
+        encoding_hint: Option<SubtitleEncodingHint>,
+        display_name: Option<String>,
+        lang: Option<String>,
+    ) -> Result<ShareSubtitleResultDto, String> {
+        check_rate(&state, "sync_share_subtitle", 6, Duration::from_secs(10))?;
+        let opts = state.network_policy.options();
+        let hint = encoding_hint.unwrap_or_default();
+
+        let (clean_name, safe_ext, decoded) =
+            tokio::task::spawn_blocking(move || -> Result<(String, String, String), String> {
+                let valid = validate_existing_local_file_with_options(&path, opts)
+                    .map_err(|e| e.to_string())?;
+                let raw_ext = valid.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let safe_ext = sanitize_shared_subtitle_ext(raw_ext).ok_or_else(|| {
+                    "Only text subtitles (.srt, .vtt, .ass, .ssa) can be shared.".to_string()
+                })?;
+                let meta_len = std::fs::metadata(&valid).map(|m| m.len()).unwrap_or(0);
+                if meta_len > (MAX_SHARED_SUBTITLE_BYTES as u64) * 2 {
+                    return Err("Subtitle file is too large to share (max 384 KB).".to_string());
+                }
+                let bytes = std::fs::read(&valid)
+                    .map_err(|e| format!("Failed reading subtitle file: {e}"))?;
+                let decoded =
+                    decode_subtitle_bytes_with_hint(&bytes, hint).map_err(|e| e.to_string())?;
+                if decoded.trim().is_empty() {
+                    return Err("Subtitle file is empty.".to_string());
+                }
+                if decoded.len() > MAX_SHARED_SUBTITLE_BYTES {
+                    return Err("Subtitle file is too large to share (max 384 KB).".to_string());
+                }
+                let fallback_name = valid
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("shared");
+                let raw_name = display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !is_internal_temp_sub_name(s))
+                    .unwrap_or(fallback_name);
+                let clean_name = sanitize_shared_subtitle_name(raw_name, safe_ext);
+                Ok((clean_name, safe_ext.to_string(), decoded))
+            })
+            .await
+            .map_err(|e| format!("Subtitle share preparation failed: {e}"))??;
+
+        let ts_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let seq = SHARED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
+        let id = sanitize_chat_id(&format!("sub_{ts_secs:x}_{seq:x}"));
+        let clean_lang = lang
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(16).collect::<String>());
+        let size_bytes = decoded.len();
+
+        if !state.sync.send_subtitle_share(
+            id.clone(),
+            clean_name.clone(),
+            safe_ext,
+            clean_lang,
+            decoded,
+        ) {
+            return Err("Connect to a Watch Party room before sharing subtitles.".to_string());
+        }
+
+        Ok(ShareSubtitleResultDto {
+            id,
+            file_name: clean_name,
+            size_bytes,
+        })
+    }
+
+    #[tauri::command]
+    async fn apply_shared_subtitle(
+        state: State<'_, AppState>,
+        id: String,
+        file_name: String,
+        ext: String,
+        content: String,
+        fix_rtl: Option<bool>,
+    ) -> Result<String, String> {
+        check_rate(&state, "apply_shared_subtitle", 10, Duration::from_secs(5))?;
+        if content.trim().is_empty() {
+            return Err("Shared subtitle content is empty.".to_string());
+        }
+        if content.len() > MAX_SHARED_SUBTITLE_BYTES {
+            return Err("Shared subtitle exceeds maximum allowed size.".to_string());
+        }
+        let safe_ext = sanitize_shared_subtitle_ext(&ext)
+            .ok_or_else(|| "Unsupported shared subtitle format.".to_string())?;
+        let raw_id = sanitize_chat_id(&id);
+        let clean_id = if raw_id.is_empty() {
+            let seq = SHARED_SUB_SEQ.fetch_add(1, Ordering::Relaxed);
+            format!("room_{seq}")
+        } else {
+            raw_id
+        };
+        let clean_name = sanitize_shared_subtitle_name(&file_name, safe_ext);
+        let apply_fix_rtl = fix_rtl.unwrap_or(true);
+
+        let saved_path = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let is_srt_or_vtt = safe_ext == "srt" || safe_ext == "vtt";
+            let final_text = if apply_fix_rtl && is_srt_or_vtt && contains_arabic(&content) {
+                fix_rtl_subtitles(&content, safe_ext)
+            } else {
+                content
+            };
+            let dir = crate::subtitles::shared_subtitle_cache_dir();
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("Failed creating shared subtitle cache: {e}"))?;
+            let dest = dir.join(format!("shared_{clean_id}.{safe_ext}"));
+            std::fs::write(&dest, final_text.as_bytes())
+                .map_err(|e| format!("Failed saving shared subtitle: {e}"))?;
+            crate::subtitles::prune_shared_subtitle_cache(25, 14);
+            Ok(dest.to_string_lossy().into_owned())
+        })
+        .await
+        .map_err(|e| format!("Shared subtitle task failed: {e}"))??;
+
+        let req = state.mpv.next_request_id();
+        state
+            .mpv
+            .send_command(sub_add_cmd_with_title(req, &saved_path, Some(&clean_name)))?;
+        Ok(saved_path)
     }
 
     #[tauri::command]
@@ -1718,13 +1946,233 @@ mod windows_app {
             .map_err(|e| format!("Failed restoring secret: {e}"))?
     }
 
+    #[tauri::command]
+    async fn generate_seekbar_thumbnails(
+        app: AppHandle,
+        state: State<'_, AppState>,
+        path: String,
+        duration_secs: f64,
+    ) -> Result<Option<crate::thumbnails::ThumbnailSpriteDto>, String> {
+        check_rate(
+            &state,
+            "generate_seekbar_thumbnails",
+            12,
+            Duration::from_secs(10),
+        )?;
+        let opts = state.network_policy.options();
+        state
+            .thumbnails
+            .generate(&app, &path, duration_secs, opts)
+            .await
+    }
+
+    #[tauri::command]
+    async fn cancel_seekbar_thumbnails(state: State<'_, AppState>) -> Result<(), String> {
+        state.thumbnails.cancel();
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn clear_thumbnail_cache() -> Result<u64, String> {
+        let Some(dir) = crate::thumbnails::thumbnail_cache_dir() else {
+            return Ok(0);
+        };
+        tokio::task::spawn_blocking(move || crate::thumbnails::clear_all_thumbnail_cache(&dir))
+            .await
+            .map_err(|e| format!("Failed clearing thumbnail cache: {e}"))
+    }
+
+    #[tauri::command]
+    async fn storage_read_all_domains() -> Result<std::collections::HashMap<String, String>, String>
+    {
+        tokio::task::spawn_blocking(|| {
+            let Some(root) = crate::storage::userdata_root_dir() else {
+                return Ok(std::collections::HashMap::new());
+            };
+            crate::storage::read_all_userdata_domains_in(&root)
+        })
+        .await
+        .map_err(|e| format!("Storage read task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_write_domain(domain: String, json_str: String) -> Result<(), String> {
+        tokio::task::spawn_blocking(move || {
+            let root = crate::storage::userdata_root_dir()
+                .ok_or_else(|| "User data folder path unavailable".to_string())?;
+            crate::storage::write_userdata_domain_in(&root, &domain, &json_str)
+        })
+        .await
+        .map_err(|e| format!("Storage write task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_get_stats() -> Result<crate::storage::StorageStatsDto, String> {
+        tokio::task::spawn_blocking(|| {
+            let userdata = crate::storage::userdata_root_dir();
+            let thumbs = crate::thumbnails::thumbnail_cache_dir();
+            let subs = crate::subtitles::subtitle_cache_dir();
+            let local = crate::storage::local_epilod_root_dir();
+            let cap_mb = crate::thumbnails::get_thumb_cache_cap_bytes() / (1024 * 1024);
+            crate::storage::compute_storage_stats_with_dirs(
+                userdata.as_deref(),
+                thumbs.as_deref(),
+                Some(&subs),
+                local.as_deref(),
+                cap_mb,
+            )
+        })
+        .await
+        .map_err(|e| format!("Storage stats task failed: {e}"))
+    }
+
+    #[tauri::command]
+    async fn storage_clear_cache(target: String) -> Result<u64, String> {
+        tokio::task::spawn_blocking(move || {
+            let thumbs = crate::thumbnails::thumbnail_cache_dir();
+            let subs = crate::subtitles::subtitle_cache_dir();
+            let local = crate::storage::local_epilod_root_dir();
+            crate::storage::clear_storage_cache_with_dirs(
+                &target,
+                thumbs.as_deref(),
+                Some(&subs),
+                local.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| format!("Clear cache task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_set_thumb_cap_mb(mb: u64) -> Result<u64, String> {
+        tokio::task::spawn_blocking(move || {
+            let bytes = crate::thumbnails::set_thumb_cache_cap_mb(mb);
+            bytes / (1024 * 1024)
+        })
+        .await
+        .map_err(|e| format!("Failed updating thumbnail cache cap: {e}"))
+    }
+
+    #[tauri::command]
+    async fn storage_export_backup(path: String, payload_json: String) -> Result<u64, String> {
+        tokio::task::spawn_blocking(move || {
+            crate::storage::export_backup_file(&path, &payload_json)
+        })
+        .await
+        .map_err(|e| format!("Export backup task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_import_backup(path: String) -> Result<String, String> {
+        tokio::task::spawn_blocking(move || crate::storage::import_backup_file(&path))
+            .await
+            .map_err(|e| format!("Import backup task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_create_snapshot(
+        reason: String,
+        payload_json: String,
+    ) -> Result<crate::storage::BackupSnapshotInfo, String> {
+        tokio::task::spawn_blocking(move || {
+            let root = crate::storage::userdata_root_dir()
+                .ok_or_else(|| "User data folder path unavailable".to_string())?;
+            crate::storage::create_auto_snapshot_in(&root, &reason, &payload_json)
+        })
+        .await
+        .map_err(|e| format!("Create snapshot task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_list_snapshots() -> Result<Vec<crate::storage::BackupSnapshotInfo>, String> {
+        tokio::task::spawn_blocking(|| {
+            let Some(root) = crate::storage::userdata_root_dir() else {
+                return Vec::new();
+            };
+            crate::storage::list_auto_snapshots_in(&root)
+        })
+        .await
+        .map_err(|e| format!("List snapshots task failed: {e}"))
+    }
+
+    #[tauri::command]
+    async fn storage_read_snapshot(file_name: String) -> Result<String, String> {
+        tokio::task::spawn_blocking(move || {
+            let root = crate::storage::userdata_root_dir()
+                .ok_or_else(|| "User data folder path unavailable".to_string())?;
+            crate::storage::read_auto_snapshot_in(&root, &file_name)
+        })
+        .await
+        .map_err(|e| format!("Read snapshot task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn storage_open_userdata_folder() -> Result<String, String> {
+        tokio::task::spawn_blocking(crate::storage::open_userdata_folder)
+            .await
+            .map_err(|e| format!("Open userdata folder task failed: {e}"))?
+    }
+
+    #[tauri::command]
+    async fn consume_pending_open_file(
+        state: State<'_, AppState>,
+    ) -> Result<Option<String>, String> {
+        let mut guard = state
+            .pending_open_file
+            .lock()
+            .map_err(|_| "Open-file lock poisoned".to_string())?;
+        Ok(guard.take())
+    }
+
+    const OPEN_FILE_VIDEO_EXTS: &[&str] = &[
+        "mkv", "mp4", "ts", "m2ts", "avi", "webm", "flv", "wmv", "ogv", "3gp", "mov", "m4v", "mpg",
+        "mpeg", "vob",
+    ];
+
+    /// Accepts a Windows "Open with" argument: an existing local video file path.
+    /// Returns None for invites, flags, non-video files, missing files, and unsafe paths.
+    pub(crate) fn parse_open_file_arg(raw: &str) -> Option<String> {
+        let trimmed = raw.trim().trim_matches('"').trim();
+        if trimmed.is_empty() || trimmed.starts_with("--") || parse_invite_link(trimmed).is_some() {
+            return None;
+        }
+        let path = epilod_core::validation::validate_local_path_syntax_with_options(
+            trimmed,
+            LocalPathOptions {
+                allow_network_shares: true,
+            },
+        )
+        .ok()?;
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())?
+            .to_ascii_lowercase();
+        if !OPEN_FILE_VIDEO_EXTS.contains(&ext.as_str()) {
+            return None;
+        }
+        if !std::path::Path::new(&path).is_file() {
+            return None;
+        }
+        Some(path)
+    }
+
     fn extract_startup_deep_link() -> Option<DeepLinkInvite> {
         std::env::args()
             .skip(1)
             .find_map(|arg| parse_invite_link(&arg))
     }
 
+    fn extract_startup_open_file() -> Option<String> {
+        std::env::args()
+            .skip(1)
+            .find_map(|arg| parse_open_file_arg(&arg))
+    }
+
     fn try_forward_deep_link_to_running_instance(invite: &DeepLinkInvite) -> bool {
+        try_forward_line_to_running_instance(&invite.uri)
+    }
+
+    fn try_forward_line_to_running_instance(line: &str) -> bool {
         use std::io::Write;
         for _ in 0..4 {
             if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -1732,7 +2180,7 @@ mod windows_app {
                 .write(true)
                 .open(DEEP_LINK_PIPE_NAME)
             {
-                let payload = format!("{}\n", invite.uri);
+                let payload = format!("{}\n", line);
                 if file.write_all(payload.as_bytes()).is_ok() && file.flush().is_ok() {
                     return true;
                 }
@@ -1852,6 +2300,7 @@ mod windows_app {
             let mut first = true;
             loop {
                 let mut opts = ServerOptions::new();
+                opts.reject_remote_clients(true);
                 if first {
                     opts.first_pipe_instance(true);
                     first = false;
@@ -1874,7 +2323,19 @@ mod windows_app {
                     .await
                     {
                         if n > 0 {
-                            if let Some(invite) = parse_invite_link(&line) {
+                            if let Some(path) = parse_open_file_arg(&line) {
+                                if let Some(state) = app_clone.try_state::<AppState>() {
+                                    if let Ok(mut guard) = state.pending_open_file.lock() {
+                                        *guard = Some(path.clone());
+                                    }
+                                }
+                                if let Some(win) = app_clone.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app_clone.emit("app://open-file", path);
+                            } else if let Some(invite) = parse_invite_link(&line) {
                                 if let Some(state) = app_clone.try_state::<AppState>() {
                                     if let Ok(mut guard) = state.pending_deep_link.lock() {
                                         *guard = Some(invite.clone());
@@ -1894,10 +2355,81 @@ mod windows_app {
         });
     }
 
+    fn prune_startup_temp_orphans() {
+        let now = SystemTime::now();
+        let seven_days = Duration::from_secs(7 * 86_400);
+        let one_hour = Duration::from_secs(3600);
+
+        if let Some(thumbs_dir) = crate::thumbnails::thumbnail_cache_dir() {
+            crate::thumbnails::prune_thumbnail_cache_by_age(
+                &thumbs_dir,
+                Duration::from_secs(crate::thumbnails::THUMB_CACHE_MAX_IDLE_SECS),
+            );
+            crate::thumbnails::prune_thumbnail_cache(
+                &thumbs_dir,
+                crate::thumbnails::get_thumb_cache_cap_bytes(),
+            );
+        }
+        if let Some(local_app) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            let subs_dir = local_app.join("EpilodParty").join("cache").join("subs");
+            if let Ok(entries) = std::fs::read_dir(&subs_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if !p.is_file() {
+                        continue;
+                    }
+                    let is_old = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|mt| now.duration_since(mt).ok())
+                        .is_some_and(|age| age > seven_days);
+                    if is_old {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+            }
+        }
+
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !(name.starts_with("epilod_freeze_") || name.starts_with("epilod_intro_")) {
+                    continue;
+                }
+                let is_old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|mt| now.duration_since(mt).ok())
+                    .is_some_and(|age| age > one_hour);
+                if is_old {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
+    }
+
     pub fn run() {
         let initial_deep_link = extract_startup_deep_link();
         if let Some(ref invite) = initial_deep_link {
             if try_forward_deep_link_to_running_instance(invite) {
+                return;
+            }
+        }
+        let initial_open_file = if initial_deep_link.is_none() {
+            extract_startup_open_file()
+        } else {
+            None
+        };
+        if let Some(ref path) = initial_open_file {
+            if try_forward_line_to_running_instance(path) {
                 return;
             }
         }
@@ -1943,14 +2475,19 @@ mod windows_app {
         let voice_for_destroy = Arc::clone(&voice);
         let sync_for_destroy = Arc::clone(&sync);
 
+        let media_library = Arc::new(MediaLibraryState::default());
+        let media_library_for_setup = Arc::clone(&media_library);
+
         let app_state = AppState {
             mpv,
             sync,
             voice,
             autosync: Arc::new(AutoSyncController::new()),
             intro_detect: Arc::new(IntroDetectController::new()),
-            media_library: Arc::new(MediaLibraryState::default()),
+            media_library,
+            thumbnails: Arc::new(crate::thumbnails::ThumbnailController::default()),
             pending_deep_link: Arc::new(Mutex::new(initial_deep_link)),
+            pending_open_file: Arc::new(Mutex::new(initial_open_file)),
             logger,
             rate_guard: Arc::new(Mutex::new(CommandRateGuard::new())),
             network_policy: Arc::new(NetworkSharePolicy::new(false)),
@@ -2026,7 +2563,34 @@ mod windows_app {
                     let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 }
 
+                // Safety fallback: never leave the user with an invisible window if the WebView fails to signal readiness.
+                let app_for_reveal = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    if let Some(win) = app_for_reveal.get_webview_window("main") {
+                        if !win.is_visible().unwrap_or(true) {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                });
+
                 spawn_deep_link_pipe_listener(app.handle().clone());
+
+                let media_library_prewarm = Arc::clone(&media_library_for_setup);
+                tauri::async_runtime::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(|| {
+                        crate::subtitles::prune_shared_subtitle_cache(25, 14);
+                        crate::subtitles::prune_subtitle_cache_startup();
+                        crate::autosync::prune_stale_work_files_startup();
+                        prune_startup_temp_orphans();
+                    })
+                    .await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    media_library_prewarm
+                        .prewarm_default_roots(LocalPathOptions::default())
+                        .await;
+                });
 
                 // Lightweight UI-thread heartbeat watchdog: detects and logs main-thread stalls.
                 let app_handle = app.handle().clone();
@@ -2110,6 +2674,7 @@ mod windows_app {
                 mpv_set_speed,
                 mpv_set_loop,
                 mpv_set_aspect_mode,
+                mpv_set_dialogue_boost,
                 mpv_set_video_margin_right,
                 mpv_add_subtitle,
                 mpv_remove_subtitle,
@@ -2134,6 +2699,7 @@ mod windows_app {
                 window_drag_from_maximized,
                 set_allow_network_shares,
                 sync_connect,
+                sync_prewarm,
                 sync_reconnect,
                 sync_force_resync,
                 sync_set_room_admin,
@@ -2151,12 +2717,30 @@ mod windows_app {
                 sync_align_scene_here,
                 sync_run_p2p_auto_align,
                 sync_send_reaction,
+                sync_send_rating_vote,
                 sync_send_chat,
                 sync_send_chat_edit,
                 sync_send_chat_react,
                 sync_send_chat_typing,
+                sync_share_subtitle,
+                apply_shared_subtitle,
                 scan_media_paths,
                 consume_pending_deep_link,
+                consume_pending_open_file,
+                generate_seekbar_thumbnails,
+                cancel_seekbar_thumbnails,
+                clear_thumbnail_cache,
+                storage_read_all_domains,
+                storage_write_domain,
+                storage_get_stats,
+                storage_clear_cache,
+                storage_set_thumb_cap_mb,
+                storage_export_backup,
+                storage_import_backup,
+                storage_create_snapshot,
+                storage_list_snapshots,
+                storage_read_snapshot,
+                storage_open_userdata_folder,
                 probe_pinned_rooms,
                 find_local_media_matches,
                 check_local_files_exist,
@@ -2344,5 +2928,22 @@ mod tests {
         assert!(shrunk.height < 1040 && shrunk.height >= 640);
         assert!(shrunk.x + shrunk.width >= 1800);
         assert!(shrunk.y >= 0);
+    }
+
+    #[test]
+    fn test_compute_drag_restore_bounds_respects_150_percent_dpi_min_bounds() {
+        let min_phys = scale_logical_min_size(1024, 640, 1.5);
+        assert_eq!(min_phys, (1536, 960));
+
+        let restored = compute_drag_restore_bounds(
+            1440,
+            24,
+            (0, 0, 2880, 1560),
+            (0, 0, 2880, 1560),
+            (1024, 640),
+            min_phys,
+        );
+        assert_eq!(restored.width, 1536);
+        assert_eq!(restored.height, 960);
     }
 }

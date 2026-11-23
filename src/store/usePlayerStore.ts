@@ -25,6 +25,7 @@ interface PlayerState {
   durationSecs: number;
   volume: number;
   muted: boolean;
+  dialogueBoost: boolean;
   speed: number;
   looping: boolean;
   aspectMode: AspectMode;
@@ -43,6 +44,7 @@ interface PlayerState {
   setDurationSecs: (dur: number) => void;
   setVolume: (vol: number) => void;
   setMuted: (muted: boolean) => void;
+  setDialogueBoost: (enabled: boolean) => void;
   setSpeed: (speed: number) => void;
   setLooping: (looping: boolean) => void;
   setAspectMode: (aspect: AspectMode) => void;
@@ -54,7 +56,6 @@ interface PlayerState {
   setPlayerError: (err: string | null) => void;
   setTracks: (tracks: MpvTrack[]) => void;
   mergeDetectedSubLangs: (entries: ReadonlyArray<{ trackId: number; lang: string }>) => void;
-  clearDetectedSubLangs: () => void;
   flashFeedback: (text: string) => void;
   clearFeedback: () => void;
   flashSeekCue: (payload: { direction: "back" | "forward"; deltaSecs: number; actor?: string | null }) => void;
@@ -68,12 +69,34 @@ let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
 let seekCueSeq = 1;
 let seekCueTimer: ReturnType<typeof setTimeout> | null = null;
 
+function readDialogueBoostStorage(): boolean {
+  try {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("ep.dialogueBoost") === "true";
+    }
+  } catch {
+    // Ignore storage read restrictions
+  }
+  return false;
+}
+
+function writeDialogueBoostStorage(enabled: boolean): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("ep.dialogueBoost", enabled ? "true" : "false");
+    }
+  } catch {
+    // Ignore storage write restrictions
+  }
+}
+
 export const usePlayerStore = create<PlayerState>((set) => ({
   paused: true,
   positionSecs: 0,
   durationSecs: 0,
   volume: 100,
   muted: false,
+  dialogueBoost: readDialogueBoostStorage(),
   speed: 1.0,
   looping: false,
   aspectMode: "auto",
@@ -97,6 +120,10 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   setDurationSecs: (durationSecs) => set({ durationSecs }),
   setVolume: (volume) => set({ volume: Math.max(0, Math.min(130, Math.round(volume))) }),
   setMuted: (muted) => set({ muted }),
+  setDialogueBoost: (dialogueBoost) => {
+    writeDialogueBoostStorage(dialogueBoost);
+    set({ dialogueBoost });
+  },
   setSpeed: (speed) => set({ speed }),
   setLooping: (looping) => set({ looping }),
   setAspectMode: (aspectMode) => set({ aspectMode }),
@@ -120,7 +147,6 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       }
       return changed ? { detectedSubLangs: next } : state;
     }),
-  clearDetectedSubLangs: () => set({ detectedSubLangs: {} }),
 
   flashFeedback: (text) => {
     if (feedbackTimer) {

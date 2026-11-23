@@ -20,6 +20,7 @@ interface SeriesProgressState {
   relocateSeriesFolder: (seriesKey: string, newFolderPath: string, newFolderName?: string) => string | null;
   getSeries: (seriesKey: string) => SeriesProgressEntry | null;
   removeSeries: (seriesKey: string) => void;
+  hydrateSeriesMap: (map: Record<string, SeriesProgressEntry>) => void;
   clearAll: () => void;
 }
 
@@ -151,6 +152,12 @@ export const useSeriesProgressStore = create<SeriesProgressState>((set, get) => 
     delete next[seriesKey];
     saveJson(STORAGE_KEY, next);
     set({ series: next });
+  },
+
+  hydrateSeriesMap: (map) => {
+    const clean = trimLruMap(map, SERIES_PROGRESS_MAX);
+    saveJson(STORAGE_KEY, clean);
+    set({ series: clean });
   },
 
   clearAll: () => {

@@ -17,7 +17,7 @@ export interface SubtitleTrackDisplay {
  * Falls back to FFmpeg-detected language for untagged text tracks and `"Closed Captions"`
  * for untagged EIA-608/CEA-708 streams.
  */
-const INTERNAL_TEMP_SUB_RE = /^(?:decoded|embedded|autosync|epilod_synced|synced)_\d+_/i;
+const INTERNAL_TEMP_SUB_RE = /^(?:(?:decoded|embedded|autosync|epilod_synced|synced)_\d+_|shared_)/i;
 
 export function formatSubtitleTrackDisplay(
   track: MpvTrack,
@@ -110,20 +110,6 @@ export function formatDelaySigned(delaySecs: number): string {
 export function formatDelayLabel(delaySecs: number): string {
   const formatted = formatDelaySigned(delaySecs);
   return formatted === "+0.00s" ? "0.00s" : formatted;
-}
-
-export function formatTimingStatus(params: {
-  delaySecs: number;
-  hasTrack: boolean;
-  isAutoSynced?: boolean;
-}): string {
-  if (!params.hasTrack) {
-    return "No subtitle selected";
-  }
-  if (params.isAutoSynced) {
-    return `Auto-synced (${formatDelaySigned(params.delaySecs)})`;
-  }
-  return `Delay ${formatDelaySigned(params.delaySecs)}`;
 }
 
 export function buildAudioTrackOptions(tracks: readonly MpvTrack[]): TrackOption[] {

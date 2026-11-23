@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { isDesktop } from "../lib/bridge";
+import { buildBackupEnvelopeJson } from "../lib/dataBackup";
+import { storageCreateSnapshot } from "../lib/storageBridge";
 import {
   applyAndRestartUpdate,
   cancelUpdateDownload,
@@ -30,7 +32,6 @@ interface UpdaterStoreState {
   cancelDownload: () => Promise<void>;
   applyAndRestart: () => Promise<void>;
   markAutoDownloadAttempted: (version: string) => void;
-  clearError: () => void;
 }
 
 let unlistenProgressPromise: Promise<() => void> | null = null;
@@ -200,6 +201,13 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
     if (get().isApplying || get().isDownloading) return;
     set({ isApplying: true, error: null });
     try {
+      try {
+        const ver = get().status?.currentVersion ?? "0.1.5";
+        const json = buildBackupEnvelopeJson(ver);
+        await storageCreateSnapshot("pre-update", json);
+      } catch {
+        // Pre-update snapshot is best-effort and must not block applying an update
+      }
       await applyAndRestartUpdate();
     } catch (err) {
       const message = toErrorMessage(err);
@@ -214,6 +222,4 @@ export const useUpdaterStore = create<UpdaterStoreState>((set, get) => ({
   },
 
   markAutoDownloadAttempted: (version) => set({ autoDownloadedVersion: version }),
-
-  clearError: () => set({ error: null }),
 }));

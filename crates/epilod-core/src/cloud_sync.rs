@@ -5,18 +5,39 @@ use sha2::{Digest, Sha256};
 
 pub const CLOUD_DEFAULT_ENDPOINT: &str = "wss://epilod-sync.ahmednazief.workers.dev";
 pub const CLOUD_PROTOCOL_VERSION: u8 = 1;
-pub const CLOUD_DRIFT_SEEK_THRESHOLD_SECS: f64 = 1.5;
-pub const CLOUD_DRIFT_SPEED_THRESHOLD_SECS: f64 = 0.25;
+
+pub fn sha256_hex(input: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(input.as_bytes());
+    let digest = h.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Room-salted SHA-256 password hash so plaintext passwords never leave the device.
 pub fn hash_room_password(wire_room: &str, password: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(b"epilod-pw-v1:");
-    h.update(wire_room.trim().as_bytes());
-    h.update(b":");
-    h.update(password.as_bytes());
-    let digest = h.finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    sha256_hex(&format!("epilod-pw-v1:{}:{}", wire_room.trim(), password))
+}
+
+/// Derives a `/peek` proof token from knowledge of the room code or password.
+pub fn peek_proof_for_room(wire_room: &str, secret: &str) -> String {
+    sha256_hex(&format!(
+        "epilod-peek-v1:{}:{}",
+        wire_room.trim(),
+        secret.trim()
+    ))
+}
+
+/// Resolves the shared secret used for `/peek` proof generation across both join and room probing.
+pub fn default_peek_secret<'a>(
+    wire_room: &'a str,
+    six_digit: Option<&'a str>,
+    password: Option<&'a str>,
+) -> &'a str {
+    password
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .or_else(|| six_digit.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or(wire_room)
 }
 
 fn percent_encode_query_value(input: &str) -> String {
@@ -50,14 +71,23 @@ pub fn build_cloud_http_base(endpoint: &str) -> String {
     }
 }
 
-pub fn build_cloud_peek_path(wire_rooms: &[String]) -> String {
-    let joined = wire_rooms
+pub fn build_cloud_peek_path_with_proofs(wire_rooms: &[String], proofs: &[String]) -> String {
+    let rooms_part = wire_rooms
         .iter()
         .take(8)
         .map(|r| format!("room={}", percent_encode_query_value(r.trim())))
         .collect::<Vec<_>>()
         .join("&");
-    format!("/peek?{joined}")
+    if proofs.is_empty() {
+        return format!("/peek?{rooms_part}");
+    }
+    let proofs_part = proofs
+        .iter()
+        .take(8)
+        .map(|p| percent_encode_query_value(p.trim()))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("/peek?{rooms_part}&proofs={proofs_part}")
 }
 
 /// Parses an HTTP/1.x response into `(status_code, decoded_body)`, properly handling
@@ -107,12 +137,24 @@ pub fn decode_http_response_body(raw: &[u8]) -> Option<(u16, Vec<u8>)> {
     Some((status, out))
 }
 
-/// Estimates `server_time_ms - local_time_ms` using the lowest-RTT sample
-/// to stay resilient against transient Wi-Fi jitter spikes.
+#[derive(Debug, Clone, Copy)]
+struct ClockSample {
+    at_ms: f64,
+    rtt_ms: f64,
+    offset_ms: f64,
+}
+
+const CLOCK_WINDOW_MS: f64 = 300_000.0; // 5 minutes
+const CLOCK_MAX_SAMPLES: usize = 8;
+
+/// Estimates `server_time_ms - local_time_ms` using a windowed minimum-RTT
+/// filter so transient Wi-Fi spikes are ignored while route changes recover.
 #[derive(Debug, Clone, Default)]
 pub struct ClockSyncEstimator {
-    best_rtt_ms: Option<f64>,
+    samples: Vec<ClockSample>,
     offset_ms: f64,
+    jitter_ms: f64,
+    last_rtt_ms: Option<f64>,
     sample_count: u32,
 }
 
@@ -127,27 +169,91 @@ impl ClockSyncEstimator {
             return;
         }
         let rtt = (client_recv_ms - client_send_ms).max(0.0);
-        if rtt > 15_000.0 {
-            return;
-        }
         let midpoint = client_send_ms + rtt * 0.5;
         let candidate_offset = server_time_ms - midpoint;
-        self.sample_count = self.sample_count.saturating_add(1);
+        self.push_sample(client_recv_ms, rtt, candidate_offset);
+    }
 
-        match self.best_rtt_ms {
+    /// NTP 4-timestamp clock sample (`t1`: client send, `t2`: server recv, `t3`: server send,
+    /// `t4`: client recv) that subtracts server processing time `t3 - t2`.
+    pub fn record_ntp_sample(
+        &mut self,
+        t1_client_send_ms: f64,
+        t2_server_recv_ms: f64,
+        t3_server_send_ms: f64,
+        t4_client_recv_ms: f64,
+    ) {
+        if !t1_client_send_ms.is_finite()
+            || !t2_server_recv_ms.is_finite()
+            || !t3_server_send_ms.is_finite()
+            || !t4_client_recv_ms.is_finite()
+        {
+            return;
+        }
+        let server_proc = (t3_server_send_ms - t2_server_recv_ms).max(0.0);
+        let rtt = ((t4_client_recv_ms - t1_client_send_ms) - server_proc).max(0.0);
+        let candidate_offset = ((t2_server_recv_ms - t1_client_send_ms)
+            + (t3_server_send_ms - t4_client_recv_ms))
+            * 0.5;
+        self.push_sample(t4_client_recv_ms, rtt, candidate_offset);
+    }
+
+    fn push_sample(&mut self, client_recv_ms: f64, rtt: f64, candidate_offset: f64) {
+        if rtt > 15_000.0 || !candidate_offset.is_finite() {
+            return;
+        }
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.record_rtt_only(rtt);
+
+        self.samples
+            .retain(|s| (client_recv_ms - s.at_ms) <= CLOCK_WINDOW_MS && client_recv_ms >= s.at_ms);
+
+        let window_best = self.samples.iter().map(|s| s.rtt_ms).reduce(f64::min);
+
+        match window_best {
             None => {
-                self.best_rtt_ms = Some(rtt);
                 self.offset_ms = candidate_offset;
             }
             Some(best) if rtt <= best + 15.0 => {
-                if rtt < best {
-                    self.best_rtt_ms = Some(rtt);
-                }
-                // Smooth update when sample is near best RTT.
                 self.offset_ms = self.offset_ms * 0.35 + candidate_offset * 0.65;
             }
-            _ => {}
+            Some(_) => {}
         }
+
+        self.samples.push(ClockSample {
+            at_ms: client_recv_ms,
+            rtt_ms: rtt,
+            offset_ms: candidate_offset,
+        });
+        if self.samples.len() > CLOCK_MAX_SAMPLES {
+            self.samples.remove(0);
+        }
+
+        // If the minimum RTT in the window shifted up (e.g. VPN/route change),
+        // re-anchor offset to the lowest-RTT sample in the current window.
+        if let Some(best_sample) = self
+            .samples
+            .iter()
+            .min_by(|a, b| a.rtt_ms.total_cmp(&b.rtt_ms))
+        {
+            if let Some(prev_best) = window_best {
+                if best_sample.rtt_ms > prev_best + 15.0 {
+                    self.offset_ms = best_sample.offset_ms;
+                }
+            }
+        }
+    }
+
+    /// Updates rolling RTT and jitter EWMA from lightweight keepalive `"pong"` frames.
+    pub fn record_rtt_only(&mut self, rtt_ms: f64) {
+        if !rtt_ms.is_finite() || !(0.0..=15_000.0).contains(&rtt_ms) {
+            return;
+        }
+        if let Some(prev) = self.last_rtt_ms {
+            let delta = (rtt_ms - prev).abs();
+            self.jitter_ms = self.jitter_ms * 0.75 + delta * 0.25;
+        }
+        self.last_rtt_ms = Some(rtt_ms);
     }
 
     pub fn estimated_server_ms(&self, local_now_ms: f64) -> f64 {
@@ -159,12 +265,122 @@ impl ClockSyncEstimator {
     }
 
     pub fn best_rtt_ms(&self) -> Option<f64> {
-        self.best_rtt_ms
+        self.samples
+            .iter()
+            .map(|s| s.rtt_ms)
+            .reduce(f64::min)
+            .or(self.last_rtt_ms)
+    }
+
+    pub fn last_rtt_ms(&self) -> Option<f64> {
+        self.last_rtt_ms
+    }
+
+    pub fn jitter_ms(&self) -> f64 {
+        self.jitter_ms
     }
 
     pub fn sample_count(&self) -> u32 {
         self.sample_count
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DriftAction {
+    None,
+    SetSpeed(f64),
+    Seek,
+    ResetSpeed,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DriftController {
+    pub min_deadband_secs: f64,
+    pub min_seek_threshold_secs: f64,
+    pub max_seek_threshold_secs: f64,
+}
+
+impl Default for DriftController {
+    fn default() -> Self {
+        Self {
+            min_deadband_secs: 0.08,
+            min_seek_threshold_secs: 0.80,
+            max_seek_threshold_secs: 2.00,
+        }
+    }
+}
+
+impl DriftController {
+    pub fn deadband_secs(&self, jitter_secs: f64) -> f64 {
+        (2.0 * jitter_secs.max(0.0)).max(self.min_deadband_secs)
+    }
+
+    pub fn seek_threshold_secs(&self, jitter_secs: f64) -> f64 {
+        (self.min_seek_threshold_secs + 4.0 * jitter_secs.max(0.0))
+            .clamp(self.min_seek_threshold_secs, self.max_seek_threshold_secs)
+    }
+
+    pub fn decide(
+        &self,
+        drift_secs: f64,
+        jitter_secs: f64,
+        soft_active: bool,
+        last_speed: f64,
+    ) -> DriftAction {
+        if !drift_secs.is_finite() {
+            return DriftAction::None;
+        }
+        let abs_drift = drift_secs.abs();
+        let deadband = self.deadband_secs(jitter_secs);
+        let seek_thr = self.seek_threshold_secs(jitter_secs);
+
+        if abs_drift >= seek_thr {
+            return DriftAction::Seek;
+        }
+        if abs_drift >= deadband || (soft_active && abs_drift >= deadband * 0.5) {
+            let target_speed = (1.0 + drift_secs * 0.20).clamp(0.92, 1.08);
+            if !soft_active || (target_speed - last_speed).abs() >= 0.005 {
+                return DriftAction::SetSpeed(target_speed);
+            }
+            return DriftAction::None;
+        }
+        if soft_active {
+            return DriftAction::ResetSpeed;
+        }
+        DriftAction::None
+    }
+}
+
+pub fn should_apply_welcome_state(retained: bool, state_seq: u64, participants_len: usize) -> bool {
+    retained || participants_len > 1 || state_seq > 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaybackAction {
+    pub set_pause: Option<bool>,
+    pub seek_to: Option<f64>,
+}
+
+pub fn compute_playback_action(
+    state: &CloudPlaybackState,
+    target_local: f64,
+    snap_position: f64,
+    snap_paused: bool,
+    seek_threshold_secs: f64,
+) -> PlaybackAction {
+    let set_pause = if snap_paused != state.paused {
+        Some(state.paused)
+    } else {
+        None
+    };
+    let abs_drift = (target_local - snap_position).abs();
+    let should_seek = if state.paused {
+        state.do_seek || abs_drift > 0.08
+    } else {
+        state.do_seek || abs_drift >= seek_threshold_secs
+    };
+    let seek_to = should_seek.then_some(target_local.max(0.0));
+    PlaybackAction { set_pause, seek_to }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -203,6 +419,12 @@ pub struct CloudParticipant {
     pub is_host: bool,
     pub is_admin: bool,
     pub file: Option<WireFileInfo>,
+    #[serde(default)]
+    pub reported_position: Option<f64>,
+    #[serde(default)]
+    pub buffering: bool,
+    #[serde(default)]
+    pub lag_secs: Option<f64>,
 }
 
 impl CloudParticipant {
@@ -250,6 +472,13 @@ pub struct CloudControlNotice {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudResumeHint {
+    pub position: f64,
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CloudClientMsg {
     Hello {
@@ -266,6 +495,16 @@ pub enum CloudClientMsg {
         file: Option<WireFileInfo>,
         #[serde(rename = "isReady")]
         is_ready: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume: Option<CloudResumeHint>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caps: Option<Vec<String>>,
+        #[serde(rename = "clientVersion", skip_serializing_if = "Option::is_none")]
+        client_version: Option<String>,
+        #[serde(rename = "peekProofHash", skip_serializing_if = "Option::is_none")]
+        peek_proof_hash: Option<String>,
+        #[serde(rename = "clientMs", skip_serializing_if = "Option::is_none")]
+        client_ms: Option<f64>,
     },
     Ping {
         #[serde(rename = "clientMs")]
@@ -273,12 +512,22 @@ pub enum CloudClientMsg {
     },
     Play {
         position: f64,
+        #[serde(rename = "clientServerMs", skip_serializing_if = "Option::is_none")]
+        client_server_ms: Option<f64>,
     },
     Pause {
         position: f64,
+        #[serde(rename = "clientServerMs", skip_serializing_if = "Option::is_none")]
+        client_server_ms: Option<f64>,
     },
     Seek {
         position: f64,
+        #[serde(rename = "clientServerMs", skip_serializing_if = "Option::is_none")]
+        client_server_ms: Option<f64>,
+    },
+    Status {
+        position: f64,
+        buffering: bool,
     },
     Resync,
     File {
@@ -342,6 +591,14 @@ pub enum CloudServerMsg {
         host_token: Option<String>,
         #[serde(rename = "serverTimeMs")]
         server_time_ms: f64,
+        #[serde(rename = "clientMs", default)]
+        client_ms: Option<f64>,
+        #[serde(rename = "recvMs", default)]
+        recv_ms: Option<f64>,
+        #[serde(default)]
+        retained: bool,
+        #[serde(rename = "serverCaps", default)]
+        server_caps: Vec<String>,
         state: CloudPlaybackState,
         participants: Vec<CloudParticipant>,
         #[serde(rename = "roomControl")]
@@ -363,6 +620,18 @@ pub enum CloudServerMsg {
         set_by: Option<String>,
         #[serde(rename = "doSeek", default)]
         do_seek: bool,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    #[serde(rename = "playBlocked")]
+    PlayBlocked {
+        usernames: Vec<String>,
+    },
+    #[serde(rename = "rateLimited")]
+    RateLimited {
+        bucket: String,
+        #[serde(rename = "retryAfterMs")]
+        retry_after_ms: u64,
     },
     Participants {
         participants: Vec<CloudParticipant>,
@@ -555,6 +824,22 @@ mod tests {
                 r#"{"type":"error","code":"ROOM_OCCUPIED","message":"x"}"#,
                 |m| matches!(m, CloudServerMsg::Error { .. }),
             ),
+            (
+                r#"{"type":"playBlocked","usernames":["Bob"]}"#,
+                |m| matches!(m, CloudServerMsg::PlayBlocked { usernames } if usernames == &["Bob"]),
+            ),
+            (
+                r#"{"type":"rateLimited","bucket":"playback","retryAfterMs":1000}"#,
+                |m| {
+                    matches!(
+                        m,
+                        CloudServerMsg::RateLimited {
+                            retry_after_ms: 1000,
+                            ..
+                        }
+                    )
+                },
+            ),
         ];
         for (raw, check) in cases {
             let parsed: CloudServerMsg =
@@ -580,8 +865,14 @@ mod tests {
                 duration: Some(9.5),
             }),
             is_ready: true,
+            resume: None,
+            caps: Some(vec!["readygate".into()]),
+            client_version: Some("1.0.0".into()),
+            peek_proof_hash: None,
+            client_ms: Some(1234.5),
         });
         assert_eq!(hello["type"], "hello");
+        assert_eq!(hello["clientMs"], 1234.5);
         assert_eq!(hello["claimEmpty"], true);
         assert_eq!(hello["hostOnly"], true);
         assert_eq!(hello["hostToken"], "tok");
@@ -590,9 +881,34 @@ mod tests {
         assert_eq!(hello["file"]["name"], "m.mkv");
 
         assert_eq!(v(&CloudClientMsg::Ping { client_ms: 1.5 })["clientMs"], 1.5);
-        assert_eq!(v(&CloudClientMsg::Play { position: 2.0 })["type"], "play");
-        assert_eq!(v(&CloudClientMsg::Pause { position: 2.0 })["type"], "pause");
-        assert_eq!(v(&CloudClientMsg::Seek { position: 2.0 })["type"], "seek");
+        assert_eq!(
+            v(&CloudClientMsg::Play {
+                position: 2.0,
+                client_server_ms: None
+            })["type"],
+            "play"
+        );
+        assert_eq!(
+            v(&CloudClientMsg::Pause {
+                position: 2.0,
+                client_server_ms: None
+            })["type"],
+            "pause"
+        );
+        assert_eq!(
+            v(&CloudClientMsg::Seek {
+                position: 2.0,
+                client_server_ms: None
+            })["type"],
+            "seek"
+        );
+        assert_eq!(
+            v(&CloudClientMsg::Status {
+                position: 5.0,
+                buffering: true
+            })["type"],
+            "status"
+        );
         assert_eq!(v(&CloudClientMsg::Resync)["type"], "resync");
         let ready = v(&CloudClientMsg::Ready {
             is_ready: false,
@@ -674,7 +990,7 @@ mod tests {
             "wss://epilod-sync.ahmednazief.workers.dev/ws?v=1&room=Movie%20Night"
         );
         assert_eq!(
-            build_cloud_peek_path(&["ep-1".into(), "Movie, Night".into()]),
+            build_cloud_peek_path_with_proofs(&["ep-1".into(), "Movie, Night".into()], &[]),
             "/peek?room=ep-1&room=Movie%2C%20Night"
         );
     }
@@ -720,5 +1036,69 @@ mod tests {
             ..playing
         };
         assert!((paused.projected_position(15_000.0) - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clock_sync_recovers_after_window_expires() {
+        let mut est = ClockSyncEstimator::new();
+        est.record_pong(1000.0, 1020.0, 1510.0); // offset +500, rtt 20
+        assert!((est.offset_ms() - 500.0).abs() < 0.01);
+
+        // 6 minutes later, route changed (rtt 80ms, new offset +600ms)
+        est.record_pong(361_000.0, 361_080.0, 361_640.0);
+        assert!((est.offset_ms() - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn drift_controller_proportional_and_hysteresis() {
+        let ctrl = DriftController::default();
+        assert_eq!(ctrl.decide(0.05, 0.01, false, 1.0), DriftAction::None);
+        match ctrl.decide(0.30, 0.01, false, 1.0) {
+            DriftAction::SetSpeed(s) => assert!((s - 1.06).abs() < 1e-6),
+            other => panic!("expected SetSpeed, got {other:?}"),
+        }
+        assert_eq!(ctrl.decide(0.06, 0.01, true, 1.01), DriftAction::None);
+        assert_eq!(ctrl.decide(0.02, 0.01, true, 1.01), DriftAction::ResetSpeed);
+        assert_eq!(ctrl.decide(0.95, 0.01, false, 1.0), DriftAction::Seek);
+    }
+
+    #[test]
+    fn welcome_and_playback_action_helpers() {
+        assert!(!should_apply_welcome_state(false, 0, 1));
+        assert!(should_apply_welcome_state(true, 0, 1));
+        assert!(should_apply_welcome_state(false, 0, 2));
+        assert!(should_apply_welcome_state(false, 3, 1));
+
+        let paused_state = CloudPlaybackState {
+            position: 100.0,
+            paused: true,
+            seq: 1,
+            server_time_ms: 1000.0,
+            set_by: None,
+            do_seek: false,
+        };
+        let act = compute_playback_action(&paused_state, 100.2, 100.0, false, 0.8);
+        assert_eq!(act.set_pause, Some(true));
+        assert_eq!(act.seek_to, Some(100.2));
+    }
+
+    #[test]
+    fn peek_proof_is_deterministic_and_distinct() {
+        let p1 = peek_proof_for_room("fix-123456", "123456");
+        let p2 = peek_proof_for_room("fix-123456", "123456");
+        let p3 = peek_proof_for_room("fix-123456", "other");
+        assert_eq!(p1, p2);
+        assert_ne!(p1, p3);
+        assert_eq!(p1.len(), 64);
+    }
+
+    #[test]
+    fn clock_sync_ntp_sample_subtracts_server_processing() {
+        let mut clock = ClockSyncEstimator::new();
+        // True offset = +500ms, network one-way = 20ms, server processing = 10ms.
+        // t1 = 1000, t2 = 1520, t3 = 1530, t4 = 1050.
+        clock.record_ntp_sample(1000.0, 1520.0, 1530.0, 1050.0);
+        assert!((clock.offset_ms() - 500.0).abs() < 0.01);
+        assert!((clock.last_rtt_ms().unwrap() - 40.0).abs() < 0.01);
     }
 }

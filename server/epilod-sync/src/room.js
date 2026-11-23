@@ -6,20 +6,32 @@ const MAX_CHAT_CHARS = 500;
 const MAX_USERNAME_CHARS = 48;
 const MAX_FILENAME_CHARS = 240;
 const MAX_STRIKES = 10;
+const STRIKE_DECAY_MS = 60_000;
 const HOST_RECONNECT_GRACE_MS = 60_000;
 const EMPTY_CLEANUP_ALARM_MS = 65_000;
+const LIVENESS_ALARM_MS = 30_000;
+const GHOST_IDLE_TIMEOUT_MS = 90_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+const SERVER_VERSION = "1.1.0";
+const SERVER_CAPS = ["readygate", "clientts", "status", "outbox", "peekproof"];
 
 const TEXT_ENCODER = new TextEncoder();
 
 const RATE_LIMITS = {
-  playback: { max: 8, windowMs: 2_000 },
+  playback: { max: 12, windowMs: 2_000 },
   chat: { max: 8, windowMs: 2_000 },
   typing: { max: 2, windowMs: 2_000 },
   p2pSignal: { max: 12, windowMs: 60_000 },
   ping: { max: 6, windowMs: 10_000 },
   control: { max: 6, windowMs: 5_000 },
+  status: { max: 1, windowMs: 4_000 },
 };
+
+function log(level, event, fields = {}) {
+  try {
+    console.log(JSON.stringify({ level, event, ...fields, ts: Date.now() }));
+  } catch {}
+}
 
 function stripUnsafeUnicode(str) {
   if (typeof str !== "string") return "";
@@ -62,6 +74,20 @@ function randomTokenHex() {
     .join("");
 }
 
+function sanitizeCaps(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw.slice(0, 16)) {
+    const clean = clampString(item, 24);
+    if (clean) out.push(clean);
+  }
+  return out;
+}
+
+function hasCap(att, cap) {
+  return Array.isArray(att?.caps) && att.caps.includes(cap);
+}
+
 function sanitizeFile(raw) {
   if (!raw || typeof raw !== "object") return null;
   const name = clampString(raw.name, MAX_FILENAME_CHARS);
@@ -89,6 +115,8 @@ function defaultRoomState() {
     hostDisconnectedAt: null,
     admins: [],
     passwordHash: null,
+    emptySince: null,
+    peekProofHash: null,
   };
 }
 
@@ -96,15 +124,29 @@ export class RoomDO extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.rateState = new WeakMap();
+    this.attCache = new WeakMap();
     this.cachedState = null;
     this.schemaReady = false;
-    this.hasAlarm = false;
-    this.badPasswordWindow = { startMs: 0, count: 0 };
+    this.badPasswordMap = new Map();
 
     // Zero-compute edge auto-response for lightweight keepalive pings.
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong")
     );
+  }
+
+  getAttachment(ws) {
+    let att = this.attCache.get(ws);
+    if (!att) {
+      att = ws.deserializeAttachment();
+      if (att) this.attCache.set(ws, att);
+    }
+    return att;
+  }
+
+  saveAttachment(ws, att) {
+    this.attCache.set(ws, att);
+    ws.serializeAttachment(att);
   }
 
   ensureSchema() {
@@ -145,9 +187,16 @@ export class RoomDO extends DurableObject {
     );
   }
 
+  async ensureAlarmAt(targetMs) {
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || existing > targetMs + 2_000) {
+      await this.ctx.storage.setAlarm(targetMs);
+    }
+  }
+
   evictStaleUnjoinedSockets(nowMs = Date.now()) {
     for (const ws of this.ctx.getWebSockets()) {
-      const att = ws.deserializeAttachment();
+      const att = this.getAttachment(ws);
       if (!att || (!att.joined && nowMs - (att.joinedAt || 0) > HANDSHAKE_TIMEOUT_MS)) {
         try {
           ws.close(1008, "Handshake timeout");
@@ -165,7 +214,7 @@ export class RoomDO extends DurableObject {
   getActiveSockets() {
     const out = [];
     for (const ws of this.ctx.getWebSockets()) {
-      const att = ws.deserializeAttachment();
+      const att = this.getAttachment(ws);
       if (att && att.joined) {
         out.push({ ws, att });
       }
@@ -179,9 +228,22 @@ export class RoomDO extends DurableObject {
     return this.getActiveSockets().map(({ att }) => {
       const lower = att.username.toLowerCase();
       const isHost = Boolean(
-        state.hostUsername && state.hostUsername.toLowerCase() === lower
+        state.hostOnly &&
+        att.isHost &&
+        state.hostUsername &&
+        state.hostUsername.toLowerCase() === lower
       );
       const isAdmin = !isHost && adminSet.has(lower);
+      const reportedPosition =
+        typeof att.reportedPosition === "number" && Number.isFinite(att.reportedPosition)
+          ? att.reportedPosition
+          : null;
+      const lagSecs =
+        typeof att.reportedLagSecs === "number" && Number.isFinite(att.reportedLagSecs)
+          ? att.reportedLagSecs
+          : reportedPosition !== null
+            ? Math.round((pos - reportedPosition) * 100) / 100
+            : null;
       return {
         username: att.username,
         room: roomName,
@@ -193,14 +255,20 @@ export class RoomDO extends DurableObject {
         isHost,
         isAdmin,
         file: att.file || null,
+        reportedPosition,
+        buffering: Boolean(att.buffering),
+        lagSecs,
       };
     });
   }
 
-  buildRoomControlFor(state, username) {
+  buildRoomControlFor(state, username, attIsHost = false) {
     const lower = (username || "").toLowerCase();
     const localIsHost = Boolean(
-      state.hostUsername && state.hostUsername.toLowerCase() === lower
+      state.hostOnly &&
+      attIsHost &&
+      state.hostUsername &&
+      state.hostUsername.toLowerCase() === lower
     );
     const localIsAdmin =
       !localIsHost && state.admins.some((a) => a.toLowerCase() === lower);
@@ -225,6 +293,7 @@ export class RoomDO extends DurableObject {
       state.hostDisconnectedAt = null;
       state.admins = [];
       this.saveState(state);
+      log("info", "host.expired", { room: roomName });
       this.broadcastRoomControl(state, { kind: "hostAbsentUnlocked", actor: null });
       if (roomName) {
         this.broadcastParticipants(roomName, state);
@@ -234,11 +303,11 @@ export class RoomDO extends DurableObject {
     return false;
   }
 
-  canControlPlayback(roomName, state, username, nowMs = Date.now()) {
+  canControlPlayback(roomName, state, att, nowMs = Date.now()) {
     this.expireAbsentHostIfNeeded(roomName, state, nowMs);
     if (!state.hostOnly) return true;
-    const lower = (username || "").toLowerCase();
-    if (state.hostUsername && state.hostUsername.toLowerCase() === lower) {
+    const lower = (att?.username || "").toLowerCase();
+    if (att?.isHost && state.hostUsername && state.hostUsername.toLowerCase() === lower) {
       return true;
     }
     if (state.admins.some((a) => a.toLowerCase() === lower)) {
@@ -263,17 +332,38 @@ export class RoomDO extends DurableObject {
     }
   }
 
-  broadcastParticipants(roomName, state) {
+  broadcastParticipants(roomName, state, excludeWs = null) {
     const participants = this.buildParticipants(roomName, state);
-    this.broadcastJson({ type: "participants", participants });
+    this.broadcastJson({ type: "participants", participants }, excludeWs);
   }
 
-  broadcastRoomControl(state, notice = null) {
+  broadcastRoomControl(state, notice = null, targetUsername = null) {
+    const targetLower = targetUsername ? targetUsername.toLowerCase() : null;
+    const adminSet = state.admins.length > 0 ? new Set(state.admins.map((a) => a.toLowerCase())) : null;
+    let guestPlainRaw = null;
     for (const { ws, att } of this.getActiveSockets()) {
+      const includeNotice =
+        notice && (!targetLower || (att.username || "").toLowerCase() === targetLower);
+      const isHostOrAdmin =
+        state.hostOnly &&
+        (att.isHost || (adminSet && adminSet.has((att.username || "").toLowerCase())));
+      if (!includeNotice && !isHostOrAdmin) {
+        if (guestPlainRaw === null) {
+          guestPlainRaw = JSON.stringify({
+            type: "roomControl",
+            roomControl: this.buildRoomControlFor(state, att.username, false),
+            notice: null,
+          });
+        }
+        try {
+          ws.send(guestPlainRaw);
+        } catch {}
+        continue;
+      }
       this.sendJson(ws, {
         type: "roomControl",
-        roomControl: this.buildRoomControlFor(state, att.username),
-        notice,
+        roomControl: this.buildRoomControlFor(state, att.username, Boolean(att.isHost)),
+        notice: includeNotice ? notice : null,
       });
     }
   }
@@ -283,10 +373,13 @@ export class RoomDO extends DurableObject {
     if (!cfg) return true;
     let entry = this.rateState.get(ws);
     if (!entry) {
-      entry = { buckets: {}, strikes: 0 };
+      entry = { buckets: {}, strikes: 0, lastStrikeAt: 0 };
       this.rateState.set(ws, entry);
     }
     const now = Date.now();
+    if (entry.strikes > 0 && now - entry.lastStrikeAt > STRIKE_DECAY_MS) {
+      entry.strikes = 0;
+    }
     let arr = entry.buckets[bucket];
     if (!arr) {
       arr = [];
@@ -297,6 +390,7 @@ export class RoomDO extends DurableObject {
     }
     if (arr.length >= cfg.max) {
       entry.strikes += 1;
+      entry.lastStrikeAt = now;
       if (entry.strikes >= MAX_STRIKES) {
         try {
           ws.close(1008, "Rate limit exceeded");
@@ -311,10 +405,15 @@ export class RoomDO extends DurableObject {
   addStrike(ws) {
     let entry = this.rateState.get(ws);
     if (!entry) {
-      entry = { buckets: {}, strikes: 0 };
+      entry = { buckets: {}, strikes: 0, lastStrikeAt: 0 };
       this.rateState.set(ws, entry);
     }
+    const now = Date.now();
+    if (entry.strikes > 0 && now - entry.lastStrikeAt > STRIKE_DECAY_MS) {
+      entry.strikes = 0;
+    }
     entry.strikes += 1;
+    entry.lastStrikeAt = now;
     if (entry.strikes >= MAX_STRIKES) {
       try {
         ws.close(1008, "Policy violation");
@@ -322,9 +421,20 @@ export class RoomDO extends DurableObject {
     }
   }
 
-  deduplicateUsername(rawName, excludeWs) {
+  pruneBadPasswordMap(nowMs = Date.now()) {
+    for (const [key, entry] of this.badPasswordMap) {
+      if (nowMs - entry.startMs >= 60_000) {
+        this.badPasswordMap.delete(key);
+      }
+    }
+  }
+
+  deduplicateUsername(rawName, excludeWs, reservedLower = null) {
     const base = clampString(rawName, MAX_USERNAME_CHARS) || "Guest";
     const used = new Set();
+    if (reservedLower) {
+      used.add(reservedLower);
+    }
     for (const { ws, att } of this.getActiveSockets()) {
       if (ws === excludeWs) continue;
       used.add(att.username.toLowerCase());
@@ -337,10 +447,9 @@ export class RoomDO extends DurableObject {
     return `${base}-${Math.floor(Math.random() * 900 + 100)}`;
   }
 
-  async peek() {
+  async peek(proof = null) {
     this.evictStaleUnjoinedSockets();
     const active = this.getActiveSockets();
-    const state = this.loadState();
     if (active.length === 0) {
       return {
         onlineCount: 0,
@@ -349,13 +458,24 @@ export class RoomDO extends DurableObject {
         locked: false,
       };
     }
+    const state = this.loadState();
     const locked = Boolean(state.passwordHash);
-    if (locked) {
+    let authorized = false;
+    if (
+      typeof proof === "string" &&
+      proof.length > 0 &&
+      proof.length <= 128 &&
+      state.peekProofHash
+    ) {
+      const candidateHash = await sha256Hex(proof);
+      authorized = constantTimeEqualHex(candidateHash, state.peekProofHash);
+    }
+    if (!authorized) {
       return {
         onlineCount: active.length,
         usernamesPreview: [],
         activeMediaHint: null,
-        locked: true,
+        locked,
       };
     }
     const usernamesPreview = active.slice(0, 4).map(({ att }) => att.username);
@@ -365,7 +485,7 @@ export class RoomDO extends DurableObject {
       onlineCount: active.length,
       usernamesPreview,
       activeMediaHint,
-      locked: false,
+      locked,
     };
   }
 
@@ -379,7 +499,13 @@ export class RoomDO extends DurableObject {
     this.evictStaleUnjoinedSockets();
     const activeCount = this.ctx.getWebSockets().length;
     if (activeCount >= MAX_ROOM_USERS) {
-      return new Response("Room full", { status: 429 });
+      return new Response(
+        JSON.stringify({ ok: false, error: "ROOM_FULL" }),
+        {
+          status: 409,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        }
+      );
     }
 
     const roomName = clampString(url.searchParams.get("room") || "", 64);
@@ -387,20 +513,30 @@ export class RoomDO extends DurableObject {
       return new Response("Missing room", { status: 400 });
     }
 
+    const clientKey = clampString(request.headers.get("X-Epilod-Client") || "", 32) || "anon";
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
+    const nowMs = Date.now();
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({
+    this.saveAttachment(server, {
       joined: false,
       room: roomName,
       username: "",
+      isHost: false,
       isReady: false,
       manualNotReady: false,
       file: null,
-      joinedAt: Date.now(),
+      joinedAt: nowMs,
+      lastMsgAt: nowMs,
+      clientKey,
+      caps: [],
+      clientVersion: null,
+      reportedPosition: null,
+      buffering: false,
     });
 
+    await this.ensureAlarmAt(nowMs + LIVENESS_ALARM_MS);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -411,7 +547,7 @@ export class RoomDO extends DurableObject {
     }
     if (
       message.length > MAX_MESSAGE_BYTES ||
-      TEXT_ENCODER.encode(message).byteLength > MAX_MESSAGE_BYTES
+      (message.length > 1365 && TEXT_ENCODER.encode(message).byteLength > MAX_MESSAGE_BYTES)
     ) {
       this.sendJson(ws, {
         type: "error",
@@ -434,10 +570,16 @@ export class RoomDO extends DurableObject {
       return;
     }
 
-    const att = ws.deserializeAttachment();
+    const att = this.getAttachment(ws);
     if (!att) {
       ws.close(1008, "Invalid session");
       return;
+    }
+
+    const nowMs = Date.now();
+    if (att.joined && nowMs - (att.lastMsgAt || 0) >= 10_000) {
+      att.lastMsgAt = nowMs;
+      this.saveAttachment(ws, att);
     }
 
     if (!att.joined) {
@@ -446,7 +588,7 @@ export class RoomDO extends DurableObject {
         this.sendJson(ws, {
           type: "pong",
           clientMs: typeof msg.clientMs === "number" ? msg.clientMs : 0,
-          serverTimeMs: Date.now(),
+          serverTimeMs: nowMs,
         });
         return;
       }
@@ -454,12 +596,11 @@ export class RoomDO extends DurableObject {
         this.addStrike(ws);
         return;
       }
-      await this.handleHello(ws, att, msg);
+      await this.handleHello(ws, att, msg, nowMs);
       return;
     }
 
     const state = this.loadState();
-    const nowMs = Date.now();
 
     switch (msg.type) {
       case "ping": {
@@ -475,11 +616,33 @@ export class RoomDO extends DurableObject {
       case "play":
       case "pause":
       case "seek": {
-        if (!this.checkRateLimit(ws, "playback")) return;
-        if (!this.canControlPlayback(att.room, state, att.username, nowMs)) {
+        if (!this.checkRateLimit(ws, "playback")) {
+          log("warn", "rate.limited", {
+            room: att.room,
+            username: att.username,
+            bucket: "playback",
+          });
+          this.sendJson(ws, {
+            type: "rateLimited",
+            bucket: "playback",
+            retryAfterMs: 1000,
+          });
+          this.sendJson(ws, {
+            type: "state",
+            position: this.projectedPosition(state, nowMs),
+            paused: state.paused,
+            seq: state.seq,
+            serverTimeMs: nowMs,
+            setBy: state.setBy,
+            doSeek: true,
+            reason: "rateLimited",
+          });
+          return;
+        }
+        if (!this.canControlPlayback(att.room, state, att, nowMs)) {
           this.sendJson(ws, {
             type: "roomControl",
-            roomControl: this.buildRoomControlFor(state, att.username),
+            roomControl: this.buildRoomControlFor(state, att.username, Boolean(att.isHost)),
             notice: { kind: "guestBlocked", actor: state.hostUsername },
           });
           this.sendJson(ws, {
@@ -490,31 +653,72 @@ export class RoomDO extends DurableObject {
             serverTimeMs: nowMs,
             setBy: state.setBy,
             doSeek: true,
+            reason: "guestBlocked",
           });
           return;
         }
-        const pos = isFiniteNonNeg(msg.position)
-          ? msg.position
-          : this.projectedPosition(state, nowMs);
+        if (msg.type === "play" && hasCap(att, "readygate")) {
+          const blockers = this.getActiveSockets()
+            .filter(
+              ({ ws: otherWs, att: otherAtt }) =>
+                otherWs !== ws && otherAtt.manualNotReady && !otherAtt.isReady
+            )
+            .map(({ att: otherAtt }) => otherAtt.username);
+          if (blockers.length > 0) {
+            this.sendJson(ws, {
+              type: "playBlocked",
+              usernames: blockers,
+            });
+            this.sendJson(ws, {
+              type: "state",
+              position: this.projectedPosition(state, nowMs),
+              paused: state.paused,
+              seq: state.seq,
+              serverTimeMs: nowMs,
+              setBy: state.setBy,
+              doSeek: true,
+              reason: "readyBlocked",
+            });
+            return;
+          }
+        }
+
         const nextPaused =
           msg.type === "play" ? false : msg.type === "pause" ? true : state.paused;
         const doSeek = msg.type === "seek";
+        let pos = isFiniteNonNeg(msg.position)
+          ? msg.position
+          : this.projectedPosition(state, nowMs);
+        let effectiveServerTimeMs = nowMs;
+
+        if (
+          hasCap(att, "clientts") &&
+          typeof msg.clientServerMs === "number" &&
+          Number.isFinite(msg.clientServerMs)
+        ) {
+          const latMs = Math.max(0, Math.min(600, nowMs - msg.clientServerMs));
+          if (msg.type === "play") {
+            effectiveServerTimeMs = nowMs - latMs;
+          } else if (!nextPaused) {
+            pos += latMs / 1000;
+          }
+        }
+
         state.position = pos;
         state.paused = nextPaused;
         state.seq += 1;
-        state.serverTimeMs = nowMs;
+        state.serverTimeMs = effectiveServerTimeMs;
         state.setBy = att.username;
-        this.saveState(state);
-
         this.broadcastJson({
           type: "state",
           position: pos,
           paused: nextPaused,
           seq: state.seq,
-          serverTimeMs: nowMs,
+          serverTimeMs: effectiveServerTimeMs,
           setBy: att.username,
           doSeek,
         });
+        this.saveState(state);
         return;
       }
 
@@ -532,10 +736,40 @@ export class RoomDO extends DurableObject {
         return;
       }
 
+      case "status": {
+        if (!this.checkRateLimit(ws, "status")) return;
+        const prevBuf = Boolean(att.buffering);
+        const prevPos = att.reportedPosition;
+        const nextPos = isFiniteNonNeg(msg.position) ? msg.position : null;
+        const nextBuf = Boolean(msg.buffering);
+        const posChanged =
+          (prevPos == null) !== (nextPos == null) ||
+          (prevPos != null && nextPos != null && Math.abs(prevPos - nextPos) >= 0.5);
+        const proj = this.projectedPosition(state, nowMs);
+        const prevLag =
+          typeof att.reportedLagSecs === "number" && Number.isFinite(att.reportedLagSecs)
+            ? att.reportedLagSecs
+            : 0;
+        const nextLag =
+          typeof nextPos === "number" ? Math.round((proj - nextPos) * 100) / 100 : null;
+        const lagDelta = Math.abs((nextLag ?? 0) - prevLag);
+        att.reportedPosition = nextPos;
+        att.reportedLagSecs = nextLag;
+        att.buffering = nextBuf;
+        if (prevBuf !== nextBuf || posChanged || lagDelta >= 0.25) {
+          this.saveAttachment(ws, att);
+        }
+
+        if (prevBuf !== nextBuf || lagDelta >= 1.0) {
+          this.broadcastParticipants(att.room, state);
+        }
+        return;
+      }
+
       case "file": {
         if (!this.checkRateLimit(ws, "control")) return;
         att.file = sanitizeFile(msg.file);
-        ws.serializeAttachment(att);
+        this.saveAttachment(ws, att);
         this.broadcastParticipants(att.room, state);
         return;
       }
@@ -547,7 +781,7 @@ export class RoomDO extends DurableObject {
         const wasReady = Boolean(att.isReady);
         att.isReady = nextReady;
         att.manualNotReady = !nextReady && manual;
-        ws.serializeAttachment(att);
+        this.saveAttachment(ws, att);
         if (!nextReady && (wasReady || manual)) {
           this.broadcastJson(
             {
@@ -564,10 +798,12 @@ export class RoomDO extends DurableObject {
 
       case "setAdmin": {
         if (!this.checkRateLimit(ws, "control")) return;
-        const isHost =
+        const isHost = Boolean(
           state.hostOnly &&
+          att.isHost &&
           state.hostUsername &&
-          state.hostUsername.toLowerCase() === att.username.toLowerCase();
+          state.hostUsername.toLowerCase() === att.username.toLowerCase()
+        );
         if (!isHost) {
           this.sendJson(ws, {
             type: "error",
@@ -584,12 +820,12 @@ export class RoomDO extends DurableObject {
         if (grant && !exists && state.admins.length < MAX_ROOM_USERS) {
           state.admins.push(target);
           this.saveState(state);
-          this.broadcastRoomControl(state, { kind: "adminGranted", actor: att.username });
+          this.broadcastRoomControl(state, { kind: "adminGranted", actor: att.username }, target);
           this.broadcastParticipants(att.room, state);
         } else if (!grant && exists) {
           state.admins = state.admins.filter((a) => a.toLowerCase() !== targetLower);
           this.saveState(state);
-          this.broadcastRoomControl(state, { kind: "adminRevoked", actor: att.username });
+          this.broadcastRoomControl(state, { kind: "adminRevoked", actor: att.username }, target);
           this.broadcastParticipants(att.room, state);
         }
         return;
@@ -597,12 +833,16 @@ export class RoomDO extends DurableObject {
 
       case "releaseHost": {
         if (!this.checkRateLimit(ws, "control")) return;
-        const isHost =
+        const isHost = Boolean(
           state.hostOnly &&
+          att.isHost &&
           state.hostUsername &&
-          state.hostUsername.toLowerCase() === att.username.toLowerCase();
+          state.hostUsername.toLowerCase() === att.username.toLowerCase()
+        );
         if (!isHost) return;
         const prevHost = state.hostUsername;
+        att.isHost = false;
+        this.saveAttachment(ws, att);
         state.hostOnly = false;
         state.hostUsername = null;
         state.hostTokenHash = null;
@@ -716,17 +956,51 @@ export class RoomDO extends DurableObject {
         return;
       }
 
-      default:
+      default: {
+        if (att.clientVersion && att.clientVersion !== SERVER_VERSION) {
+          if (!att.warnedUnsupported) {
+            att.warnedUnsupported = true;
+            this.saveAttachment(ws, att);
+            this.sendJson(ws, {
+              type: "error",
+              code: "UNSUPPORTED",
+              message: `Unsupported message type: ${msg.type}`,
+            });
+          }
+          return;
+        }
         this.addStrike(ws);
+      }
     }
   }
 
-  async handleHello(ws, att, msg) {
+  async handleHello(ws, att, msg, recvMs = Date.now()) {
+    // Precompute all async hashes/tokens BEFORE reading active sockets or room state,
+    // so the join/claim check and attachment mutation execute without any interleaved awaits.
+    const incomingHostTokenHash =
+      typeof msg.hostToken === "string" && msg.hostToken.length > 0
+        ? await sha256Hex(msg.hostToken)
+        : null;
+    const generatedToken = msg.hostOnly ? randomTokenHex() : null;
+    const generatedTokenHash = generatedToken ? await sha256Hex(generatedToken) : null;
+    const incomingPeekProofHash =
+      typeof msg.peekProofHash === "string" && /^[0-9a-f]{64}$/i.test(msg.peekProofHash)
+        ? msg.peekProofHash.toLowerCase()
+        : null;
+
+    const nowMs = Date.now();
     const active = this.getActiveSockets();
     const state = this.loadState();
-    const nowMs = Date.now();
 
-    if (msg.claimEmpty && active.length > 0) {
+    const withinGrace =
+      active.length === 0 &&
+      typeof state.emptySince === "number" &&
+      nowMs - state.emptySince <= EMPTY_CLEANUP_ALARM_MS;
+    const isEmptyReset = active.length === 0 && !withinGrace;
+    const retained = active.length === 0 && withinGrace;
+
+    if (msg.claimEmpty && (active.length > 0 || withinGrace)) {
+      log("info", "hello.reject", { room: att.room, code: "ROOM_OCCUPIED" });
       this.sendJson(ws, {
         type: "error",
         code: "ROOM_OCCUPIED",
@@ -741,110 +1015,157 @@ export class RoomDO extends DurableObject {
         ? msg.passwordHash.toLowerCase()
         : null;
 
-    if (active.length === 0) {
-      const isHostReconnecting =
-        state.hostOnly &&
+    const isValidHostReconnect = Boolean(
+      state.hostOnly &&
         state.hostTokenHash &&
-        typeof msg.hostToken === "string" &&
-        state.hostDisconnectedAt &&
-        nowMs - state.hostDisconnectedAt <= HOST_RECONNECT_GRACE_MS &&
-        constantTimeEqualHex(await sha256Hex(msg.hostToken), state.hostTokenHash);
+        incomingHostTokenHash &&
+        (!state.hostDisconnectedAt ||
+          nowMs - state.hostDisconnectedAt <= HOST_RECONNECT_GRACE_MS) &&
+        constantTimeEqualHex(incomingHostTokenHash, state.hostTokenHash)
+    );
 
-      if (!isHostReconnecting) {
-        Object.assign(state, defaultRoomState());
-        state.serverTimeMs = nowMs;
-        state.passwordHash = incomingPwHash;
+    if (isEmptyReset) {
+      Object.assign(state, defaultRoomState());
+      state.serverTimeMs = nowMs;
+      state.passwordHash = incomingPwHash;
+      state.peekProofHash = incomingPeekProofHash;
+      this.badPasswordMap.clear();
+      log("info", "state.reset", { room: att.room });
+    } else {
+      if (retained) {
+        log("info", "state.retained", { room: att.room, seq: state.seq });
       }
-    } else if (state.passwordHash) {
-      if (nowMs - this.badPasswordWindow.startMs >= 60_000) {
-        this.badPasswordWindow = { startMs: nowMs, count: 0 };
+      if (state.passwordHash) {
+        if (this.badPasswordMap.size > 64) {
+          this.pruneBadPasswordMap(nowMs);
+        }
+        const clientKey = att.clientKey || "anon";
+        let pwWin = this.badPasswordMap.get(clientKey);
+        if (!pwWin || nowMs - pwWin.startMs >= 60_000) {
+          pwWin = { startMs: nowMs, count: 0 };
+        }
+        if (pwWin.count >= 10) {
+          log("warn", "hello.reject", { room: att.room, code: "RATE_LIMITED" });
+          this.sendJson(ws, {
+            type: "error",
+            code: "RATE_LIMITED",
+            message: "Too many failed password attempts. Please wait a minute and try again.",
+          });
+          ws.close(4029, "Too many failed password attempts");
+          return;
+        }
+        if (!incomingPwHash || !constantTimeEqualHex(incomingPwHash, state.passwordHash)) {
+          pwWin.count += 1;
+          this.badPasswordMap.set(clientKey, pwWin);
+          log("warn", "hello.reject", { room: att.room, code: "BAD_PASSWORD" });
+          this.sendJson(ws, {
+            type: "error",
+            code: "BAD_PASSWORD",
+            message: "Incorrect room password.",
+          });
+          ws.close(4003, "Incorrect password");
+          return;
+        }
+        this.badPasswordMap.delete(clientKey);
       }
-      if (this.badPasswordWindow.count >= 10) {
-        this.sendJson(ws, {
-          type: "error",
-          code: "RATE_LIMITED",
-          message: "Too many failed password attempts. Please wait a minute and try again.",
-        });
-        ws.close(4029, "Too many failed password attempts");
-        return;
+      if (!state.peekProofHash && incomingPeekProofHash) {
+        state.peekProofHash = incomingPeekProofHash;
       }
-      if (!incomingPwHash || !constantTimeEqualHex(incomingPwHash, state.passwordHash)) {
-        this.badPasswordWindow.count += 1;
-        this.sendJson(ws, {
-          type: "error",
-          code: "BAD_PASSWORD",
-          message: "Incorrect room password.",
-        });
-        ws.close(4003, "Incorrect password");
-        return;
-      }
-      this.badPasswordWindow = { startMs: 0, count: 0 };
     }
 
-    const username = this.deduplicateUsername(msg.username, ws);
-    let issuedHostToken = null;
-
-    if (
+    const reservedHostLower =
+      !isEmptyReset &&
+      !isValidHostReconnect &&
       state.hostOnly &&
-      state.hostTokenHash &&
-      typeof msg.hostToken === "string" &&
-      (!state.hostDisconnectedAt ||
-        nowMs - state.hostDisconnectedAt <= HOST_RECONNECT_GRACE_MS) &&
-      constantTimeEqualHex(await sha256Hex(msg.hostToken), state.hostTokenHash)
-    ) {
+      state.hostDisconnectedAt !== null &&
+      state.hostUsername
+        ? state.hostUsername.toLowerCase()
+        : null;
+    const username = this.deduplicateUsername(msg.username, ws, reservedHostLower);
+    let issuedHostToken = null;
+    let hostReclaimed = false;
+
+    if (!isEmptyReset && isValidHostReconnect) {
       state.hostUsername = username;
       state.hostDisconnectedAt = null;
       issuedHostToken = msg.hostToken;
-      if (this.hasAlarm || state.hostDisconnectedAt) {
-        this.hasAlarm = false;
-        await this.ctx.storage.deleteAlarm();
-      }
-    } else if (active.length === 0 && msg.hostOnly) {
-      const token = randomTokenHex();
+      hostReclaimed = true;
+    } else if (isEmptyReset && msg.hostOnly && generatedToken && generatedTokenHash) {
       state.hostOnly = true;
       state.hostUsername = username;
-      state.hostTokenHash = await sha256Hex(token);
+      state.hostTokenHash = generatedTokenHash;
       state.hostDisconnectedAt = null;
       state.admins = [];
-      issuedHostToken = token;
-      if (this.hasAlarm) {
-        this.hasAlarm = false;
-        await this.ctx.storage.deleteAlarm();
-      }
-    } else if (this.hasAlarm && !state.hostDisconnectedAt) {
-      this.hasAlarm = false;
-      await this.ctx.storage.deleteAlarm();
+      issuedHostToken = generatedToken;
     }
 
+    if (
+      retained &&
+      state.seq === 0 &&
+      state.setBy === null &&
+      msg.resume &&
+      typeof msg.resume === "object"
+    ) {
+      if (isFiniteNonNeg(msg.resume.position)) {
+        state.position = msg.resume.position;
+      }
+      state.paused = Boolean(msg.resume.paused);
+      state.seq = 1;
+      state.serverTimeMs = nowMs;
+      state.setBy = username;
+    }
+
+    state.emptySince = null;
     this.cachedState = state;
+
     att.joined = true;
     att.username = username;
+    att.isHost = Boolean(issuedHostToken);
     att.isReady = Boolean(msg.isReady);
     att.manualNotReady = false;
     att.file = sanitizeFile(msg.file);
-    ws.serializeAttachment(att);
+    att.lastMsgAt = nowMs;
+    att.caps = sanitizeCaps(msg.caps);
+    att.clientVersion =
+      typeof msg.clientVersion === "string" ? clampString(msg.clientVersion, 32) || null : null;
+    this.saveAttachment(ws, att);
+    this.saveState(state);
 
-    const participants = this.buildParticipants(att.room, state, nowMs);
+    log("info", "hello.ok", { room: att.room, username, retained, host: Boolean(issuedHostToken) });
+
+    const sendMs = Date.now();
+    const participants = this.buildParticipants(att.room, state, sendMs);
     this.sendJson(ws, {
       type: "welcome",
       username,
       room: att.room,
       hostToken: issuedHostToken,
-      serverTimeMs: nowMs,
+      clientMs:
+        typeof msg.clientMs === "number" && Number.isFinite(msg.clientMs) ? msg.clientMs : null,
+      recvMs,
+      serverTimeMs: sendMs,
+      retained,
+      serverCaps: SERVER_CAPS,
       state: {
-        position: this.projectedPosition(state, nowMs),
+        position: this.projectedPosition(state, sendMs),
         paused: state.paused,
         seq: state.seq,
-        serverTimeMs: nowMs,
+        serverTimeMs: sendMs,
         setBy: state.setBy,
         doSeek: true,
+        reason: retained ? "resume" : undefined,
       },
       participants,
-      roomControl: this.buildRoomControlFor(state, username),
+      roomControl: this.buildRoomControlFor(state, username, Boolean(att.isHost)),
     });
 
-    this.saveState(state);
-    this.broadcastParticipants(att.room, state);
+    if (hostReclaimed && active.length > 0) {
+      this.broadcastRoomControl(state, { kind: "hostReconnected", actor: username });
+    }
+    if (active.length > 0) {
+      this.broadcastParticipants(att.room, state, ws);
+    }
+    await this.ensureAlarmAt(nowMs + LIVENESS_ALARM_MS);
   }
 
   async webSocketClose(ws) {
@@ -856,57 +1177,77 @@ export class RoomDO extends DurableObject {
   }
 
   async handleDisconnect(ws) {
-    const att = ws.deserializeAttachment();
+    const att = this.getAttachment(ws);
     if (!att || !att.joined) return;
 
     // Immediately mark unjoined to prevent double-handling and ensure
     // getActiveSockets() / broadcastParticipants() exclude this socket.
     const departedUsername = att.username;
     const roomName = att.room;
+    const wasHost = Boolean(att.isHost);
     att.joined = false;
-    ws.serializeAttachment(att);
+    att.isHost = false;
+    this.saveAttachment(ws, att);
 
+    const nowMs = Date.now();
     const state = this.loadState();
     const remaining = this.getActiveSockets();
-    let hostJustLeft = false;
 
     if (
+      wasHost &&
       state.hostOnly &&
       state.hostUsername &&
       state.hostUsername.toLowerCase() === departedUsername.toLowerCase()
     ) {
-      state.hostDisconnectedAt = Date.now();
-      hostJustLeft = true;
-      this.saveState(state);
+      state.hostDisconnectedAt = nowMs;
     }
 
     if (remaining.length === 0) {
-      this.hasAlarm = true;
-      await this.ctx.storage.setAlarm(Date.now() + EMPTY_CLEANUP_ALARM_MS);
+      state.emptySince = nowMs;
+      this.saveState(state);
+      await this.ctx.storage.setAlarm(nowMs + EMPTY_CLEANUP_ALARM_MS);
     } else {
-      if (hostJustLeft) {
-        // Ensure remaining guests automatically unlock if host doesn't return in 60s.
-        this.hasAlarm = true;
-        await this.ctx.storage.setAlarm(Date.now() + HOST_RECONNECT_GRACE_MS + 1000);
-      }
+      this.saveState(state);
       this.broadcastJson({ type: "peerLeft", username: departedUsername });
       this.broadcastParticipants(roomName, state);
+      await this.ensureAlarmAt(nowMs + LIVENESS_ALARM_MS);
     }
   }
 
   async alarm() {
-    this.evictStaleUnjoinedSockets();
+    const nowMs = Date.now();
+    this.evictStaleUnjoinedSockets(nowMs);
+
+    for (const { ws, att } of this.getActiveSockets()) {
+      const autoTs = this.ctx.getWebSocketAutoResponseTimestamp(ws);
+      const autoMs = autoTs instanceof Date ? autoTs.getTime() : 0;
+      const lastSeen = Math.max(att.joinedAt || 0, att.lastMsgAt || 0, autoMs);
+      if (nowMs - lastSeen > GHOST_IDLE_TIMEOUT_MS) {
+        log("info", "socket.reaped", { room: att.room, username: att.username });
+        try {
+          ws.close(1001, "Idle");
+        } catch {}
+        await this.handleDisconnect(ws);
+      }
+    }
+
     const active = this.getActiveSockets();
+    const state = this.loadState();
     if (active.length === 0) {
-      this.cachedState = null;
-      this.hasAlarm = false;
-      this.ensureSchema();
-      this.ctx.storage.sql.exec("DELETE FROM room_state");
-      await this.ctx.storage.deleteAlarm();
+      if (!state.emptySince || nowMs - state.emptySince >= EMPTY_CLEANUP_ALARM_MS) {
+        this.cachedState = null;
+        this.badPasswordMap.clear();
+        this.ensureSchema();
+        this.ctx.storage.sql.exec("DELETE FROM room_state");
+        await this.ctx.storage.deleteAlarm();
+      } else {
+        await this.ctx.storage.setAlarm(state.emptySince + EMPTY_CLEANUP_ALARM_MS);
+      }
       return;
     }
-    const state = this.loadState();
+
     const roomName = active[0]?.att?.room || "";
-    this.expireAbsentHostIfNeeded(roomName, state, Date.now());
+    this.expireAbsentHostIfNeeded(roomName, state, nowMs);
+    await this.ctx.storage.setAlarm(nowMs + LIVENESS_ALARM_MS);
   }
 }

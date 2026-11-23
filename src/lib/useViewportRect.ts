@@ -58,12 +58,22 @@ export function useViewportRect(ref: RefObject<HTMLElement | null>, refreshSigna
 
     window.addEventListener("resize", scheduleMeasure);
 
-    const dpr = window.devicePixelRatio || 1;
-    const mq =
-      typeof window.matchMedia === "function"
-        ? window.matchMedia(`(resolution: ${dpr}dppx)`)
-        : null;
-    mq?.addEventListener?.("change", scheduleMeasure);
+    let mq: MediaQueryList | null = null;
+    const bindDprListener = () => {
+      mq?.removeEventListener?.("change", onDprChange);
+      if (typeof window.matchMedia !== "function") {
+        mq = null;
+        return;
+      }
+      const dpr = window.devicePixelRatio || 1;
+      mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+      mq.addEventListener?.("change", onDprChange);
+    };
+    const onDprChange = () => {
+      scheduleMeasure();
+      bindDprListener();
+    };
+    bindDprListener();
 
     return () => {
       if (rafId !== null && typeof cancelAnimationFrame === "function") {
@@ -74,7 +84,7 @@ export function useViewportRect(ref: RefObject<HTMLElement | null>, refreshSigna
       }
       ro?.disconnect();
       window.removeEventListener("resize", scheduleMeasure);
-      mq?.removeEventListener?.("change", scheduleMeasure);
+      mq?.removeEventListener?.("change", onDprChange);
     };
   }, [ref, refreshSignal]);
 

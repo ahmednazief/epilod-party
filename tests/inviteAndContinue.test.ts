@@ -45,10 +45,10 @@ async function loadBundle() {
 test("inviteLinks formats, extracts from pasted text, and rejects invalid URIs", async () => {
   const mod = await loadBundle();
 
-  const link = mod.formatInviteLink("482 915", false, "syncplay.pl:8999");
+  const link = mod.formatInviteLink("482 915", false, "wss://epilod-sync.ahmednazief.workers.dev");
   assert.equal(link, "epilod://join/482915");
 
-  const clip = mod.formatInviteClipboardText("482915", false, "syncplay.pl:8999");
+  const clip = mod.formatInviteClipboardText("482915", false, "wss://epilod-sync.ahmednazief.workers.dev");
   assert.equal(clip, "482 915 · epilod://join/482915");
 
   const parsedFromClip = mod.parseInviteLink(`Come join! ${clip}`);
@@ -58,6 +58,10 @@ test("inviteLinks formats, extracts from pasted text, and rejects invalid URIs",
     literalRoom: false,
     serverHost: null,
   });
+
+  const syncplayLink = mod.formatInviteLink("482 915", false, "syncplay.pl:8999");
+  assert.equal(syncplayLink, "epilod://join/482915?host=syncplay.pl%3A8999");
+  assert.equal(mod.parseInviteLink(syncplayLink!)?.serverHost, "syncplay.pl:8999");
 
   const customLink = mod.formatInviteLink("Friday Anime", true, "party.example.com:9000");
   assert.equal(

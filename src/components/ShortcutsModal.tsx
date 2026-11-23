@@ -1,6 +1,9 @@
+import { Fragment, useEffect } from "react";
 import { AppCloseIcon } from "./ui/AppIcons";
 import { PLAYER_SHORTCUTS, SHORTCUT_CATEGORIES } from "../lib/shortcuts";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
+
+const MODIFIER_KEYS = new Set(["Shift", "Ctrl", "Control", "Alt", "Meta", "Cmd"]);
 
 interface ShortcutsModalProps {
   open: boolean;
@@ -9,6 +12,19 @@ interface ShortcutsModalProps {
 
 export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
   const { mounted, exiting } = useAnimatedPresence(open, 200);
+
+  useEffect(() => {
+    if (!open || exiting) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, exiting, onClose]);
+
   if (!mounted) return null;
 
   return (
@@ -62,15 +78,22 @@ export function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
                       className="flex items-center justify-between gap-3 px-2.5 py-2 text-xs rounded-xl hover:bg-white/[0.04] transition-colors"
                     >
                       <span className="text-secondary">{row.label}</span>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {row.keys.map((key) => (
-                          <kbd
-                            key={key}
-                            className="ep-glass-tray px-2 py-0.5 text-[11px] font-medium text-white rounded-md"
-                          >
-                            {key}
-                          </kbd>
-                        ))}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {row.keys.map((key, idx) => {
+                          const isCombo = MODIFIER_KEYS.has(row.keys[0]);
+                          return (
+                            <Fragment key={key}>
+                              {idx > 0 && (
+                                <span className="text-[10px] text-muted select-none px-0.5">
+                                  {isCombo ? "+" : "/"}
+                                </span>
+                              )}
+                              <kbd className="ep-glass-tray px-2 py-0.5 text-[11px] font-medium text-white rounded-md">
+                                {key}
+                              </kbd>
+                            </Fragment>
+                          );
+                        })}
                       </div>
                     </div>
                   ))}

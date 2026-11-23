@@ -1,4 +1,5 @@
-import { safeInvoke } from "./bridge";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { isDesktop, safeInvoke } from "./bridge";
 import { CLOUD_ENDPOINT, DEFAULT_ENDPOINT } from "./syncStatusDisplay";
 import { stripUnsafeUnicode, validateServerEndpointInput } from "./webviewHardening";
 
@@ -50,9 +51,7 @@ export function formatInviteLink(
   if (serverHost && serverHost.trim()) {
     const validated = validateServerEndpointInput(serverHost);
     if (validated.ok && validated.endpoint) {
-      if (validated.endpoint.toLowerCase() === CLOUD_ENDPOINT.toLowerCase()) {
-        params.push("cloud=1");
-      } else if (validated.endpoint.toLowerCase() !== DEFAULT_ENDPOINT.toLowerCase()) {
+      if (validated.endpoint.toLowerCase() !== DEFAULT_ENDPOINT.toLowerCase()) {
         params.push(`host=${encodeURIComponent(validated.endpoint)}`);
       }
     }
@@ -153,8 +152,8 @@ export async function consumePendingDeepLink(): Promise<DeepLinkInvite | null> {
 
 export async function onDeepLinkInvite(
   handler: (invite: DeepLinkInvite) => void,
-): Promise<() => void> {
-  const { listen } = await import("@tauri-apps/api/event");
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return () => {};
   return listen<DeepLinkInvite>("app://deep-link", (event) => {
     if (event.payload) {
       handler(event.payload);

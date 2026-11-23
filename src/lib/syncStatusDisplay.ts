@@ -3,7 +3,7 @@ import type { SyncStatusPayload } from "./syncplay";
 export const SYNCPLAY_ENDPOINT = "syncplay.pl:8999";
 export const CLOUD_ENDPOINT = "wss://epilod-sync.ahmednazief.workers.dev";
 // Flip to CLOUD_ENDPOINT to make Epilod Cloud (Cloudflare) the default.
-export const DEFAULT_ENDPOINT = SYNCPLAY_ENDPOINT;
+export const DEFAULT_ENDPOINT = CLOUD_ENDPOINT;
 export const BACKUP_ENDPOINT = "syncplay.pl:8998";
 
 export function isCloudEndpoint(endpoint: string): boolean {

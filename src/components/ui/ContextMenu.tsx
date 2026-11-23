@@ -1,5 +1,6 @@
 import { AppCheckIcon, AppChevronIcon } from "./AppIcons";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { usePresencePayload } from "../../lib/useAnimatedPresence";
 
 export interface ContextMenuItemEntry {
@@ -208,11 +209,8 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
         e.preventDefault();
         e.stopPropagation();
         clearSubmenuTimer();
-        if (openSubmenu) {
-          setOpenSubmenu(null);
-        } else {
-          onClose();
-        }
+        setOpenSubmenu(null);
+        onClose();
       } else if (e.key === "ArrowLeft" && openSubmenu) {
         e.preventDefault();
         clearSubmenuTimer();
@@ -391,7 +389,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
     );
   };
 
-  return (
+  const menuContent = (
     <>
       <div
         ref={menuRef}
@@ -406,7 +404,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
         }}
         className={`ep-glass-submenu ${
           exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
-        } fixed z-50 w-[276px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[18px] py-2 flex flex-col select-none`}
+        } fixed z-[55] w-[276px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[18px] py-2 flex flex-col select-none`}
       >
         <div
           ref={menuScrollRef}
@@ -431,7 +429,7 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
           }}
           className={`ep-glass-submenu ${
             subPresence.exiting || exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
-          } fixed z-[55] w-[256px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[18px] py-2 flex flex-col select-none`}
+          } fixed z-[60] w-[256px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[18px] py-2 flex flex-col select-none`}
         >
           <div
             ref={subScrollRef}
@@ -443,4 +441,6 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
       )}
     </>
   );
+
+  return typeof document !== "undefined" ? createPortal(menuContent, document.body) : menuContent;
 }

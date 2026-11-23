@@ -158,6 +158,7 @@ mod windows_app {
         pub wait_pid: Option<u32>,
         pub auto_relaunch: bool,
         pub remove_user_data: bool,
+        pub allow_downgrade: bool,
     }
 
     pub struct InstallerState {
@@ -281,6 +282,7 @@ mod windows_app {
         let wait_pid = ctx.wait_pid;
         let auto_relaunch = ctx.auto_relaunch;
         let remove_user_data_default = ctx.remove_user_data;
+        let allow_downgrade = ctx.allow_downgrade;
 
         tokio::task::spawn_blocking(move || {
             let manifest_meta = payload
@@ -346,7 +348,9 @@ mod windows_app {
             let auto_start = mode_initial == InstallMode::Update
                 && payload_available
                 && inspection.writable
-                && enough_disk;
+                && enough_disk
+                && (inspection.report.disposition != InstallDisposition::DowngradeWarning
+                    || allow_downgrade);
 
             Ok(InstallerDefaults {
                 version: APP_VERSION.to_string(),
@@ -377,14 +381,6 @@ mod windows_app {
         })
         .await
         .map_err(|e| format!("Failed inspecting installer defaults: {e}"))?
-    }
-
-    #[tauri::command]
-    fn check_install_dir(path: String) -> Result<Option<u64>, String> {
-        let resolved = resolve_install_dir(&path).map_err(|e| e.to_string())?;
-        let dir_path = Path::new(&resolved);
-        test_directory_writable(dir_path)?;
-        Ok(query_free_disk_bytes(dir_path))
     }
 
     #[tauri::command]
@@ -687,6 +683,7 @@ mod windows_app {
             wait_pid: cli.wait_pid,
             auto_relaunch: cli.relaunch,
             remove_user_data: cli.remove_user_data,
+            allow_downgrade: cli.allow_downgrade,
         };
 
         if let Err(err) = tauri::Builder::default()
@@ -695,16 +692,40 @@ mod windows_app {
             .manage(launch_ctx)
             .setup(|app| {
                 if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_background_color(Some(tauri::window::Color(12, 13, 17, 255)));
                     if let Ok(hwnd) = win.hwnd() {
                         use windows_sys::Win32::Graphics::Dwm::{
-                            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+                            DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
+                            DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+                            DWMWCP_ROUND,
                         };
+                        let dark_mode: i32 = 1;
                         let preference = DWMWCP_ROUND;
+                        let border_color: u32 = 0x002E2A29;
+                        let caption_color: u32 = 0x00110D0C;
                         unsafe {
+                            DwmSetWindowAttribute(
+                                hwnd.0 as _,
+                                DWMWA_USE_IMMERSIVE_DARK_MODE as _,
+                                &dark_mode as *const _ as *const _,
+                                std::mem::size_of::<i32>() as u32,
+                            );
                             DwmSetWindowAttribute(
                                 hwnd.0 as _,
                                 DWMWA_WINDOW_CORNER_PREFERENCE as _,
                                 &preference as *const _ as *const _,
+                                std::mem::size_of::<u32>() as u32,
+                            );
+                            DwmSetWindowAttribute(
+                                hwnd.0 as _,
+                                DWMWA_BORDER_COLOR as _,
+                                &border_color as *const _ as *const _,
+                                std::mem::size_of::<u32>() as u32,
+                            );
+                            DwmSetWindowAttribute(
+                                hwnd.0 as _,
+                                DWMWA_CAPTION_COLOR as _,
+                                &caption_color as *const _ as *const _,
                                 std::mem::size_of::<u32>() as u32,
                             );
                         }
@@ -714,7 +735,6 @@ mod windows_app {
             })
             .invoke_handler(tauri::generate_handler![
                 get_installer_defaults,
-                check_install_dir,
                 preflight_install_dir,
                 inspect_install_dir,
                 verify_existing_install,

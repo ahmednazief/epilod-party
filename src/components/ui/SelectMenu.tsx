@@ -122,14 +122,16 @@ export function SelectMenu<T extends string = string>({
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         setOpen(false);
       }
     };
     window.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
       window.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
   }, [open]);
 
@@ -153,7 +155,7 @@ export function SelectMenu<T extends string = string>({
         }}
         className={`${
           listMenu.exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
-        } ep-glass-submenu fixed z-50 overflow-hidden rounded-2xl py-2 flex flex-col`}
+        } ep-glass-submenu fixed z-[80] overflow-hidden rounded-2xl py-2 flex flex-col`}
       >
         <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1.5 flex flex-col gap-0.5">
           {options.map((opt) => {

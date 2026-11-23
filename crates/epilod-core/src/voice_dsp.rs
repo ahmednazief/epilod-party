@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::time::Duration;
 
-use nnnoiseless::DenoiseState;
+use dfn3_rs::Denoiser as Dfn3Denoiser;
+use sonora::config::EchoCanceller as SonoraEchoCancellerConfig;
+use sonora::{AudioProcessing, Config as SonoraConfig, StreamConfig as SonoraStreamConfig};
 
 pub const VOICE_SAMPLE_RATE: usize = 48_000;
 pub const VOICE_FRAME_10MS: usize = 480;
 pub const VOICE_FRAME_20MS: usize = 960;
-pub const RNNOISE_SCALE: f32 = 32768.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoiseSuppressionMode {
@@ -228,6 +230,72 @@ impl EchoCanceller for AdaptiveNlmsEchoCanceller {
     }
 }
 
+/// WebRTC AEC3 acoustic echo canceller backed by pure-Rust `sonora` (48 kHz mono, 10 ms frames).
+pub struct WebRtcAec3Canceller {
+    apm: AudioProcessing,
+    render_scratch: [f32; VOICE_FRAME_10MS],
+}
+
+impl Default for WebRtcAec3Canceller {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WebRtcAec3Canceller {
+    fn build_apm() -> AudioProcessing {
+        let cfg = SonoraConfig {
+            echo_canceller: Some(SonoraEchoCancellerConfig::default()),
+            ..Default::default()
+        };
+        let stream_cfg = SonoraStreamConfig::new(VOICE_SAMPLE_RATE as u32, 1);
+        AudioProcessing::builder()
+            .config(cfg)
+            .capture_config(stream_cfg)
+            .render_config(stream_cfg)
+            .build()
+    }
+
+    pub fn new() -> Self {
+        Self {
+            apm: Self::build_apm(),
+            render_scratch: [0.0; VOICE_FRAME_10MS],
+        }
+    }
+
+    /// Supplies estimated render-to-capture delay in milliseconds (`[0, 500]`).
+    pub fn set_delay_ms(&mut self, delay_ms: i32) {
+        let _ = self.apm.set_stream_delay_ms(delay_ms.clamp(0, 500));
+    }
+}
+
+impl EchoCanceller for WebRtcAec3Canceller {
+    fn process_10ms(
+        &mut self,
+        mic_48k: &[f32; VOICE_FRAME_10MS],
+        ref_48k: Option<&[f32; VOICE_FRAME_10MS]>,
+        out_48k: &mut [f32; VOICE_FRAME_10MS],
+    ) {
+        if let Some(far) = ref_48k {
+            let _ = self
+                .apm
+                .process_render_f32(&[far.as_slice()], &mut [&mut self.render_scratch[..]]);
+        }
+        if self
+            .apm
+            .process_capture_f32(&[mic_48k.as_slice()], &mut [&mut out_48k[..]])
+            .is_err()
+        {
+            out_48k.copy_from_slice(mic_48k);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.apm = Self::build_apm();
+        self.render_scratch.fill(0.0);
+    }
+}
+
 /// Detects speaker-to-mic acoustic leak by correlating 10 ms RMS envelopes across 0..160 ms lags.
 #[derive(Debug, Clone)]
 pub struct SpeakerEchoDetector {
@@ -390,7 +458,7 @@ impl VoiceCalibrator {
         let noise_floor = if quiet.is_empty() {
             -60.0
         } else {
-            quiet[(quiet.len() * 75) / 100.min(quiet.len().max(1))].min(quiet[quiet.len() - 1])
+            quiet[((quiet.len() * 75) / 100).min(quiet.len() - 1)]
         };
 
         let mut speak = self.speak_dbs.clone();
@@ -398,7 +466,7 @@ impl VoiceCalibrator {
         let speech_level = if speak.is_empty() {
             noise_floor + 14.0
         } else {
-            speak[(speak.len() * 80) / 100]
+            speak[((speak.len() * 80) / 100).min(speak.len() - 1)]
         };
 
         let spread = (speech_level - noise_floor).max(6.0);
@@ -409,19 +477,19 @@ impl VoiceCalibrator {
     }
 }
 
-/// Local RNNoise wrapper with Discord-style 3-stage processing:
-/// - Stage A: 2.5 ms sub-frame transient de-clicker (rejects keyboard/mouse clicks pre-RNNoise)
-/// - Stage B: Quiet-mic pre-leveled 48 kHz RNNoise neural core + speech-adaptive wet/dry warmth
+/// Local DeepFilterNet3 wrapper with 3-stage processing:
+/// - Stage A: 2.5 ms sub-frame transient de-clicker (rejects keyboard/mouse clicks pre-denoiser)
+/// - Stage B: Quiet-mic pre-leveled 48 kHz DeepFilterNet3 neural core (sample-aligned internal dry/wet)
 /// - Stage C: Residual floor expander & Strong-mode HF hiss damper
 pub struct VoiceDenoiser {
-    state: Box<DenoiseState<'static>>,
+    dfn: Dfn3Denoiser,
+    last_mode: NoiseSuppressionMode,
     stage_a_buf: [f32; VOICE_FRAME_10MS],
     in_scaled: [f32; VOICE_FRAME_10MS],
     out_scaled: [f32; VOICE_FRAME_10MS],
     speech_rms_env: f32,
     prob_smooth: f32,
     hangover_frames: u8,
-    wet_smooth: f32,
     post_gain_smooth: f32,
     prev_sub_rms: f32,
     hiss_lp_state: f32,
@@ -435,20 +503,24 @@ impl Default for VoiceDenoiser {
 
 impl VoiceDenoiser {
     const SPEECH_HANGOVER_FRAMES: u8 = 22; // 220 ms tail protection against word-end clipping
-    const TARGET_RNNOISE_RMS: f32 = 0.063; // ~ -24 dBFS (RNNoise training sweet spot)
+    const TARGET_INPUT_RMS: f32 = 0.063; // ~ -24 dBFS pre-leveling sweet spot for quiet mics
     const MAX_PRE_GAIN: f32 = 2.0; // +6 dB bounded lift for quiet mics without amplifying room fans
     const SUBFRAME_LEN: usize = 120; // 2.5 ms @ 48 kHz
+    const BALANCED_ATTEN_LIMIT_DB: f32 = 18.0;
+    const STRONG_ATTEN_LIMIT_DB: f32 = 100.0;
 
     pub fn new() -> Self {
+        let mut dfn = Dfn3Denoiser::new();
+        dfn.set_attenuation_limit(Self::BALANCED_ATTEN_LIMIT_DB);
         Self {
-            state: DenoiseState::new(),
+            dfn,
+            last_mode: NoiseSuppressionMode::Balanced,
             stage_a_buf: [0.0; VOICE_FRAME_10MS],
             in_scaled: [0.0; VOICE_FRAME_10MS],
             out_scaled: [0.0; VOICE_FRAME_10MS],
-            speech_rms_env: Self::TARGET_RNNOISE_RMS,
+            speech_rms_env: Self::TARGET_INPUT_RMS,
             prob_smooth: 0.0,
             hangover_frames: 0,
-            wet_smooth: 1.0,
             post_gain_smooth: 1.0,
             prev_sub_rms: 0.005,
             hiss_lp_state: 0.0,
@@ -456,12 +528,13 @@ impl VoiceDenoiser {
     }
 
     pub fn reset(&mut self) {
-        self.state = DenoiseState::new();
+        self.dfn.reset();
         self.stage_a_buf.fill(0.0);
-        self.speech_rms_env = Self::TARGET_RNNOISE_RMS;
+        self.in_scaled.fill(0.0);
+        self.out_scaled.fill(0.0);
+        self.speech_rms_env = Self::TARGET_INPUT_RMS;
         self.prob_smooth = 0.0;
         self.hangover_frames = 0;
-        self.wet_smooth = 1.0;
         self.post_gain_smooth = 1.0;
         self.prev_sub_rms = 0.005;
         self.hiss_lp_state = 0.0;
@@ -480,9 +553,9 @@ impl VoiceDenoiser {
             return 1.0;
         }
 
-        // Stage A: Sub-frame transient de-clicker (2.5 ms windows before RNNoise).
+        // Stage A: Sub-frame transient de-clicker (2.5 ms windows before neural enhancement).
         // Mechanical switches and mouse clicks show a sharp broadband RMS spike + high HF derivative
-        // energy; attenuating them pre-RNNoise stops the GRU from opening noise bands on clicks.
+        // energy; attenuating them pre-denoiser stops transient spikes from bleeding through.
         self.stage_a_buf.copy_from_slice(dry);
         let spike_mult = match mode {
             NoiseSuppressionMode::Strong => 3.2,
@@ -533,23 +606,40 @@ impl VoiceDenoiser {
             }
         }
 
-        // Stage B: Bounded pre-gain so quiet mics enter RNNoise near -24 dBFS, then neural core.
+        // Stage B: Bounded pre-gain so quiet mics enter DeepFilterNet3 near -24 dBFS, then neural core.
+        if mode != self.last_mode {
+            let limit_db = match mode {
+                NoiseSuppressionMode::Strong => Self::STRONG_ATTEN_LIMIT_DB,
+                NoiseSuppressionMode::Balanced | NoiseSuppressionMode::Off => {
+                    Self::BALANCED_ATTEN_LIMIT_DB
+                }
+            };
+            self.dfn
+                .set_attenuation_limit_smooth(limit_db, Duration::from_millis(20));
+            self.last_mode = mode;
+        }
+
         let dry_rms =
             (self.stage_a_buf.iter().map(|s| s * s).sum::<f32>() / VOICE_FRAME_10MS as f32).sqrt();
         let pre_gain = if self.speech_rms_env > 1e-4 {
-            (Self::TARGET_RNNOISE_RMS / self.speech_rms_env).clamp(1.0, Self::MAX_PRE_GAIN)
+            (Self::TARGET_INPUT_RMS / self.speech_rms_env).clamp(1.0, Self::MAX_PRE_GAIN)
         } else {
             1.0
         };
-        let scale_in = RNNOISE_SCALE * pre_gain;
         for (dst, &src) in self.in_scaled.iter_mut().zip(self.stage_a_buf.iter()) {
-            *dst = (src * scale_in).clamp(-RNNOISE_SCALE, RNNOISE_SCALE);
+            *dst = if src.is_finite() {
+                (src * pre_gain).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
         }
 
-        let raw_prob = self
-            .state
-            .process_frame(&mut self.out_scaled, &self.in_scaled)
-            .clamp(0.0, 1.0);
+        let lsnr = self.dfn.process(&self.in_scaled, &mut self.out_scaled);
+        let raw_prob = if lsnr.is_finite() {
+            ((lsnr + 6.0) / 14.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         if raw_prob >= 0.80 && dry_rms > 0.008 {
             self.speech_rms_env = (self.speech_rms_env * 0.96 + dry_rms * 0.04).clamp(0.031, 0.25);
@@ -567,14 +657,9 @@ impl VoiceDenoiser {
             self.hangover_frames -= 1;
         }
 
-        let speech_blend = ((self.prob_smooth - 0.35) / 0.50).clamp(0.0, 1.0);
-        let target_wet = match mode {
-            NoiseSuppressionMode::Off => 0.0,
-            NoiseSuppressionMode::Balanced => 1.0 - 0.10 * speech_blend,
-            NoiseSuppressionMode::Strong => 1.0,
-        };
-
-        // Stage C: Post-RNNoise residual noise-floor expander + Strong-mode HF hiss damper
+        // Stage C: Post-denoiser residual noise-floor expander & Strong-mode HF hiss damper.
+        // Note: dfn3_rs already applies sample-aligned dry/wet attenuation mixing internally (30 ms
+        // delay), so we must NOT blend undelayed stage_a_buf with out_scaled here.
         let floor_gain = match mode {
             NoiseSuppressionMode::Off => 1.0,
             NoiseSuppressionMode::Balanced => 0.25, // -12 dB residual attenuation
@@ -592,23 +677,16 @@ impl VoiceDenoiser {
             0.0
         };
 
-        let inv_scale_out = 1.0 / (RNNOISE_SCALE * pre_gain);
+        let inv_pre_gain = 1.0 / pre_gain;
         let post_coeff = if target_post_gain > self.post_gain_smooth {
             0.006
         } else {
             0.00045
         };
-        let wet_coeff = 0.003;
 
-        for ((dst, &clean_s), &dry_s) in out
-            .iter_mut()
-            .zip(self.out_scaled.iter())
-            .zip(self.stage_a_buf.iter())
-        {
-            self.wet_smooth += wet_coeff * (target_wet - self.wet_smooth);
+        for (dst, &clean_s) in out.iter_mut().zip(self.out_scaled.iter()) {
             self.post_gain_smooth += post_coeff * (target_post_gain - self.post_gain_smooth);
-            let clean = clean_s * inv_scale_out;
-            let mut blended = clean * self.wet_smooth + dry_s * (1.0 - self.wet_smooth);
+            let mut blended = (clean_s * inv_pre_gain).clamp(-1.0, 1.0);
             self.hiss_lp_state += 0.36 * (blended - self.hiss_lp_state);
             if strong_hf_damp > 0.0 {
                 blended = blended * (1.0 - strong_hf_damp) + self.hiss_lp_state * strong_hf_damp;
@@ -2312,5 +2390,108 @@ mod tests {
             jb.current_delay_ms(),
             jb.target_delay_ms()
         );
+    }
+
+    #[test]
+    fn webrtc_aec3_cancels_delayed_synthetic_echo() {
+        let mut aec = WebRtcAec3Canceller::new();
+        aec.set_delay_ms(60);
+        let mut rng = 0x9933_4411u32;
+        let delay_samples = 6 * VOICE_FRAME_10MS; // 60 ms render-to-capture delay
+        let total_frames = 150usize;
+        let mut far_history = vec![0.0f32; total_frames * VOICE_FRAME_10MS];
+        for (i, s) in far_history.iter_mut().enumerate() {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            let noise = (((rng >> 16) as f32 / 32768.0) - 1.0) * 0.25;
+            let t = i as f32 / VOICE_SAMPLE_RATE as f32;
+            let tone = 0.15 * (2.0 * std::f32::consts::PI * 330.0 * t).sin();
+            *s = noise + tone;
+        }
+
+        let mut echo_pow_last = 0.0f64;
+        let mut resid_pow_last = 0.0f64;
+        let mut out = [0.0f32; VOICE_FRAME_10MS];
+        for frame_idx in 0..total_frames {
+            let base = frame_idx * VOICE_FRAME_10MS;
+            let mut far_frame = [0.0f32; VOICE_FRAME_10MS];
+            let mut mic_frame = [0.0f32; VOICE_FRAME_10MS];
+            for i in 0..VOICE_FRAME_10MS {
+                let g = base + i;
+                far_frame[i] = far_history[g];
+                let d1 = g
+                    .checked_sub(delay_samples + 96)
+                    .map_or(0.0, |k| far_history[k] * 0.50);
+                let d2 = g
+                    .checked_sub(delay_samples + 240)
+                    .map_or(0.0, |k| far_history[k] * 0.22);
+                mic_frame[i] = d1 + d2;
+            }
+            aec.process_10ms(&mic_frame, Some(&far_frame), &mut out);
+            if frame_idx >= total_frames - 50 {
+                for (&m, &r) in mic_frame.iter().zip(out.iter()) {
+                    echo_pow_last += (m as f64) * (m as f64);
+                    resid_pow_last += (r as f64) * (r as f64);
+                }
+            }
+        }
+        let erle_db = 10.0 * (echo_pow_last / resid_pow_last.max(1e-12)).log10();
+        assert!(
+            erle_db >= 12.0,
+            "WebRTC AEC3 must achieve >= 12 dB ERLE on delayed synthetic echo; got {erle_db:.2} dB"
+        );
+    }
+
+    #[test]
+    fn dfn3_denoiser_suppresses_delayed_impulse_and_preserves_off_mode() {
+        let mut denoiser = VoiceDenoiser::new();
+        let mut out = [0.0f32; VOICE_FRAME_10MS];
+
+        // Off mode must be bit-exact pass-through with prob=1.0
+        let mut dry = [0.0f32; VOICE_FRAME_10MS];
+        for (i, s) in dry.iter_mut().enumerate() {
+            *s = ((i as f32) * 0.05).sin() * 0.4;
+        }
+        let prob_off = denoiser.process_10ms(NoiseSuppressionMode::Off, &dry, &mut out);
+        assert_eq!(prob_off, 1.0);
+        assert_eq!(out, dry);
+
+        denoiser.reset();
+        let silence = [0.0f32; VOICE_FRAME_10MS];
+        for _ in 0..10 {
+            let _ = denoiser.process_10ms(NoiseSuppressionMode::Strong, &silence, &mut out);
+        }
+
+        // Inject sharp 2.5 ms click impulse in frame 0, then feed silence through frames 1..=4
+        // so the 30 ms DeepFilterNet3 algorithmic delay window is fully observed.
+        let mut click_frame = [0.0f32; VOICE_FRAME_10MS];
+        for (i, slot) in click_frame.iter_mut().enumerate().take(240).skip(120) {
+            *slot = if i % 2 == 0 { 0.35 } else { -0.35 };
+        }
+        let mut max_peak_across_delay = 0.0f32;
+        for f in 0..=4 {
+            let inp = if f == 0 { &click_frame } else { &silence };
+            let _ = denoiser.process_10ms(NoiseSuppressionMode::Strong, inp, &mut out);
+            let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            max_peak_across_delay = max_peak_across_delay.max(peak);
+        }
+        assert!(
+            max_peak_across_delay < 0.08,
+            "DeepFilterNet3 + Stage A must keep 2.5ms click suppressed across 30 ms delay; max_peak={max_peak_across_delay}"
+        );
+    }
+
+    #[test]
+    fn calibrator_finalize_handles_short_quiet_samples_without_panic() {
+        for count in 1..=80usize {
+            let mut cal = VoiceCalibrator::default();
+            for i in 0..count {
+                cal.push_quiet_db(-65.0 + (i % 5) as f32);
+            }
+            cal.push_speak_db(-22.0);
+            let (noise, speak, threshold) = cal.finalize();
+            assert!(noise <= -59.0);
+            assert!(speak >= -25.0);
+            assert!(threshold.is_finite());
+        }
     }
 }

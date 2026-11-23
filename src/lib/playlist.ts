@@ -452,7 +452,7 @@ export function formatSeasonFolderTitle(folderName: string | null | undefined): 
 
   const seasonMatch = base.match(/^(.*?)(?:^|\s)(?:s|season)\s*0*(\d{1,2})$/i);
   if (seasonMatch) {
-    const show = seasonMatch[1].replace(/[\s-]+$/, "").trim();
+    const show = seasonMatch[1].replace(/[\s\-–—]+$/, "").trim();
     const seasonNum = Number(seasonMatch[2]);
     return show ? `${show} · Season ${seasonNum}` : `Season ${seasonNum}`;
   }

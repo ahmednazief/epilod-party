@@ -93,15 +93,16 @@ export const FloatingChatPeeks = memo(function FloatingChatPeeks({
     return null;
   }
 
-  const bottomClass = chromeVisible
-    ? fullWidthPlayBar
-      ? "bottom-[104px]"
-      : "bottom-[126px]"
-    : "bottom-5";
-
   return (
     <div
-      className={`pointer-events-none fixed left-4 sm:left-6 z-[38] flex flex-col items-start gap-2 max-w-[320px] transition-[bottom] duration-300 ${bottomClass}`}
+      style={
+        chromeVisible
+          ? { bottom: "var(--ep-playbar-clearance, 126px)" }
+          : undefined
+      }
+      className={`pointer-events-none absolute left-4 sm:left-6 z-[38] flex flex-col items-start gap-2 max-w-[320px] transition-[bottom] duration-300 ${
+        chromeVisible ? "" : "bottom-5"
+      }`}
       aria-live="polite"
     >
       {visibleEntries.map(({ item, exiting }) => {

@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createSerialQueue } from "./asyncGuard";
+import { isAutoSyncStage, type AutoSyncStage } from "./autoSyncSummary";
 import { isDesktop, safeInvoke } from "./bridge";
 import { nextClientSeekSeq } from "./seekCoalesce";
 
@@ -56,6 +57,7 @@ export interface MpvTrack {
   lang?: string | null;
   codec?: string | null;
   external?: boolean;
+  "external-filename"?: string | null;
   default?: boolean;
   forced?: boolean;
   "ff-index"?: number;
@@ -82,6 +84,9 @@ export function normalizeMpvTrack(raw: RawMpvTrack): MpvTrack {
     lang: raw.lang ?? null,
     codec: raw.codec ?? null,
     external: Boolean(raw.external),
+    ...(raw["external-filename"] !== undefined
+      ? { "external-filename": raw["external-filename"] }
+      : {}),
     default: Boolean(raw.default),
     forced: Boolean(raw.forced),
     ...(raw["ff-index"] !== undefined ? { "ff-index": raw["ff-index"] } : {}),
@@ -97,6 +102,12 @@ export function normalizeMpvTracks(rawTracks: readonly RawMpvTrack[]): MpvTrack[
 export type AspectMode = "auto" | "16:9" | "4:3" | "21:9" | "fill";
 export type SubtitleEncodingHint = "auto" | "utf8" | "windows1256" | "windows1252" | "windows1251";
 
+export interface AutoSyncSegment {
+  startSecs: number;
+  offsetSecs: number;
+  scale: number;
+}
+
 export interface AutoSyncResult {
   offsetSecs: number;
   scale: number;
@@ -104,6 +115,7 @@ export interface AutoSyncResult {
   correlation: number;
   driftApplied: boolean;
   segmentsApplied?: number;
+  segments?: AutoSyncSegment[];
   bitmapInPlace?: boolean;
   syncedSubtitlePath: string;
   sourceSubtitlePath: string;
@@ -147,10 +159,6 @@ let lastCleanFreezeFrame: MpvBackdropFrame | null = null;
 
 export function getLastCapturedBackdropFrame(): MpvBackdropFrame | null {
   return lastCapturedBackdropFrame;
-}
-
-export function clearLastCapturedBackdropFrame(): void {
-  lastCapturedBackdropFrame = null;
 }
 
 export function getLastCleanFreezeFrame(): MpvBackdropFrame | null {
@@ -252,39 +260,6 @@ export async function captureCleanFrozenFrame(
 
 export const captureFrozenBackdropFrame = captureCleanFrozenFrame;
 
-export async function withHiddenMpvForDialog<T>(
-  mpvActive: boolean,
-  options: {
-    onFreezeFrame?: (frame: MpvBackdropFrame) => void;
-    shouldRestoreVisible: () => boolean;
-  },
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (mpvActive) {
-    if (options.onFreezeFrame) {
-      if (lastCleanFreezeFrame) {
-        options.onFreezeFrame(lastCleanFreezeFrame);
-      }
-      const snap = await captureCleanFrozenFrame();
-      if (snap) {
-        options.onFreezeFrame(snap);
-      }
-    }
-    try {
-      await mpvSetVisible(false);
-    } catch {
-      // Engine may not be alive if runtime exited.
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    if (mpvActive) {
-      safeMpvCall(mpvSetVisible(options.shouldRestoreVisible()), "mpvSetVisible");
-    }
-  }
-}
-
 export async function mpvLoad(path: string): Promise<void> {
   lastCapturedBackdropFrame = null;
   lastCleanFreezeFrame = null;
@@ -334,6 +309,10 @@ export async function mpvSetLoop(looping: boolean): Promise<void> {
 
 export async function mpvSetAspectMode(aspect: AspectMode): Promise<void> {
   await safeInvoke("mpv_set_aspect_mode", { aspect });
+}
+
+export async function mpvSetDialogueBoost(enabled: boolean): Promise<void> {
+  await safeInvoke("mpv_set_dialogue_boost", { enabled });
 }
 
 export async function mpvSetVideoMarginRight(ratio: number): Promise<void> {
@@ -463,6 +442,18 @@ export async function subtitleCancelAutoSync(): Promise<void> {
   await safeInvoke("subtitle_cancel_auto_sync");
 }
 
+export async function onAutoSyncProgress(
+  cb: (stage: AutoSyncStage) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<{ stage?: unknown }>("autosync:progress", (e) => {
+    const raw = e.payload?.stage;
+    if (isAutoSyncStage(raw)) {
+      cb(raw);
+    }
+  });
+}
+
 export interface SubtitleLangProbeTrack {
   trackId: number;
   ffIndex: number | null;
@@ -540,6 +531,7 @@ export interface OnlineSubtitleSearchParams {
   season?: number | null;
   episode?: number | null;
   apiKey?: string | null;
+  privateTitles?: boolean;
 }
 
 export async function subtitleSearchOnline(
@@ -554,6 +546,7 @@ export async function subtitleSearchOnline(
       season: params.season ?? null,
       episode: params.episode ?? null,
       apiKey: params.apiKey ?? null,
+      privateTitles: params.privateTitles ?? false,
     },
   });
 }
@@ -588,12 +581,14 @@ export async function subtitleAutoFetchOnline(params: {
   videoPath: string;
   languages: string;
   apiKey?: string | null;
+  privateTitles?: boolean;
 }): Promise<AutoFetchSubtitleResult> {
   return safeInvoke<AutoFetchSubtitleResult>("subtitle_auto_fetch_online", {
     req: {
       videoPath: params.videoPath,
       languages: params.languages,
       apiKey: params.apiKey ?? null,
+      privateTitles: params.privateTitles ?? false,
     },
   });
 }

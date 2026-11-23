@@ -1,5 +1,12 @@
 import { create } from "zustand";
+import type { AutoSyncStage } from "../lib/autoSyncSummary";
 import type { AutoSyncResult, MpvTrack, SubStyleParams, SubtitleEncodingHint } from "../lib/mpv";
+
+export interface PreSyncTarget {
+  wasEmbedded: boolean;
+  trackId: number | null;
+  originalFilePath: string | null;
+}
 
 function readBoldStorage(): boolean {
   try {
@@ -145,6 +152,20 @@ export function deriveCleanSearchQuery(filenameOrPath: string | null | undefined
 
 export type AutoFetchStatus = "idle" | "searching" | "loaded" | "none" | "error";
 
+export interface SharedRoomSubtitle {
+  id: string;
+  sender: string;
+  fileName: string;
+  ext: string;
+  lang: string | null;
+  content: string;
+  sizeBytes: number;
+  receivedAt: number;
+  applied: boolean;
+}
+
+const MAX_SHARED_SUBTITLES = 10;
+
 function roundToCentisecond(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -166,10 +187,13 @@ interface SubtitleState {
   secondaryDelaySecs: number;
   sessionGen: number;
   autoSyncBusy: boolean;
+  autoSyncStage: AutoSyncStage;
   autoSyncOutcome: AutoSyncResult | null;
   autoSyncError: string | null;
+  preSyncTarget: PreSyncTarget | null;
   autoFetchStatus: AutoFetchStatus;
   autoFetchMessage: string | null;
+  sharedSubtitles: SharedRoomSubtitle[];
   setFont: (font: string) => void;
   setBold: (bold: boolean) => void;
   setFontSize: (fontSize: number) => void;
@@ -181,14 +205,19 @@ interface SubtitleState {
   setEncodingHint: (hint: SubtitleEncodingHint) => void;
   setDelaySecs: (delaySecs: number) => void;
   setSecondarySubId: (sid: number | null) => void;
-  setSecondaryDelaySecs: (delaySecs: number) => void;
   nudgeDelay: (deltaSecs: number) => number;
   setLoadedTrack: (loadedFilePath: string, originalFilePath?: string) => void;
   clearLoadedTrack: () => void;
+  clearSecondaryTrack: () => void;
   setAutoSyncBusy: (busy: boolean) => void;
+  setAutoSyncStage: (stage: AutoSyncStage) => void;
+  setPreSyncTarget: (target: PreSyncTarget | null) => void;
   setAutoSyncResult: (result: AutoSyncResult | null) => void;
   setAutoSyncError: (err: string | null) => void;
   setAutoFetchState: (status: AutoFetchStatus, message?: string | null) => void;
+  addSharedSubtitle: (item: Omit<SharedRoomSubtitle, "receivedAt" | "applied">) => boolean;
+  markSharedSubtitleApplied: (id: string) => void;
+  clearSharedSubtitles: () => void;
   resetDefaults: () => void;
 }
 
@@ -228,10 +257,13 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
   secondaryDelaySecs: 0,
   sessionGen: 0,
   autoSyncBusy: false,
+  autoSyncStage: null,
   autoSyncOutcome: null,
   autoSyncError: null,
+  preSyncTarget: null,
   autoFetchStatus: "idle",
   autoFetchMessage: null,
+  sharedSubtitles: [],
 
   setFont: (font) => set({ font }),
   setBold: (bold) => {
@@ -253,11 +285,6 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
 
   setSecondarySubId: (secondarySubId) => set({ secondarySubId }),
 
-  setSecondaryDelaySecs: (secondaryDelaySecs) =>
-    set({
-      secondaryDelaySecs: Math.max(-600, Math.min(600, roundToCentisecond(secondaryDelaySecs))),
-    }),
-
   nudgeDelay: (deltaSecs) => {
     const next = Math.max(-600, Math.min(600, roundToCentisecond(get().delaySecs + deltaSecs)));
     set({ delaySecs: next });
@@ -269,7 +296,9 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
       loadedFilePath,
       originalFilePath: originalFilePath ?? s.originalFilePath ?? loadedFilePath,
       visible: true,
+      autoSyncOutcome: null,
       autoSyncError: null,
+      preSyncTarget: null,
     })),
 
   clearLoadedTrack: () =>
@@ -277,26 +306,63 @@ export const useSubtitleStore = create<SubtitleState>((set, get) => ({
       loadedFilePath: null,
       originalFilePath: null,
       delaySecs: 0,
-      secondarySubId: null,
-      secondaryDelaySecs: 0,
       sessionGen: s.sessionGen + 1,
       autoSyncBusy: false,
+      autoSyncStage: null,
       autoSyncOutcome: null,
       autoSyncError: null,
+      preSyncTarget: null,
       autoFetchStatus: "idle",
       autoFetchMessage: null,
     })),
 
-  setAutoSyncBusy: (autoSyncBusy) => set({ autoSyncBusy }),
+  clearSecondaryTrack: () =>
+    set({
+      secondarySubId: null,
+      secondaryDelaySecs: 0,
+    }),
+
+  setAutoSyncBusy: (autoSyncBusy) =>
+    set((s) => ({
+      autoSyncBusy,
+      autoSyncStage: autoSyncBusy ? s.autoSyncStage : null,
+    })),
+  setAutoSyncStage: (autoSyncStage) => set({ autoSyncStage }),
+  setPreSyncTarget: (preSyncTarget) => set({ preSyncTarget }),
   setAutoSyncResult: (autoSyncOutcome) =>
     set({
       autoSyncOutcome,
       autoSyncBusy: false,
+      autoSyncStage: null,
       autoSyncError: null,
     }),
-  setAutoSyncError: (autoSyncError) => set({ autoSyncError, autoSyncBusy: false }),
+  setAutoSyncError: (autoSyncError) =>
+    set({ autoSyncError, autoSyncBusy: false, autoSyncStage: null }),
   setAutoFetchState: (autoFetchStatus, autoFetchMessage = null) =>
     set({ autoFetchStatus, autoFetchMessage }),
+  addSharedSubtitle: (item) => {
+    const existing = get().sharedSubtitles;
+    if (existing.some((x) => x.id === item.id)) {
+      return false;
+    }
+    const entry: SharedRoomSubtitle = {
+      ...item,
+      lang: item.lang ?? null,
+      receivedAt: Date.now(),
+      applied: false,
+    };
+    set({
+      sharedSubtitles: [entry, ...existing].slice(0, MAX_SHARED_SUBTITLES),
+    });
+    return true;
+  },
+  markSharedSubtitleApplied: (id) =>
+    set((s) => ({
+      sharedSubtitles: s.sharedSubtitles.map((item) =>
+        item.id === id ? { ...item, applied: true } : item,
+      ),
+    })),
+  clearSharedSubtitles: () => set({ sharedSubtitles: [] }),
 
   resetDefaults: () => {
     writeBoldStorage(false);

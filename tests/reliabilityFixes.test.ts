@@ -1289,3 +1289,234 @@ test("useAppStore clamps playBarOpacity and scales floating and full-width bar C
   appStoreMod.useAppStore.getState().setPlayBarOpacity(85);
   assert.equal(appStoreMod.useAppStore.getState().playBarOpacity, 85);
 });
+
+test("Magic Sync summary, stage labels, external-filename normalization, and SubtitlePanel swap order", async () => {
+  const summaryMod = await loadModules<typeof import("../src/lib/autoSyncSummary")>(
+    "src/lib/autoSyncSummary.ts",
+  );
+  const mpvMod = await loadModules<typeof import("../src/lib/mpv")>("src/lib/mpv.ts");
+  const subStoreMod = await loadModules<typeof import("../src/store/useSubtitleStore")>(
+    "src/store/useSubtitleStore.ts",
+  );
+
+  // 1. Live stage formatting & validator
+  assert.equal(summaryMod.isAutoSyncStage("extracting_sub"), true);
+  assert.equal(summaryMod.isAutoSyncStage("extracting_audio"), true);
+  assert.equal(summaryMod.isAutoSyncStage("aligning"), true);
+  assert.equal(summaryMod.isAutoSyncStage("applying"), true);
+  assert.equal(summaryMod.isAutoSyncStage("bogus"), false);
+  assert.equal(summaryMod.formatAutoSyncStage("extracting_audio"), "Extracting audio track…");
+  assert.equal(summaryMod.formatAutoSyncStage("aligning"), "Matching speech timing…");
+  assert.equal(summaryMod.formatAutoSyncStage(null), "Syncing subtitles…");
+
+  // 2. Framerate drift labels
+  assert.equal(summaryMod.formatFramerateDriftLabel(23.976 / 25.0), "25 → 23.976 fps");
+  assert.equal(summaryMod.formatFramerateDriftLabel(25.0 / 23.976), "23.976 → 25 fps");
+  assert.equal(summaryMod.formatFramerateDriftLabel(24.0 / 25.0), "25 → 24 fps");
+  assert.match(summaryMod.formatFramerateDriftLabel(1.0035), /Speed ×1\.0035 \(\+0\.35%\)/);
+
+  // 3. Summarize constant offset + drift
+  const driftSummary = summaryMod.summarizeAutoSyncOutcome({
+    offsetSecs: -2.4,
+    scale: 23.976 / 25.0,
+    confidenceZ: 9.4,
+    correlation: 0.42,
+    driftApplied: true,
+    segmentsApplied: 1,
+    bitmapInPlace: false,
+    syncedSubtitlePath: "C:\\Temp\\synced.srt",
+    sourceSubtitlePath: "C:\\Subs\\Movie.srt",
+    audioDurationSecs: 5400,
+    elapsedMs: 3420,
+  });
+  assert.equal(driftSummary.alreadyInSync, false);
+  assert.equal(driftSummary.headline, "Subtitles matched to speech");
+  assert.equal(driftSummary.confidenceLabel, "High confidence");
+  assert.equal(driftSummary.elapsedLabel, "3.4s");
+  assert.deepEqual(
+    driftSummary.fixes.map((f) => f.label),
+    ["Shifted -2.40s (earlier)", "25 → 23.976 fps"],
+  );
+  assert.match(driftSummary.toastText, /Shifted -2\.40s \(earlier\), 25 → 23\.976 fps/);
+
+  // 4. Summarize piecewise multi-segment outcome
+  const segSummary = summaryMod.summarizeAutoSyncOutcome({
+    offsetSecs: 2.4,
+    scale: 1,
+    confidenceZ: 6.2,
+    correlation: 0.31,
+    driftApplied: false,
+    segmentsApplied: 3,
+    segments: [
+      { startSecs: 0, offsetSecs: 2.4, scale: 1 },
+      { startSecs: 610, offsetSecs: 9.8, scale: 1 },
+      { startSecs: 1205, offsetSecs: 4.1, scale: 1 },
+    ],
+    bitmapInPlace: false,
+    syncedSubtitlePath: "C:\\Temp\\synced.srt",
+    sourceSubtitlePath: "C:\\Subs\\Ep.srt",
+    audioDurationSecs: 1800,
+    elapsedMs: 850,
+  });
+  assert.equal(segSummary.headline, "Matched across 3 segments");
+  assert.equal(segSummary.confidenceLabel, "Good match");
+  assert.equal(segSummary.elapsedLabel, "850ms");
+  assert.deepEqual(
+    segSummary.fixes.map((f) => f.label),
+    ["Shifts +2.40s to +9.80s", "3 segments"],
+  );
+  assert.deepEqual(segSummary.segmentDetails, [
+    "0:00 → +2.40s",
+    "10:10 → +9.80s",
+    "20:05 → +4.10s",
+  ]);
+
+  // 5. Already in sync & bitmap in-place
+  const inSync = summaryMod.summarizeAutoSyncOutcome({
+    offsetSecs: 0.02,
+    scale: 1,
+    confidenceZ: 8.5,
+    correlation: 0.55,
+    driftApplied: false,
+    segmentsApplied: 1,
+    bitmapInPlace: true,
+    syncedSubtitlePath: "",
+    sourceSubtitlePath: "",
+    audioDurationSecs: 3000,
+    elapsedMs: 1200,
+  });
+  assert.equal(inSync.alreadyInSync, true);
+  assert.equal(inSync.headline, "Already in sync");
+  assert.deepEqual(
+    inSync.fixes.map((f) => f.label),
+    ["No shift needed", "Live mpv delay"],
+  );
+
+  // 6. normalizeMpvTrack preserves external-filename for auto-loaded external subtitles
+  const normalized = mpvMod.normalizeMpvTrack({
+    id: 3,
+    type: "sub",
+    external: true,
+    "external-filename": "D:\\Movies\\Film.en.srt",
+    selected: true,
+  });
+  assert.equal(normalized["external-filename"], "D:\\Movies\\Film.en.srt");
+
+  // 7. Store tracks autoSyncStage and clears autoSyncOutcome when a fresh track is loaded
+  const subStore = subStoreMod.useSubtitleStore;
+  subStore.getState().setAutoSyncBusy(true);
+  subStore.getState().setAutoSyncStage("aligning");
+  assert.equal(subStore.getState().autoSyncStage, "aligning");
+  subStore.getState().setAutoSyncResult({
+    offsetSecs: 1.5,
+    scale: 1,
+    confidenceZ: 7,
+    correlation: 0.3,
+    driftApplied: false,
+    syncedSubtitlePath: "C:\\Temp\\x.srt",
+    sourceSubtitlePath: "C:\\Subs\\x.srt",
+    audioDurationSecs: 100,
+    elapsedMs: 500,
+  });
+  assert.equal(subStore.getState().autoSyncStage, null);
+  subStore.getState().setLoadedTrack("C:\\Subs\\Other.srt", "C:\\Subs\\Other.srt");
+  assert.equal(subStore.getState().autoSyncOutcome, null);
+
+  // 8. SubtitlePanel swaps tracks by adding synced sub BEFORE removing old external sub
+  const subPanelSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/SubtitlePanel.tsx"),
+    "utf8",
+  );
+  const autoSyncBlock = subPanelSrc.slice(
+    subPanelSrc.indexOf("const handleAutoSync"),
+    subPanelSrc.indexOf("const handleUndoAutoSync"),
+  );
+  const addIdx = autoSyncBlock.indexOf("await mpvAddSubtitle(result.syncedSubtitlePath");
+  const remIdx = autoSyncBlock.indexOf("await mpvRemoveSubtitle(activeSub.id)");
+  assert.ok(addIdx !== -1 && remIdx !== -1 && addIdx < remIdx);
+  assert.match(subPanelSrc, /selectedSub\?\.\["external-filename"\]/);
+  assert.match(subPanelSrc, /data-testid="autosync-summary-card"/);
+  assert.match(subPanelSrc, /\$\{embeddedTrackLabel\} \(Synced\)/);
+  assert.match(subPanelSrc, /prev !== null &&\s*\n\s*\(prev\.id !== selectedSub\?\.id/);
+  const timingSection = subPanelSrc.slice(subPanelSrc.indexOf("{/* Timing & Magic Sync */}"));
+  assert.match(timingSection, /autoSyncError && !autoSyncBusy/);
+});
+
+test("autoEnableEmbeddedSubtitle does not hijack newly added Magic-Synced external tracks", async () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "epilod-autosync-sub-test-"));
+  try {
+    const outFile = path.join(outDir, "bundle.mjs");
+    buildSync({
+      stdin: {
+        contents: `
+          export * from "./src/lib/mpv";
+          export * from "./src/lib/playerActions";
+          export * from "./src/store/useAppStore";
+          export * from "./src/store/useSubtitleStore";
+        `,
+        resolveDir: REPO_ROOT,
+        loader: "ts",
+      },
+      outfile: outFile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node22",
+    });
+    const mod = await import(pathToFileURL(outFile).href);
+    const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+    const prevWindow = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).window = {
+      __TAURI_INTERNALS__: {
+        invoke: async (cmd: string, args: Record<string, unknown>) => {
+          calls.push({ cmd, args });
+          return undefined;
+        },
+      },
+    };
+    try {
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Movie.mkv", "Movie.mkv");
+
+      // Initial load: embedded Arabic (id 1) and embedded English (id 2) -> selects id 1
+      const initialTracks = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "subrip", lang: "ara", selected: false, external: false },
+        { id: 2, type: "sub", codec: "subrip", lang: "eng", selected: true, external: false },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(initialTracks);
+      assert.ok(calls.some((c) => c.cmd === "mpv_set_sub_track" && c.args.sid === 1));
+
+      // User manually picks embedded English (id 2) and runs Magic Sync -> mpv adds synced external
+      // track (id 3, selected: true, external: true). autoEnableEmbeddedSubtitle must NOT hijack
+      // selection back to embedded Arabic (id 1) or another external track!
+      calls.length = 0;
+      const postSyncTracks = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "subrip", lang: "ara", selected: false, external: false },
+        { id: 2, type: "sub", codec: "subrip", lang: "eng", selected: false, external: false },
+        { id: 3, type: "sub", codec: "subrip", title: "ENG Subtitles (Synced)", selected: true, external: true },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(postSyncTracks);
+      assert.equal(calls.some((c) => c.cmd === "mpv_set_sub_track"), false);
+
+      // Even if a file opens with an external non-Arabic/non-English track already selected alongside
+      // an external Arabic track, autoEnableEmbeddedSubtitle must preserve the user's selected external track.
+      calls.length = 0;
+      mod.resetAutoSubtitleState();
+      mod.useAppStore.getState().setSelectedFile("D:\\Shows\\Movie2.mkv", "Movie2.mkv");
+      const alreadySelectedExternal = mod.normalizeMpvTracks([
+        { id: 1, type: "sub", codec: "subrip", lang: "ara", selected: false, external: true },
+        { id: 2, type: "sub", codec: "subrip", title: "Custom Synced", selected: true, external: true },
+      ]);
+      mod.autoEnableEmbeddedSubtitle(alreadySelectedExternal);
+      assert.equal(calls.some((c) => c.cmd === "mpv_set_sub_track"), false);
+    } finally {
+      if (prevWindow === undefined) {
+        delete (globalThis as Record<string, unknown>).window;
+      } else {
+        (globalThis as Record<string, unknown>).window = prevWindow;
+      }
+    }
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});

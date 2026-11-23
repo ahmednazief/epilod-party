@@ -18,6 +18,7 @@ import {
   PEER_LEFT_TAG_PREFIX,
 } from "../lib/syncReady";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
+import { useRatingStore } from "./useRatingStore";
 import {
   sanitizeCustomServerEndpoint,
   sanitizeRoomCodeInput,
@@ -103,6 +104,7 @@ export type SettingsTab =
   | "playback"
   | "party"
   | "voice"
+  | "storage"
   | "updates"
   | "server"
   | "logs";
@@ -152,6 +154,9 @@ interface AppState {
   playBarOpacity: number;
   autoCheckUpdates: boolean;
   autoDownloadUpdates: boolean;
+  seekbarThumbnails: boolean;
+  thumbCacheCapMb: number;
+  outroRatingEnabled: boolean;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
   shortcutsOpen: boolean;
@@ -162,7 +167,6 @@ interface AppState {
   setUsername: (name: string) => void;
   setAvatarId: (avatarId: AvatarId) => void;
   setRoomCode: (code: string) => void;
-  setLiteralRoom: (literal: boolean) => void;
   setHostOnlyRoom: (hostOnly: boolean) => void;
   setCreatingRoom: (creating: boolean) => void;
   applyRerolledRoomCode: (code: string) => void;
@@ -201,6 +205,9 @@ interface AppState {
   setPlayBarOpacity: (opacity: number) => void;
   setAutoCheckUpdates: (autoCheck: boolean) => void;
   setAutoDownloadUpdates: (autoDownload: boolean) => void;
+  setSeekbarThumbnails: (enabled: boolean) => void;
+  setThumbCacheCapMb: (mb: number) => void;
+  setOutroRatingEnabled: (enabled: boolean) => void;
   openSettings: (tab?: SettingsTab | "prefs") => void;
   setSettingsTab: (tab: SettingsTab | "prefs") => void;
   closeSettings: () => void;
@@ -313,6 +320,13 @@ const initialPlayBarOpacity = (() => {
 })();
 const initialAutoCheckUpdates = readStorage("ep.autoCheckUpdates", "true") !== "false";
 const initialAutoDownloadUpdates = readStorage("ep.autoDownloadUpdates", "true") !== "false";
+const initialSeekbarThumbnails = readStorage("ep.seekbarThumbnails", "true") !== "false";
+const initialThumbCacheCapMb = (() => {
+  const n = Number(readStorage("ep.thumbCacheCapMb", "24"));
+  if (!Number.isFinite(n)) return 24;
+  return Math.max(8, Math.min(250, Math.round(n)));
+})();
+const initialOutroRatingEnabled = readStorage("ep.outroRatingEnabled", "true") !== "false";
 
 applyReducedMotionAttribute(initialReducedMotion);
 applyPlayBarOpacityVariables(initialPlayBarOpacity);
@@ -357,6 +371,9 @@ export const useAppStore = create<AppState>((set) => ({
   playBarOpacity: initialPlayBarOpacity,
   autoCheckUpdates: initialAutoCheckUpdates,
   autoDownloadUpdates: initialAutoDownloadUpdates,
+  seekbarThumbnails: initialSeekbarThumbnails,
+  thumbCacheCapMb: initialThumbCacheCapMb,
+  outroRatingEnabled: initialOutroRatingEnabled,
   settingsOpen: false,
   settingsTab: "server",
   shortcutsOpen: false,
@@ -385,8 +402,6 @@ export const useAppStore = create<AppState>((set) => ({
         creatingRoom: cleaned ? s.creatingRoom : false,
       };
     }),
-
-  setLiteralRoom: (literalRoom) => set({ literalRoom }),
 
   setHostOnlyRoom: (hostOnlyRoom) => set({ hostOnlyRoom }),
 
@@ -603,6 +618,22 @@ export const useAppStore = create<AppState>((set) => ({
     set({ playBarOpacity: next });
   },
 
+  setOutroRatingEnabled: (outroRatingEnabled) => {
+    writeStorage("ep.outroRatingEnabled", outroRatingEnabled ? "true" : "false");
+    set({ outroRatingEnabled });
+  },
+
+  setSeekbarThumbnails: (seekbarThumbnails) => {
+    writeStorage("ep.seekbarThumbnails", seekbarThumbnails ? "true" : "false");
+    set({ seekbarThumbnails });
+  },
+
+  setThumbCacheCapMb: (mb) => {
+    const clamped = Math.max(8, Math.min(250, Math.round(mb)));
+    writeStorage("ep.thumbCacheCapMb", String(clamped));
+    set({ thumbCacheCapMb: clamped });
+  },
+
   setAutoCheckUpdates: (autoCheckUpdates) => {
     writeStorage("ep.autoCheckUpdates", autoCheckUpdates ? "true" : "false");
     set({ autoCheckUpdates });
@@ -660,8 +691,11 @@ export const useAppStore = create<AppState>((set) => ({
     noteStore.dismissByTagPrefix(PEER_LEFT_TAG_PREFIX);
     noteStore.dismissByTag(LOCAL_DISCONNECT_TAG);
     useSubtitleStore.getState().clearLoadedTrack();
+    useSubtitleStore.getState().clearSecondaryTrack();
+    useSubtitleStore.getState().clearSharedSubtitles();
     usePlaylistStore.getState().clearPlaylist();
     useVoiceStore.getState().resetSession();
+    useRatingStore.getState().resetSession();
     set({
       screen: "home",
       roomCode: "",
@@ -680,6 +714,7 @@ export const useAppStore = create<AppState>((set) => ({
     useSyncStore.getState().setLocalReady(false);
     useSyncStore.getState().resetTimelineAlignment();
     useSubtitleStore.getState().clearLoadedTrack();
+    useSubtitleStore.getState().clearSecondaryTrack();
     set({
       selectedFilePath: path,
       selectedFileName: name,

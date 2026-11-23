@@ -28,7 +28,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
 const USER_AGENT: &str = concat!("EpilodParty/", env!("CARGO_PKG_VERSION"));
 const OS_API_USER_AGENT: &str = concat!("EpilodParty v", env!("CARGO_PKG_VERSION"));
-const MAX_CACHED_SUB_FILES: usize = 400;
+const MAX_CACHED_SUB_FILES: usize = 200;
+const MAX_CACHED_SUB_AGE_DAYS: u64 = 30;
 
 const ALLOWED_SUBTITLE_HOSTS: &[&str] = &[
     "v3-cinemeta.strem.io",
@@ -58,6 +59,8 @@ pub struct SubtitleSearchRequest {
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub private_titles: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +105,8 @@ pub struct AutoFetchSubtitleRequest {
     pub video_path: String,
     pub languages: String,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub private_titles: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,6 +124,44 @@ pub fn subtitle_cache_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("EpilodParty")
         .join("subtitles")
+}
+
+pub fn shared_subtitle_cache_dir() -> PathBuf {
+    subtitle_cache_dir().join("shared")
+}
+
+pub fn prune_shared_subtitle_cache_in(dir: &Path, max_files: usize, max_age_days: u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    let max_age = Duration::from_secs(max_age_days.saturating_mul(86_400));
+    let mut kept: Vec<(PathBuf, SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        if max_age_days > 0 && now.duration_since(mtime).is_ok_and(|age| age > max_age) {
+            let _ = fs::remove_file(&p);
+            continue;
+        }
+        kept.push((p, mtime));
+    }
+    if kept.len() > max_files {
+        kept.sort_by_key(|b| std::cmp::Reverse(b.1));
+        for (old, _) in kept.into_iter().skip(max_files) {
+            let _ = fs::remove_file(old);
+        }
+    }
+}
+
+pub fn prune_shared_subtitle_cache(max_files: usize, max_age_days: u64) {
+    prune_shared_subtitle_cache_in(&shared_subtitle_cache_dir(), max_files, max_age_days);
 }
 
 fn percent_encode_component(input: &str) -> String {
@@ -160,10 +203,17 @@ async fn https_request_bytes(
             .map_err(|_| format!("TLS handshake timed out with {}", current.host))?
             .map_err(|e| format!("TLS failed for {}: {e}", current.host))?;
 
+        let has_custom_ua = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"));
         let mut req = format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: application/json, text/plain, */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
-            cur_method, current.path_and_query, current.host, USER_AGENT
+            "{} {} HTTP/1.1\r\nHost: {}\r\n",
+            cur_method, current.path_and_query, current.host
         );
+        if !has_custom_ua {
+            req.push_str(&format!("User-Agent: {USER_AGENT}\r\n"));
+        }
+        req.push_str("Accept: application/json, text/plain, */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
         for (k, v) in headers {
             if !k.eq_ignore_ascii_case("host")
                 && !k.eq_ignore_ascii_case("connection")
@@ -463,20 +513,37 @@ async fn query_opensubtitles_official_api(
     ))
 }
 
+pub fn prune_subtitle_cache_startup() {
+    prune_subtitle_cache(&subtitle_cache_dir());
+}
+
 fn prune_subtitle_cache(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+    let now = SystemTime::now();
+    let max_age = Duration::from_secs(MAX_CACHED_SUB_AGE_DAYS * 86_400);
+    let part_max_age = Duration::from_secs(3600);
     let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_file() {
-            let mtime = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(UNIX_EPOCH);
-            files.push((p, mtime));
+        if !p.is_file() {
+            continue;
         }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        let age = now.duration_since(mtime).ok();
+        let is_part = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".part"));
+        if (is_part && age.is_some_and(|a| a > part_max_age)) || age.is_some_and(|a| a > max_age) {
+            let _ = fs::remove_file(&p);
+            continue;
+        }
+        files.push((p, mtime));
     }
     if files.len() <= MAX_CACHED_SUB_FILES {
         return;
@@ -540,7 +607,7 @@ pub async fn search_online_subtitles_impl(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .is_none()
+                .is_some()
         {
             parsed.season = parsed_video.season;
             parsed.episode = parsed_video.episode;
@@ -585,13 +652,19 @@ pub async fn search_online_subtitles_impl(
             None
         };
 
+        let wire_file_name = if req.private_titles.unwrap_or(false) {
+            None
+        } else {
+            video_name.as_deref()
+        };
+
         let p_fut = query_stremio_subtitles_for_match(
             primary,
             parsed.season,
             parsed.episode,
             movie_hash.as_deref(),
             movie_size,
-            video_name.as_deref(),
+            wire_file_name,
             video_name.as_deref(),
             &preferred_langs,
         );
@@ -604,7 +677,7 @@ pub async fn search_online_subtitles_impl(
                         parsed.episode,
                         movie_hash.as_deref(),
                         movie_size,
-                        video_name.as_deref(),
+                        wire_file_name,
                         video_name.as_deref(),
                         &preferred_langs,
                     )
@@ -737,35 +810,43 @@ pub async fn download_online_subtitle_impl(
     .await?;
 
     let clean_utf8 = sanitize_subtitle_download_bytes(&raw_bytes)?;
-
-    let cache_dir = subtitle_cache_dir();
-    fs::create_dir_all(&cache_dir)
-        .map_err(|e| format!("Failed creating subtitle cache directory: {e}"))?;
-
+    let lang = normalize_subtitle_lang_code(req.language.as_deref().unwrap_or("eng"));
+    let tag = short_subtitle_cache_tag(req.video_path.as_deref(), &download_url);
     let video_name = req
         .video_path
         .as_deref()
         .and_then(|p| Path::new(p).file_name())
         .map(|n| n.to_string_lossy().into_owned());
+    let req_file_name = req.file_name.clone();
+    let lang_for_task = lang.clone();
 
-    let lang = normalize_subtitle_lang_code(req.language.as_deref().unwrap_or("eng"));
-    let tag = short_subtitle_cache_tag(req.video_path.as_deref(), &download_url);
-    let cached_name = build_cached_subtitle_filename(
-        video_name.as_deref(),
-        req.file_name.as_deref(),
-        Some(&lang),
-        &tag,
-    );
-    let dest_path = cache_dir.join(&cached_name);
-    let tmp_path = cache_dir.join(format!("{cached_name}.part"));
-    fs::write(&tmp_path, &clean_utf8).map_err(|e| format!("Failed saving subtitle file: {e}"))?;
-    if dest_path.exists() {
-        let _ = fs::remove_file(&dest_path);
-    }
-    fs::rename(&tmp_path, &dest_path)
-        .map_err(|e| format!("Failed finalizing cached subtitle file: {e}"))?;
+    let (dest_path, cached_name) =
+        tokio::task::spawn_blocking(move || -> Result<(PathBuf, String), String> {
+            let cache_dir = subtitle_cache_dir();
+            fs::create_dir_all(&cache_dir)
+                .map_err(|e| format!("Failed creating subtitle cache directory: {e}"))?;
 
-    prune_subtitle_cache(&cache_dir);
+            let cached_name = build_cached_subtitle_filename(
+                video_name.as_deref(),
+                req_file_name.as_deref(),
+                Some(&lang_for_task),
+                &tag,
+            );
+            let dest_path = cache_dir.join(&cached_name);
+            let tmp_path = cache_dir.join(format!("{cached_name}.part"));
+            fs::write(&tmp_path, &clean_utf8)
+                .map_err(|e| format!("Failed saving subtitle file: {e}"))?;
+            if dest_path.exists() {
+                let _ = fs::remove_file(&dest_path);
+            }
+            fs::rename(&tmp_path, &dest_path)
+                .map_err(|e| format!("Failed finalizing cached subtitle file: {e}"))?;
+
+            prune_subtitle_cache(&cache_dir);
+            Ok((dest_path, cached_name))
+        })
+        .await
+        .map_err(|e| format!("Failed saving subtitle cache task: {e}"))??;
 
     Ok(DownloadedSubtitleDto {
         subtitle_path: dest_path.to_string_lossy().into_owned(),
@@ -798,6 +879,7 @@ pub async fn auto_fetch_online_subtitle_impl(
             season: None,
             episode: None,
             api_key: req.api_key.clone(),
+            private_titles: req.private_titles,
         },
         path_opts,
     )
@@ -851,6 +933,39 @@ mod tests {
         let dir = subtitle_cache_dir();
         let norm = dir.to_string_lossy().replace('\\', "/");
         assert!(norm.ends_with("EpilodParty/subtitles"));
+        let shared = shared_subtitle_cache_dir();
+        let shared_norm = shared.to_string_lossy().replace('\\', "/");
+        assert!(shared_norm.ends_with("EpilodParty/subtitles/shared"));
+    }
+
+    #[test]
+    fn test_prune_shared_subtitle_cache_in_enforces_max_files_and_age() {
+        let dir = std::env::temp_dir().join(format!(
+            "epilod-shared-sub-prune-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        for i in 0..5 {
+            let file_path = dir.join(format!("shared_sub_{i}.srt"));
+            fs::write(&file_path, b"1\n00:00:01,000 --> 00:00:02,000\nHi\n").unwrap();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+
+        prune_shared_subtitle_cache_in(&dir, 3, 14);
+        let remaining: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(remaining.len(), 3);
+
+        // Verify the newest 3 files survived
+        assert!(dir.join("shared_sub_2.srt").exists());
+        assert!(dir.join("shared_sub_3.srt").exists());
+        assert!(dir.join("shared_sub_4.srt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -861,6 +976,7 @@ mod tests {
                 video_path: "D:\\Shows\\Breaking.Bad.S01E01.720p.BluRay.x264.mkv".to_string(),
                 languages: "ara,eng".to_string(),
                 api_key: None,
+                private_titles: None,
             },
             LocalPathOptions::default(),
         )

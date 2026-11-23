@@ -381,13 +381,15 @@ export const ReactionPopover = memo(function ReactionPopover() {
                 className="pointer-events-none absolute left-3 text-white/60"
               />
               <input
+                id="reaction-emoji-search"
+                name="reactionEmojiSearch"
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={
                   customizing
                     ? `Pick or paste emoji for slot ${selectedSlot + 1}…`
-                    : "Search or paste any emoji (Win + .)"
+                    : "Search emoji or paste (Win+.)"
                 }
                 aria-label="Search emojis"
                 className="ep-glass-input w-full h-8.5 pl-8.5 pr-8 text-xs text-primary placeholder:text-white/45 rounded-full focus:outline-none"
@@ -685,11 +687,6 @@ export const ReactionPopover = memo(function ReactionPopover() {
                   }}
                   type="button"
                   aria-label={`React ${item.label} (${item.shortcut})`}
-                  title={
-                    customizing
-                      ? `Slot ${idx + 1} (${item.label}) — Click to select for editing`
-                      : `${item.label} (${item.shortcut}) — Click or hold to stream`
-                  }
                   onMouseEnter={() => enterHoveredIdx(idx)}
                   onFocus={() => enterHoveredIdx(idx)}
                   onBlur={() => {

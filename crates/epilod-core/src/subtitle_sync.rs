@@ -1377,7 +1377,8 @@ fn is_confident_alignment(r: f64, z: f64, config: &AutoSyncConfig) -> bool {
     r.is_finite()
         && z.is_finite()
         && ((r >= config.min_correlation && z >= config.min_z_score)
-            || (z >= config.min_z_score.max(6.5) && r >= (config.min_correlation * 0.67).max(0.12)))
+            || (z >= config.min_z_score.max(6.5) && r >= (config.min_correlation * 0.67).max(0.12))
+            || (z >= config.min_z_score.max(8.5) && r >= (config.min_correlation * 0.40).max(0.07)))
 }
 
 pub(crate) fn fft_radix2(re: &mut [f64], im: &mut [f64], inverse: bool) {
@@ -1647,8 +1648,8 @@ fn run_global_fft_align(
             }
         }
 
-        let mut local_best_lag = ranked[0].0;
-        let mut local_best_corr = ranked[0].1;
+        let mut fine_best_lag = ranked[0].0;
+        let mut fine_best_corr = f64::NEG_INFINITY;
         for peak_lag in peak_lags {
             let fine_lo = (peak_lag - 8).max(-max_lag);
             let fine_hi = (peak_lag + 8).min(max_lag);
@@ -1662,13 +1663,18 @@ fn run_global_fft_align(
                     total_cue_bins,
                     f_lag,
                 ) {
-                    if r > local_best_corr {
-                        local_best_corr = r;
-                        local_best_lag = f_lag;
+                    if r > fine_best_corr {
+                        fine_best_corr = r;
+                        fine_best_lag = f_lag;
                     }
                 }
             }
         }
+        let (local_best_lag, local_best_corr) = if fine_best_corr.is_finite() {
+            (fine_best_lag, fine_best_corr)
+        } else {
+            (ranked[0].0, ranked[0].1)
+        };
 
         let z = measure_background_z(&coarse_points, local_best_lag, local_best_corr, 250);
         // A frame-rate-drift candidate must clearly beat the unscaled fit; otherwise random noise
@@ -2405,7 +2411,7 @@ pub fn auto_align_subtitles(
                 }
                 let min_r = rs.iter().copied().fold(f64::INFINITY, f64::min);
                 let max_r = rs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                if min_r < 0.08 || (max_r > 0.12 && min_r < max_r * 0.40) {
+                if min_r < 0.045 || (max_r > 0.10 && min_r < max_r * 0.35) {
                     need_segmented = true;
                 }
             }
@@ -2419,7 +2425,9 @@ pub fn auto_align_subtitles(
             let prefer_seg = match (&global_fit, global_confident) {
                 (_, false) => true,
                 (Some(g), true) => {
-                    seg_outcome.transform.segment_count() > 1
+                    (seg_outcome.transform.segment_count() > 1
+                        && seg_outcome.confidence_z >= 4.0
+                        && seg_outcome.correlation >= g.corr - 0.03)
                         || seg_outcome.correlation > g.corr + 0.04
                 }
                 (None, true) => true,
@@ -3827,5 +3835,77 @@ mod tests {
         // ASS files must remain untouched
         let ass = "[Events]\nDialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\an8}مرحبا!\n";
         assert_eq!(fix_rtl_subtitles(ass, "ass"), ass);
+    }
+
+    #[test]
+    fn test_autosync_high_z_moderate_r_and_50hz_vs_100hz_refinement() {
+        // Test the high-Z confidence gate directly and end-to-end on a noisy envelope where
+        // continuous background energy lowers raw Pearson r into the 0.08..0.11 range while
+        // keeping an unmistakable Z >= 8.5 peak, and verify unrelated cues are still rejected.
+        let cfg = AutoSyncConfig::default();
+        assert!(is_confident_alignment(0.085, 9.2, &cfg));
+        assert!(!is_confident_alignment(0.065, 11.0, &cfg));
+        assert!(!is_confident_alignment(0.09, 7.5, &cfg));
+
+        let secs = 600usize;
+        let bins = secs * 100;
+        let mut env = vec![0.42f32; bins];
+        let mut speech_windows = Vec::new();
+        let mut t = 15_000u64;
+        let mut step = 0u64;
+        while t < 560_000 {
+            let dur = 1_200 + ((step * 733) % 1_100);
+            let gap = 7_500 + ((step * 2_903) % 6_200);
+            speech_windows.push((t, t + dur));
+            let b0 = (t as usize / 10).min(bins);
+            let b1 = ((t + dur) as usize / 10).min(bins);
+            for slot in &mut env[b0..b1] {
+                *slot = 0.95;
+            }
+            // Add periodic non-subtitle background bursts to dilute Pearson r below 0.12
+            let dec = ((t + dur + 2_200) as usize / 10).min(bins);
+            let dec_end = (dec + 140).min(bins);
+            for slot in &mut env[dec..dec_end] {
+                *slot = 0.85;
+            }
+            t += dur + gap;
+            step += 1;
+        }
+        assert!(speech_windows.len() >= 30);
+
+        let shift_ms = 4_250i64;
+        let cues: Vec<SubtitleCue> = speech_windows
+            .iter()
+            .enumerate()
+            .map(|(i, &(a, b))| SubtitleCue {
+                index: i + 1,
+                start_ms: (a as i64 - shift_ms) as u64,
+                end_ms: (b as i64 - shift_ms) as u64,
+                text: format!("Noisy scene cue {i}"),
+            })
+            .collect();
+
+        let outcome = auto_align_subtitles(&cues, &env, &cfg)
+            .expect("high-Z moderate-r alignment should succeed");
+        assert!(
+            (outcome.offset_ms - shift_ms).abs() <= 80,
+            "expected ~+{shift_ms}ms, got {}ms (r={}, z={})",
+            outcome.offset_ms,
+            outcome.correlation,
+            outcome.confidence_z
+        );
+
+        let wrong_cues: Vec<SubtitleCue> = (0..40u64)
+            .map(|i| SubtitleCue {
+                index: i as usize + 1,
+                start_ms: 10_000 + i * 11_300,
+                end_ms: 11_800 + i * 11_300,
+                text: format!("Wrong episode line {i}"),
+            })
+            .collect();
+        assert!(matches!(
+            auto_align_subtitles(&wrong_cues, &env, &cfg),
+            Err(SubtitleSyncError::LowConfidence(_))
+        ));
     }
 }

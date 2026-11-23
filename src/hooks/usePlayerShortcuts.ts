@@ -37,6 +37,7 @@ import { useVoiceStore } from "../store/useVoiceStore";
 interface UsePlayerShortcutsOptions {
   onToggleFullscreen: () => void;
   onExitFullscreen: () => void;
+  hasOpenOverlay?: () => boolean;
   onToggleReactions?: () => void;
   onToggleChat?: () => void;
   onWakeChrome?: () => void;
@@ -45,6 +46,7 @@ interface UsePlayerShortcutsOptions {
 export function usePlayerShortcuts({
   onToggleFullscreen,
   onExitFullscreen,
+  hasOpenOverlay,
   onToggleReactions,
   onToggleChat,
   onWakeChrome,
@@ -86,21 +88,13 @@ export function usePlayerShortcuts({
           appState.closeShortcuts();
           return;
         }
+        if (hasOpenOverlay?.()) {
+          return;
+        }
         if (player.isFullscreen) {
           e.preventDefault();
           onExitFullscreen();
           return;
-        }
-        return;
-      }
-
-      // Open/toggle shortcuts modal with ? (or Shift+Slash across keyboard layouts)
-      if (e.key === "?" || (e.code === "Slash" && e.shiftKey)) {
-        e.preventDefault();
-        if (appState.shortcutsOpen) {
-          appState.closeShortcuts();
-        } else {
-          appState.openShortcuts();
         }
         return;
       }
@@ -338,5 +332,5 @@ export function usePlayerShortcuts({
       throttledSeek.cancel();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleReactions, onWakeChrome]);
+  }, [hasOpenOverlay, onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleReactions, onWakeChrome]);
 }

@@ -1491,3 +1491,80 @@ export function PlayerCollapseRightIcon({ size = 15, className = "" }: PlayerIco
     </svg>
   );
 }
+
+/**
+ * Custom iOS 27 Liquid-Glass sculpted rating star with soft squircle-rounded points,
+ * translucent warm-gold glass body, inner refraction glow, and top-left specular crescent.
+ */
+export function PlayerRatingStarIcon({
+  size = 16,
+  active = true,
+  tone = "gold",
+  className = "",
+}: PlayerIconProps & { active?: boolean; tone?: "gold" | "personal" }) {
+  const uid = useId().replace(/:/g, "");
+  const bodyId = `ep-star-body-${uid}`;
+  const innerGlowId = `ep-star-glow-${uid}`;
+  const sheenId = `ep-star-sheen-${uid}`;
+  const clipId = `ep-star-clip-${uid}`;
+  const isPersonal = tone === "personal";
+
+  // Plump, soft iOS-style rounded 5-point star
+  const starPath =
+    "M12 2.25Q12.72 2.25 13.28 3.38L15.05 6.95Q15.42 7.7 16.24 7.82L20.18 8.39Q21.4 8.57 21.05 9.6Q20.9 10.04 20.22 10.7L17.36 13.48Q16.77 14.06 16.91 14.88L17.58 18.81Q17.8 20.02 16.75 20.12Q16.32 20.16 15.48 19.72L11.95 17.86Q11.22 17.48 10.49 17.86L6.96 19.72Q5.88 20.29 5.42 19.38Q5.22 18.99 5.38 18.04L6.05 14.11Q6.19 13.29 5.6 12.71L2.74 9.93Q1.86 9.08 2.52 8.28Q2.8 7.94 3.74 7.8L7.68 7.23Q8.5 7.11 8.87 6.36L10.64 2.79Q11.2 1.66 12 2.25Z";
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <defs>
+        <linearGradient id={bodyId} x1="4" y1="2" x2="20" y2="21" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor={isPersonal ? "#F3E8FF" : "#FFF7AE"} stopOpacity="0.98" />
+          <stop offset="42%" stopColor={isPersonal ? "#C084FC" : "#FBBF24"} stopOpacity="0.94" />
+          <stop offset="100%" stopColor={isPersonal ? "#7C3AED" : "#EA580C"} stopOpacity="0.9" />
+        </linearGradient>
+        <radialGradient id={innerGlowId} cx="50%" cy="55%" r="50%">
+          <stop offset="0%" stopColor={isPersonal ? "#E9D5FF" : "#FEF08A"} stopOpacity="0.88" />
+          <stop offset="100%" stopColor={isPersonal ? "#8B5CF6" : "#F59E0B"} stopOpacity="0" />
+        </radialGradient>
+        <linearGradient id={sheenId} x1="5" y1="2" x2="14" y2="12" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.88" />
+          <stop offset="50%" stopColor="#FFFFFF" stopOpacity="0.22" />
+          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+        <clipPath id={clipId}>
+          <path d={starPath} />
+        </clipPath>
+      </defs>
+      {active ? (
+        <>
+          <path d={starPath} fill={`url(#${bodyId})`} />
+          <g clipPath={`url(#${clipId})`}>
+            <circle cx="12" cy="12.5" r="7.5" fill={`url(#${innerGlowId})`} />
+            <ellipse cx="9" cy="6.6" rx="7.2" ry="3.8" transform="rotate(-18 9 6.6)" fill={`url(#${sheenId})`} />
+          </g>
+          <path
+            d={starPath}
+            stroke="#FFFFFF"
+            strokeOpacity="0.62"
+            strokeWidth="0.85"
+            strokeLinejoin="round"
+          />
+        </>
+      ) : (
+        <path
+          d={starPath}
+          fill="rgba(255,255,255,0.14)"
+          stroke="rgba(255,255,255,0.75)"
+          strokeWidth="1.35"
+          strokeLinejoin="round"
+        />
+      )}
+    </svg>
+  );
+}

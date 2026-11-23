@@ -12,11 +12,13 @@ use epilod_core::p2p::{
     is_allowed_upnp_lan_ip, parse_http_url_host_port_path, parse_igd_control_url,
     parse_natpmp_map_response, parse_pcp_map_response, parse_ssdp_location,
     parse_stun_binding_response, sanitize_avatar_id, sanitize_chat_id, sanitize_chat_text,
-    sanitize_reaction_emoji, ChatFallbackPacket, ChatReactFallbackPacket, P2pBeacon, P2pCandidate,
-    P2pCandidateKind, P2pCryptoSession, P2pIdentity, P2pWireFrame, ReactionFallbackPacket,
-    ReliableChannel, VoiceRxCrypto, VoiceTxCrypto, MAX_P2P_DATAGRAM_BYTES,
-    MAX_REACTION_BURST_COUNT, MAX_VOICE_OPUS_BYTES, NATPMP_PCP_PORT, SSDP_MULTICAST_ADDR,
-    STUN_SERVERS, VOICE_FLAG_END_OF_TALK, VOICE_FLAG_RELAYED,
+    sanitize_reaction_emoji, sanitize_shared_subtitle_ext, sanitize_shared_subtitle_name,
+    ChatFallbackPacket, ChatReactFallbackPacket, P2pBeacon, P2pCandidate, P2pCandidateKind,
+    P2pCryptoSession, P2pIdentity, P2pWireFrame, ReactionFallbackPacket, ReliableChannel,
+    VoiceRxCrypto, VoiceTxCrypto, MAX_P2P_DATAGRAM_BYTES, MAX_REACTION_BURST_COUNT,
+    MAX_RELIABLE_MSG_BYTES, MAX_SHARED_SUBTITLE_BYTES, MAX_VOICE_OPUS_BYTES, NATPMP_PCP_PORT,
+    P2P_CHUNK_PAYLOAD_BYTES, SSDP_MULTICAST_ADDR, STUN_SERVERS, VOICE_FLAG_END_OF_TALK,
+    VOICE_FLAG_RELAYED,
 };
 use epilod_core::syncplay::{
     RoomParticipantUpdate, TimelineSegment, TimelineTransform, WireFileInfo,
@@ -431,6 +433,13 @@ pub enum P2pControlCmd {
     SendTyping {
         is_typing: bool,
     },
+    SendSubtitleShare {
+        id: String,
+        file_name: String,
+        ext: String,
+        lang: Option<String>,
+        content: String,
+    },
     PeerJoined(String),
     UpdateLocalVoiceState,
     #[cfg(test)]
@@ -513,6 +522,19 @@ enum P2pAppMessage {
         target_msg_id: String,
         sender: String,
         emoji: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    SubtitleShare {
+        id: String,
+        sender: String,
+        file_name: String,
+        ext: String,
+        #[serde(default)]
+        lang: Option<String>,
+        content: String,
         #[serde(default)]
         relay_targets: Vec<String>,
         #[serde(default)]
@@ -607,6 +629,7 @@ struct PeerSession {
     bidirectional_verified: bool,
     inbound_chat_window: (Instant, u32),
     inbound_reaction_window: (Instant, u32),
+    inbound_align_window: (Instant, u32),
     #[cfg(test)]
     test_drop_direct: bool,
 }
@@ -635,6 +658,18 @@ impl PeerSession {
         let allowed = (120 - self.inbound_reaction_window.1).min(count as u32) as u8;
         self.inbound_reaction_window.1 += allowed as u32;
         allowed
+    }
+
+    fn allow_inbound_align(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.inbound_align_window.0) >= Duration::from_secs(10) {
+            self.inbound_align_window = (now, 0);
+        }
+        if self.inbound_align_window.1 >= 4 {
+            return false;
+        }
+        self.inbound_align_window.1 += 1;
+        true
     }
 }
 
@@ -1891,6 +1926,7 @@ async fn run_p2p_actor(
     let mut reaction_seq: u32 = 1;
     let mut seen_reactions: VecDeque<((String, u32), Instant)> = VecDeque::new();
     let mut seen_chat_msgs: VecDeque<((String, String), Instant)> = VecDeque::new();
+    let mut seen_shared_subs: VecDeque<String> = VecDeque::new();
 
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1943,6 +1979,7 @@ async fn run_p2p_actor(
                         &mut force_realign_pending,
                         &mut seen_reactions,
                         &mut seen_chat_msgs,
+                        &mut seen_shared_subs,
                         &nat_mode,
                     ).await;
                 }
@@ -1995,6 +2032,7 @@ async fn run_p2p_actor(
                             &mut force_realign_pending,
                             &mut seen_reactions,
                             &mut seen_chat_msgs,
+                            &mut seen_shared_subs,
                             &nat_mode,
                         ).await;
                     }
@@ -2203,6 +2241,7 @@ async fn run_p2p_actor(
                             bidirectional_verified: false,
                             inbound_chat_window: (Instant::now(), 0),
                             inbound_reaction_window: (Instant::now(), 0),
+                            inbound_align_window: (Instant::now(), 0),
                             #[cfg(test)]
                             test_drop_direct: false,
                         };
@@ -2372,7 +2411,14 @@ async fn run_p2p_actor(
                                     .iter()
                                     .any(|t| !relay_targets.contains(t)));
 
-                        if !direct_keys.is_empty() {
+                        if fallback_needed {
+                            let _ = reaction_fallback_tx.try_send(ReactionFallbackPacket {
+                                avatar_id: clean_avatar,
+                                emoji: clean_emoji,
+                                count: clean_count,
+                                seq,
+                            });
+                        } else if !direct_keys.is_empty() {
                             let dmsg = P2pDatagramMessage::Reaction {
                                 sender: local_username.clone(),
                                 avatar_id: clean_avatar.clone(),
@@ -2393,15 +2439,6 @@ async fn run_p2p_actor(
                                     .await;
                                 }
                             }
-                        }
-
-                        if fallback_needed {
-                            let _ = reaction_fallback_tx.try_send(ReactionFallbackPacket {
-                                avatar_id: clean_avatar,
-                                emoji: clean_emoji,
-                                count: clean_count,
-                                seq,
-                            });
                         }
                     }
                     P2pControlCmd::SendChat {
@@ -2571,7 +2608,12 @@ async fn run_p2p_actor(
                         }
                         let (direct_keys, relay_targets, fallback_needed) =
                             compute_chat_routing(&peers, &participants, &local_username);
-                        if !direct_keys.is_empty() {
+                        if fallback_needed {
+                            let _ = chat_react_fallback_tx.try_send(ChatReactFallbackPacket {
+                                msg_id: clean_id,
+                                emoji: clean_emoji,
+                            });
+                        } else if !direct_keys.is_empty() {
                             let app_msg = P2pAppMessage::ChatReact {
                                 target_msg_id: clean_id.clone(),
                                 sender: local_username.clone(),
@@ -2594,12 +2636,6 @@ async fn run_p2p_actor(
                                     }
                                 }
                             }
-                        }
-                        if fallback_needed {
-                            let _ = chat_react_fallback_tx.try_send(ChatReactFallbackPacket {
-                                msg_id: clean_id,
-                                emoji: clean_emoji,
-                            });
                         }
                     }
                     P2pControlCmd::SendTyping { is_typing } => {
@@ -2627,6 +2663,69 @@ async fn run_p2p_actor(
                                         sock_v6.as_ref(),
                                     )
                                     .await;
+                                }
+                            }
+                        }
+                    }
+                    P2pControlCmd::SendSubtitleShare {
+                        id,
+                        file_name,
+                        ext,
+                        lang,
+                        content,
+                    } => {
+                        let clean_id = sanitize_chat_id(&id);
+                        let Some(safe_ext) = sanitize_shared_subtitle_ext(&ext) else {
+                            continue;
+                        };
+                        if clean_id.is_empty()
+                            || content.is_empty()
+                            || content.len() > MAX_SHARED_SUBTITLE_BYTES
+                        {
+                            continue;
+                        }
+                        let clean_name = sanitize_shared_subtitle_name(&file_name, safe_ext);
+                        let clean_lang = lang
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.chars().take(16).collect::<String>());
+                        let (direct_keys, relay_targets, _) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if direct_keys.is_empty() {
+                            continue;
+                        }
+                        if !seen_shared_subs.contains(&clean_id) {
+                            if seen_shared_subs.len() >= 64 {
+                                seen_shared_subs.pop_front();
+                            }
+                            seen_shared_subs.push_back(clean_id.clone());
+                        }
+                        let app_msg = P2pAppMessage::SubtitleShare {
+                            id: clean_id,
+                            sender: local_username.clone(),
+                            file_name: clean_name,
+                            ext: safe_ext.to_string(),
+                            lang: clean_lang,
+                            content,
+                            relay_targets,
+                            ttl: 1,
+                        };
+                        if let Ok(payload) = serde_json::to_vec(&app_msg) {
+                            if payload.len() <= MAX_RELIABLE_MSG_BYTES {
+                                let now_ms = epoch_ms(start_instant);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload_paced(
+                                            peer,
+                                            &payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                            true,
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
                         }
@@ -2727,6 +2826,7 @@ async fn run_p2p_actor(
                             bidirectional_verified: false,
                             inbound_chat_window: (Instant::now(), 0),
                             inbound_reaction_window: (Instant::now(), 0),
+                            inbound_align_window: (Instant::now(), 0),
                             test_drop_direct: drop_direct,
                         };
                         if !drop_direct {
@@ -3335,6 +3435,7 @@ async fn forward_chat_relay(
     let Ok(payload) = serde_json::to_vec(fwd) else {
         return;
     };
+    let pace_for_voice = payload.len() > P2P_CHUNK_PAYLOAD_BYTES * 8;
     let now_ms = epoch_ms(start_instant);
     for raw_target in relay_targets.into_iter().take(16) {
         let target_key = raw_target.to_ascii_lowercase();
@@ -3350,8 +3451,15 @@ async fn forward_chat_relay(
                 LinkTransportState::DirectLan | LinkTransportState::DirectWan
             ) && target_peer.active_addr.is_some()
             {
-                let _ =
-                    send_reliable_payload(target_peer, &payload, sock_v4, sock_v6, now_ms).await;
+                let _ = send_reliable_payload_paced(
+                    target_peer,
+                    &payload,
+                    sock_v4,
+                    sock_v6,
+                    now_ms,
+                    pace_for_voice,
+                )
+                .await;
             }
         }
     }
@@ -3380,6 +3488,35 @@ async fn send_datagram_message(
         .is_ok()
 }
 
+/// Validates that an inbound P2P message's claimed sender is authentic:
+/// - rejects self-echoes and arbitrary `ttl > 1`
+/// - requires direct (`ttl > 0`) messages to match the authenticated P2P session `peer_key`
+/// - rejects spoofed 1-hop relays (`ttl == 0`) for peers we already have a verified direct link with
+/// - requires relayed senders to be active room participants
+fn validate_p2p_sender(
+    ttl: u8,
+    sender_display: &str,
+    peer_key: &str,
+    local_username: &str,
+    participants: &HashMap<String, RoomParticipantUpdate>,
+    peers: &HashMap<String, PeerSession>,
+) -> bool {
+    if sender_display.eq_ignore_ascii_case(local_username) || ttl > 1 {
+        return false;
+    }
+    let sender_key = sender_display.to_ascii_lowercase();
+    if ttl > 0 && sender_key != peer_key {
+        return false;
+    }
+    if ttl == 0 && sender_key != peer_key && peers.get(&sender_key).is_some_and(is_direct_peer) {
+        return false;
+    }
+    sender_key == peer_key
+        || participants
+            .values()
+            .any(|p| p.username.eq_ignore_ascii_case(sender_display))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_udp_event(
     evt: UdpPacketEvent,
@@ -3403,6 +3540,7 @@ async fn dispatch_udp_event(
     force_realign_pending: &mut bool,
     seen_reactions: &mut VecDeque<((String, u32), Instant)>,
     seen_chat_msgs: &mut VecDeque<((String, String), Instant)>,
+    seen_shared_subs: &mut VecDeque<String>,
     nat_mode: &str,
 ) {
     match evt {
@@ -3429,6 +3567,7 @@ async fn dispatch_udp_event(
                 internal_tx,
                 std::mem::take(force_realign_pending),
                 seen_chat_msgs,
+                seen_shared_subs,
             )
             .await;
             emit_p2p_status(app, nat_mode, peers, align_job.as_ref());
@@ -3550,17 +3689,14 @@ async fn dispatch_udp_event(
                 };
 
                 let sender_key = sender_display.to_ascii_lowercase();
-                if sender_display.eq_ignore_ascii_case(local_username) {
-                    return;
-                }
-                if ttl > 0 && sender_key != from_key {
-                    return;
-                }
-                let sender_known = sender_key == from_key
-                    || participants
-                        .values()
-                        .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
-                if !sender_known {
+                if !validate_p2p_sender(
+                    ttl,
+                    &sender_display,
+                    &from_key,
+                    local_username,
+                    participants,
+                    peers,
+                ) {
                     return;
                 }
 
@@ -3759,10 +3895,16 @@ async fn handle_udp_packet(
         .last_rx_at
         .is_some_and(|t| t.elapsed() >= Duration::from_secs(6));
     peer.last_rx_at = Some(Instant::now());
+    let is_addr_switch_proof = matches!(
+        frame,
+        P2pWireFrame::PunchPong { .. } | P2pWireFrame::KeepAlive { .. }
+    );
     let keep_existing_better = !stale_existing
         && peer.active_addr.is_some_and(|existing| {
-            candidate_priority(infer_candidate_kind(existing))
-                > candidate_priority(infer_candidate_kind(src))
+            existing != src
+                && (!is_addr_switch_proof
+                    || candidate_priority(infer_candidate_kind(existing))
+                        > candidate_priority(infer_candidate_kind(src)))
         });
     if !keep_existing_better {
         peer.active_addr = Some(src);
@@ -4072,6 +4214,7 @@ async fn handle_peer_app_msg(
     internal_tx: &mpsc::Sender<InternalEvent>,
     force_bypass_user_align: bool,
     seen_chat_msgs: &mut VecDeque<((String, String), Instant)>,
+    seen_shared_subs: &mut VecDeque<String>,
 ) {
     if let P2pAppMessage::VoiceState {
         username,
@@ -4101,17 +4244,14 @@ async fn handle_peer_app_msg(
             username.trim().chars().take(32).collect()
         };
         let sender_key = sender_display.to_ascii_lowercase();
-        if sender_display.eq_ignore_ascii_case(local_username) {
-            return;
-        }
-        if ttl > 0 && sender_key != peer_key {
-            return;
-        }
-        let sender_known = sender_key == peer_key
-            || participants
-                .values()
-                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
-        if !sender_known {
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
             return;
         }
         let clean_blocked: Vec<String> = blocked_voice_peers
@@ -4255,17 +4395,14 @@ async fn handle_peer_app_msg(
             sender.trim().chars().take(32).collect()
         };
         let sender_key = sender_display.to_ascii_lowercase();
-        if sender_display.eq_ignore_ascii_case(local_username) {
-            return;
-        }
-        if ttl > 0 && sender_key != peer_key {
-            return;
-        }
-        let sender_known = sender_key == peer_key
-            || participants
-                .values()
-                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
-        if !sender_known {
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
             return;
         }
 
@@ -4340,17 +4477,14 @@ async fn handle_peer_app_msg(
             sender.trim().chars().take(32).collect()
         };
         let sender_key = sender_display.to_ascii_lowercase();
-        if sender_display.eq_ignore_ascii_case(local_username) {
-            return;
-        }
-        if ttl > 0 && sender_key != peer_key {
-            return;
-        }
-        let sender_known = sender_key == peer_key
-            || participants
-                .values()
-                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
-        if !sender_known {
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
             return;
         }
         emit_opt(
@@ -4411,17 +4545,14 @@ async fn handle_peer_app_msg(
             sender.trim().chars().take(32).collect()
         };
         let sender_key = sender_display.to_ascii_lowercase();
-        if sender_display.eq_ignore_ascii_case(local_username) {
-            return;
-        }
-        if ttl > 0 && sender_key != peer_key {
-            return;
-        }
-        let sender_known = sender_key == peer_key
-            || participants
-                .values()
-                .any(|p| p.username.eq_ignore_ascii_case(&sender_display));
-        if !sender_known {
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
             return;
         }
         emit_opt(
@@ -4439,6 +4570,105 @@ async fn handle_peer_app_msg(
                 target_msg_id: clean_id,
                 sender: sender_display,
                 emoji: clean_emoji,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::SubtitleShare {
+        id,
+        sender,
+        file_name,
+        ext,
+        lang,
+        content,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&id);
+        let Some(safe_ext) = sanitize_shared_subtitle_ext(&ext) else {
+            return;
+        };
+        if clean_id.is_empty()
+            || content.trim().is_empty()
+            || content.len() > MAX_SHARED_SUBTITLE_BYTES
+        {
+            return;
+        }
+        let clean_name = sanitize_shared_subtitle_name(&file_name, safe_ext);
+        let clean_lang = lang
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(16).collect::<String>());
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
+            return;
+        }
+        let size_bytes = content.len();
+        if !seen_shared_subs.contains(&clean_id) {
+            let allowed = peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_chat);
+            if !allowed {
+                return;
+            }
+            if seen_shared_subs.len() >= 64 {
+                seen_shared_subs.pop_front();
+            }
+            seen_shared_subs.push_back(clean_id.clone());
+            emit_opt(
+                app,
+                "sync://subtitle-shared",
+                serde_json::json!({
+                    "id": clean_id,
+                    "sender": sender_display,
+                    "fileName": clean_name,
+                    "ext": safe_ext,
+                    "lang": clean_lang,
+                    "content": content,
+                    "sizeBytes": size_bytes,
+                }),
+            );
+        }
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::SubtitleShare {
+                id: clean_id,
+                sender: sender_display,
+                file_name: clean_name,
+                ext: safe_ext.to_string(),
+                lang: clean_lang,
+                content,
                 relay_targets: Vec::new(),
                 ttl: ttl - 1,
             };
@@ -4482,9 +4712,16 @@ async fn handle_peer_app_msg(
         P2pAppMessage::ChatMessage { .. }
         | P2pAppMessage::ChatEdit { .. }
         | P2pAppMessage::ChatReact { .. }
+        | P2pAppMessage::SubtitleShare { .. }
         | P2pAppMessage::VoiceState { .. }
         | P2pAppMessage::VoiceRosterRequest => {}
         P2pAppMessage::OfferRequest => {
+            if !peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_align)
+            {
+                return;
+            }
             if let Some(peer) = peers.get_mut(peer_key) {
                 peer.offered_file_sig = None;
             }
@@ -4514,10 +4751,23 @@ async fn handle_peer_app_msg(
             if lm.file_sig != file_sig || timestamps_secs.is_empty() {
                 return;
             }
+            let req_ts: Vec<f64> = timestamps_secs
+                .into_iter()
+                .filter(|t| t.is_finite() && *t >= 0.0 && *t < local_dur)
+                .take(4)
+                .collect();
+            if req_ts.is_empty() {
+                return;
+            }
+            if !peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_align)
+            {
+                return;
+            }
             let cancel = Arc::new(AtomicBool::new(false));
             let int_tx = internal_tx.clone();
             let target = peer_key.to_string();
-            let req_ts: Vec<f64> = timestamps_secs.into_iter().take(4).collect();
             tokio::spawn(async move {
                 let probes =
                     extract_reference_probes(&ffmpeg, &valid_vp, local_dur, Some(&req_ts), &cancel)
@@ -4541,6 +4791,12 @@ async fn handle_peer_app_msg(
             ..
         } => {
             if lm.has_user_alignment && !force_bypass_user_align {
+                return;
+            }
+            if !peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_align)
+            {
                 return;
             }
             let probes: Vec<SparseAudioProbe> = wire_probes
@@ -4597,6 +4853,12 @@ async fn handle_peer_app_msg(
             probes: wire_probes,
             ..
         } => {
+            if !peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_align)
+            {
+                return;
+            }
             let Some(ref mut job) = align_job else {
                 return;
             };
@@ -5500,6 +5762,7 @@ mod tests {
                 bidirectional_verified: true,
                 inbound_chat_window: (Instant::now(), 0),
                 inbound_reaction_window: (Instant::now(), 0),
+                inbound_align_window: (Instant::now(), 0),
                 test_drop_direct: false,
             },
         );
@@ -5576,6 +5839,7 @@ mod tests {
                 bidirectional_verified: false,
                 inbound_chat_window: (Instant::now(), 0),
                 inbound_reaction_window: (Instant::now(), 0),
+                inbound_align_window: (Instant::now(), 0),
                 test_drop_direct: false,
             },
         );
@@ -5616,6 +5880,7 @@ mod tests {
                 bidirectional_verified: true,
                 inbound_chat_window: (Instant::now(), 0),
                 inbound_reaction_window: (Instant::now(), 0),
+                inbound_align_window: (Instant::now(), 0),
                 test_drop_direct: false,
             },
         );
@@ -5836,5 +6101,155 @@ mod tests {
         t.join().unwrap();
         assert!(woke);
         assert!(last_seq > 0);
+    }
+
+    fn make_dummy_peer_session(
+        username: &str,
+        state: LinkTransportState,
+        bidirectional_verified: bool,
+    ) -> PeerSession {
+        let local = P2pIdentity::generate();
+        let remote = P2pIdentity::generate();
+        let crypto = local.establish_with(remote.pubkey, remote.session_id);
+        let (v_tx, _v_rx) = local.establish_voice_with(remote.pubkey, remote.session_id);
+        PeerSession {
+            username: username.to_string(),
+            beacon: P2pBeacon {
+                version: 1,
+                nat_symmetric: false,
+                pubkey: remote.pubkey,
+                session_id: remote.session_id,
+                candidates: Vec::new(),
+            },
+            crypto,
+            voice_tx: Arc::new(std::sync::Mutex::new(v_tx)),
+            reliable: ReliableChannel::new(),
+            state,
+            started_at: Instant::now(),
+            active_addr: Some("127.0.0.1:12345".parse().unwrap()),
+            last_rx_at: None,
+            last_keepalive_at: Instant::now(),
+            last_repunch_at: Instant::now(),
+            punch_attempts: 0,
+            rtt_ms: None,
+            pending_pings: HashMap::new(),
+            offered_file_sig: None,
+            cant_relay_to: HashSet::new(),
+            voice_id: 0,
+            voice_epoch: 0,
+            prev_voice_epoch: None,
+            voice_gen: 0,
+            voice_in_call: false,
+            voice_muted: false,
+            voice_deafened: false,
+            voice_loss_pct: 0.0,
+            voice_allow_relay_for_others: true,
+            voice_allow_relayed_voice: true,
+            voice_on_battery: false,
+            voice_est_upload_kbps: UplinkBandwidthTracker::INITIAL_KBPS,
+            voice_relay_cap: 2,
+            last_voice_state_rx: None,
+            voice_blocked_peers: Vec::new(),
+            bidirectional_verified,
+            inbound_chat_window: (Instant::now(), 0),
+            inbound_reaction_window: (Instant::now(), 0),
+            inbound_align_window: (Instant::now(), 0),
+            test_drop_direct: false,
+        }
+    }
+
+    #[test]
+    fn validate_p2p_sender_blocks_direct_and_relay_impersonation() {
+        let mut participants = HashMap::new();
+        participants.insert("Alice".to_string(), make_test_participant("Alice"));
+        participants.insert("Bob".to_string(), make_test_participant("Bob"));
+        participants.insert("Charlie".to_string(), make_test_participant("Charlie"));
+
+        let mut peers = HashMap::new();
+        // Alice has a verified direct link; Bob has a verified direct link; Charlie is not direct.
+        peers.insert(
+            "alice".to_string(),
+            make_dummy_peer_session("Alice", LinkTransportState::DirectWan, true),
+        );
+        peers.insert(
+            "bob".to_string(),
+            make_dummy_peer_session("Bob", LinkTransportState::DirectWan, true),
+        );
+        peers.insert(
+            "charlie".to_string(),
+            make_dummy_peer_session("Charlie", LinkTransportState::FallbackSyncplay, false),
+        );
+
+        // Direct message from Bob claiming to be Bob is allowed
+        assert!(validate_p2p_sender(
+            1,
+            "Bob",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+        // Direct message from Bob claiming to be Alice is rejected
+        assert!(!validate_p2p_sender(
+            1,
+            "Alice",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+        // Relayed message (ttl=0) from Bob claiming to be Alice is REJECTED because Alice is direct
+        assert!(!validate_p2p_sender(
+            0,
+            "Alice",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+        // Relayed message (ttl=0) from Bob claiming to be Charlie (non-direct participant) is allowed
+        assert!(validate_p2p_sender(
+            0,
+            "Charlie",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+        // Relayed message claiming to be an unknown outsider or self is rejected
+        assert!(!validate_p2p_sender(
+            0,
+            "Mallory",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+        assert!(!validate_p2p_sender(
+            0,
+            "LocalUser",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+        // ttl > 1 is rejected
+        assert!(!validate_p2p_sender(
+            2,
+            "Bob",
+            "bob",
+            "LocalUser",
+            &participants,
+            &peers
+        ));
+    }
+
+    #[test]
+    fn peer_session_allow_inbound_align_rate_limits_ffmpeg_requests() {
+        let mut session = make_dummy_peer_session("Bob", LinkTransportState::DirectWan, true);
+        for _ in 0..4 {
+            assert!(session.allow_inbound_align());
+        }
+        assert!(!session.allow_inbound_align());
     }
 }

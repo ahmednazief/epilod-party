@@ -298,29 +298,9 @@ pub fn sanitize_aspect_mode(raw: &str) -> Result<&'static str, ValidationError> 
         "16:9" => Ok("16:9"),
         "4:3" => Ok("4:3"),
         "21:9" => Ok("21:9"),
+        "fill" => Ok("fill"),
         _ => Err(ValidationError::InvalidAspectMode),
     }
-}
-
-pub fn sanitize_osd_text(raw: &str) -> String {
-    let normalized: String = raw
-        .chars()
-        .map(|c| {
-            if matches!(c, '\r' | '\n' | '\t') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-    let clean = strip_unsafe_unicode(&normalized);
-    clean
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(120)
-        .collect()
 }
 
 pub fn is_allowed_webview_url(url: &str) -> bool {
@@ -396,13 +376,13 @@ mod tests {
     }
 
     #[test]
-    fn test_playback_speed_aspect_and_osd_sanitization() {
+    fn test_playback_speed_and_aspect_sanitization() {
         assert_eq!(sanitize_playback_speed(1.25).unwrap(), 1.25);
         assert!(sanitize_playback_speed(f64::NAN).is_err());
         assert!(sanitize_playback_speed(5.0).is_err());
         assert_eq!(sanitize_aspect_mode("21:9").unwrap(), "21:9");
+        assert_eq!(sanitize_aspect_mode("fill").unwrap(), "fill");
         assert!(sanitize_aspect_mode("99:1").is_err());
-        assert_eq!(sanitize_osd_text("Hello\n\u{202E}World"), "Hello World");
     }
 
     #[test]

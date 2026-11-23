@@ -13,7 +13,7 @@ export function GlassSwitchTrack({ checked }: GlassSwitchTrackProps) {
           : "bg-white/10 border-white/10"
       }`}
     >
-      <span className={`ep-switch-slide block ${checked ? "translate-x-3.5" : "translate-x-0"}`}>
+      <span className={`ep-switch-slide block ${checked ? "translate-x-3" : "translate-x-0"}`}>
         <span className="ep-switch-thumb block h-3 w-3 rounded-full bg-white shadow-sm" />
       </span>
     </span>

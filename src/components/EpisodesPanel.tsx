@@ -5,12 +5,24 @@ import {
   AppPlusIcon,
 } from "./ui/AppIcons";
 import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
 import {
   PlayerAutoNextIcon,
   PlayerCaptionsIcon,
   PlayerFollowIcon,
+  PlayerRatingStarIcon,
 } from "./ui/PlayerIcons";
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  buildEpisodeBadgeKey,
+  deriveShowTitleForRatings,
+  fetchShowOfficialRatings,
+  getCachedShowRatings,
+  type ShowOfficialRatings,
+} from "../lib/officialRatings";
+import { buildEpisodeRatingId } from "../lib/ratings";
+import { playSoundCue } from "../lib/soundEffects";
+import { useRatingStore } from "../store/useRatingStore";
 import {
   formatDisplayMediaTitle,
   formatSeasonFolderTitle,
@@ -67,6 +79,34 @@ export const EpisodesPanel = memo(function EpisodesPanel({
   const markAllAboveWatched = useSeriesProgressStore((s) => s.markAllAboveWatched);
   const upsertSeries = useSeriesProgressStore((s) => s.upsertSeries);
   const resumeEntries = useResumeStore((s) => s.entries);
+  const personalByMediaId = useRatingStore((s) => s.personalByMediaId);
+
+  const ratingShowTitle = useMemo(
+    () => deriveShowTitleForRatings(folderName, items[0]?.fileName),
+    [folderName, items],
+  );
+  const [officialRatings, setOfficialRatings] = useState<ShowOfficialRatings | null>(() =>
+    ratingShowTitle ? getCachedShowRatings(ratingShowTitle) : null,
+  );
+
+  useEffect(() => {
+    if (!ratingShowTitle) {
+      setOfficialRatings(null);
+      return;
+    }
+    const cached = getCachedShowRatings(ratingShowTitle);
+    if (cached) {
+      setOfficialRatings(cached);
+      return;
+    }
+    const ac = new AbortController();
+    void fetchShowOfficialRatings(ratingShowTitle, ac.signal).then((res) => {
+      if (!ac.signal.aborted && res) {
+        setOfficialRatings(res);
+      }
+    });
+    return () => ac.abort();
+  }, [ratingShowTitle]);
 
   const seriesFolderPath = items.length > 0 ? extractParentFolderPath(items[0].path) : "";
   const seriesKey = seriesFolderPath ? buildSeriesKey(seriesFolderPath) : "";
@@ -217,8 +257,8 @@ export const EpisodesPanel = memo(function EpisodesPanel({
       </div>
 
       {/* Clean Minimal Vertical Episode List */}
-      <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1">
-        <div ref={trackRef} className="relative space-y-1 pb-0.5">
+      <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden -mx-2 px-2 pt-0.5 pb-3 pr-2.5">
+        <div ref={trackRef} className="relative space-y-1 pb-1">
           {indicator.height > 0 && (
             <span
               aria-hidden="true"
@@ -260,7 +300,12 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                 key={item.path}
                 ref={active ? activeItemRef : undefined}
                 type="button"
-                onClick={() => onSelectEpisode(idx)}
+                onClick={() => {
+                  if (idx !== currentIndex) {
+                    playSoundCue("episodeChanged", { moviePlaying: loaded && !paused });
+                  }
+                  onSelectEpisode(idx);
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setEpContextMenu({ x: e.clientX, y: e.clientY, index: idx });
@@ -301,7 +346,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                   )}
                 </div>
 
-                {/* Clean centered episode title + compact subtitle badge when present */}
+                {/* Clean centered episode title + compact subtitle & rating badges */}
                 <div className="min-w-0 flex-1">
                   <div
                     className={`text-[12.5px] leading-snug truncate ${
@@ -311,12 +356,81 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                     {epTitle}
                   </div>
 
-                  {item.subtitlePath && (
-                    <div className="flex items-center gap-1 mt-0.5 text-[10px] text-white/55">
-                      <PlayerCaptionsIcon size={11} />
-                      <span>Sub</span>
-                    </div>
-                  )}
+                  {(() => {
+                    const badgeKey =
+                      item.episodeBadge || buildEpisodeBadgeKey(item.season, item.episode);
+                    const officialScore =
+                      badgeKey && officialRatings?.episodes[badgeKey]
+                        ? officialRatings.episodes[badgeKey]
+                        : null;
+                    const mediaId = buildEpisodeRatingId(item.fileName);
+                    const personalScore = mediaId ? personalByMediaId[mediaId]?.score ?? null : null;
+
+                    if (!item.subtitlePath && officialScore === null && personalScore === null) {
+                      return null;
+                    }
+
+                    return (
+                      <div className="flex items-center gap-1.5 mt-0.5 min-w-0 text-[10px] leading-none">
+                        {item.subtitlePath && (
+                          <span className="inline-flex items-center gap-1 text-white/50 shrink-0">
+                            <PlayerCaptionsIcon size={11} />
+                            <span>Sub</span>
+                          </span>
+                        )}
+                        {item.subtitlePath && (officialScore !== null || personalScore !== null) && (
+                          <span aria-hidden="true" className="text-white/25">·</span>
+                        )}
+                        {officialScore !== null && personalScore !== null ? (
+                          <span className="inline-flex items-center gap-1.5 shrink-0">
+                            <GlassHoverTip
+                              label="Official rating"
+                              detail={`${officialScore.toFixed(1)} / 10`}
+                              accent="host"
+                            >
+                              <span className="line-through text-white/30 decoration-white/40 num">
+                                {officialScore.toFixed(1)}
+                              </span>
+                            </GlassHoverTip>
+                            <GlassHoverTip
+                              label="Your rating"
+                              detail={`${personalScore} / 10 · Replaced ${officialScore.toFixed(1)}`}
+                              accent="admin"
+                            >
+                              <span className="inline-flex items-center gap-0.5 text-white/95 font-semibold num">
+                                <PlayerRatingStarIcon size={9.5} active tone="personal" />
+                                <span>{personalScore}</span>
+                              </span>
+                            </GlassHoverTip>
+                          </span>
+                        ) : personalScore !== null ? (
+                          <GlassHoverTip
+                            label="Your rating"
+                            detail={`${personalScore} / 10`}
+                            accent="admin"
+                            className="inline-flex items-center shrink-0"
+                          >
+                            <span className="inline-flex items-center gap-0.5 text-white/95 font-semibold num">
+                              <PlayerRatingStarIcon size={9.5} active tone="personal" />
+                              <span>{personalScore}</span>
+                            </span>
+                          </GlassHoverTip>
+                        ) : officialScore !== null ? (
+                          <GlassHoverTip
+                            label="Official rating"
+                            detail={`${officialScore.toFixed(1)} / 10 · Rate at episode end`}
+                            accent="host"
+                            className="inline-flex items-center shrink-0"
+                          >
+                            <span className="inline-flex items-center gap-0.5 text-white/55 group-hover:text-white/75 transition-colors num">
+                              <PlayerRatingStarIcon size={9.5} active tone="gold" />
+                              <span>{officialScore.toFixed(1)}</span>
+                            </span>
+                          </GlassHoverTip>
+                        ) : null}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Balanced right metadata cluster aligned cleanly on the row centerline */}

@@ -10,9 +10,9 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 pub const EP2_CHAT_PREFIX: &str = "~EP2:";
 pub const EP_REACTION_CHAT_PREFIX: &str = "~EPR:";
+pub const EP_RATING_CHAT_PREFIX: &str = "~EPV:";
 pub const EP_CHAT_TEXT_PREFIX: &str = "~EPT:";
 pub const EP_CHAT_REACT_PREFIX: &str = "~EPCR:";
-pub const EP2_URI_PREFIX: &str = "epilod://p2p/";
 pub const MAX_CHAT_BEACON_CHARS: usize = 144;
 pub const MAX_CHAT_REACTION_CHARS: usize = 144;
 pub const MAX_CHAT_FALLBACK_LINE_CHARS: usize = 144;
@@ -26,8 +26,10 @@ pub const VOICE_FLAG_RELAYED: u8 = 0b0000_0010;
 pub const MAX_REACTION_EMOJI_BYTES: usize = 48;
 pub const MAX_REACTION_BURST_COUNT: u8 = 25;
 pub const P2P_CHUNK_PAYLOAD_BYTES: usize = 920;
-pub const MAX_RELIABLE_CHUNKS: u16 = 512;
-pub const MAX_RELIABLE_MSG_BYTES: usize = 256 * 1024;
+pub const MAX_RELIABLE_CHUNKS: u16 = 1024;
+pub const MAX_RELIABLE_MSG_BYTES: usize = 512 * 1024;
+pub const MAX_SHARED_SUBTITLE_BYTES: usize = 384 * 1024;
+pub const MAX_SHARED_SUBTITLE_NAME_CHARS: usize = 120;
 pub const STUN_SERVERS: [&str; 4] = [
     "stun.l.google.com:19302",
     "stun.cloudflare.com:3478",
@@ -286,20 +288,6 @@ pub fn decode_ep2_beacon(message: &str) -> Option<P2pBeacon> {
     })
 }
 
-pub fn encode_ep2_invite_uri(beacon: &P2pBeacon) -> String {
-    let chat = encode_ep2_beacon(beacon);
-    let b64 = chat.strip_prefix(EP2_CHAT_PREFIX).unwrap_or("");
-    format!("{EP2_URI_PREFIX}{b64}")
-}
-
-pub fn decode_ep2_invite_uri(raw: &str) -> Option<P2pBeacon> {
-    let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix(EP2_URI_PREFIX) {
-        return decode_ep2_beacon(&format!("{EP2_CHAT_PREFIX}{rest}"));
-    }
-    decode_ep2_beacon(trimmed)
-}
-
 pub fn sanitize_reaction_emoji(raw: &str) -> Option<String> {
     let clean: String = raw
         .trim()
@@ -379,6 +367,84 @@ pub fn encode_epr_reaction(packet: &ReactionFallbackPacket) -> Option<String> {
     Some(encoded)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RatingVotePacket {
+    pub key: String,
+    pub score: u8,
+    pub avatar_id: String,
+}
+
+pub fn sanitize_rating_key(raw: &str) -> Option<String> {
+    let clean: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(48)
+        .collect();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
+pub fn encode_epv_rating(packet: &RatingVotePacket) -> Option<String> {
+    if !(1..=10).contains(&packet.score) {
+        return None;
+    }
+    let key = sanitize_rating_key(&packet.key)?;
+    let avatar_id = sanitize_avatar_id(&packet.avatar_id);
+    let key_bytes = key.as_bytes();
+    let avatar_bytes = avatar_id.as_bytes();
+    if avatar_bytes.len() > 24 {
+        return None;
+    }
+    let mut raw = Vec::with_capacity(4 + key_bytes.len() + avatar_bytes.len());
+    raw.push(1u8); // version
+    raw.push(packet.score);
+    raw.push(key_bytes.len() as u8);
+    raw.extend_from_slice(key_bytes);
+    raw.push(avatar_bytes.len() as u8);
+    raw.extend_from_slice(avatar_bytes);
+    let encoded = format!("{EP_RATING_CHAT_PREFIX}{}", encode_base64_url(&raw));
+    if encoded.len() > MAX_CHAT_REACTION_CHARS {
+        return None;
+    }
+    Some(encoded)
+}
+
+pub fn decode_epv_rating(message: &str) -> Option<RatingVotePacket> {
+    let payload = message.trim().strip_prefix(EP_RATING_CHAT_PREFIX)?;
+    let bytes = decode_base64_url(payload)?;
+    if bytes.len() < 5 || bytes[0] != 1 {
+        return None;
+    }
+    let score = bytes[1];
+    if !(1..=10).contains(&score) {
+        return None;
+    }
+    let key_len = bytes[2] as usize;
+    let mut pos = 3usize;
+    if key_len == 0 || key_len > 48 || pos + key_len + 1 > bytes.len() {
+        return None;
+    }
+    let key_raw = std::str::from_utf8(&bytes[pos..pos + key_len]).ok()?;
+    let key = sanitize_rating_key(key_raw)?;
+    pos += key_len;
+    let avatar_len = bytes[pos] as usize;
+    pos += 1;
+    if avatar_len > 24 || pos + avatar_len != bytes.len() {
+        return None;
+    }
+    let avatar_raw = std::str::from_utf8(&bytes[pos..]).ok()?;
+    let avatar_id = sanitize_avatar_id(avatar_raw);
+    Some(RatingVotePacket {
+        key,
+        score,
+        avatar_id,
+    })
+}
+
 pub fn decode_epr_reaction(message: &str) -> Option<ReactionFallbackPacket> {
     let payload = message.trim().strip_prefix(EP_REACTION_CHAT_PREFIX)?;
     let bytes = decode_base64_url(payload)?;
@@ -416,6 +482,62 @@ pub fn sanitize_chat_id(raw: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(MAX_CHAT_ID_LEN)
         .collect()
+}
+
+/// Validates and normalizes an extension for room-shared text subtitles.
+pub fn sanitize_shared_subtitle_ext(raw: &str) -> Option<&'static str> {
+    let cleaned = raw.trim().trim_start_matches('.');
+    if cleaned.eq_ignore_ascii_case("srt") {
+        Some("srt")
+    } else if cleaned.eq_ignore_ascii_case("vtt") {
+        Some("vtt")
+    } else if cleaned.eq_ignore_ascii_case("ass") {
+        Some("ass")
+    } else if cleaned.eq_ignore_ascii_case("ssa") {
+        Some("ssa")
+    } else {
+        None
+    }
+}
+
+/// Sanitizes a user-facing filename for a room-shared subtitle, stripping path components,
+/// control characters, bidi overrides, and invalid Windows filename characters.
+pub fn sanitize_shared_subtitle_name(raw: &str, fallback_ext: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .filter(|&c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '<' | '>'
+                        | ':'
+                        | '"'
+                        | '/'
+                        | '\\'
+                        | '|'
+                        | '?'
+                        | '*'
+                        | '\u{00AD}'
+                        | '\u{061C}'
+                        | '\u{200B}'
+                        | '\u{200E}'
+                        | '\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{FEFF}'
+                )
+        })
+        .take(MAX_SHARED_SUBTITLE_NAME_CHARS)
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        let ext = sanitize_shared_subtitle_ext(fallback_ext).unwrap_or("srt");
+        format!("shared.{ext}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn sanitize_chat_text(raw: &str) -> Option<String> {
@@ -1948,9 +2070,6 @@ mod tests {
 
         let decoded = decode_ep2_beacon(&encoded).expect("decode beacon");
         assert_eq!(decoded, beacon);
-
-        let uri = encode_ep2_invite_uri(&beacon);
-        assert_eq!(decode_ep2_invite_uri(&uri), Some(beacon));
     }
 
     #[test]
@@ -2062,6 +2181,36 @@ mod tests {
         oversized.extend_from_slice(&((MAX_P2P_DATAGRAM_BYTES as u16) + 1).to_be_bytes());
         oversized.resize(3 + MAX_P2P_DATAGRAM_BYTES + 1, 0x41);
         assert_eq!(P2pWireFrame::decode_binary(&oversized), None);
+    }
+
+    #[test]
+    fn epv_rating_roundtrips_and_rejects_bad_scores_or_versions() {
+        let pkt = RatingVotePacket {
+            key: "ep_s01e04_abc123".to_string(),
+            score: 9,
+            avatar_id: "fox".to_string(),
+        };
+        let encoded = encode_epv_rating(&pkt).expect("encode");
+        assert!(encoded.starts_with(EP_RATING_CHAT_PREFIX));
+        assert_eq!(decode_epv_rating(&encoded), Some(pkt));
+
+        assert!(encode_epv_rating(&RatingVotePacket {
+            key: "k1".to_string(),
+            score: 0,
+            avatar_id: "fox".to_string(),
+        })
+        .is_none());
+        assert!(encode_epv_rating(&RatingVotePacket {
+            key: "k1".to_string(),
+            score: 11,
+            avatar_id: "fox".to_string(),
+        })
+        .is_none());
+        let bad_ver = format!(
+            "{EP_RATING_CHAT_PREFIX}{}",
+            encode_base64_url(&[2, 8, 2, 107, 49, 0])
+        );
+        assert!(decode_epv_rating(&bad_ver).is_none());
     }
 
     #[test]
@@ -2415,5 +2564,57 @@ mod tests {
             .unwrap();
         assert!(m_from_a_no_psk.open(&pkt_m).is_none());
         assert!(m_from_a_wrong_psk.open(&pkt_m).is_none());
+    }
+
+    #[test]
+    fn sanitize_shared_subtitle_ext_allows_only_text_formats() {
+        assert_eq!(sanitize_shared_subtitle_ext("srt"), Some("srt"));
+        assert_eq!(sanitize_shared_subtitle_ext(" .ASS "), Some("ass"));
+        assert_eq!(sanitize_shared_subtitle_ext("VTT"), Some("vtt"));
+        assert_eq!(sanitize_shared_subtitle_ext("ssa"), Some("ssa"));
+        assert_eq!(sanitize_shared_subtitle_ext("sub"), None);
+        assert_eq!(sanitize_shared_subtitle_ext("idx"), None);
+        assert_eq!(sanitize_shared_subtitle_ext("exe"), None);
+        assert_eq!(sanitize_shared_subtitle_ext(""), None);
+    }
+
+    #[test]
+    fn sanitize_shared_subtitle_name_strips_paths_controls_and_invalid_chars() {
+        assert_eq!(
+            sanitize_shared_subtitle_name(r"C:\Temp\..\..\Show.E04.ar.srt", "srt"),
+            "Show.E04.ar.srt"
+        );
+        assert_eq!(
+            sanitize_shared_subtitle_name("/tmp/sub:bad*name?.ass", "ass"),
+            "subbadname.ass"
+        );
+        assert_eq!(
+            sanitize_shared_subtitle_name("///...  ", "vtt"),
+            "shared.vtt"
+        );
+        let long = format!("{}.srt", "a".repeat(200));
+        assert_eq!(
+            sanitize_shared_subtitle_name(&long, "srt").chars().count(),
+            MAX_SHARED_SUBTITLE_NAME_CHARS
+        );
+    }
+
+    #[test]
+    fn reliable_channel_transfers_384kb_subtitle_payload() {
+        let payload = vec![b'a'; MAX_SHARED_SUBTITLE_BYTES];
+        let mut tx = ReliableChannel::new();
+        let mut rx = ReliableChannel::new();
+        let (msg_id, frames) = tx
+            .enqueue_message(&payload)
+            .expect("384KB fits reliable channel");
+        tx.mark_sent(msg_id, 0);
+        let mut assembled = None;
+        for frame in frames {
+            let (_acks, done) = rx.handle_frame(frame);
+            if let Some(bytes) = done {
+                assembled = Some(bytes);
+            }
+        }
+        assert_eq!(assembled.as_deref(), Some(payload.as_slice()));
     }
 }

@@ -151,7 +151,8 @@ test("Animation and compositor performance invariants hold in UI primitives and 
   );
   assert.equal(subPanelSrc.includes("ring-2 ring-accent-soft"), true);
   assert.equal(subPanelSrc.includes("ring-offset-chrome"), false);
-  assert.equal(subPanelSrc.includes('flex items-start gap-1.5 text-warn'), true);
+  assert.equal(subPanelSrc.includes("Image sub"), true);
+  assert.equal(subPanelSrc.includes("<GlassHoverTip"), true);
   assert.equal(subPanelSrc.includes("ep-glass-well"), false);
   assert.equal(subPanelSrc.includes("<SegmentedTabs"), true);
   assert.match(subPanelSrc, /space-y-2\.5[\s\S]*Appearance/);
@@ -190,7 +191,9 @@ test("Built dist bundle emits strictly 3 WOFF2 fonts and includes reliability sy
 
   const jsFiles = assetFiles.filter((f) => f.endsWith(".js"));
   assert.ok(jsFiles.length >= 1);
-  const jsBundle = fs.readFileSync(path.join(assetsDir, jsFiles[0]), "utf8");
+  const jsBundle = jsFiles
+    .map((f) => fs.readFileSync(path.join(assetsDir, f), "utf8"))
+    .join("\n");
 
   for (const token of [
     "Noto Sans Arabic",
@@ -1094,7 +1097,7 @@ test("Preference sliders use iOS Liquid Glass pill thumb, recessed track, and re
   assert.match(scrubberSrc, /ep-scrubber-glass-thumb/);
   assert.match(scrubberSrc, /alwaysShowThumb/);
   assert.match(scrubberSrc, /alwaysShowThumb \? "left-\[11px\] right-\[11px\]" : "left-\[7px\] right-\[7px\]"/);
-  assert.match(scrubberSrc, /alwaysShowThumb \? "left-\[19px\] right-\[19px\]" : "left-\[7px\] right-\[7px\]"/);
+  assert.match(scrubberSrc, /alwaysShowThumb \? "left-\[19px\] right-\[19px\]" : "left-\[15px\] right-\[15px\]"/);
   assert.match(scrubberSrc, /-ml-\[7px\] h-3\.5 w-3\.5 rounded-full ep-scrubber-glass-thumb ep-scrubber-hover-thumb/);
   assert.match(settingsSrc, /ariaLabel="Play Bar Opacity"[\s\S]{0,160}alwaysShowThumb/);
   assert.match(settingsSrc, /ariaLabel="Subtitle Vertical Position"[\s\S]{0,160}alwaysShowThumb/);

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 
 export interface ScrubberChangeMeta {
   phase: "start" | "move" | "commit" | "key";
@@ -12,6 +12,7 @@ interface ScrubberProps {
   disabled?: boolean;
   ariaLabel: string;
   formatTooltip?: (val: number) => string;
+  renderPreview?: (val: number) => ReactNode;
   tooltipPlacement?: "top" | "bottom";
   tooltipVariant?: "pill" | "plain";
   onChange: (val: number, meta?: ScrubberChangeMeta) => void;
@@ -35,6 +36,7 @@ export function Scrubber({
   disabled = false,
   ariaLabel,
   formatTooltip,
+  renderPreview,
   tooltipPlacement = "top",
   tooltipVariant = "pill",
   onChange,
@@ -47,6 +49,7 @@ export function Scrubber({
   const pointerDownXRef = useRef(0);
   const pointerDownValRef = useRef(value);
   const lastValRef = useRef(value);
+  const hoverGlassNotifiedRef = useRef(false);
   const draggingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
   const dragMovedRef = useRef(false);
@@ -81,10 +84,14 @@ export function Scrubber({
     const el = trackRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const relX = clamp(clientX - rect.left, 0, rect.width);
+    const pad = alwaysShowThumb ? 11 : 7;
+    const effectivePad = rect.width > pad * 2 ? pad : 0;
+    const span = rect.width - effectivePad * 2;
+    const relX = clamp(clientX - rect.left, effectivePad, rect.width - effectivePad);
     setHoverX(relX);
-    setHoverRatio(rect.width > 0 ? relX / rect.width : 0);
-    if (formatTooltip && tooltipVariant !== "plain" && !disabled) {
+    setHoverRatio(span > 0 ? clamp((relX - effectivePad) / span, 0, 1) : 0);
+    if (formatTooltip && tooltipVariant !== "plain" && !disabled && !hoverGlassNotifiedRef.current) {
+      hoverGlassNotifiedRef.current = true;
       window.dispatchEvent(new Event("ep:glass-layout"));
     }
   };
@@ -191,21 +198,38 @@ export function Scrubber({
       onLostPointerCapture={finishPointerDrag}
       onPointerLeave={() => {
         setHoverRatio(null);
+        if (hoverGlassNotifiedRef.current) {
+          hoverGlassNotifiedRef.current = false;
+          window.dispatchEvent(new Event("ep:glass-layout"));
+        }
       }}
       onKeyDown={handleKeyDown}
       className={`ep-scrubber group relative h-6 flex items-center select-none touch-none ${
         disabled ? "opacity-45 cursor-not-allowed" : "cursor-pointer"
       } ${className}`}
     >
-      {formatTooltip &&
-        hoverVal !== null &&
-        !disabled &&
-        (tooltipVariant === "plain" ? (
+      {hoverVal !== null && !disabled && (() => {
+        const previewNode = renderPreview ? renderPreview(hoverVal) : null;
+        if (previewNode) {
+          return (
+            <div
+              data-glass-region="true"
+              className={`anim-pop-in ep-glass-thumb-preview pointer-events-none absolute z-30 -translate-x-1/2 p-1.5 rounded-2xl transition-[left] duration-75 ease-out ${
+                tooltipPlacement === "bottom" ? "top-7" : "bottom-7"
+              }`}
+              style={{ left: `clamp(min(94px, 50%), ${hoverX}px, max(50%, calc(100% - 94px)))` }}
+            >
+              {previewNode}
+            </div>
+          );
+        }
+        if (!formatTooltip) return null;
+        return tooltipVariant === "plain" ? (
           <div
-            className={`anim-pop-in pointer-events-none absolute z-30 -translate-x-1/2 text-[11px] leading-none font-semibold num text-white/95 drop-shadow-[0_1px_3px_rgba(0,0,0,0.85)] whitespace-nowrap select-none ${
+            className={`anim-pop-in pointer-events-none absolute z-30 -translate-x-1/2 text-[11px] leading-none font-semibold num text-white/95 whitespace-nowrap select-none ${
               tooltipPlacement === "bottom" ? "top-7" : "-top-3"
             }`}
-            style={{ left: `clamp(12px, ${hoverX}px, calc(100% - 12px))` }}
+            style={{ left: `clamp(min(24px, 50%), ${hoverX}px, max(50%, calc(100% - 24px)))` }}
           >
             {formatTooltip(hoverVal)}
           </div>
@@ -215,11 +239,12 @@ export function Scrubber({
             className={`anim-pop-in ep-glass-pill pointer-events-none absolute z-30 -translate-x-1/2 px-2.5 py-0.5 text-[11px] font-medium num text-primary rounded-full whitespace-nowrap ${
               tooltipPlacement === "bottom" ? "top-7" : "-top-8"
             }`}
-            style={{ left: `clamp(18px, ${hoverX}px, calc(100% - 18px))` }}
+            style={{ left: `clamp(min(34px, 50%), ${hoverX}px, max(50%, calc(100% - 34px)))` }}
           >
             {formatTooltip(hoverVal)}
           </div>
-        ))}
+        );
+      })()}
       <div
         className={`ep-scrubber-track relative w-full ${
           alwaysShowThumb
@@ -264,13 +289,11 @@ export function Scrubber({
         )}
       </div>
       <div
-        className={`pointer-events-none absolute inset-y-0 overflow-x-clip ${
-          alwaysShowThumb ? "-inset-x-2" : "inset-x-0"
-        }`}
+        className="pointer-events-none absolute inset-y-0 -inset-x-2 overflow-x-clip"
       >
         <div
           className={`absolute inset-y-0 flex items-center ${
-            alwaysShowThumb ? "left-[19px] right-[19px]" : "left-[7px] right-[7px]"
+            alwaysShowThumb ? "left-[19px] right-[19px]" : "left-[15px] right-[15px]"
           }`}
         >
           <div className="w-full" style={{ transform: `translateX(${ratio * 100}%)` }}>

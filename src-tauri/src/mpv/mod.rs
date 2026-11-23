@@ -74,6 +74,9 @@ pub struct MpvController {
     freeze_capture_busy: Arc<AtomicBool>,
     vo_nudge_pending: Arc<AtomicBool>,
     vo_nudge_in_flight: Arc<AtomicBool>,
+    buffering: Arc<AtomicBool>,
+    seek_lead_ms: Arc<AtomicU64>,
+    last_seek_at: Arc<Mutex<Option<Instant>>>,
     volume_reassert_cb: VolumeReassertCallback,
 }
 
@@ -105,6 +108,9 @@ impl MpvController {
             freeze_capture_busy: Arc::new(AtomicBool::new(false)),
             vo_nudge_pending: Arc::new(AtomicBool::new(false)),
             vo_nudge_in_flight: Arc::new(AtomicBool::new(false)),
+            buffering: Arc::new(AtomicBool::new(false)),
+            seek_lead_ms: Arc::new(AtomicU64::new(0)),
+            last_seek_at: Arc::new(Mutex::new(None)),
             volume_reassert_cb: Arc::new(Mutex::new(None)),
         }
     }
@@ -158,6 +164,10 @@ impl MpvController {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    pub fn next_request_id_range(&self, count: u64) -> u64 {
+        self.next_req_id.fetch_add(count, Ordering::Relaxed)
+    }
+
     pub fn snapshot(&self) -> PlayerSnapshot {
         *self.snapshot.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -197,6 +207,14 @@ impl MpvController {
         self.loading_media.load(Ordering::SeqCst)
     }
 
+    pub fn is_buffering(&self) -> bool {
+        self.buffering.load(Ordering::Acquire)
+    }
+
+    pub fn seek_lead_secs(&self) -> f64 {
+        (self.seek_lead_ms.load(Ordering::Acquire) as f64) / 1000.0
+    }
+
     /// Records the target seek position and returns `true` when deferred until `file-loaded`.
     pub fn note_seek_target(&self, target_secs: f64) -> bool {
         let safe = if target_secs.is_finite() && target_secs >= 0.0 {
@@ -224,6 +242,13 @@ impl MpvController {
             .unwrap_or_else(|e| e.into_inner())
             .position = safe;
         deferred
+    }
+
+    pub fn is_seeking(&self) -> bool {
+        self.pending_seek
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_seeking_at(Instant::now())
     }
 
     /// Dispatches a tracked seek command (deferring exact seeks cleanly if media is still loading)
@@ -260,6 +285,9 @@ impl MpvController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .note_dispatched_seek(safe, Some(req), Instant::now());
+        if !preview {
+            *self.last_seek_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        }
         self.snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -439,15 +467,16 @@ impl MpvController {
         let pending_resize_for_file_loaded = Arc::clone(&self.pending_resize);
         let app_for_file_loaded = app.clone();
         let file_loaded_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            let effective = has_media_for_file_loaded.load(Ordering::SeqCst)
-                && ui_visible_for_file_loaded.load(Ordering::SeqCst);
+            let ui_vis = ui_visible_for_file_loaded.load(Ordering::SeqCst);
             let mut running = false;
             if let Ok(mut guard) = runtime_for_file_loaded.lock() {
                 if let Some(ref mut rt) = *guard {
                     if rt.session_id == session_id {
                         running = !matches!(rt.child.try_wait(), Ok(Some(_)))
                             && is_child_window_alive(rt.hwnd);
-                        set_child_visible(&rt.app, rt.hwnd, effective);
+                        // Keep the child HWND visible behind the still-opaque WebView2 canvas
+                        // so mpv's vo configures and paints frame #1 before we punch out WebView2.
+                        set_child_visible(&rt.app, rt.hwnd, ui_vis);
                         if let Some(r) = rt.last_rect {
                             if r.width > 0 && r.height > 0 {
                                 resize_child_hwnd(
@@ -462,7 +491,6 @@ impl MpvController {
                 }
             }
             let has_media = running && has_media_for_file_loaded.load(Ordering::SeqCst);
-            let ui_vis = ui_visible_for_file_loaded.load(Ordering::SeqCst);
             let _ = app_for_file_loaded.emit(
                 "mpv://surface-state",
                 MpvSurfaceState {
@@ -473,12 +501,46 @@ impl MpvController {
                 },
             );
         });
+        let app_for_vo_ready = app.clone();
         let runtime_for_vo_ready = Arc::clone(&self.runtime);
         let has_media_for_vo_ready = Arc::clone(&self.has_media);
         let ui_visible_for_vo_ready = Arc::clone(&self.ui_visible);
         let vo_nudge_pending_cb = Arc::clone(&self.vo_nudge_pending);
         let vo_nudge_in_flight_cb = Arc::clone(&self.vo_nudge_in_flight);
         let vo_ready_cb: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |is_playback_restart| {
+            if is_playback_restart && !has_media_for_vo_ready.load(Ordering::SeqCst) {
+                let app_reveal = app_for_vo_ready.clone();
+                let runtime_reveal = Arc::clone(&runtime_for_vo_ready);
+                let has_media_reveal = Arc::clone(&has_media_for_vo_ready);
+                let ui_visible_reveal = Arc::clone(&ui_visible_for_vo_ready);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    let ui_vis = ui_visible_reveal.load(Ordering::SeqCst);
+                    let mut running = false;
+                    if let Ok(mut guard) = runtime_reveal.lock() {
+                        if let Some(ref mut rt) = *guard {
+                            if rt.session_id == session_id {
+                                running = !matches!(rt.child.try_wait(), Ok(Some(_)))
+                                    && is_child_window_alive(rt.hwnd);
+                                if running {
+                                    has_media_reveal.store(true, Ordering::SeqCst);
+                                    set_child_visible(&rt.app, rt.hwnd, ui_vis);
+                                }
+                            }
+                        }
+                    }
+                    let has_media = running && has_media_reveal.load(Ordering::SeqCst);
+                    let _ = app_reveal.emit(
+                        "mpv://surface-state",
+                        MpvSurfaceState {
+                            running,
+                            has_media,
+                            ui_visible: ui_vis,
+                            surface_visible: running && has_media && ui_vis,
+                        },
+                    );
+                });
+            }
             let should_nudge = if is_playback_restart {
                 vo_nudge_pending_cb.swap(false, Ordering::AcqRel)
             } else {
@@ -541,6 +603,9 @@ impl MpvController {
                 }
             });
         });
+        let buffering_for_ipc = Arc::clone(&self.buffering);
+        let seek_lead_for_ipc = Arc::clone(&self.seek_lead_ms);
+        let last_seek_for_ipc = Arc::clone(&self.last_seek_at);
         tokio::spawn(async move {
             let reason = ipc::connect_and_run_ipc(
                 pipe_name,
@@ -556,6 +621,9 @@ impl MpvController {
                 Arc::clone(&volume_reassert_clone),
                 file_loaded_cb,
                 vo_ready_cb,
+                buffering_for_ipc,
+                seek_lead_for_ipc,
+                last_seek_for_ipc,
                 move || {
                     if let Ok(mut guard) = runtime_for_probe.try_lock() {
                         if let Some(rt) = guard.as_mut() {

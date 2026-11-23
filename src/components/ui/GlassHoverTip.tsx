@@ -121,22 +121,34 @@ export function GlassHoverTip({
     };
   }, [open, placement]);
 
-  const payload = usePresencePayload(open && !disabled && coords ? coords : null, 130);
+  const payload = usePresencePayload(open && !disabled && coords ? coords : null, 150);
+  const [entered, setEntered] = useState(false);
+
+  useEffect(() => {
+    if (!payload.mounted || payload.exiting) {
+      setEntered(false);
+      return;
+    }
+    let f2 = 0;
+    const f1 = window.requestAnimationFrame(() => {
+      f2 = window.requestAnimationFrame(() => setEntered(true));
+    });
+    return () => {
+      window.cancelAnimationFrame(f1);
+      if (f2) window.cancelAnimationFrame(f2);
+    };
+  }, [payload.mounted, payload.exiting]);
 
   useLayoutEffect(() => {
     if (!payload.mounted || !tipRef.current || !payload.value) return;
-    const rect = tipRef.current.getBoundingClientRect();
+    const halfW = tipRef.current.offsetWidth / 2;
     const vw = window.innerWidth || 1280;
     const margin = 12;
-    let delta = 0;
-    if (rect.left < margin) {
-      delta = margin - rect.left;
-    } else if (rect.right > vw - margin) {
-      delta = vw - margin - rect.right;
-    }
-    if (delta !== 0) {
-      setNudgeX((prev) => prev + delta);
-    }
+    const minCenter = margin + halfW;
+    const maxCenter = Math.max(minCenter, vw - margin - halfW);
+    const clampedCenter = Math.min(maxCenter, Math.max(minCenter, payload.value.anchorX));
+    const nextNudge = Math.round(clampedCenter - payload.value.anchorX);
+    setNudgeX(nextNudge);
   }, [payload.mounted, payload.value, label, detail]);
 
   const dotClass = ACCENT_DOT_CLASS[accent];
@@ -169,7 +181,7 @@ export function GlassHoverTip({
             <div
               ref={tipRef}
               className={`ep-glass-reaction-hint h-7 px-2.5 rounded-full flex items-center gap-1.5 whitespace-nowrap transition-[opacity,transform] duration-150 ease-[var(--spring-fluid)] ${
-                payload.exiting
+                payload.exiting || !entered
                   ? payload.value.resolvedPlacement === "top"
                     ? "opacity-0 scale-95 translate-y-1"
                     : "opacity-0 scale-95 -translate-y-1"

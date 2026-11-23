@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes, ReactNode } from "react";
+import { useId, type InputHTMLAttributes, type ReactNode } from "react";
 
 interface TextFieldProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -13,14 +13,16 @@ export function TextField({
   error,
   rightSlot,
   id,
+  name,
   className = "",
   ...rest
 }: TextFieldProps) {
+  const fallbackId = useId();
   const inputId =
     id ||
     (label
       ? `ep-field-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
-      : undefined);
+      : fallbackId);
 
   return (
     <div className="flex flex-col gap-1.5 w-full">
@@ -32,6 +34,7 @@ export function TextField({
       <div className="relative flex items-center">
         <input
           id={inputId}
+          name={name ?? inputId}
           className={`ep-glass-input w-full h-10 px-3.5 text-sm text-primary placeholder:text-muted rounded-xl focus:outline-none ${
             error ? "ring-2 ring-bad/60" : ""
           } ${rightSlot ? "pr-10" : ""} ${className}`}

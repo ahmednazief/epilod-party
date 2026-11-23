@@ -255,7 +255,7 @@ test("UI components wire unified play-block & peer-not-ready handlers cleanly", 
   assert.match(watchRoomSrc, /onMpvSurfaceClick\(\(\) => \{\s*if \(active\) hideChrome\(\);/);
   assert.match(
     watchRoomSrc,
-    /onPointerDown=\{\(e\) => e\.stopPropagation\(\)\}\s*onClick=\{hideChrome\}/,
+    /onPointerDown=\{\(e\) => e\.stopPropagation\(\)\}\s*onClick=\{\(\) => \(chromeIdle \? wakeChrome\(\) : hideChrome\(\)\)\}/,
   );
 
   assert.equal(roomPanelSrc.includes("Not ready"), true);

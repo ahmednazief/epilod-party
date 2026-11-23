@@ -412,12 +412,6 @@ fn eval_linear_residual(matches: &[ProbeMatch], scale: f64) -> (f64, f64) {
     (offset, max_res)
 }
 
-#[derive(Debug, Clone)]
-pub struct BisectObservation {
-    pub room_secs: f64,
-    pub matched: Option<ProbeMatch>,
-}
-
 /// Evaluates sparse audio anchor matches across the timeline, returning a Linear fit, a
 /// mid-movie cut bisection request, or finalized Piecewise segments.
 pub fn analyze_probe_matches(

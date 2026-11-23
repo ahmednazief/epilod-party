@@ -330,14 +330,16 @@ export const ChatSidebar = memo(function ChatSidebar({
     };
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape" && voiceAudioOpen) {
+        e.preventDefault();
+        e.stopPropagation();
         setVoiceAudioOpen(false);
       }
     };
     window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     return () => {
       window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
     };
   }, [optionsOpen, voiceAudioOpen]);
 
@@ -626,9 +628,19 @@ export const ChatSidebar = memo(function ChatSidebar({
     }, 950);
   };
 
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      resizeCleanupRef.current?.();
+      resizeCleanupRef.current = null;
+    };
+  }, []);
+
   const handleResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    resizeCleanupRef.current?.();
     const startX = e.clientX;
     const startW = sidebarWidth;
     setResizing(true);
@@ -640,13 +652,20 @@ export const ChatSidebar = memo(function ChatSidebar({
         Math.max(MIN_CHAT_SIDEBAR_WIDTH, Math.min(MAX_CHAT_SIDEBAR_WIDTH, startW + delta)),
       );
     };
-    const onUp = () => {
-      setResizing(false);
-      onResizingChange?.(false);
+    const cleanup = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      if (resizeCleanupRef.current === cleanup) {
+        resizeCleanupRef.current = null;
+      }
     };
+    const onUp = () => {
+      setResizing(false);
+      onResizingChange?.(false);
+      cleanup();
+    };
+    resizeCleanupRef.current = cleanup;
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
@@ -715,9 +734,12 @@ export const ChatSidebar = memo(function ChatSidebar({
               type="button"
               title="Click to copy link"
               onClick={() => {
-                void navigator.clipboard?.writeText(tok.href).then(() => {
-                  usePlayerStore.getState().flashFeedback("Link copied");
-                });
+                void navigator.clipboard
+                  ?.writeText(tok.href)
+                  .then(() => {
+                    usePlayerStore.getState().flashFeedback("Link copied");
+                  })
+                  .catch(() => undefined);
               }}
               className="underline decoration-white/40 hover:decoration-white text-accent-soft hover:text-white break-all cursor-pointer text-left"
             >
@@ -835,7 +857,13 @@ export const ChatSidebar = memo(function ChatSidebar({
 
           <button
             type="button"
-            onClick={() => setOptionsOpen((v) => !v)}
+            onClick={() => {
+              setOptionsOpen((v) => {
+                const next = !v;
+                if (next) setVoiceAudioOpen(false);
+                return next;
+              });
+            }}
             aria-label="Chat preferences"
             aria-expanded={optionsOpen}
             title="Chat options"
@@ -1366,12 +1394,19 @@ export const ChatSidebar = memo(function ChatSidebar({
       </div>
 
       {/* Collapsible Inline Emoji Tray */}
-      <div className="ep-collapse shrink-0" data-open={emojiOpen ? "true" : "false"}>
+      <div
+        className="ep-collapse shrink-0"
+        data-open={emojiOpen ? "true" : "false"}
+        aria-hidden={!emojiOpen}
+        inert={!emojiOpen}
+      >
         <div className="ep-collapse-inner">
           <div className="mx-3 mb-2 p-2.5 rounded-2xl bg-white/[0.05] space-y-2">
             <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-black/25">
               <AppSearchIcon size={12} className="text-muted shrink-0" />
               <input
+                id="chat-emoji-search"
+                name="chatEmojiSearch"
                 type="text"
                 value={emojiQuery}
                 onChange={(e) => setEmojiQuery(e.target.value)}

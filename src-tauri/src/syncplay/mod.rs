@@ -6,10 +6,11 @@ use crate::voice::VoiceController;
 use epilod_core::matching::{analyze_files, FileIdentity, FileMatchStatus, SourceRelation};
 use epilod_core::mpv_ipc::{set_pause_cmd, set_speed_cmd};
 use epilod_core::p2p::{
-    decode_epcr_chat_react, decode_epr_reaction, decode_ept_chat_chunk, encode_epcr_chat_react,
-    encode_epr_reaction, encode_ept_chat_chunks, ChatFallbackPacket, ChatReactFallbackPacket,
-    EptChatReassembler, ReactionFallbackPacket, EP2_CHAT_PREFIX, EP_CHAT_REACT_PREFIX,
-    EP_CHAT_TEXT_PREFIX, EP_REACTION_CHAT_PREFIX, MAX_REACTION_BURST_COUNT,
+    decode_epcr_chat_react, decode_epr_reaction, decode_ept_chat_chunk, decode_epv_rating,
+    encode_epcr_chat_react, encode_epr_reaction, encode_ept_chat_chunks, encode_epv_rating,
+    ChatFallbackPacket, ChatReactFallbackPacket, EptChatReassembler, RatingVotePacket,
+    ReactionFallbackPacket, EP2_CHAT_PREFIX, EP_CHAT_REACT_PREFIX, EP_CHAT_TEXT_PREFIX,
+    EP_RATING_CHAT_PREFIX, EP_REACTION_CHAT_PREFIX, MAX_REACTION_BURST_COUNT,
 };
 use epilod_core::room_code::{
     generate as generate_room_code, is_six_digit_code, normalize as normalize_room_code,
@@ -58,6 +59,10 @@ pub struct ParticipantDto {
     pub duration_delta_secs: Option<f64>,
     pub suggested_fps_scale: Option<f64>,
     pub suggested_fps_label: Option<String>,
+    #[serde(default)]
+    pub buffering: bool,
+    #[serde(default)]
+    pub lag_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +108,11 @@ pub enum SyncCommand {
         avatar_id: String,
         count: u8,
     },
+    SendRatingVote {
+        key: String,
+        score: u8,
+        avatar_id: String,
+    },
     SendChat {
         id: String,
         text: String,
@@ -119,6 +129,13 @@ pub enum SyncCommand {
     },
     SendTyping {
         is_typing: bool,
+    },
+    SendSubtitleShare {
+        id: String,
+        file_name: String,
+        ext: String,
+        lang: Option<String>,
+        content: String,
     },
     ManualRetry,
 }
@@ -180,7 +197,7 @@ fn is_room_occupied_by_others(items: &[RoomParticipantUpdate], local_username: &
     })
 }
 
-fn reroll_distinct_six_digit_code(current: Option<&str>) -> Option<(String, String)> {
+pub(crate) fn reroll_distinct_six_digit_code(current: Option<&str>) -> Option<(String, String)> {
     for _ in 0..8 {
         if let Ok(code) = generate_room_code() {
             if current.is_some_and(|prev| prev == code) {
@@ -731,6 +748,14 @@ impl SyncController {
         });
     }
 
+    pub fn send_rating_vote(&self, key: String, score: u8, avatar_id: String) {
+        self.try_send(SyncCommand::SendRatingVote {
+            key,
+            score,
+            avatar_id,
+        });
+    }
+
     pub fn send_chat(
         &self,
         id: String,
@@ -762,6 +787,31 @@ impl SyncController {
 
     pub fn send_typing(&self, is_typing: bool) {
         self.try_send(SyncCommand::SendTyping { is_typing });
+    }
+
+    pub fn send_subtitle_share(
+        &self,
+        id: String,
+        file_name: String,
+        ext: String,
+        lang: Option<String>,
+        content: String,
+    ) -> bool {
+        if let Ok(guard) = self.runtime.lock() {
+            if let Some(ref rt) = *guard {
+                return rt
+                    .tx
+                    .try_send(SyncCommand::SendSubtitleShare {
+                        id,
+                        file_name,
+                        ext,
+                        lang,
+                        content,
+                    })
+                    .is_ok();
+            }
+        }
+        false
     }
 
     pub fn send_command(&self, cmd: SyncCommand) {
@@ -1120,7 +1170,7 @@ fn apply_sync_actions(
     }
 }
 
-fn build_local_file_identity(
+pub(crate) fn build_local_file_identity(
     local_file: &Arc<Mutex<Option<LocalFileMeta>>>,
 ) -> Option<FileIdentity> {
     local_file
@@ -1133,7 +1183,7 @@ fn build_local_file_identity(
             } else {
                 f.name
             },
-            size_bytes: f.size_bytes,
+            size_bytes: if f.hash_identity { None } else { f.size_bytes },
             size_hash: f
                 .hash_identity
                 .then(|| f.size_bytes.map(hash_filesize))
@@ -1143,7 +1193,7 @@ fn build_local_file_identity(
         })
 }
 
-fn build_peer_file_identity(pf: &epilod_core::syncplay::WireFileInfo) -> FileIdentity {
+pub(crate) fn build_peer_file_identity(pf: &epilod_core::syncplay::WireFileInfo) -> FileIdentity {
     let peer_name_hashed = pf.size_hash.is_some()
         || (pf.name.len() == 12 && pf.name.bytes().all(|b| b.is_ascii_hexdigit()));
     FileIdentity {
@@ -2103,6 +2153,21 @@ where
                                     }
                                 }
                             }
+                        } else if trimmed.starts_with(EP_RATING_CHAT_PREFIX)
+                            && !sender.eq_ignore_ascii_case(&active_username)
+                        {
+                            if let Some(pkt) = decode_epv_rating(trimmed) {
+                                let _ = app.emit(
+                                    "sync://rating-vote",
+                                    serde_json::json!({
+                                        "username": sender,
+                                        "avatarId": pkt.avatar_id,
+                                        "key": pkt.key,
+                                        "score": pkt.score,
+                                        "via": "syncplay",
+                                    }),
+                                );
+                            }
                         } else if trimmed.starts_with(EP_CHAT_TEXT_PREFIX)
                             && !sender.eq_ignore_ascii_case(&active_username)
                         {
@@ -2851,6 +2916,26 @@ where
                             });
                         }
                     }
+                    SyncCommand::SendRatingVote {
+                        key,
+                        score,
+                        avatar_id,
+                    } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            if let Some(line) = encode_epv_rating(&RatingVotePacket {
+                                key,
+                                score,
+                                avatar_id,
+                            }) {
+                                if pending_ept_lines.len() < 48 {
+                                    pending_ept_lines.push_back(line);
+                                }
+                            }
+                        }
+                    }
                     SyncCommand::SendChat {
                         id,
                         text,
@@ -2903,6 +2988,26 @@ where
                             .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
                         if connected_emitted && has_other_peer {
                             p2p.try_send(P2pControlCmd::SendTyping { is_typing });
+                        }
+                    }
+                    SyncCommand::SendSubtitleShare {
+                        id,
+                        file_name,
+                        ext,
+                        lang,
+                        content,
+                    } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendSubtitleShare {
+                                id,
+                                file_name,
+                                ext,
+                                lang,
+                                content,
+                            });
                         }
                     }
                     SyncCommand::ManualRetry => {}
@@ -3071,6 +3176,8 @@ fn emit_participants(
                 duration_delta_secs: cmp.duration_delta_secs,
                 suggested_fps_scale: cmp.suggested_fps_scale,
                 suggested_fps_label: cmp.suggested_fps_label,
+                buffering: false,
+                lag_secs: None,
             }
         })
         .collect();
@@ -3372,7 +3479,7 @@ pub async fn probe_pinned_rooms(rooms: Vec<ProbeRoomRequest>) -> Vec<RoomOccupan
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let mut by_endpoint: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut by_endpoint: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
     let mut invalid_results: Vec<RoomOccupancyDto> = Vec::new();
 
     for req in rooms.into_iter().take(5) {
@@ -3398,10 +3505,16 @@ pub async fn probe_pinned_rooms(rooms: Vec<ProbeRoomRequest>) -> Vec<RoomOccupan
             });
             continue;
         };
+        let six_digit = if !req.literal_room && is_six_digit_code(&req.room_name) {
+            normalize_room_code(&req.room_name).ok()
+        } else {
+            None
+        };
+        let peek_secret = six_digit.unwrap_or_else(|| wire_room.clone());
         by_endpoint
             .entry(endpoint)
             .or_default()
-            .push((req.id, wire_room));
+            .push((req.id, wire_room, peek_secret));
     }
 
     let mut results = invalid_results;
@@ -3411,9 +3524,13 @@ pub async fn probe_pinned_rooms(rooms: Vec<ProbeRoomRequest>) -> Vec<RoomOccupan
             results.extend(batch);
             continue;
         }
+        let plain_targets: Vec<(String, String)> = targets
+            .iter()
+            .map(|(id, w, _)| (id.clone(), w.clone()))
+            .collect();
         let batch_fut = async {
             let Ok((wire, _)) = establish_connection(&endpoint).await else {
-                return targets
+                return plain_targets
                     .iter()
                     .map(|(id, _)| RoomOccupancyDto {
                         id: id.clone(),
@@ -3428,18 +3545,18 @@ pub async fn probe_pinned_rooms(rooms: Vec<ProbeRoomRequest>) -> Vec<RoomOccupan
             match wire {
                 WireStream::Plain(tcp) => {
                     let (r, w) = tokio::io::split(tcp);
-                    probe_endpoint_batch(r, w, &targets, checked_at).await
+                    probe_endpoint_batch(r, w, &plain_targets, checked_at).await
                 }
                 WireStream::Tls(tls) => {
                     let (r, w) = tokio::io::split(tls);
-                    probe_endpoint_batch(r, w, &targets, checked_at).await
+                    probe_endpoint_batch(r, w, &plain_targets, checked_at).await
                 }
             }
         };
 
         let mut batch_res = match tokio::time::timeout(Duration::from_secs(4), batch_fut).await {
             Ok(v) => v,
-            Err(_) => targets
+            Err(_) => plain_targets
                 .iter()
                 .map(|(id, _)| RoomOccupancyDto {
                     id: id.clone(),

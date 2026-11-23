@@ -126,9 +126,11 @@ export async function joinVoiceSession(options: JoinVoiceOptions = {}): Promise<
     await voiceSetConfig(stateNow.toConfigDto());
     stateNow.syncAllPeerVolumesToBackend();
     await voiceJoin(listenOnly);
-    if (listenOnly) {
-      useVoiceStore.setState({ muted: true, deafened: false, preDeafenMuted: true });
-    }
+    useVoiceStore.setState({
+      muted: listenOnly,
+      deafened: false,
+      preDeafenMuted: listenOnly,
+    });
     useVoiceStore.getState().setJoined(true);
     playSoundCue("voiceJoined", { moviePlaying: isMovieActivelyPlaying() });
     return "joined";
@@ -147,7 +149,12 @@ export async function leaveVoiceSession(): Promise<void> {
   if (!store.joined && !store.joining) return;
   await voiceLeave().catch(() => undefined);
   useVoiceStore.getState().setJoined(false);
-  useVoiceStore.setState({ pttActive: false });
+  useVoiceStore.setState({
+    muted: false,
+    deafened: false,
+    preDeafenMuted: false,
+    pttActive: false,
+  });
   useNotificationStore.getState().dismissByTag(VOICE_HEALTH_NOTE_TAG);
   useNotificationStore.getState().dismissByTag(VOICE_PEER_BLOCKED_NOTE_TAG);
   playSoundCue("voiceLeft", { moviePlaying: isMovieActivelyPlaying() });
@@ -181,7 +188,7 @@ export function toggleVoiceDeafen(): boolean {
   const store = useVoiceStore.getState();
   const next = !store.deafened;
   store.setDeafened(next);
-  playSoundCue(next ? "micMuted" : "micUnmuted", { moviePlaying: isMovieActivelyPlaying() });
+  playSoundCue(next ? "voiceDeafened" : "voiceUndeafened", { moviePlaying: isMovieActivelyPlaying() });
   return next;
 }
 

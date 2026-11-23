@@ -16,7 +16,13 @@ export type SoundCue =
   | "peerVoiceJoined"
   | "peerVoiceLeft"
   | "micMuted"
-  | "micUnmuted";
+  | "micUnmuted"
+  | "voiceDeafened"
+  | "voiceUndeafened"
+  | "resyncSnap"
+  | "ratingSubmitted"
+  | "episodeChanged"
+  | "errorTone";
 
 export interface PlaySoundOptions {
   /** Quiets and softens cues automatically when video is actively playing. */
@@ -27,8 +33,14 @@ export interface PlaySoundOptions {
 
 interface CueNote {
   freqHz: number;
+  startFreqHz?: number;
+  wave?: OscillatorType;
   harmonicFreqHz?: number;
   harmonicRatio?: number;
+  detuneCents?: number;
+  pan?: number;
+  transientHz?: number;
+  transientGain?: number;
   delayMs: number;
   durationMs: number;
   gain: number;
@@ -36,179 +48,482 @@ interface CueNote {
 
 interface CueRecipe {
   cutoffHz: number;
+  ambienceWet?: number;
   notes: readonly CueNote[];
 }
 
 const CUE_RECIPES: Record<SoundCue, CueRecipe> = {
-  // Warm low-velvet ascending fifth (D4 -> A4) with faint D3 body
+  // Warm velvet theater ascending fifth (D4 -> A4) with D3 body & lush stereo shimmer
   roomConnected: {
-    cutoffHz: 1100,
+    cutoffHz: 1320,
+    ambienceWet: 0.2,
     notes: [
       {
+        startFreqHz: 277.18,
         freqHz: 293.66,
         harmonicFreqHz: 146.83,
-        harmonicRatio: 0.35,
+        harmonicRatio: 0.34,
+        detuneCents: 6,
+        pan: -0.14,
         delayMs: 0,
-        durationMs: 170,
-        gain: 0.052,
+        durationMs: 190,
+        gain: 0.056,
       },
       {
+        startFreqHz: 415.3,
         freqHz: 440.0,
         harmonicFreqHz: 659.25,
-        harmonicRatio: 0.14,
-        delayMs: 70,
-        durationMs: 240,
-        gain: 0.056,
+        harmonicRatio: 0.16,
+        detuneCents: 7,
+        pan: 0.14,
+        delayMs: 72,
+        durationMs: 265,
+        gain: 0.06,
       },
     ],
   },
-  // Airy liquid-glass droplet dyad (E4 -> B4 + subtle F#5 glisten)
+  // Airy liquid-glass droplet dyad (E4 -> B4 + F#5 glisten)
   peerJoined: {
-    cutoffHz: 1250,
+    cutoffHz: 1450,
+    ambienceWet: 0.18,
     notes: [
       {
+        startFreqHz: 311.13,
         freqHz: 329.63,
         harmonicFreqHz: 659.25,
         harmonicRatio: 0.16,
+        detuneCents: 5,
+        pan: -0.12,
         delayMs: 0,
-        durationMs: 135,
-        gain: 0.052,
+        durationMs: 145,
+        gain: 0.054,
       },
       {
+        startFreqHz: 466.16,
         freqHz: 493.88,
         harmonicFreqHz: 739.99,
-        harmonicRatio: 0.18,
-        delayMs: 65,
-        durationMs: 220,
-        gain: 0.058,
+        harmonicRatio: 0.2,
+        detuneCents: 7,
+        pan: 0.14,
+        delayMs: 64,
+        durationMs: 235,
+        gain: 0.06,
       },
     ],
   },
   // Muted warm descending breath (A4 -> E4)
   peerLeft: {
-    cutoffHz: 820,
+    cutoffHz: 860,
+    ambienceWet: 0.12,
     notes: [
       {
+        startFreqHz: 452.0,
         freqHz: 440.0,
+        pan: 0.08,
         delayMs: 0,
-        durationMs: 120,
-        gain: 0.036,
+        durationMs: 125,
+        gain: 0.038,
       },
       {
+        startFreqHz: 349.23,
         freqHz: 329.63,
-        delayMs: 60,
-        durationMs: 175,
-        gain: 0.034,
+        detuneCents: 4,
+        pan: -0.08,
+        delayMs: 58,
+        durationMs: 185,
+        gain: 0.036,
       },
     ],
   },
   // Micro crystal tactile tick (F#4 -> A4)
   peerReady: {
-    cutoffHz: 1200,
+    cutoffHz: 1320,
     notes: [
-      { freqHz: 369.99, delayMs: 0, durationMs: 75, gain: 0.038 },
-      { freqHz: 440.0, delayMs: 38, durationMs: 115, gain: 0.042 },
+      {
+        freqHz: 369.99,
+        transientHz: 1150,
+        transientGain: 0.016,
+        delayMs: 0,
+        durationMs: 75,
+        gain: 0.04,
+      },
+      {
+        startFreqHz: 415.3,
+        freqHz: 440.0,
+        harmonicFreqHz: 880.0,
+        harmonicRatio: 0.1,
+        delayMs: 36,
+        durationMs: 120,
+        gain: 0.045,
+      },
     ],
   },
   // Lush theater-lights-dimming major add9 shimmer (D4 - F#4 - A4 - E5)
   allReady: {
+    cutoffHz: 1550,
+    ambienceWet: 0.24,
+    notes: [
+      { freqHz: 293.66, detuneCents: 5, pan: -0.2, delayMs: 0, durationMs: 250, gain: 0.044 },
+      { freqHz: 369.99, detuneCents: 6, pan: -0.07, delayMs: 42, durationMs: 250, gain: 0.046 },
+      { freqHz: 440.0, detuneCents: 6, pan: 0.07, delayMs: 84, durationMs: 260, gain: 0.048 },
+      {
+        startFreqHz: 622.25,
+        freqHz: 659.25,
+        harmonicFreqHz: 1318.5,
+        harmonicRatio: 0.12,
+        detuneCents: 8,
+        pan: 0.2,
+        delayMs: 126,
+        durationMs: 290,
+        gain: 0.044,
+      },
+    ],
+  },
+  // Subtle glass tap (G4 -> D5) with crisp micro-click for code copy / OTP verify
+  codeCopied: {
     cutoffHz: 1350,
     notes: [
-      { freqHz: 293.66, delayMs: 0, durationMs: 240, gain: 0.042 },
-      { freqHz: 369.99, delayMs: 42, durationMs: 240, gain: 0.044 },
-      { freqHz: 440.0, delayMs: 84, durationMs: 250, gain: 0.046 },
-      { freqHz: 659.25, delayMs: 126, durationMs: 260, gain: 0.042 },
+      {
+        freqHz: 392.0,
+        transientHz: 1400,
+        transientGain: 0.018,
+        delayMs: 0,
+        durationMs: 58,
+        gain: 0.036,
+      },
+      {
+        startFreqHz: 554.37,
+        freqHz: 587.33,
+        harmonicFreqHz: 1174.66,
+        harmonicRatio: 0.1,
+        delayMs: 28,
+        durationMs: 100,
+        gain: 0.04,
+      },
     ],
   },
-  // Subtle glass tap (G4 -> D5) for code copy / OTP verify
-  codeCopied: {
-    cutoffHz: 1150,
-    notes: [
-      { freqHz: 392.0, delayMs: 0, durationMs: 55, gain: 0.032 },
-      { freqHz: 587.33, delayMs: 28, durationMs: 95, gain: 0.036 },
-    ],
-  },
-  // Delicate liquid-glass droplet pop (A4 + soft E5 shimmer) for live reactions
+  // Delicate liquid-glass droplet pop (A4 + soft E5 shimmer)
   reactionPop: {
-    cutoffHz: 1180,
+    cutoffHz: 1260,
     notes: [
       {
+        startFreqHz: 369.99,
         freqHz: 440.0,
         harmonicFreqHz: 659.25,
-        harmonicRatio: 0.12,
+        harmonicRatio: 0.14,
         delayMs: 0,
-        durationMs: 70,
-        gain: 0.026,
+        durationMs: 74,
+        gain: 0.028,
       },
     ],
   },
   // Whisper-soft crystalline droplet (E4 -> B4) for incoming room chat when panel is closed
   chatMessage: {
-    cutoffHz: 1050,
+    cutoffHz: 1180,
+    ambienceWet: 0.15,
     notes: [
       {
+        startFreqHz: 311.13,
         freqHz: 329.63,
         harmonicFreqHz: 493.88,
         harmonicRatio: 0.14,
+        pan: 0.18,
         delayMs: 0,
         durationMs: 95,
-        gain: 0.028,
+        gain: 0.03,
       },
       {
+        startFreqHz: 466.16,
         freqHz: 493.88,
+        detuneCents: 5,
+        pan: 0.22,
         delayMs: 42,
-        durationMs: 130,
-        gain: 0.022,
+        durationMs: 140,
+        gain: 0.026,
       },
     ],
   },
-  // Crisp upward glass chime (E4 -> A4 -> E5) on joining room voice
+  // Signature Epilod upward voice chime (E4 -> A4 -> E5) with warm stereo bloom
   voiceJoined: {
-    cutoffHz: 1300,
+    cutoffHz: 1500,
+    ambienceWet: 0.2,
     notes: [
-      { freqHz: 329.63, delayMs: 0, durationMs: 95, gain: 0.036 },
-      { freqHz: 440.0, delayMs: 45, durationMs: 120, gain: 0.04 },
-      { freqHz: 659.25, delayMs: 95, durationMs: 170, gain: 0.036 },
+      {
+        startFreqHz: 311.13,
+        freqHz: 329.63,
+        transientHz: 950,
+        transientGain: 0.014,
+        pan: -0.14,
+        delayMs: 0,
+        durationMs: 100,
+        gain: 0.04,
+      },
+      {
+        freqHz: 440.0,
+        detuneCents: 6,
+        pan: 0.0,
+        delayMs: 46,
+        durationMs: 125,
+        gain: 0.044,
+      },
+      {
+        startFreqHz: 622.25,
+        freqHz: 659.25,
+        harmonicFreqHz: 987.77,
+        harmonicRatio: 0.16,
+        detuneCents: 7,
+        pan: 0.16,
+        delayMs: 94,
+        durationMs: 185,
+        gain: 0.042,
+      },
     ],
   },
-  // Soft descending glass chime (E5 -> A4) on leaving voice
+  // Soft descending glass chime (C5 -> G4) on leaving voice
   voiceLeft: {
-    cutoffHz: 950,
+    cutoffHz: 980,
+    ambienceWet: 0.14,
     notes: [
-      { freqHz: 523.25, delayMs: 0, durationMs: 90, gain: 0.032 },
-      { freqHz: 392.0, delayMs: 48, durationMs: 140, gain: 0.028 },
+      {
+        startFreqHz: 554.37,
+        freqHz: 523.25,
+        pan: 0.1,
+        delayMs: 0,
+        durationMs: 95,
+        gain: 0.036,
+      },
+      {
+        startFreqHz: 415.3,
+        freqHz: 392.0,
+        detuneCents: 5,
+        pan: -0.1,
+        delayMs: 48,
+        durationMs: 150,
+        gain: 0.032,
+      },
     ],
   },
   // Gentle whisper chime when a friend joins voice
   peerVoiceJoined: {
-    cutoffHz: 1150,
+    cutoffHz: 1280,
+    ambienceWet: 0.14,
     notes: [
-      { freqHz: 392.0, delayMs: 0, durationMs: 85, gain: 0.026 },
-      { freqHz: 523.25, delayMs: 42, durationMs: 135, gain: 0.028 },
+      { startFreqHz: 369.99, freqHz: 392.0, pan: -0.12, delayMs: 0, durationMs: 85, gain: 0.028 },
+      {
+        startFreqHz: 493.88,
+        freqHz: 523.25,
+        harmonicFreqHz: 783.99,
+        harmonicRatio: 0.12,
+        pan: 0.12,
+        delayMs: 42,
+        durationMs: 140,
+        gain: 0.03,
+      },
     ],
   },
   // Soft low droplet when a friend leaves voice
   peerVoiceLeft: {
-    cutoffHz: 850,
+    cutoffHz: 860,
     notes: [
-      { freqHz: 440.0, delayMs: 0, durationMs: 75, gain: 0.022 },
-      { freqHz: 329.63, delayMs: 38, durationMs: 115, gain: 0.02 },
+      { startFreqHz: 466.16, freqHz: 440.0, delayMs: 0, durationMs: 75, gain: 0.024 },
+      { startFreqHz: 349.23, freqHz: 329.63, delayMs: 38, durationMs: 120, gain: 0.022 },
     ],
   },
-  // Subtle muted low tap (D4 -> A3)
+  // Crisp tactile mic-mute switch (D#4 -> A3 + damped click)
   micMuted: {
-    cutoffHz: 800,
+    cutoffHz: 920,
     notes: [
-      { freqHz: 293.66, delayMs: 0, durationMs: 65, gain: 0.028 },
-      { freqHz: 220.0, delayMs: 32, durationMs: 90, gain: 0.026 },
+      {
+        startFreqHz: 311.13,
+        freqHz: 293.66,
+        transientHz: 880,
+        transientGain: 0.018,
+        delayMs: 0,
+        durationMs: 62,
+        gain: 0.032,
+      },
+      {
+        startFreqHz: 246.94,
+        freqHz: 220.0,
+        delayMs: 30,
+        durationMs: 88,
+        gain: 0.03,
+      },
     ],
   },
-  // Subtle crisp unmute tap (A3 -> D4)
+  // Crisp tactile mic-unmute switch (B3 -> E4 + bright micro-click)
   micUnmuted: {
-    cutoffHz: 1050,
+    cutoffHz: 1250,
     notes: [
-      { freqHz: 246.94, delayMs: 0, durationMs: 60, gain: 0.026 },
-      { freqHz: 329.63, delayMs: 30, durationMs: 95, gain: 0.03 },
+      {
+        startFreqHz: 233.08,
+        freqHz: 246.94,
+        transientHz: 1220,
+        transientGain: 0.018,
+        delayMs: 0,
+        durationMs: 58,
+        gain: 0.03,
+      },
+      {
+        startFreqHz: 311.13,
+        freqHz: 329.63,
+        harmonicFreqHz: 659.25,
+        harmonicRatio: 0.1,
+        delayMs: 28,
+        durationMs: 95,
+        gain: 0.034,
+      },
+    ],
+  },
+  // Distinct low-pass "ears-closed" deafen signature (E4 -> E3)
+  voiceDeafened: {
+    cutoffHz: 620,
+    notes: [
+      {
+        startFreqHz: 329.63,
+        freqHz: 261.63,
+        transientHz: 480,
+        transientGain: 0.02,
+        delayMs: 0,
+        durationMs: 78,
+        gain: 0.036,
+      },
+      {
+        startFreqHz: 220.0,
+        freqHz: 164.81,
+        wave: "triangle",
+        delayMs: 38,
+        durationMs: 115,
+        gain: 0.034,
+      },
+    ],
+  },
+  // Bright "ears-open" undeafen bloom (A3 -> E4 -> A4)
+  voiceUndeafened: {
+    cutoffHz: 1450,
+    ambienceWet: 0.12,
+    notes: [
+      {
+        startFreqHz: 207.65,
+        freqHz: 220.0,
+        transientHz: 1100,
+        transientGain: 0.015,
+        delayMs: 0,
+        durationMs: 65,
+        gain: 0.03,
+      },
+      {
+        startFreqHz: 311.13,
+        freqHz: 329.63,
+        delayMs: 32,
+        durationMs: 85,
+        gain: 0.034,
+      },
+      {
+        startFreqHz: 415.3,
+        freqHz: 440.0,
+        harmonicFreqHz: 880.0,
+        harmonicRatio: 0.12,
+        delayMs: 64,
+        durationMs: 130,
+        gain: 0.036,
+      },
+    ],
+  },
+  // Magnetic sync lock-in snap (G4 -> D5)
+  resyncSnap: {
+    cutoffHz: 1420,
+    notes: [
+      {
+        startFreqHz: 349.23,
+        freqHz: 392.0,
+        transientHz: 1450,
+        transientGain: 0.02,
+        delayMs: 0,
+        durationMs: 52,
+        gain: 0.036,
+      },
+      {
+        startFreqHz: 523.25,
+        freqHz: 587.33,
+        harmonicFreqHz: 1174.66,
+        harmonicRatio: 0.12,
+        delayMs: 26,
+        durationMs: 105,
+        gain: 0.04,
+      },
+    ],
+  },
+  // Warm rewarding shimmer on submitting episode rating (A4 -> E5)
+  ratingSubmitted: {
+    cutoffHz: 1480,
+    ambienceWet: 0.2,
+    notes: [
+      {
+        startFreqHz: 415.3,
+        freqHz: 440.0,
+        detuneCents: 5,
+        pan: -0.1,
+        delayMs: 0,
+        durationMs: 110,
+        gain: 0.036,
+      },
+      {
+        startFreqHz: 622.25,
+        freqHz: 659.25,
+        harmonicFreqHz: 987.77,
+        harmonicRatio: 0.15,
+        detuneCents: 7,
+        pan: 0.12,
+        delayMs: 52,
+        durationMs: 195,
+        gain: 0.04,
+      },
+    ],
+  },
+  // Subtle theater chapter tap when switching episodes (A3 -> D4)
+  episodeChanged: {
+    cutoffHz: 1120,
+    notes: [
+      {
+        freqHz: 220.0,
+        transientHz: 760,
+        transientGain: 0.016,
+        delayMs: 0,
+        durationMs: 60,
+        gain: 0.03,
+      },
+      {
+        startFreqHz: 277.18,
+        freqHz: 293.66,
+        harmonicFreqHz: 587.33,
+        harmonicRatio: 0.08,
+        delayMs: 30,
+        durationMs: 100,
+        gain: 0.034,
+      },
+    ],
+  },
+  // Soft, non-jarring low double-thud for error notifications
+  errorTone: {
+    cutoffHz: 560,
+    notes: [
+      {
+        startFreqHz: 207.65,
+        freqHz: 196.0,
+        wave: "triangle",
+        delayMs: 0,
+        durationMs: 85,
+        gain: 0.034,
+      },
+      {
+        startFreqHz: 164.81,
+        freqHz: 146.83,
+        wave: "triangle",
+        delayMs: 55,
+        durationMs: 130,
+        gain: 0.036,
+      },
     ],
   },
 };
@@ -230,6 +545,36 @@ function getAudioContext(): AudioContext | null {
   return sharedAudioCtx;
 }
 
+function createAmbienceBus(ctx: AudioContext, destination: AudioNode, wetAmount: number): AudioNode {
+  const dry = ctx.createGain();
+  dry.gain.value = 1.0;
+  dry.connect(destination);
+
+  if (wetAmount <= 0) return dry;
+
+  const delay = ctx.createDelay(0.25);
+  delay.delayTime.value = 0.048;
+
+  const feedback = ctx.createGain();
+  feedback.gain.value = 0.22;
+
+  const damp = ctx.createBiquadFilter();
+  damp.type = "lowpass";
+  damp.frequency.value = 1100;
+
+  const wet = ctx.createGain();
+  wet.gain.value = wetAmount;
+
+  dry.connect(delay);
+  delay.connect(damp);
+  damp.connect(feedback);
+  feedback.connect(delay);
+  damp.connect(wet);
+  wet.connect(destination);
+
+  return dry;
+}
+
 function scheduleNote(
   ctx: AudioContext,
   destination: AudioNode,
@@ -243,17 +588,51 @@ function scheduleNote(
 
   const env = ctx.createGain();
   env.gain.setValueAtTime(0.0001, start);
-  env.gain.exponentialRampToValueAtTime(peak, start + 0.01);
+  env.gain.exponentialRampToValueAtTime(peak, start + 0.009);
   env.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-  env.connect(destination);
+
+  let target: AudioNode = destination;
+  if (note.pan && typeof ctx.createStereoPanner === "function") {
+    const panner = ctx.createStereoPanner();
+    panner.pan.setValueAtTime(Math.max(-0.6, Math.min(0.6, note.pan)), start);
+    panner.connect(destination);
+    target = panner;
+  }
+  env.connect(target);
 
   const osc = ctx.createOscillator();
-  osc.type = "sine";
-  osc.frequency.setValueAtTime(note.freqHz, start);
+  osc.type = note.wave ?? "sine";
+  if (note.startFreqHz && note.startFreqHz > 0) {
+    osc.frequency.setValueAtTime(note.startFreqHz, start);
+    osc.frequency.exponentialRampToValueAtTime(note.freqHz, start + Math.min(0.06, dur * 0.55));
+  } else {
+    osc.frequency.setValueAtTime(note.freqHz, start);
+  }
   osc.connect(env);
   osc.start(start);
-  osc.stop(start + dur + 0.02);
+  osc.stop(start + dur + 0.025);
 
+  // Optional detuned stereo/chorus twin for lush warmth
+  if (note.detuneCents && note.detuneCents > 0) {
+    const twinGain = ctx.createGain();
+    twinGain.gain.setValueAtTime(0.3, start);
+    twinGain.connect(env);
+
+    const twin = ctx.createOscillator();
+    twin.type = note.wave ?? "sine";
+    twin.detune.setValueAtTime(note.detuneCents, start);
+    if (note.startFreqHz && note.startFreqHz > 0) {
+      twin.frequency.setValueAtTime(note.startFreqHz, start);
+      twin.frequency.exponentialRampToValueAtTime(note.freqHz, start + Math.min(0.06, dur * 0.55));
+    } else {
+      twin.frequency.setValueAtTime(note.freqHz, start);
+    }
+    twin.connect(twinGain);
+    twin.start(start);
+    twin.stop(start + dur + 0.025);
+  }
+
+  // Optional harmonic shimmer overtone
   if (note.harmonicFreqHz && note.harmonicRatio) {
     const overtoneGain = ctx.createGain();
     overtoneGain.gain.setValueAtTime(note.harmonicRatio, start);
@@ -264,7 +643,25 @@ function scheduleNote(
     overtone.frequency.setValueAtTime(note.harmonicFreqHz, start);
     overtone.connect(overtoneGain);
     overtone.start(start);
-    overtone.stop(start + dur + 0.02);
+    overtone.stop(start + dur + 0.025);
+  }
+
+  // Optional tactile micro-transient click/tap
+  if (note.transientHz && note.transientGain) {
+    const clickEnv = ctx.createGain();
+    const clickPeak = Math.max(0.001, note.transientGain * 0.65 * gainScale);
+    clickEnv.gain.setValueAtTime(0.0001, start);
+    clickEnv.gain.exponentialRampToValueAtTime(clickPeak, start + 0.002);
+    clickEnv.gain.exponentialRampToValueAtTime(0.0001, start + 0.015);
+    clickEnv.connect(target);
+
+    const clickOsc = ctx.createOscillator();
+    clickOsc.type = "triangle";
+    clickOsc.frequency.setValueAtTime(note.transientHz, start);
+    clickOsc.frequency.exponentialRampToValueAtTime(note.transientHz * 0.45, start + 0.014);
+    clickOsc.connect(clickEnv);
+    clickOsc.start(start);
+    clickOsc.stop(start + 0.02);
   }
 }
 
@@ -278,20 +675,22 @@ export function playSoundCue(cue: SoundCue, options: PlaySoundOptions = {}): voi
 
   const recipe = CUE_RECIPES[cue];
   const moviePlaying = Boolean(options.moviePlaying);
-  const gainScale = moviePlaying ? 0.55 : 1.0;
-  const cutoffHz = moviePlaying ? Math.max(480, recipe.cutoffHz - 200) : recipe.cutoffHz;
+  const gainScale = moviePlaying ? 0.45 : 0.82;
+  const cutoffHz = moviePlaying ? Math.max(460, recipe.cutoffHz - 240) : recipe.cutoffHz;
+  const ambienceWet = moviePlaying ? (recipe.ambienceWet ?? 0) * 0.5 : (recipe.ambienceWet ?? 0);
 
   const fire = () => {
     try {
       const filter = ctx.createBiquadFilter();
       filter.type = "lowpass";
       filter.frequency.setValueAtTime(cutoffHz, ctx.currentTime);
-      filter.Q.setValueAtTime(0.7, ctx.currentTime);
+      filter.Q.setValueAtTime(0.75, ctx.currentTime);
       filter.connect(ctx.destination);
 
+      const bus = createAmbienceBus(ctx, filter, ambienceWet);
       const now = ctx.currentTime + 0.008;
       for (const note of recipe.notes) {
-        scheduleNote(ctx, filter, now, note, gainScale);
+        scheduleNote(ctx, bus, now, note, gainScale);
       }
     } catch {
       // Ignore Web Audio graph failures on suspended/restricted environments

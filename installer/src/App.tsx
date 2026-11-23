@@ -195,7 +195,14 @@ export function App() {
           info.launchMode === "update" || info.existingReport?.disposition === "updateAvailable"
             ? "update"
             : info.launchMode;
-        void startInstallWith(hydratedOptions, info, autoMode);
+        void startInstallWith(
+          {
+            ...hydratedOptions,
+            allowDowngrade: info.existingReport?.disposition === "downgradeWarning",
+          },
+          info,
+          autoMode,
+        );
       }
     } catch (err) {
       if (!mountedRef.current) return;
@@ -667,13 +674,13 @@ export function App() {
     <div className="flex h-full w-full items-center justify-center overflow-hidden">
       <div
         data-tauri-drag-region
-        className="ep-installer-window ep-stage-in flex flex-col justify-between w-full h-full"
+        className="ep-installer-window flex flex-col justify-between w-full h-full"
       >
         <WindowChrome leftSlot={topLeftSlot} />
 
         <main
           className={`relative z-10 flex flex-1 min-h-0 flex-col items-center px-6 ${
-            showCustomize ? "justify-center overflow-y-auto pb-3" : "justify-center pb-4"
+            showCustomize ? "justify-start overflow-y-auto pb-3" : "justify-center pb-4"
           }`}
         >
           {isRunning ? (

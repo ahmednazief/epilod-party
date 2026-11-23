@@ -178,6 +178,7 @@ interface RecentRoomsState {
   setEncryptedPassword: (id: string, encryptedPassword: string | undefined) => void;
   clearSeriesLinks: () => void;
   removeRoom: (id: string) => void;
+  hydrateRooms: (rooms: RecentRoomEntry[]) => void;
   clearAll: () => void;
 }
 
@@ -278,6 +279,10 @@ export const useRecentRoomsStore = create<RecentRoomsState>((set, get) => {
 
     removeRoom: (id) => {
       commit(get().rooms.filter((r) => r.id !== id));
+    },
+
+    hydrateRooms: (rooms) => {
+      commit(trimRecentRooms(rooms));
     },
 
     clearAll: () => {

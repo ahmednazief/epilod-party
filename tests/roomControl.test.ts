@@ -101,6 +101,17 @@ test("getControllerLockState respects Epilod host-only lock, admin grants, and r
     formatControlNoticeMessage({ kind: "adminRevoked", actor: "Alice" })?.level,
     "warn",
   );
+  assert.equal(
+    formatControlNoticeMessage({ kind: "hostReconnected", actor: "Alice" })?.text,
+    "Alice reconnected as room host.",
+  );
+  assert.equal(
+    formatControlNoticeMessage(
+      { kind: "guestBlocked", actor: "Alice" },
+      { hostControlActive: true, localIsHost: false, localIsAdmin: false },
+    )?.text,
+    "Only Alice (room host) can control playback.",
+  );
 });
 
 test("useAppStore and useSyncStore manage hostOnlyRoom and roomControl lifecycles cleanly", async () => {

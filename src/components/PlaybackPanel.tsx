@@ -9,6 +9,7 @@ import {
 import {
   selectAudioTrackOption,
   setMutePlayback,
+  toggleDialogueBoost,
   toggleLoopPlayback,
   toggleMutePlayback,
 } from "../lib/playerActions";
@@ -18,7 +19,8 @@ import { buildAudioTrackOptions } from "../lib/tracks";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
-import { AppCheckIcon, AppLockIcon, AppRepeatIcon } from "./ui/AppIcons";
+import { AppCheckIcon, AppLockIcon, AppRepeatIcon, AppVoiceWaveIcon } from "./ui/AppIcons";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { PlayerVolumeIcon } from "./ui/PlayerIcons";
 import { Scrubber } from "./ui/Scrubber";
@@ -38,6 +40,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
   const loaded = usePlayerStore((s) => s.loaded);
   const muted = usePlayerStore((s) => s.muted);
   const volume = usePlayerStore((s) => s.volume);
+  const dialogueBoost = usePlayerStore((s) => s.dialogueBoost);
   const speed = usePlayerStore((s) => s.speed);
   const looping = usePlayerStore((s) => s.looping);
   const aspectMode = usePlayerStore((s) => s.aspectMode);
@@ -127,6 +130,27 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         </span>
       </div>
 
+      <GlassHoverTip
+        label="Dialogue Boost · Night Mode"
+        detail="Balances quiet speech and loud action (dynaudnorm)"
+      >
+        <button
+          type="button"
+          role="menuitemcheckbox"
+          aria-checked={dialogueBoost}
+          onClick={() => toggleDialogueBoost()}
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-primary/95 hover:text-white cursor-pointer"
+        >
+          <span className="flex items-center gap-3 min-w-0">
+            <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
+              <AppVoiceWaveIcon active={dialogueBoost} size={14} />
+            </span>
+            <span className="truncate">Dialogue Boost</span>
+          </span>
+          <GlassSwitchTrack checked={dialogueBoost} size="sm" />
+        </button>
+      </GlassHoverTip>
+
       <div className="space-y-2">
         <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
           <span>Audio Track</span>
@@ -200,10 +224,15 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
         <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
           <span>Playback Speed</span>
           {syncConnected && (
-            <span className="inline-flex items-center gap-1 text-accent-soft normal-case tracking-normal font-medium">
-              <AppLockIcon size={11} />
-              Synced {Math.abs(timelineScale - 1.0) > 0.001 ? `${timelineScale.toFixed(3)}×` : "1×"}
-            </span>
+            <GlassHoverTip
+              label="Speed locked to room"
+              detail="Watch parties stay synced at 1× (or matched FPS)"
+            >
+              <span className="inline-flex items-center gap-1 text-accent-soft normal-case tracking-normal font-medium cursor-default">
+                <AppLockIcon size={11} />
+                Synced {Math.abs(timelineScale - 1.0) > 0.001 ? `${timelineScale.toFixed(3)}×` : "1×"}
+              </span>
+            </GlassHoverTip>
           )}
         </div>
         <SegmentedTabs

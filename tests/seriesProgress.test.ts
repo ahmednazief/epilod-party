@@ -131,13 +131,14 @@ test("useSeriesProgressStore enforces LRU 20 and preserves watchedKeys on reloca
   ]);
   assert.equal(mod.useSeriesProgressStore.getState().getSeries(key), null);
 
-  for (let i = 0; i < 25; i++) {
+  const maxEntries = mod.SERIES_PROGRESS_MAX;
+  for (let i = 0; i < maxEntries + 5; i++) {
     mod.useSeriesProgressStore.getState().upsertSeries({
       folderPath: `D:\\Series\\Show${i}`,
       folderName: `Show${i}`,
     });
   }
-  assert.equal(Object.keys(mod.useSeriesProgressStore.getState().series).length, 20);
+  assert.equal(Object.keys(mod.useSeriesProgressStore.getState().series).length, maxEntries);
 });
 
 test("useSeriesProgressStore survives corrupted non-object and malformed localStorage data", async () => {

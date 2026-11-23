@@ -4,6 +4,9 @@
   "main": "src/index.js",
   "compatibility_date": "2026-01-01",
   "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
   "durable_objects": {
     "bindings": [
       {
@@ -17,6 +20,11 @@
       "name": "RL",
       "namespace_id": "4821",
       "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      "name": "RL_WS",
+      "namespace_id": "4822",
+      "simple": { "limit": 120, "period": 60 }
     }
   ],
   "migrations": [

@@ -354,7 +354,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
 
     const spawnParticle = (item: ReactionSpawnItem) => {
       const cfg = configRef.current;
-      if (!cfg.enabled) return;
+      if (!cfg.enabled || (typeof document !== "undefined" && document.hidden)) return;
 
       const resolvedAvatar: AvatarId = isValidAvatarId(item.avatarId)
         ? item.avatarId
@@ -370,20 +370,29 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
       const dockRect = document
         .querySelector<HTMLElement>(".ep-glass-reaction-dock")
         ?.getBoundingClientRect();
-      const vw = window.innerWidth || 1280;
-      const vh = window.innerHeight || 720;
+      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      const vw = canvasRect?.width || canvasRef.current?.clientWidth || window.innerWidth || 1280;
+      const vh = canvasRect?.height || canvasRef.current?.clientHeight || window.innerHeight || 720;
+      const canvasLeft = canvasRect?.left ?? 0;
+      const canvasTop = canvasRect?.top ?? 0;
       const hasDock = Boolean(dockRect && dockRect.width > 40 && dockRect.top > 120);
       const anchoredXRatio = hasDock && dockRect
         ? Math.max(
             0.14,
-            Math.min(0.88, (dockRect.left + dockRect.width * (0.24 + Math.random() * 0.52)) / vw),
+            Math.min(
+              0.88,
+              (dockRect.left - canvasLeft + dockRect.width * (0.24 + Math.random() * 0.52)) / vw,
+            ),
           )
         : 0.78 + Math.random() * 0.14;
       const minBottomClearance = hasDock && dockRect
-        ? Math.max(196, Math.round(vh - dockRect.top + 48))
+        ? Math.max(196, Math.round(canvasTop + vh - dockRect.top + 48))
         : cfg.dockOpen
           ? 196
           : 0;
+
+      const burstOffset = particles.length % 3;
+      const laneJitter = (burstOffset - 1) * 34 + (Math.random() - 0.5) * 22;
 
       particles.push({
         id: item.id,
@@ -395,7 +404,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
         bornAt: performance.now(),
         durationMs: reduced ? 1900 + Math.random() * 350 : 2650 + Math.random() * 800,
         startXRatio: anchoredXRatio,
-        jitterX: (Math.random() - 0.5) * 44,
+        jitterX: laneJitter,
         driftX: reduced ? 0 : (Math.random() - 0.55) * 38,
         risePx: reduced ? 56 + Math.random() * 24 : 330 + Math.random() * 170,
         swayAmp: reduced ? 0 : 14 + Math.random() * 20,
@@ -403,7 +412,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
         swayPhase: Math.random() * Math.PI * 2,
         tiltAmp: reduced ? 0 : 0.08 + Math.random() * 0.1,
         baseScale: 0.9 + Math.random() * 0.24,
-        minBottomClearance,
+        minBottomClearance: minBottomClearance + burstOffset * 28,
       });
 
       if (!rafId) {
@@ -415,7 +424,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
     const renderFrame = (now: number) => {
       const cfg = configRef.current;
       const canvas = canvasRef.current;
-      if (!canvas) {
+      if (!canvas || (typeof document !== "undefined" && document.hidden)) {
         rafId = 0;
         return;
       }
@@ -529,7 +538,25 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
       }
     });
 
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        particles.length = 0;
+        if (rafId) {
+          window.cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (canvas && ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       unsub();
       if (rafId) {
         window.cancelAnimationFrame(rafId);
@@ -544,7 +571,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
       <canvas
         ref={canvasRef}
         aria-hidden="true"
-        className="fixed inset-0 z-[42] pointer-events-none w-full h-full"
+        className="absolute inset-0 z-[42] pointer-events-none w-full h-full"
       />
       {/* Hidden SVG source cache for crisp 1:1 ProfileAvatar rasterization into canvas bitmaps */}
       <div

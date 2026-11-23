@@ -1,7 +1,7 @@
 import { getFileDisplayName } from "./fileDrop";
 import { cleanEpisodeTitle, formatEpisodeBadge, parseEpisodeCode, type PlaylistItem } from "./playlist";
 
-export const SERIES_PROGRESS_MAX = 20;
+export const SERIES_PROGRESS_MAX = 500;
 
 export interface SeriesProgressEntry {
   seriesKey: string;
@@ -86,7 +86,8 @@ export function pickNextUnwatchedIndex(
 
 /**
  * Picks the best initial episode index when opening a series folder:
- * first unwatched episode, falling back to `lastEpisodeKey`, or `0`.
+ * resumes `lastEpisodeKey` when still unwatched, advances past it when watched,
+ * and falls back to the first unwatched episode or `0`.
  */
 export function pickInitialSeriesIndex(
   items: readonly PlaylistItem[],
@@ -94,13 +95,22 @@ export function pickInitialSeriesIndex(
 ): number {
   if (items.length === 0) return -1;
   if (!entry) return 0;
+  if (entry.lastEpisodeKey) {
+    const lastIdx = items.findIndex((it) => buildEpisodeKey(it) === entry.lastEpisodeKey);
+    if (lastIdx !== -1) {
+      if (!entry.watchedKeys.includes(entry.lastEpisodeKey)) {
+        return lastIdx;
+      }
+      return (
+        pickNextUnwatchedIndex(items, lastIdx, entry.watchedKeys) ??
+        pickNextUnwatchedIndex(items, -1, entry.watchedKeys) ??
+        lastIdx
+      );
+    }
+  }
   const firstUnwatched = pickNextUnwatchedIndex(items, -1, entry.watchedKeys);
   if (firstUnwatched !== null) {
     return firstUnwatched;
-  }
-  if (entry.lastEpisodeKey) {
-    const lastIdx = items.findIndex((it) => buildEpisodeKey(it) === entry.lastEpisodeKey);
-    if (lastIdx !== -1) return lastIdx;
   }
   return 0;
 }

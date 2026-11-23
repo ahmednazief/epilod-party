@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 
 interface OtpCodeInputProps {
   value: string;
@@ -24,6 +24,7 @@ export function OtpCodeInput({
   disabled = false,
   autoFocusFirst = false,
 }: OtpCodeInputProps) {
+  const otpId = useId();
   const [slots, setSlots] = useState<string[]>(() => toSixSlots(value));
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const lastCompletedRef = useRef<string>("");
@@ -188,9 +189,13 @@ export function OtpCodeInput({
     >
       {slots.map((digit, index) => {
         const isFilled = digit.length === 1;
+        const firstEmptyIndex = slots.findIndex((d) => d.length === 0);
+        const isNextEmpty = index === firstEmptyIndex && !disabled;
         return (
           <input
             key={index}
+            id={`${otpId}-digit-${index + 1}`}
+            name={`otp-digit-${index + 1}`}
             ref={(el) => {
               inputRefs.current[index] = el;
             }}
@@ -215,7 +220,9 @@ export function OtpCodeInput({
                 ? "ep-otp-box-verifying"
                 : isFilled
                   ? "ep-otp-box-filled"
-                  : "",
+                  : isNextEmpty
+                    ? "ring-1 ring-accent-soft/40"
+                    : "",
             ].join(" ")}
           />
         );

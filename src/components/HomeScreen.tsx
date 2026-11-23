@@ -57,6 +57,7 @@ import {
   DEFAULT_ENDPOINT,
   formatServerDisplayName,
 } from "../lib/syncStatusDisplay";
+import { syncPrewarm } from "../lib/syncplay";
 import { useAnimatedPresence } from "../lib/useAnimatedPresence";
 import { sanitizeRoomCodeInput, sanitizeUsername } from "../lib/webviewHardening";
 import { useAppStore } from "../store/useAppStore";
@@ -155,9 +156,14 @@ export function HomeScreen() {
   const [missingFilePaths, setMissingFilePaths] = useState<Record<string, boolean>>({});
   const lastProbeAtRef = useRef(0);
   const verifyTimerRef = useRef<number | null>(null);
+  const focusTimerRef = useRef<number | null>(null);
+  const draftCopyTimerRef = useRef<number | null>(null);
+  const roomCopyTimerRef = useRef<number | null>(null);
   const joiningMediaRef = useRef(false);
   const profileRef = useRef<HTMLDivElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
+  const prewarmedEndpointRef = useRef<string | null>(null);
+  const prewarmedJoinRef = useRef<string | null>(null);
   const recentRooms = useRecentRoomsStore((s) => s.rooms);
   const recentRoomsStorageError = useRecentRoomsStore((s) => s.storageError);
   const togglePinRecentRoom = useRecentRoomsStore((s) => s.togglePin);
@@ -176,6 +182,29 @@ export function HomeScreen() {
   const continueItems = buildContinueWatchingItems(seriesMap, resumeEntries, recentRooms, 4);
   const profilePopover = useAnimatedPresence(editingName, 170);
   const dragBanner = useAnimatedPresence(isDragActive, 170);
+
+  useEffect(() => {
+    if (lobbyView !== "party" || !isDesktop()) return;
+    const ep = (serverEndpoint || DEFAULT_ENDPOINT).trim();
+    const key = `${ep}|${draftRoomCode}`;
+    if (!ep || prewarmedEndpointRef.current === key) return;
+    prewarmedEndpointRef.current = key;
+    void syncPrewarm(ep, draftRoomCode);
+  }, [lobbyView, serverEndpoint, draftRoomCode]);
+
+  useEffect(() => {
+    if (lobbyView !== "party" || !isDesktop() || standardRoomName) return;
+    const code = joinInput.trim();
+    if (!/^\d{6}$/.test(code)) return;
+    const ep = (serverEndpoint || DEFAULT_ENDPOINT).trim();
+    const key = `${ep}|${code}`;
+    if (!ep || prewarmedJoinRef.current === key) return;
+    const timer = window.setTimeout(() => {
+      prewarmedJoinRef.current = key;
+      void syncPrewarm(ep, code);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [lobbyView, standardRoomName, joinInput, serverEndpoint]);
 
   const refreshPinnedOccupancy = async (force = false) => {
     if (!isDesktop() || pinnedRooms.length === 0 || probingPinned) return;
@@ -246,9 +275,10 @@ export function HomeScreen() {
     setLobbyView("party");
     setShowOptions(true);
     setError("Enter the room password to join.");
-    window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       passwordInputRef.current?.focus();
     }, 80);
+    return () => window.clearTimeout(timer);
   }, [pendingDeepLinkPasswordRoomId, recentRooms, setPendingDeepLinkPasswordRoomId, setServerEndpoint]);
 
   useEffect(() => {
@@ -275,6 +305,15 @@ export function HomeScreen() {
     return () => {
       if (verifyTimerRef.current !== null) {
         window.clearTimeout(verifyTimerRef.current);
+      }
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+      }
+      if (draftCopyTimerRef.current !== null) {
+        window.clearTimeout(draftCopyTimerRef.current);
+      }
+      if (roomCopyTimerRef.current !== null) {
+        window.clearTimeout(roomCopyTimerRef.current);
       }
     };
   }, []);
@@ -393,7 +432,11 @@ export function HomeScreen() {
       setLobbyView("party");
       setShowOptions(true);
       setError("Enter the room password to join.");
-      window.setTimeout(() => {
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+      }
+      focusTimerRef.current = window.setTimeout(() => {
+        focusTimerRef.current = null;
         passwordInputRef.current?.focus();
       }, 80);
       return;
@@ -589,7 +632,13 @@ export function HomeScreen() {
       await navigator.clipboard.writeText(text);
       setCopiedDraft(true);
       playSoundCue("codeCopied");
-      setTimeout(() => setCopiedDraft(false), 1600);
+      if (draftCopyTimerRef.current !== null) {
+        window.clearTimeout(draftCopyTimerRef.current);
+      }
+      draftCopyTimerRef.current = window.setTimeout(() => {
+        draftCopyTimerRef.current = null;
+        setCopiedDraft(false);
+      }, 1600);
     } catch {
       // Clipboard may be restricted outside secure focus
     }
@@ -601,7 +650,11 @@ export function HomeScreen() {
       await navigator.clipboard.writeText(text);
       setCopiedRoomId(room.id);
       playSoundCue("codeCopied");
-      window.setTimeout(() => {
+      if (roomCopyTimerRef.current !== null) {
+        window.clearTimeout(roomCopyTimerRef.current);
+      }
+      roomCopyTimerRef.current = window.setTimeout(() => {
+        roomCopyTimerRef.current = null;
         setCopiedRoomId((prev) => (prev === room.id ? null : prev));
       }, 1600);
     } catch {
@@ -774,7 +827,11 @@ export function HomeScreen() {
       setLobbyView("party");
       setShowOptions(true);
       setError("Enter the room password to join.");
-      window.setTimeout(() => {
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+      }
+      focusTimerRef.current = window.setTimeout(() => {
+        focusTimerRef.current = null;
         passwordInputRef.current?.focus();
       }, 80);
       return;
@@ -990,18 +1047,18 @@ export function HomeScreen() {
             } absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-4rem)] overflow-hidden rounded-[24px] py-4 flex flex-col`}
           >
             <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 space-y-3.5">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <ProfileAvatar
                     avatarId={avatarId}
                     size={38}
-                    className="ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
+                    className="shrink-0 ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
                   />
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-white truncate">
                       {username || "Viewer"}
                     </div>
-                    <div className="text-[11px] text-secondary">
+                    <div className="text-[11px] text-secondary truncate">
                       Customize how friends see you
                     </div>
                   </div>
@@ -1009,7 +1066,7 @@ export function HomeScreen() {
                 <button
                   type="button"
                   onClick={() => setEditingName(false)}
-                  className="ep-glass-pill-active ep-press h-7 px-3 rounded-full text-[11px] font-semibold text-white cursor-pointer"
+                  className="ep-glass-pill-active ep-press shrink-0 h-7 px-3 rounded-full text-[11px] font-semibold text-white cursor-pointer"
                 >
                   Done
                 </button>
@@ -1020,6 +1077,8 @@ export function HomeScreen() {
                   Display Name
                 </span>
                 <input
+                  id="profile-display-name"
+                  name="displayName"
                   type="text"
                   autoFocus
                   value={username}
@@ -1419,19 +1478,23 @@ export function HomeScreen() {
                           : "Type or paste all 6 digits to enter right away"}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void handlePasteJoin()}
-                    className="ep-press -mr-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0"
-                  >
-                    <PartyPasteIcon size={13} />
-                    <span>Paste Code</span>
-                  </button>
+                  {!standardRoomName && (
+                    <button
+                      type="button"
+                      onClick={() => void handlePasteJoin()}
+                      className="ep-press -mr-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0"
+                    >
+                      <PartyPasteIcon size={13} />
+                      <span>Paste Code</span>
+                    </button>
+                  )}
                 </div>
 
                 {standardRoomName ? (
                   <form onSubmit={handleJoinRoom} className="flex items-center gap-2">
                     <input
+                      id="join-syncplay-room"
+                      name="syncplayRoomName"
                       type="text"
                       value={joinInput}
                       aria-label="Syncplay Room Name"
@@ -1493,7 +1556,10 @@ export function HomeScreen() {
                   <form onSubmit={handleJoinRoom} className="px-2.5 flex items-center gap-2">
                     <input
                       ref={passwordInputRef}
+                      id="room-server-password"
+                      name="roomPassword"
                       type="password"
+                      autoComplete="new-password"
                       value={serverPassword}
                       maxLength={128}
                       placeholder="Optional room password"
@@ -1633,6 +1699,8 @@ export function HomeScreen() {
                                 className="flex-1 flex items-center gap-1.5 min-w-0"
                               >
                                 <input
+                                  id={`edit-room-nickname-${room.id}`}
+                                  name="recentRoomNickname"
                                   type="text"
                                   autoFocus
                                   value={editingRoomNickname}

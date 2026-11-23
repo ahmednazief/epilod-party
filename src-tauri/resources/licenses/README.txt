@@ -20,5 +20,8 @@ Epilod Party — Third-Party Licenses & Notices
 5. Tauri, React, Zustand, Lucide, Tokio, Serde, cpal, wasapi, rubato, ringbuf
    Licensed under MIT / Apache-2.0.
 
-6. libopus / audiopus & nnnoiseless (RNNoise port)
+6. libopus / audiopus & sonora (WebRTC Audio Processing / AEC3)
    Licensed under BSD-3-Clause.
+
+7. dfn3_rs (DeepFilterNet3)
+   Licensed under MIT / Apache-2.0.

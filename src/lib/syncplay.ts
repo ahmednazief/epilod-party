@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createSerialQueue } from "./asyncGuard";
 import { isDesktop, safeInvoke } from "./bridge";
+import type { SubtitleEncodingHint } from "./mpv";
 import type { TimelineSegment, TimelineTransform } from "./sourceAlignment";
 
 export type FileMatchStatus =
@@ -33,6 +34,19 @@ export interface Participant {
   durationDeltaSecs?: number | null;
   suggestedFpsScale?: number | null;
   suggestedFpsLabel?: string | null;
+  buffering?: boolean;
+  lagSecs?: number | null;
+}
+
+export interface SyncHealthPayload {
+  rttMs: number | null;
+  jitterMs: number;
+  offsetMs: number;
+  driftSecs: number;
+  seekLeadMs: number;
+  endpoint: string;
+  seq: number;
+  reconnects: number;
 }
 
 export interface RoomControlState {
@@ -49,6 +63,7 @@ export type ControlNoticeKind =
   | "adminGranted"
   | "adminRevoked"
   | "hostAbsentUnlocked"
+  | "hostReconnected"
   | "guestBlocked";
 
 export interface ControlNoticePayload {
@@ -126,6 +141,22 @@ export interface PeerSeekPayload {
   positionSecs: number;
 }
 
+export interface SharedSubtitleEventPayload {
+  id: string;
+  sender: string;
+  fileName: string;
+  ext: "srt" | "vtt" | "ass" | "ssa" | string;
+  lang?: string | null;
+  content: string;
+  sizeBytes: number;
+}
+
+export interface ShareSubtitleResultDto {
+  id: string;
+  fileName: string;
+  sizeBytes: number;
+}
+
 export type SyncStatusPayload =
   | { state: "disconnected" }
   | { state: "connecting"; endpoint: string; attempt: number }
@@ -169,6 +200,14 @@ export async function syncConnect(params: SyncConnectParams): Promise<void> {
   });
 }
 
+export async function syncPrewarm(endpoint: string, roomCode?: string): Promise<void> {
+  try {
+    await safeInvoke("sync_prewarm", { endpoint, roomCode: roomCode ?? null });
+  } catch {
+    // Best-effort DNS/TLS/DO warm-up; ignore failures.
+  }
+}
+
 export async function syncReconnect(): Promise<void> {
   await safeInvoke("sync_reconnect");
 }
@@ -191,6 +230,7 @@ export async function syncSwitchBackup(params: {
   literalRoom?: boolean;
   password?: string | null;
   hostOnly?: boolean;
+  targetEndpoint?: string | null;
 }): Promise<void> {
   await safeInvoke("sync_switch_backup", {
     username: params.username,
@@ -198,6 +238,7 @@ export async function syncSwitchBackup(params: {
     literalRoom: params.literalRoom ?? false,
     password: params.password ?? null,
     hostOnly: params.hostOnly ?? false,
+    targetEndpoint: params.targetEndpoint ?? null,
   });
 }
 
@@ -296,6 +337,36 @@ export async function syncSendChatEdit(targetMsgId: string, text: string): Promi
 
 export async function syncSendChatReact(targetMsgId: string, emoji: string): Promise<void> {
   await safeInvoke("sync_send_chat_react", { targetMsgId, emoji });
+}
+
+export async function syncShareSubtitle(params: {
+  path: string;
+  encodingHint?: SubtitleEncodingHint;
+  displayName?: string | null;
+  lang?: string | null;
+}): Promise<ShareSubtitleResultDto> {
+  return safeInvoke<ShareSubtitleResultDto>("sync_share_subtitle", {
+    path: params.path,
+    encodingHint: params.encodingHint ?? "auto",
+    displayName: params.displayName ?? null,
+    lang: params.lang ?? null,
+  });
+}
+
+export async function applySharedSubtitle(params: {
+  id: string;
+  fileName: string;
+  ext: string;
+  content: string;
+  fixRtl?: boolean;
+}): Promise<string> {
+  return safeInvoke<string>("apply_shared_subtitle", {
+    id: params.id,
+    fileName: params.fileName,
+    ext: params.ext,
+    content: params.content,
+    fixRtl: params.fixRtl ?? true,
+  });
 }
 
 function noopUnlisten(): UnlistenFn {
@@ -441,4 +512,18 @@ export async function onSyncPeerSeek(
 ): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<PeerSeekPayload>("sync://peer-seek", (e) => cb(e.payload));
+}
+
+export async function onSyncHealth(
+  cb: (payload: SyncHealthPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<SyncHealthPayload>("sync://health", (e) => cb(e.payload));
+}
+
+export async function onSyncSubtitleShared(
+  cb: (payload: SharedSubtitleEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<SharedSubtitleEventPayload>("sync://subtitle-shared", (e) => cb(e.payload));
 }

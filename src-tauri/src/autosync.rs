@@ -40,6 +40,14 @@ pub struct DetectedSubtitleLangDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AutoSyncSegmentDto {
+    pub start_secs: f64,
+    pub offset_secs: f64,
+    pub scale: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AutoSyncResultDto {
     pub offset_secs: f64,
     pub scale: f64,
@@ -47,6 +55,8 @@ pub struct AutoSyncResultDto {
     pub correlation: f64,
     pub drift_applied: bool,
     pub segments_applied: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<AutoSyncSegmentDto>,
     #[serde(default)]
     pub bitmap_in_place: bool,
     pub synced_subtitle_path: String,
@@ -312,6 +322,22 @@ pub fn parse_bitmap_framecrc_cues(
 
     packets.sort_by_key(|p| p.pts_ms);
 
+    // Coalesce split packets within the same PGS/DVD display set (e.g. PCS + WDS + ODS + END
+    // sharing the same or nearly-identical PTS within 80ms) so trailing END/PCS metadata packets
+    // are not mistaken for screen-clear packets.
+    let mut grouped: Vec<BitmapPacketMeta> = Vec::with_capacity(packets.len());
+    for pkt in packets {
+        if let Some(last) = grouped.last_mut() {
+            if pkt.pts_ms.saturating_sub(last.pts_ms) <= 80 {
+                last.dur_ms = last.dur_ms.max(pkt.dur_ms);
+                last.size = last.size.max(pkt.size);
+                continue;
+            }
+        }
+        grouped.push(pkt);
+    }
+    let packets = grouped;
+
     let codec_lower = codec.unwrap_or("").trim().to_ascii_lowercase();
     let is_pgs = codec_lower == "hdmv_pgs_subtitle" || codec_lower == "pgssub";
     let has_large_pgs = is_pgs && packets.iter().any(|p| p.size > 48);
@@ -347,8 +373,9 @@ pub fn parse_bitmap_framecrc_cues(
             pkt.size <= clear_threshold
         };
         if is_clear_pkt {
-            if let Some(start) = open_start.take() {
+            if let Some(start) = open_start {
                 if pkt.pts_ms >= start + 100 {
+                    open_start = None;
                     cues.push(SubtitleCue {
                         index: cues.len() + 1,
                         start_ms: start,
@@ -407,7 +434,7 @@ pub fn resolve_in_place_delay_ms(cues: &[SubtitleCue], outcome: &AutoSyncOutcome
 #[cfg(windows)]
 mod windows_impl {
     use super::*;
-    use crate::mpv::process::resolve_mpv_exe;
+    use crate::mpv::process::{resolve_ffmpeg_exe, resolve_mpv_exe};
     use epilod_core::mpv_ipc::{
         autosync_extract_args_ffmpeg_dialogue, autosync_extract_args_mpv,
         autosync_extract_bitmap_framecrc_args_ffmpeg, autosync_extract_cc_args_ffmpeg,
@@ -421,7 +448,7 @@ mod windows_impl {
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
-    use tauri::AppHandle;
+    use tauri::{AppHandle, Emitter};
     use tokio::process::Command;
 
     static AUTOSYNC_JOB_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -459,20 +486,17 @@ mod windows_impl {
         }
     }
 
-    fn resolve_ffmpeg_exe(app: &AppHandle) -> Option<PathBuf> {
-        if let Ok(mpv_path) = resolve_mpv_exe(app) {
-            if let Some(dir) = mpv_path.parent() {
-                let candidate = dir.join("ffmpeg.exe");
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
+    fn temp_work_dir() -> PathBuf {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("EpilodParty")
+            .join("cache")
+            .join("autosync")
     }
 
-    fn temp_work_dir() -> PathBuf {
-        std::env::temp_dir().join("epilod-autosync")
+    pub fn prune_stale_work_files_startup() {
+        prune_stale_work_files(&temp_work_dir(), None);
     }
 
     /// Best-effort removal of leftover extraction/synced files older than 24h so the temp dir
@@ -668,62 +692,104 @@ mod windows_impl {
             );
         };
         let is_cc = is_closed_caption_codec(embedded_sub_codec);
-        let ext = if is_cc {
+        let primary_ext = if is_cc {
             "srt"
         } else {
             infer_sub_extension_from_codec(embedded_sub_codec)
         };
-        let out_sub = work_dir.join(format!("embedded_{pid}_{job_seq}.{ext}"));
-        let args = if is_cc {
-            autosync_extract_cc_args_ffmpeg(
-                video_pb.to_string_lossy().as_ref(),
+        let video_str = video_pb.to_string_lossy();
+
+        let mut attempts: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        if is_cc {
+            let out_sub = work_dir.join(format!("embedded_{pid}_{job_seq}.srt"));
+            let args = autosync_extract_cc_args_ffmpeg(
+                video_str.as_ref(),
                 out_sub.to_string_lossy().as_ref(),
                 None,
-            )
-        } else if let Some(ff_idx) = embedded_sub_ff_idx {
-            autosync_extract_stream_args_ffmpeg(
-                video_pb.to_string_lossy().as_ref(),
-                out_sub.to_string_lossy().as_ref(),
-                ff_idx,
-            )
-        } else if let Some(sub_idx) = sub_idx {
-            autosync_extract_sub_args_ffmpeg(
-                video_pb.to_string_lossy().as_ref(),
-                out_sub.to_string_lossy().as_ref(),
-                sub_idx,
-            )
+            );
+            attempts.push((out_sub, args));
         } else {
-            return Err("No subtitle track index available for auto-sync extraction.".to_string());
-        };
-        // Subtitle packets can be sparse across a huge remux, so the output file may legitimately
-        // not grow for minutes while ffmpeg demuxes; rely on the overall ceiling instead of the
-        // short stall timer here.
-        if let Err(e) = run_command_with_watchdog(
-            ff,
-            &args,
-            &out_sub,
-            cancel,
-            low_power,
-            Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
-        )
-        .await
-        {
-            let _ = fs::remove_file(&out_sub);
-            return Err(e);
+            if embedded_sub_ff_idx.is_none() && sub_idx.is_none() {
+                return Err(
+                    "No subtitle track index available for auto-sync extraction.".to_string(),
+                );
+            }
+            let mut exts = vec![primary_ext];
+            if primary_ext != "srt" {
+                exts.push("srt");
+            }
+            for ext in exts {
+                if let Some(ff_idx) = embedded_sub_ff_idx {
+                    let out_sub = work_dir.join(format!(
+                        "embedded_{pid}_{job_seq}_ff{}.{ext}",
+                        attempts.len()
+                    ));
+                    let args = autosync_extract_stream_args_ffmpeg(
+                        video_str.as_ref(),
+                        out_sub.to_string_lossy().as_ref(),
+                        ff_idx,
+                    );
+                    attempts.push((out_sub, args));
+                }
+                if let Some(s_idx) = sub_idx {
+                    let out_sub = work_dir.join(format!(
+                        "embedded_{pid}_{job_seq}_s{}.{ext}",
+                        attempts.len()
+                    ));
+                    let args = autosync_extract_sub_args_ffmpeg(
+                        video_str.as_ref(),
+                        out_sub.to_string_lossy().as_ref(),
+                        s_idx,
+                    );
+                    attempts.push((out_sub, args));
+                }
+            }
         }
-        let extracted_bytes = tokio::fs::metadata(&out_sub)
+
+        let mut last_err: Option<String> = None;
+        for (out_sub, args) in attempts {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("Auto-sync cancelled.".to_string());
+            }
+            // Subtitle packets can be sparse across a huge remux, so the output file may legitimately
+            // not grow for minutes while ffmpeg demuxes; rely on the overall ceiling instead of the
+            // short stall timer here.
+            match run_command_with_watchdog(
+                ff,
+                &args,
+                &out_sub,
+                cancel,
+                low_power,
+                Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
+            )
             .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if extracted_bytes == 0 {
-            let _ = fs::remove_file(&out_sub);
-            return Err(if is_cc {
-                "No closed-caption text was found in this video stream.".to_string()
-            } else {
-                "Embedded subtitle track contained no readable cues.".to_string()
-            });
+            {
+                Ok(()) => {
+                    let extracted_bytes = tokio::fs::metadata(&out_sub)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    if extracted_bytes > 0 {
+                        return Ok(out_sub);
+                    }
+                    let _ = fs::remove_file(&out_sub);
+                    last_err = Some(if is_cc {
+                        "No closed-caption text was found in this video stream.".to_string()
+                    } else {
+                        "Embedded subtitle track contained no readable cues.".to_string()
+                    });
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&out_sub);
+                    if cancel.load(Ordering::SeqCst) {
+                        return Err(e);
+                    }
+                    last_err = Some(e);
+                }
+            }
         }
-        Ok(out_sub)
+
+        Err(last_err.unwrap_or_else(|| "Embedded subtitle extraction failed.".to_string()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -750,30 +816,63 @@ mod windows_impl {
                 "No subtitle track index available for bitmap timing extraction.".to_string(),
             );
         }
-        let out_crc = work_dir.join(format!("bitmap_{pid}_{job_seq}.framecrc.txt"));
-        let args = autosync_extract_bitmap_framecrc_args_ffmpeg(
-            video_pb.to_string_lossy().as_ref(),
-            out_crc.to_string_lossy().as_ref(),
-            embedded_sub_ff_idx,
-            sub_idx.unwrap_or(0),
-        );
-        if let Err(e) = run_command_with_watchdog(
-            ff,
-            &args,
-            &out_crc,
-            cancel,
-            low_power,
-            Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
-        )
-        .await
-        {
-            let _ = fs::remove_file(&out_crc);
-            return Err(e);
+
+        let mut targets: Vec<Option<u64>> = Vec::with_capacity(2);
+        targets.push(embedded_sub_ff_idx);
+        if embedded_sub_ff_idx.is_some() && sub_idx.is_some() {
+            targets.push(None);
         }
-        let raw = fs::read_to_string(&out_crc)
-            .map_err(|e| format!("Failed reading extracted bitmap timing data: {e}"));
-        let _ = fs::remove_file(&out_crc);
-        parse_bitmap_framecrc_cues(&raw?, embedded_sub_codec)
+
+        let mut last_err: Option<String> = None;
+        for (attempt_idx, ff_target) in targets.into_iter().enumerate() {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("Auto-sync cancelled.".to_string());
+            }
+            let out_crc =
+                work_dir.join(format!("bitmap_{pid}_{job_seq}_{attempt_idx}.framecrc.txt"));
+            let args = autosync_extract_bitmap_framecrc_args_ffmpeg(
+                video_pb.to_string_lossy().as_ref(),
+                out_crc.to_string_lossy().as_ref(),
+                ff_target,
+                sub_idx.unwrap_or(0),
+            );
+            if let Err(e) = run_command_with_watchdog(
+                ff,
+                &args,
+                &out_crc,
+                cancel,
+                low_power,
+                Duration::from_secs(DEFAULT_MAX_EXTRACT_SECS),
+            )
+            .await
+            {
+                let _ = fs::remove_file(&out_crc);
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(e);
+                }
+                last_err = Some(e);
+                continue;
+            }
+            let raw = fs::read_to_string(&out_crc)
+                .map_err(|e| format!("Failed reading extracted bitmap timing data: {e}"));
+            let _ = fs::remove_file(&out_crc);
+            match raw.and_then(|txt| parse_bitmap_framecrc_cues(&txt, embedded_sub_codec)) {
+                Ok(cues) if !cues.is_empty() => return Ok(cues),
+                Ok(_) => {
+                    last_err = Some(
+                        "Embedded image subtitle track contained no readable timing cues."
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            "Embedded image subtitle track contained no readable timing cues.".to_string()
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -830,6 +929,10 @@ mod windows_impl {
         } else if (embedded_sub_ff_idx.is_some() || embedded_sub_idx.is_some())
             && is_bitmap_subtitle_codec(embedded_sub_codec)
         {
+            let _ = app.emit(
+                "autosync:progress",
+                serde_json::json!({ "stage": "extracting_sub" }),
+            );
             let cues = extract_bitmap_subtitle_cues(
                 ffmpeg_exe.as_ref(),
                 &video_pb,
@@ -845,6 +948,10 @@ mod windows_impl {
             .await?;
             pre_parsed_cues = Some(cues);
         } else if embedded_sub_ff_idx.is_some() || embedded_sub_idx.is_some() {
+            let _ = app.emit(
+                "autosync:progress",
+                serde_json::json!({ "stage": "extracting_sub" }),
+            );
             let out_sub = extract_embedded_subtitle(
                 ffmpeg_exe.as_ref(),
                 &video_pb,
@@ -864,6 +971,10 @@ mod windows_impl {
             return Err("No subtitle track or file selected for auto-sync.".to_string());
         }
 
+        let _ = app.emit(
+            "autosync:progress",
+            serde_json::json!({ "stage": "extracting_audio" }),
+        );
         let pcm_path = work_dir.join(format!("audio_{pid}_{job_seq}.pcm"));
         let _ = tokio::fs::remove_file(&pcm_path).await;
 
@@ -927,6 +1038,11 @@ mod windows_impl {
         }
 
         // Stream PCM, decode/parse subtitles, and run CPU-bound alignment off the async executor
+        let _ = app.emit(
+            "autosync:progress",
+            serde_json::json!({ "stage": "aligning" }),
+        );
+        let app_emit = app.clone();
         let cancel_clone = Arc::clone(&cancel);
         let sub_pb_clone = sub_pb.clone();
         let pcm_path_clone = pcm_path.clone();
@@ -1004,6 +1120,10 @@ mod windows_impl {
                 let outcome = auto_align_subtitles(&cues, &envelope, &AutoSyncConfig::default())
                     .map_err(|e| e.to_string())?;
 
+                let _ = app_emit.emit(
+                    "autosync:progress",
+                    serde_json::json!({ "stage": "applying" }),
+                );
                 if let Some(ref target_pb) = sub_pb_clone {
                     let synced_pb = write_rescaled_subtitle_file_with_transform(
                         target_pb,
@@ -1022,6 +1142,17 @@ mod windows_impl {
             .map_err(|e| format!("Auto-sync worker failed: {e}"))??;
 
         let segments_applied = outcome.transform.segment_count();
+        let segments = match &outcome.transform {
+            SubtitleTimingTransform::Piecewise { segments } => segments
+                .iter()
+                .map(|seg| AutoSyncSegmentDto {
+                    start_secs: seg.start_src_ms as f64 / 1000.0,
+                    offset_secs: seg.offset_ms as f64 / 1000.0,
+                    scale: seg.scale,
+                })
+                .collect(),
+            SubtitleTimingTransform::Linear { .. } => Vec::new(),
+        };
         let bitmap_in_place = synced_pb.is_none();
         Ok(AutoSyncResultDto {
             offset_secs: if bitmap_in_place {
@@ -1034,6 +1165,7 @@ mod windows_impl {
             correlation: outcome.correlation,
             drift_applied: outcome.drift_applied,
             segments_applied,
+            segments,
             bitmap_in_place,
             synced_subtitle_path: synced_pb
                 .as_ref()
@@ -1164,6 +1296,7 @@ mod windows_impl {
             correlation: 1.0,
             drift_applied: (scale - 1.0).abs() > 1e-4,
             segments_applied: 1,
+            segments: Vec::new(),
             bitmap_in_place: false,
             synced_subtitle_path: synced_pb.to_string_lossy().into_owned(),
             source_subtitle_path: sub_pb.to_string_lossy().into_owned(),
@@ -2812,5 +2945,33 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_bitmap_framecrc_coalesces_split_pgs_display_set_end_packets() {
+        // Real Blu-ray PGS Display Sets emit multiple packets at the exact same PTS (or within a
+        // few ms): PCS (19B), WDS (19B), ODS (1850B), and END (3B). Without coalescing, the
+        // trailing 3B END packet looks like a screen-clear packet and immediately cancels `open_start`.
+        let pgs_crc = "\
+#tb 0: 1/1000
+#media_type 0: subtitle
+#codec_id 0: hdmv_pgs_subtitle
+0, 2000, 2000, 0, 19, 0x0001
+0, 2000, 2000, 0, 1850, 0x0002
+0, 2001, 2001, 0, 3, 0x0003
+0, 4200, 4200, 0, 19, 0x0004
+0, 4201, 4201, 0, 3, 0x0005
+0, 7500, 7500, 0, 2400, 0x0006
+0, 7510, 7510, 0, 19, 0x0007
+0, 7512, 7512, 0, 3, 0x0008
+0, 9800, 9800, 0, 15, 0x0009
+0, 9802, 9802, 0, 3, 0x000a
+";
+        let cues = parse_bitmap_framecrc_cues(pgs_crc, Some("hdmv_pgs_subtitle")).unwrap();
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].start_ms, 2_000);
+        assert_eq!(cues[0].end_ms, 4_200);
+        assert_eq!(cues[1].start_ms, 7_500);
+        assert_eq!(cues[1].end_ms, 9_800);
     }
 }

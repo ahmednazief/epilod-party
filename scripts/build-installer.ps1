@@ -45,8 +45,10 @@ try {
         Write-Host "==> Building main app and custom installer frontends..."
         if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
             npm ci
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
         }
         npm run build
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
     }
 
     foreach ($DistFile in @("dist\index.html", "installer\dist\index.html")) {
@@ -101,6 +103,7 @@ try {
     $PayloadOut = Join-Path $RepoRoot "src-installer\resources\payload\epilod-payload.epkg"
     Write-Host "==> Packing SHA-256 verified payload archive (v$AppVersion)..."
     cargo run --release -p epilod-installer-core --bin epilod-pack -- $StagingDir $PayloadOut --version $AppVersion
+    if ($LASTEXITCODE -ne 0) { throw "epilod-pack payload creation failed" }
 
     Write-Host "==> Compiling custom Windows setup GUI (epilod-setup.exe)..."
     cargo build --release -p epilod-setup --features custom-protocol
@@ -114,11 +117,13 @@ try {
     $FinalSetupExe = Join-Path $ReleaseDir "Epilod Party Setup.exe"
     Write-Host "==> Attaching standalone SFX payload overlay..."
     cargo run --release -p epilod-installer-core --bin epilod-pack -- --attach-sfx $SetupStub $PayloadOut $FinalSetupExe
+    if ($LASTEXITCODE -ne 0) { throw "epilod-pack --attach-sfx failed" }
 
     $ManifestOut = Join-Path $ReleaseDir "epilod-update-manifest.json"
     $ReleaseAssetUrl = "https://github.com/ahmednazief/epilod-party/releases/download/v$AppVersion/Epilod.Party.Setup.exe"
     Write-Host "==> Generating verified release update manifest..."
     cargo run --release -p epilod-installer-core --bin epilod-pack -- --write-update-manifest $FinalSetupExe $AppVersion $ReleaseAssetUrl $ManifestOut
+    if ($LASTEXITCODE -ne 0) { throw "epilod-pack --write-update-manifest failed" }
 
     $SizeMb = [Math]::Round(((Get-Item $FinalSetupExe).Length / 1MB), 2)
     Write-Host "==> Built standalone custom Windows installer: $FinalSetupExe ($SizeMb MB)"

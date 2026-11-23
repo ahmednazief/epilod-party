@@ -69,7 +69,6 @@ interface ChatState {
   peeks: ChatPeekItem[];
   sidebarWidth: number;
   setChatOpen: (open: boolean) => void;
-  markAllRead: () => void;
   setReplyToId: (id: string | null) => void;
   setEditingMsgId: (id: string | null) => void;
   setSidebarWidth: (width: number) => void;
@@ -81,7 +80,6 @@ interface ChatState {
     replyToId?: string | null;
     timestampMs?: number;
   }) => void;
-  appendSystemNote: (text: string, timestampMs?: number) => void;
   receiveRemoteMessage: (
     msg: {
       id: string;
@@ -127,8 +125,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       peeks: open ? [] : s.peeks,
     })),
 
-  markAllRead: () => set({ unreadCount: 0, unreadSinceId: null }),
-
   setReplyToId: (replyToId) =>
     set((s) => ({
       replyToId,
@@ -173,33 +169,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         replyToId: null,
         editingMsgId: null,
         unreadSinceId: null,
-      };
-    }),
-
-  appendSystemNote: (text, timestampMs = Date.now()) =>
-    set((s) => {
-      const clean = text.trim();
-      if (!clean) return s;
-      const last = s.messages[s.messages.length - 1];
-      if (last && last.kind === "system" && last.text === clean && timestampMs - last.timestampMs < 8000) {
-        return s;
-      }
-      const id = `sys_${timestampMs}_${s.messages.length}`;
-      const sysMsg: ChatMessage = {
-        id,
-        kind: "system",
-        sender: "System",
-        avatarId: "",
-        text: clean,
-        replyToId: null,
-        isSelf: false,
-        timestampMs,
-        editedAtMs: null,
-        reactions: {},
-        via: "system",
-      };
-      return {
-        messages: [...s.messages, sysMsg].slice(-MAX_CHAT_MESSAGES),
       };
     }),
 

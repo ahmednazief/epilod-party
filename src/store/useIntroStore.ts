@@ -179,9 +179,7 @@ interface IntroState {
   setDetectedOutcome: (videoPath: string | null, outcome: IntroDetectionOutcome) => void;
   markManualStart: (startSecs: number) => void;
   markManualEnd: (endSecs: number) => void;
-  setManualIntro: (startSecs: number, endSecs: number) => void;
   clearManualIntro: () => void;
-  dismissSegment: (segKey: string) => void;
   markAutoSkipped: (segKey: string) => void;
   dismissOutro: (outroKey: string) => void;
   markOutroAutoAdvanced: (outroKey: string) => void;
@@ -260,28 +258,11 @@ export const useIntroStore = create<IntroState>((set, get) => ({
     set({ manualIntro: next, dismissedKeys: [], autoSkippedKeys: [] });
   },
 
-  setManualIntro: (startSecs, endSecs) => {
-    if (!Number.isFinite(startSecs) || !Number.isFinite(endSecs) || endSecs <= startSecs + 2) {
-      return;
-    }
-    const next: ManualIntroBounds = { startSecs: Math.max(0, startSecs), endSecs };
-    const key = get().videoKey;
-    if (key) saveManualForKey(key, next);
-    set({ manualIntro: next, dismissedKeys: [], autoSkippedKeys: [] });
-  },
-
   clearManualIntro: () => {
     const key = get().videoKey;
     if (key) saveManualForKey(key, null);
     set({ manualIntro: null, dismissedKeys: [], autoSkippedKeys: [] });
   },
-
-  dismissSegment: (segKey) =>
-    set((s) =>
-      s.dismissedKeys.includes(segKey)
-        ? s
-        : { dismissedKeys: [...s.dismissedKeys, segKey] }
-    ),
 
   markAutoSkipped: (segKey) =>
     set((s) =>

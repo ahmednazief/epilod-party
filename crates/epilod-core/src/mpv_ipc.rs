@@ -29,6 +29,12 @@ pub struct MpvTrack {
     pub forced: bool,
     #[serde(default, rename = "ff-index", skip_serializing_if = "Option::is_none")]
     pub ff_index: Option<u64>,
+    #[serde(
+        default,
+        rename = "external-filename",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub external_filename: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +50,7 @@ pub enum MpvEvent {
     TimePos(f64),
     Duration(f64),
     Paused(bool),
+    PausedForCache(bool),
     EofReached(bool),
     VoConfigured(bool),
     VideoReconfig,
@@ -125,10 +132,6 @@ pub fn seek_keyframes_cmd(request_id: u64, seconds: f64) -> String {
     encode_seek_cmd(request_id, seconds, "absolute+keyframes")
 }
 
-pub fn stop_cmd(request_id: u64) -> String {
-    encode_command(request_id, &[json!("stop")])
-}
-
 /// Captures an uncropped, UI-chrome-free video frame directly to a temporary image file.
 /// (`mpv` JSON IPC cannot serialize `screenshot-raw`'s byte array, whereas `screenshot-to-file`
 /// writes a fast sRGB JPEG cleanly in ~34ms with subtitles preserved.)
@@ -185,6 +188,24 @@ pub fn set_aspect_cmd(request_id: u64, aspect: &str) -> String {
     set_property_cmd(request_id, "video-aspect-override", json!(normalized))
 }
 
+pub fn set_aspect_mode_cmds(first_request_id: u64, aspect: &str) -> Vec<String> {
+    let is_fill = aspect.trim() == "fill";
+    let panscan = if is_fill { 1.0 } else { 0.0 };
+    vec![
+        set_property_cmd(first_request_id, "panscan", json!(panscan)),
+        set_aspect_cmd(first_request_id + 1, aspect),
+    ]
+}
+
+pub fn set_dialogue_boost_cmd(request_id: u64, enabled: bool) -> String {
+    let filter = if enabled {
+        "lavfi=[dynaudnorm=f=150:g=15:p=0.9:m=10]"
+    } else {
+        ""
+    };
+    set_property_cmd(request_id, "af", json!(filter))
+}
+
 /// Shifts and scales live rendered video + subtitles horizontally on the GPU without resizing
 /// the underlying child HWND (`0.0` = full stage, `0.25` = 25% right margin for docked panels).
 pub fn set_video_margin_right_cmd(request_id: u64, ratio: f64) -> String {
@@ -194,10 +215,6 @@ pub fn set_video_margin_right_cmd(request_id: u64, ratio: f64) -> String {
         0.0
     };
     set_property_cmd(request_id, "video-margin-ratio-right", json!(clamped))
-}
-
-pub fn sub_add_cmd(request_id: u64, path: &str) -> String {
-    sub_add_cmd_with_title(request_id, path, None)
 }
 
 /// Add an external subtitle track and optionally attach a user-facing title so transcoded or
@@ -218,10 +235,6 @@ pub fn sub_add_cmd_with_title(request_id: u64, path: &str, title: Option<&str>) 
 
 pub fn sub_remove_cmd(request_id: u64, sid: u64) -> String {
     encode_command(request_id, &[json!("sub-remove"), json!(sid)])
-}
-
-pub fn sub_reload_cmd(request_id: u64) -> String {
-    encode_command(request_id, &[json!("sub-reload")])
 }
 
 pub fn set_aid_cmd(request_id: u64, aid: Option<u64>) -> String {
@@ -398,6 +411,11 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, MpvParseError> {
                             return Ok(MpvMessage::Event(MpvEvent::Paused(p)));
                         }
                     }
+                    "paused-for-cache" => {
+                        if let Some(b) = data.and_then(|v| v.as_bool()) {
+                            return Ok(MpvMessage::Event(MpvEvent::PausedForCache(b)));
+                        }
+                    }
                     "eof-reached" => {
                         if let Some(eof) = data.and_then(|v| v.as_bool()) {
                             return Ok(MpvMessage::Event(MpvEvent::EofReached(eof)));
@@ -485,6 +503,10 @@ fn parse_track_list(arr: &[Value]) -> Vec<MpvTrack> {
                     .unwrap_or(false),
                 forced: obj.get("forced").and_then(|v| v.as_bool()).unwrap_or(false),
                 ff_index: obj.get("ff-index").and_then(|v| v.as_u64()),
+                external_filename: obj
+                    .get("external-filename")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             })
         })
         .collect()
@@ -509,10 +531,6 @@ fn parse_chapter_list(arr: &[Value]) -> Vec<MpvChapter> {
         .collect();
     chapters.sort_by(|a, b| a.time.total_cmp(&b.time));
     chapters
-}
-
-pub fn launch_args(wid: u64, pipe_name: &str) -> Vec<String> {
-    launch_args_with_fonts(wid, pipe_name, None)
 }
 
 pub fn launch_args_with_fonts(
@@ -542,6 +560,7 @@ pub fn launch_args_with_fonts(
         "--no-config".to_string(),
         "--load-scripts=no".to_string(),
         "--ytdl=no".to_string(),
+        "--access-references=no".to_string(),
         "--msg-level=all=warn".to_string(),
         "--demuxer-max-bytes=150MiB".to_string(),
         "--demuxer-max-back-bytes=50MiB".to_string(),
@@ -675,6 +694,12 @@ impl PendingSeekTracker {
 
     pub fn is_active(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn is_seeking_at(&self, now: Instant) -> bool {
+        self.active.as_ref().is_some_and(|s| {
+            !s.restarted && now.duration_since(s.started_at) < Self::effective_timeout(s)
+        })
     }
 
     pub fn note_dispatched_seek(&mut self, target: f64, req_id: Option<u64>, now: Instant) {
@@ -933,6 +958,7 @@ fn autosync_extract_sub_with_map_args_ffmpeg(
         video_path.to_string(),
         "-vn".to_string(),
         "-an".to_string(),
+        "-dn".to_string(),
         "-map".to_string(),
         map_spec,
         out_sub_path.to_string(),
@@ -1381,7 +1407,7 @@ mod tests {
 
     #[test]
     fn test_universal_launch_and_autosync_extract_args() {
-        let launch = launch_args(123, "p");
+        let launch = launch_args_with_fonts(123, "p", None);
         for req in [
             "--hwdec=auto-safe",
             "--audio-channels=auto-safe",
@@ -1390,6 +1416,7 @@ mod tests {
             "--no-config",
             "--load-scripts=no",
             "--ytdl=no",
+            "--access-references=no",
             "--sub-hinting=light",
             "--sub-blur=0.08",
             "--sub-outline-color=#E6000000",
@@ -1483,11 +1510,20 @@ mod tests {
         assert!(lp.contains("\"loop-file\"") && lp.contains("\"inf\""));
         let asp = set_aspect_cmd(3, "21:9");
         assert!(asp.contains("\"video-aspect-override\"") && asp.contains("\"21:9\""));
+        let fill_cmds = set_aspect_mode_cmds(10, "fill");
+        assert_eq!(fill_cmds.len(), 2);
+        assert!(fill_cmds[0].contains("\"panscan\"") && fill_cmds[0].contains("1.0"));
+        assert!(
+            fill_cmds[1].contains("\"video-aspect-override\"") && fill_cmds[1].contains("\"-1\"")
+        );
+        let wide_cmds = set_aspect_mode_cmds(12, "16:9");
+        assert!(wide_cmds[0].contains("\"panscan\"") && wide_cmds[0].contains("0.0"));
+        assert!(wide_cmds[1].contains("\"16:9\""));
     }
 
     #[test]
     fn test_subtitle_commands_and_rtl_paths() {
-        let add = sub_add_cmd(1, r"C:\Subs\العربية.srt");
+        let add = sub_add_cmd_with_title(1, r"C:\Subs\العربية.srt", None);
         assert!(add.contains("sub-add"));
         let add_titled = sub_add_cmd_with_title(
             2,
@@ -1556,21 +1592,30 @@ mod tests {
 
     #[test]
     fn test_track_list_parsing_and_track_commands() {
-        let line = r#"{"event":"property-change","id":4,"name":"track-list","data":[{"id":1,"type":"audio","title":"JP","lang":"jpn","codec":"aac","selected":true,"external":false,"default":true,"forced":false},{"id":2,"type":"sub","title":null,"lang":"ara","codec":"ass","selected":true,"external":true,"default":false,"forced":false}]}"#;
+        let line = r#"{"event":"property-change","id":4,"name":"track-list","data":[{"id":1,"type":"audio","title":"JP","lang":"jpn","codec":"aac","selected":true,"external":false,"default":true,"forced":false},{"id":2,"type":"sub","title":null,"lang":"ara","codec":"ass","selected":true,"external":true,"external-filename":"C:\\Movies\\Movie.ara.ass","default":false,"forced":false}]}"#;
         match parse_line(line).unwrap() {
             MpvMessage::Event(MpvEvent::TrackList(tracks)) => {
                 assert_eq!(tracks.len(), 2);
                 assert_eq!(tracks[0].kind, "audio");
                 assert!(tracks[0].is_default);
                 assert!(!tracks[0].forced);
+                assert_eq!(tracks[0].external_filename, None);
                 assert_eq!(tracks[1].kind, "sub");
                 assert!(tracks[1].external);
+                assert_eq!(
+                    tracks[1].external_filename.as_deref(),
+                    Some(r"C:\Movies\Movie.ara.ass")
+                );
                 // Ensure JSON serialized to the WebView exposes `"type"` (not `"kind"`).
                 let serialized = serde_json::to_value(&tracks).unwrap();
                 assert_eq!(serialized[0]["type"], "audio");
                 assert!(serialized[0].get("kind").is_none());
                 assert_eq!(serialized[0]["default"], true);
                 assert_eq!(serialized[1]["type"], "sub");
+                assert_eq!(
+                    serialized[1]["external-filename"],
+                    r"C:\Movies\Movie.ara.ass"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1812,5 +1857,25 @@ mod tests {
             parsed4["command"],
             json!(["set_property", "video-margin-ratio-right", 0.0])
         );
+    }
+
+    #[test]
+    fn test_set_dialogue_boost_cmd_toggles_dynaudnorm_filter() {
+        let on_cmd = set_dialogue_boost_cmd(91, true);
+        let on_parsed: Value = serde_json::from_str(on_cmd.trim()).expect("valid on json");
+        assert_eq!(on_parsed["request_id"], 91);
+        assert_eq!(
+            on_parsed["command"],
+            json!([
+                "set_property",
+                "af",
+                "lavfi=[dynaudnorm=f=150:g=15:p=0.9:m=10]"
+            ])
+        );
+
+        let off_cmd = set_dialogue_boost_cmd(92, false);
+        let off_parsed: Value = serde_json::from_str(off_cmd.trim()).expect("valid off json");
+        assert_eq!(off_parsed["request_id"], 92);
+        assert_eq!(off_parsed["command"], json!(["set_property", "af", ""]));
     }
 }

@@ -5,6 +5,7 @@ import {
   AppCloseIcon,
   AppDownloadIcon,
   AppHeadphonesIcon,
+  AppKeyboardIcon,
   AppLogsIcon,
   AppMicIcon,
   AppPartyPrivacyCategoryIcon,
@@ -20,12 +21,31 @@ import {
 } from "./ui/AppIcons";
 import { PlayerPauseIcon } from "./ui/PlayerIcons";
 import { MenuEncodingIcon } from "./ui/MenuIcons";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { HardDrive } from "lucide-react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { clearLocalMatchCache } from "../hooks/usePartyFileMismatch";
 import { isDesktop, safeInvoke } from "../lib/bridge";
+import {
+  applyBackupEnvelope,
+  buildBackupEnvelopeJson,
+  parseAndValidateBackup,
+  type BackupPreviewSummary,
+} from "../lib/dataBackup";
 import { getLogsSnapshot, type LogEntry } from "../lib/logger";
 import { mpvSetSubStyle, safeMpvCall, setAllowNetworkShares } from "../lib/mpv";
+import {
+  storageClearCache,
+  storageCreateSnapshot,
+  storageExportBackup,
+  storageGetStats,
+  storageImportBackup,
+  storageOpenUserdataFolder,
+  storageReadSnapshot,
+  storageSetThumbCapMb,
+  type StorageStats,
+} from "../lib/storageBridge";
+import { clearThumbnailCache } from "../lib/thumbnails";
 import {
   CLOUD_ENDPOINT,
   DEFAULT_ENDPOINT,
@@ -83,6 +103,7 @@ import {
 import { useVoiceStore } from "../store/useVoiceStore";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import { Button } from "./ui/Button";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
 import { AvatarPicker, ProfileAvatar } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
@@ -96,12 +117,19 @@ interface SettingsModalProps {
   onApplyServerConfig?: (endpoint: string, password: string) => void;
 }
 
+const isCloudEndpoint = (endpoint: string): boolean =>
+  endpoint.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase();
+
+const normalizePresetEndpoint = (endpoint: string): string =>
+  isCloudEndpoint(endpoint) ? CLOUD_ENDPOINT : SYNCPLAY_ENDPOINT;
+
 const PRIMARY_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
   { value: "profile", label: "Profile" },
   { value: "appearance", label: "Appearance" },
   { value: "playback", label: "Playback" },
   { value: "party", label: "Party & Privacy" },
   { value: "voice", label: "Voice & Audio" },
+  { value: "storage", label: "Storage & Backup" },
   { value: "updates", label: "Updates" },
 ];
 
@@ -116,6 +144,7 @@ const NAV_HEADINGS: Record<SettingsTab, string> = {
   playback: "Playback & Subtitles",
   party: "Watch Party & Privacy",
   voice: "Voice & Audio",
+  storage: "Storage & Backup",
   updates: "App Updates",
   server: "Connection & Shared Folders",
   logs: "Session Diagnostics",
@@ -133,6 +162,13 @@ function renderCategoryIcon(tabValue: SettingsTab, active: boolean) {
       return <AppPartyPrivacyCategoryIcon size={16} active={active} className="shrink-0" />;
     case "voice":
       return <AppVoiceCategoryIcon size={16} active={active} className="shrink-0" />;
+    case "storage":
+      return (
+        <HardDrive
+          size={15}
+          className={`shrink-0 transition-colors ${active ? "text-accent-soft" : "text-current"}`}
+        />
+      );
     case "updates":
       return <AppDownloadIcon size={16} active={active} className="shrink-0" />;
     case "server":
@@ -142,14 +178,30 @@ function renderCategoryIcon(tabValue: SettingsTab, active: boolean) {
   }
 }
 
+function InfoTipDot({ tip }: { tip: string }) {
+  return (
+    <GlassHoverTip label={tip}>
+      <span
+        aria-label={tip}
+        onClick={(e) => e.stopPropagation()}
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-white/[0.08] text-[10px] font-semibold text-muted hover:bg-white/[0.15] hover:text-white transition-colors shrink-0 cursor-default"
+      >
+        ?
+      </span>
+    </GlassHoverTip>
+  );
+}
+
 function ComfortSwitchRow({
   title,
   description,
+  tip,
   checked,
   onChange,
 }: {
   title: string;
-  description: string;
+  description?: string;
+  tip?: string;
   checked: boolean;
   onChange: (next: boolean) => void;
 }) {
@@ -159,16 +211,54 @@ function ComfortSwitchRow({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="ep-menu-row ep-press w-full px-3 py-3 flex items-center justify-between gap-4 text-left cursor-pointer"
+      className="ep-menu-row ep-press w-full px-3 py-2.5 flex items-center justify-between gap-4 text-left cursor-pointer"
     >
       <div className="min-w-0">
-        <div className="text-[13px] font-medium text-white">{title}</div>
-        <div className="text-xs text-secondary leading-relaxed mt-0.5">{description}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[13px] font-medium text-white">{title}</span>
+          {tip && <InfoTipDot tip={tip} />}
+        </div>
+        {description && (
+          <div className="text-xs text-secondary leading-relaxed mt-0.5">{description}</div>
+        )}
       </div>
       <GlassSwitchTrack checked={checked} size="md" />
     </button>
   );
 }
+
+const VoiceLevelMeter = memo(function VoiceLevelMeter({ sensitivityDb }: { sensitivityDb: number }) {
+  const voiceLevelDb = useVoiceStore((s) => s.localLevelDb);
+  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
+  return (
+    <>
+      {/* Live dBFS meter with sensitivity marker */}
+      <div className="relative h-2.5 rounded-full bg-white/10 overflow-hidden">
+        <div
+          className={`h-full transition-[width] duration-75 ${
+            voiceGateOpen ? "bg-ok" : "bg-white/35"
+          }`}
+          style={{
+            width: `${Math.max(0, Math.min(100, ((voiceLevelDb + 75) / 75) * 100))}%`,
+          }}
+        />
+        <div
+          className="absolute top-0 bottom-0 w-0.5 bg-accent-soft"
+          style={{
+            left: `${Math.max(0, Math.min(100, ((sensitivityDb + 75) / 75) * 100))}%`,
+          }}
+        />
+      </div>
+
+      <div className="flex items-center justify-between text-[11px] text-secondary">
+        <span>Threshold: {sensitivityDb} dB</span>
+        <span className={voiceGateOpen ? "text-ok font-medium" : "text-muted"}>
+          {voiceGateOpen ? "Speaking" : "Gated"} ({Math.round(voiceLevelDb)} dB)
+        </span>
+      </div>
+    </>
+  );
+});
 
 export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsModalProps) {
   const rawTab = useAppStore((s) => s.settingsTab);
@@ -184,6 +274,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const hashFilenames = useAppStore((s) => s.hashFilenames);
   const autoFixFileMismatch = useAppStore((s) => s.autoFixFileMismatch);
   const rememberPlaybackPosition = useAppStore((s) => s.rememberPlaybackPosition);
+  const seekbarThumbnails = useAppStore((s) => s.seekbarThumbnails);
+  const thumbCacheCapMb = useAppStore((s) => s.thumbCacheCapMb);
+  const outroRatingEnabled = useAppStore((s) => s.outroRatingEnabled);
   const trackWatchedEpisodes = useAppStore((s) => s.trackWatchedEpisodes);
   const fixArabicPunctuation = useAppStore((s) => s.fixArabicPunctuation);
   const globalShortcutsEnabled = useAppStore((s) => s.globalShortcutsEnabled);
@@ -214,6 +307,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setHashFilenames = useAppStore((s) => s.setHashFilenames);
   const setAutoFixFileMismatch = useAppStore((s) => s.setAutoFixFileMismatch);
   const setRememberPlaybackPosition = useAppStore((s) => s.setRememberPlaybackPosition);
+  const setSeekbarThumbnails = useAppStore((s) => s.setSeekbarThumbnails);
+  const setThumbCacheCapMb = useAppStore((s) => s.setThumbCacheCapMb);
+  const setOutroRatingEnabled = useAppStore((s) => s.setOutroRatingEnabled);
   const setTrackWatchedEpisodes = useAppStore((s) => s.setTrackWatchedEpisodes);
   const setFixArabicPunctuation = useAppStore((s) => s.setFixArabicPunctuation);
   const setGlobalShortcutsEnabled = useAppStore((s) => s.setGlobalShortcutsEnabled);
@@ -271,17 +367,12 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const cancelUpdateDownload = useUpdaterStore((s) => s.cancelDownload);
   const applyAndRestartUpdate = useUpdaterStore((s) => s.applyAndRestart);
 
-  const [endpointDraft, setEndpointDraft] = useState(serverEndpoint);
-  const [customEndpointOpen, setCustomEndpointOpen] = useState(() => {
-    const low = serverEndpoint.trim().toLowerCase();
-    return (
-      low !== SYNCPLAY_ENDPOINT.toLowerCase() &&
-      low !== CLOUD_ENDPOINT.toLowerCase()
-    );
-  });
+  const [endpointDraft, setEndpointDraft] = useState(() =>
+    normalizePresetEndpoint(serverEndpoint),
+  );
   const [passwordDraft, setPasswordDraft] = useState(serverPassword);
-  const [endpointError, setEndpointError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [playbackAdvancedOpen, setPlaybackAdvancedOpen] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logsPath, setLogsPath] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -311,10 +402,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const voiceSensitivityDb = useVoiceStore((s) => s.sensitivityDb);
   const voiceAutoSensitivity = useVoiceStore((s) => s.autoSensitivity);
   const voiceNoiseMode = useVoiceStore((s) => s.noiseMode);
-  const voiceCompression = useVoiceStore((s) => s.compressionEnabled);
   const voiceDuckingMode = useVoiceStore((s) => s.duckingMode);
-  const voiceCinemaTightGate = useVoiceStore((s) => s.cinemaTightGate);
-  const voiceSpatialPan = useVoiceStore((s) => s.spatialPan);
   const voiceEchoGuard = useVoiceStore((s) => s.echoGuardEnabled);
   const voiceAecEnabled = useVoiceStore((s) => s.aecEnabled);
   const voiceAllowRelayForOthers = useVoiceStore((s) => s.allowRelayForOthers);
@@ -329,8 +417,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const voiceBtHfpDropped = useVoiceStore((s) => s.bluetoothHfpDropped);
   const voiceStreamStatus = useVoiceStore((s) => s.streamStatus);
   const voiceStreamError = useVoiceStore((s) => s.streamError);
-  const voiceLevelDb = useVoiceStore((s) => s.localLevelDb);
-  const voiceGateOpen = useVoiceStore((s) => s.localGateOpen);
   const updateVoiceConfig = useVoiceStore((s) => s.updateConfig);
   const setVoiceDevices = useVoiceStore((s) => s.setDevices);
   const setVoiceMicTestActive = useVoiceStore((s) => s.setMicTestActive);
@@ -340,6 +426,35 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   );
   const [voiceDiag, setVoiceDiag] = useState<VoiceDiagnosticsDto | null>(null);
   const [voiceAdvancedOpen, setVoiceAdvancedOpen] = useState(false);
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageBusyAction, setStorageBusyAction] = useState<string | null>(null);
+  const [restoreMode, setRestoreMode] = useState<"merge" | "replace">("merge");
+  const [pendingRestore, setPendingRestore] = useState<{
+    summary: BackupPreviewSummary;
+    sourceLabel: string;
+  } | null>(null);
+  const browserBackupInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshStorageStats = useCallback(async () => {
+    setStorageLoading(true);
+    try {
+      const stats = await storageGetStats(thumbCacheCapMb);
+      setStorageStats(stats);
+    } catch {
+      // Keep previous stats on transient failure
+    } finally {
+      setStorageLoading(false);
+    }
+  }, [thumbCacheCapMb]);
+
+  useEffect(() => {
+    if (open && tab === "storage") {
+      void refreshStorageStats();
+    } else if (!open) {
+      setPendingRestore(null);
+    }
+  }, [open, tab, refreshStorageStats]);
   const navTrackRef = useRef<HTMLDivElement | null>(null);
   const navButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const prevNavTabRef = useRef<SettingsTab>(tab);
@@ -357,7 +472,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     const isCollapsedTab = !advancedOpen && (tab === "server" || tab === "logs");
     const measure = () => {
       if (isCollapsedTab) {
-        setNavIndicator((prev) => ({ ...prev, visible: false }));
+        setNavIndicator((prev) => (prev.visible ? { ...prev, visible: false } : prev));
         return;
       }
       const btn = navButtonRefs.current[tab];
@@ -365,14 +480,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       const wRect = wrap.getBoundingClientRect();
       const bRect = btn.getBoundingClientRect();
       if (bRect.height < 8) {
-        setNavIndicator((prev) => ({ ...prev, visible: false }));
+        setNavIndicator((prev) => (prev.visible ? { ...prev, visible: false } : prev));
         return;
       }
-      setNavIndicator({
-        top: Math.round(bRect.top - wRect.top + wrap.scrollTop),
-        height: Math.round(bRect.height),
-        visible: true,
-      });
+      const nextTop = Math.round(bRect.top - wRect.top + wrap.scrollTop);
+      const nextHeight = Math.round(bRect.height);
+      setNavIndicator((prev) =>
+        prev.top === nextTop && prev.height === nextHeight && prev.visible
+          ? prev
+          : { top: nextTop, height: nextHeight, visible: true },
+      );
     };
 
     measure();
@@ -396,14 +513,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   useEffect(() => {
     if (open) {
-      setEndpointDraft(serverEndpoint);
-      const low = serverEndpoint.trim().toLowerCase();
-      setCustomEndpointOpen(
-        low !== SYNCPLAY_ENDPOINT.toLowerCase() &&
-          low !== CLOUD_ENDPOINT.toLowerCase(),
-      );
+      setEndpointDraft(normalizePresetEndpoint(serverEndpoint));
       setPasswordDraft(serverPassword);
-      setEndpointError(null);
       if (tab === "server" || tab === "logs") {
         setAdvancedOpen(true);
       }
@@ -465,29 +576,17 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       if (voiceEnabled) {
         void voiceStartMicMonitor(useVoiceStore.getState().micTestActive).catch(() => undefined);
       }
-      void voiceGetDiagnostics()
-        .then((diag) => {
-          if (active) setVoiceDiag(diag);
-        })
-        .catch(() => undefined);
-      const iv = window.setInterval(() => {
-        void voiceGetDiagnostics()
-          .then((diag) => {
-            if (active) setVoiceDiag(diag);
-          })
-          .catch(() => undefined);
-      }, 1000);
       return () => {
         active = false;
         unlistenLevel?.();
         unlistenCal?.();
         unlistenDev?.();
-        window.clearInterval(iv);
       };
     } else if (wasVoiceTabOpenRef.current) {
       wasVoiceTabOpenRef.current = false;
       setCapturingBind(null);
       setHotkeyMessage(null);
+      setVoiceCalibration(null);
       if (releaseMicMonitorSurface() === 0) {
         if (useVoiceStore.getState().micTestActive) {
           setVoiceMicTestActive(false);
@@ -507,6 +606,24 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     updateVoiceConfig,
     pushNote,
   ]);
+
+  useEffect(() => {
+    if (!open || tab !== "voice" || !voiceAdvancedOpen) return;
+    let active = true;
+    const pollDiag = () => {
+      void voiceGetDiagnostics()
+        .then((diag) => {
+          if (active) setVoiceDiag(diag);
+        })
+        .catch(() => undefined);
+    };
+    pollDiag();
+    const iv = window.setInterval(pollDiag, 1000);
+    return () => {
+      active = false;
+      window.clearInterval(iv);
+    };
+  }, [open, tab, voiceAdvancedOpen]);
 
   useEffect(() => {
     return () => {
@@ -577,6 +694,19 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     };
   }, [capturingBind, voiceHotkeyScope, updateVoiceConfig]);
 
+  useEffect(() => {
+    if (!open || exiting || capturingBind) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[role="listbox"], [role="menu"]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, exiting, capturingBind, onClose]);
+
   const loadLogs = async () => {
     setLogsLoading(true);
     try {
@@ -602,13 +732,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   if (!mounted) return null;
 
+  const selectedBackend: "syncplay" | "cloud" = isCloudEndpoint(endpointDraft)
+    ? "cloud"
+    : "syncplay";
+
   const handleSaveServer = () => {
     const check = validateServerEndpointInput(endpointDraft);
     if (!check.ok || !check.endpoint) {
-      setEndpointError(check.reason ?? "Invalid server address.");
+      pushNote("error", check.reason ?? "Invalid server address.");
       return;
     }
-    setEndpointError(null);
     setServerEndpoint(check.endpoint);
     setServerPassword(passwordDraft);
     onApplyServerConfig?.(check.endpoint, passwordDraft);
@@ -660,11 +793,13 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
               const bRect = btn.getBoundingClientRect();
               const wRect = wrap.getBoundingClientRect();
               if (bRect.height >= 8) {
-                setNavIndicator({
-                  top: Math.round(bRect.top - wRect.top + wrap.scrollTop),
-                  height: Math.round(bRect.height),
-                  visible: true,
-                });
+                const nextTop = Math.round(bRect.top - wRect.top + wrap.scrollTop);
+                const nextHeight = Math.round(bRect.height);
+                setNavIndicator((prev) =>
+                  prev.top === nextTop && prev.height === nextHeight && prev.visible
+                    ? prev
+                    : { top: nextTop, height: nextHeight, visible: true },
+                );
               }
             }}
             className="ep-settings-scroll relative z-10 flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 py-3 my-1 flex flex-col justify-between gap-3"
@@ -733,7 +868,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 />
               </button>
 
-              <AnimatedCollapse open={advancedOpen} innerClassName="space-y-1 pt-1">
+              <AnimatedCollapse open={advancedOpen} durationMs={200} innerClassName="space-y-1 pt-1">
                 {ADVANCED_NAV.map((item) => {
                   const active = tab === item.value;
                   return (
@@ -755,6 +890,20 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   );
                 })}
               </AnimatedCollapse>
+
+              <button
+                type="button"
+                onClick={() => useAppStore.getState().openShortcuts()}
+                className="ep-menu-row ep-press w-full px-2.5 py-1.5 flex items-center justify-between gap-2 text-left text-[11px] font-medium text-muted hover:text-secondary cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <AppKeyboardIcon size={13} className="shrink-0" />
+                  <span className="truncate">Shortcuts</span>
+                </span>
+                <kbd className="px-1.5 py-0.5 rounded bg-white/[0.08] text-[10px] font-medium text-secondary">
+                  ?
+                </kbd>
+              </button>
             </div>
           </div>
         </aside>
@@ -775,7 +924,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             </button>
           </div>
 
-          <div className="ep-settings-scroll flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden pl-6 pr-[18px] mr-1.5 my-1 py-3">
+          <div className="ep-settings-scroll flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden pl-6 pr-[18px] mr-1.5 mt-1 mb-4 pt-2 pb-2">
             {tab === "profile" && (
               <div className="anim-tab-in px-3 py-1 space-y-4">
                 <div className="flex items-end gap-3">
@@ -806,13 +955,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             {tab === "appearance" && (
               <div className="anim-tab-in space-y-1">
                 <div className="px-3 py-3 space-y-2.5">
-                  <div className="space-y-0.5">
+                  <div className="flex items-center gap-1.5">
                     <div className="text-xs font-medium text-white">
-                      Full-Width Bottom Play Bar
+                      Play Bar Layout
                     </div>
-                    <p className="text-[11px] text-secondary leading-relaxed">
-                      Switch between the floating glass capsule or a full-width bottom bar that auto-hides during playback and fullscreen until the mouse moves.
-                    </p>
+                    <InfoTipDot tip="Full-width bar auto-hides during playback and fullscreen" />
                   </div>
                   <SegmentedTabs
                     ariaLabel="Full-Width Bottom Play Bar style"
@@ -828,21 +975,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 </div>
 
                 <div className="px-3 py-3 space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="space-y-0.5 min-w-0">
-                      <div className="text-xs font-medium text-white">
-                        Play Bar Opacity
-                      </div>
-                      <p className="text-[11px] text-secondary leading-relaxed">
-                        Adjust how translucent or solid both the floating and full-width play bars appear over video.
-                      </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-medium text-white">
+                      Play Bar Opacity
                     </div>
-                    <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                    <div className="flex items-center gap-2 shrink-0">
                       {playBarOpacity !== 60 && (
                         <button
                           type="button"
                           onClick={() => setPlayBarOpacity(60)}
-                          className="text-[11px] font-medium text-accent-soft hover:text-white cursor-pointer"
+                          className="ep-press text-[11px] font-medium text-accent-soft hover:text-white cursor-pointer"
                         >
                           Reset
                         </button>
@@ -870,14 +1012,14 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Calm Motion"
-                  description="Replace bouncy spring transitions with gentle fades."
+                  tip="Replaces bouncy spring animations with gentle fades"
                   checked={reducedMotion}
                   onChange={setReducedMotion}
                 />
 
                 <ComfortSwitchRow
                   title="Quiet Background Sync"
-                  description="Keep subtitle alignment gentle on fans and battery during long movies."
+                  tip="Reduces background CPU/GPU work during long movies"
                   checked={lowPowerMode}
                   onChange={setLowPowerMode}
                 />
@@ -887,11 +1029,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             {tab === "playback" && (
               <div className="anim-tab-in space-y-1">
                 <div className="px-3 py-3 space-y-2.5">
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
                     <div className="text-[13px] font-medium text-white">Skip Intro</div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Detect opening credits and choose whether to show the Skip Intro button or skip automatically.
-                    </div>
+                    <InfoTipDot tip="Detects opening credits to show a skip pill or skip automatically" />
                   </div>
                   <SegmentedTabs<SkipIntroMode>
                     ariaLabel="Skip Intro mode"
@@ -908,11 +1048,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 </div>
 
                 <div className="px-3 py-3 space-y-2.5">
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
                     <div className="text-[13px] font-medium text-white">Next Episode on Outro</div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Detect ending credits and show the Next Episode pill, or advance automatically.
-                    </div>
+                    <InfoTipDot tip="Detects end credits to offer Next Episode or advance automatically" />
                   </div>
                   <SegmentedTabs<OutroNextMode>
                     ariaLabel="Next Episode on Outro mode"
@@ -930,28 +1068,62 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Remember playback position"
-                  description="Save your place for each video and resume automatically when playing solo."
+                  tip="Resumes solo videos from where you left off"
                   checked={rememberPlaybackPosition}
                   onChange={setRememberPlaybackPosition}
                 />
 
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <ComfortSwitchRow
+                      title="Seekbar thumbnail previews"
+                      tip="Shows video frame previews when hovering the seekbar"
+                      checked={seekbarThumbnails}
+                      onChange={setSeekbarThumbnails}
+                    />
+                  </div>
+                  {isDesktop() && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void clearThumbnailCache().then((bytes) => {
+                          const mb = (bytes / (1024 * 1024)).toFixed(1);
+                          useNotificationStore
+                            .getState()
+                            .push("info", bytes > 0 ? `Cleared ${mb} MB of thumbnail cache.` : "Thumbnail cache is already empty.");
+                        });
+                      }}
+                      className="shrink-0 text-[11px] font-medium px-2.5 py-1 rounded-lg bg-white/6 hover:bg-white/12 text-white/75 hover:text-white border border-white/10 transition-colors cursor-pointer"
+                    >
+                      Clear cache
+                    </button>
+                  )}
+                </div>
+
                 <ComfortSwitchRow
                   title="Track watched episodes"
-                  description="Mark episodes as watched after 90% and remember your series progress locally."
+                  tip="Marks episodes watched after 90% locally"
                   checked={trackWatchedEpisodes}
                   onChange={setTrackWatchedEpisodes}
                 />
 
                 <ComfortSwitchRow
+                  title="Outro rating vote (1–10)"
+                  tip="Shows a room rating card at the end of movies and episodes"
+                  checked={outroRatingEnabled}
+                  onChange={setOutroRatingEnabled}
+                />
+
+                <ComfortSwitchRow
                   title="Fix Arabic punctuation"
-                  description="Wrap Arabic SRT/VTT lines with RTL markers so punctuation and mixed numbers render in order."
+                  tip="Keeps punctuation and mixed numbers ordered in Arabic subtitles"
                   checked={fixArabicPunctuation}
                   onChange={setFixArabicPunctuation}
                 />
 
                 <ComfortSwitchRow
                   title="Global shortcuts (Ctrl+Alt+Space / ← / →)"
-                  description="Play/pause and seek 10s even when Epilod Party is not in focus."
+                  tip="Play/pause and seek 10s even when Epilod Party is in the background"
                   checked={globalShortcutsEnabled}
                   onChange={(enabled) => {
                     setGlobalShortcutsEnabled(enabled);
@@ -965,17 +1137,15 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="On-screen video notices (OSD)"
-                  description="Show brief overlay notices on the video when friends join, leave, or pause."
+                  tip="Shows brief text on video when friends join, leave, or pause"
                   checked={osdEnabled}
                   onChange={setOsdEnabled}
                 />
 
                 <div className="px-3 py-2 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 min-w-0">
                     <div className="text-[13px] font-medium text-white">Watch history</div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Clear saved resume positions and watched episode marks.
-                    </div>
+                    <InfoTipDot tip="Clears saved resume positions and watched episode marks" />
                   </div>
                   <button
                     type="button"
@@ -1012,7 +1182,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Bold Subtitle Font"
-                  description="Use a bolder caption weight for both Arabic and Latin subtitles."
                   checked={boldSubtitles}
                   onChange={(enabled) => {
                     setBoldSubtitles(enabled);
@@ -1029,7 +1198,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Override Styled Fansubs"
-                  description="Apply Epilod's font, size, and color over custom ASS/SSA anime subtitle styles."
+                  tip="Applies Epilod's font, size, and color over custom anime ASS/SSA styles"
                   checked={overrideAssStyle}
                   onChange={(enabled) => {
                     setOverrideAssStyle(enabled);
@@ -1065,13 +1234,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 </div>
 
                 <div className="px-3 py-3 space-y-2.5">
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
                     <div className="text-[13px] font-medium text-white">
                       Auto-Fetch Online Subtitles
                     </div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Automatically find and load matching OpenSubtitles tracks when opening a movie or episode.
-                    </div>
+                    <InfoTipDot tip="Automatically finds matching subtitles when opening a video" />
                   </div>
                   <SegmentedTabs<AutoFetchSubtitleMode>
                     ariaLabel="Auto-Fetch Subtitles mode"
@@ -1088,13 +1255,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 </div>
 
                 <div className="px-3 py-3 space-y-2">
-                  <div className="min-w-0">
-                    <div className="text-[13px] font-medium text-white">
-                      Preferred Subtitle Language
-                    </div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Language prioritized for automatic subtitle fetching and online search.
-                    </div>
+                  <div className="text-[13px] font-medium text-white">
+                    Preferred Subtitle Language
                   </div>
                   <SelectMenu
                     ariaLabel="Preferred Subtitle Language"
@@ -1106,15 +1268,34 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   />
                 </div>
 
-                <div className="px-3 py-3 space-y-2">
-                  <TextField
-                    label="OpenSubtitles API Key (Optional)"
-                    type="password"
-                    value={openSubtitlesApiKey}
-                    onChange={(e) => setOpenSubtitlesApiKey(e.target.value)}
-                    placeholder="Not required — built-in search works automatically"
-                    hint="Optional personal opensubtitles.com REST key for extra hash & query results."
-                  />
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    aria-expanded={playbackAdvancedOpen}
+                    onClick={() => setPlaybackAdvancedOpen((o) => !o)}
+                    className="ep-menu-row ep-press w-full px-3 py-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer"
+                  >
+                    <span className="text-[12.5px] font-medium text-secondary">
+                      Advanced
+                    </span>
+                    <AppChevronIcon
+                      direction="right"
+                      size={14}
+                      className={`text-muted shrink-0 transition-transform duration-200 ${
+                        playbackAdvancedOpen ? "rotate-90" : ""
+                      }`}
+                    />
+                  </button>
+                  <AnimatedCollapse open={playbackAdvancedOpen} innerClassName="px-3 pt-2 pb-1">
+                    <TextField
+                      label="OpenSubtitles API Key (Optional)"
+                      type="password"
+                      value={openSubtitlesApiKey}
+                      onChange={(e) => setOpenSubtitlesApiKey(e.target.value)}
+                      placeholder="Not required — built-in search works automatically"
+                      hint="Personal opensubtitles.com REST key for extra results."
+                    />
+                  </AnimatedCollapse>
                 </div>
               </div>
             )}
@@ -1123,25 +1304,20 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
               <div className="anim-tab-in space-y-1">
                 <ComfortSwitchRow
                   title="Floating Party Reactions"
-                  description="Show live floating emoji reactions from Watch Party friends over the video (keys 1–7 or E)."
+                  tip="Shows live emoji reactions over the video (keys 1–7 or E)"
                   checked={reactionsEnabled}
                   onChange={setReactionsEnabled}
                 />
 
                 <ComfortSwitchRow
                   title="Ambient Chat Peeks"
-                  description="Briefly surface incoming room messages in soft glass pills over the corner when chat is closed."
+                  tip="Briefly shows incoming chat messages in the corner when chat is closed"
                   checked={chatPeeksEnabled}
                   onChange={setChatPeeksEnabled}
                 />
 
                 <div className="px-3 py-3 space-y-2.5">
-                  <div className="min-w-0">
-                    <div className="text-[13px] font-medium text-white">Chat Button Placement</div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Choose whether to keep the Party Chat button in the bottom play bar or as a slim tab on the right edge.
-                    </div>
-                  </div>
+                  <div className="text-[13px] font-medium text-white">Chat Button Placement</div>
                   <SegmentedTabs<ChatTriggerPlacement>
                     ariaLabel="Chat Button Placement"
                     size="sm"
@@ -1157,7 +1333,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Subtle Party Sound Cues"
-                  description="Play soft acoustic glass tones when friends join, leave, or ready up (automatically quieter during playback)."
+                  tip="Soft chimes when friends join, leave, or ready up"
                   checked={soundEffectsEnabled}
                   onChange={(enabled) => {
                     setSoundEffectsEnabled(enabled);
@@ -1169,28 +1345,28 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Streamer Mode (Hide Profile Icons)"
-                  description="Hide friend names and profile avatars while streaming or sharing your screen."
+                  tip="Hides friend names and avatars when sharing your screen"
                   checked={hideParticipants}
                   onChange={setHideParticipants}
                 />
 
                 <ComfortSwitchRow
                   title="Private File Titles"
-                  description="Keep your local movie filename private from party servers."
+                  tip="Hides your local movie filename from party servers"
                   checked={hashFilenames}
                   onChange={setHashFilenames}
                 />
 
                 <ComfortSwitchRow
                   title="Auto-fix file differences"
-                  description="Automatically match known frame-rate differences (like 23.976 vs 25 fps) with a one-click Undo."
+                  tip="Matches common frame-rate differences (like 23.976 vs 25 fps) with one-click Undo"
                   checked={autoFixFileMismatch}
                   onChange={setAutoFixFileMismatch}
                 />
 
                 <ComfortSwitchRow
                   title="Start when all ready"
-                  description="Automatically start playback 2 seconds after everyone in the room marks Ready."
+                  tip="Starts playback 2 seconds after everyone marks Ready"
                   checked={startWhenAllReady}
                   onChange={setStartWhenAllReady}
                 />
@@ -1201,7 +1377,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
               <div className="anim-tab-in space-y-2.5">
                 <ComfortSwitchRow
                   title="Enable Voice Chat"
-                  description="Master switch for P2P voice chat in watch parties. Disable to turn off all voice controls and audio workers."
                   checked={voiceEnabled}
                   onChange={(v) => updateVoiceConfig({ voiceEnabled: v })}
                 />
@@ -1432,7 +1607,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <ComfortSwitchRow
                   title="Only When Epilod Is Focused"
-                  description="Restrict voice hotkeys (PTT, mute, deafen) to when Epilod Party is the active foreground window."
+                  tip="Limits push-to-talk, mute, and deafen hotkeys to when Epilod is active"
                   checked={voiceHotkeyScope === "focused"}
                   onChange={(v) => updateVoiceConfig({ hotkeyScope: v ? "focused" : "global" })}
                 />
@@ -1477,30 +1652,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     </div>
                   )}
 
-                  {/* Live dBFS meter with sensitivity marker */}
-                  <div className="relative h-2.5 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className={`h-full transition-[width] duration-75 ${
-                        voiceGateOpen ? "bg-ok" : "bg-white/35"
-                      }`}
-                      style={{
-                        width: `${Math.max(0, Math.min(100, ((voiceLevelDb + 75) / 75) * 100))}%`,
-                      }}
-                    />
-                    <div
-                      className="absolute top-0 bottom-0 w-0.5 bg-accent-soft"
-                      style={{
-                        left: `${Math.max(0, Math.min(100, ((voiceSensitivityDb + 75) / 75) * 100))}%`,
-                      }}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px] text-secondary">
-                    <span>Threshold: {voiceSensitivityDb} dB</span>
-                    <span className={voiceGateOpen ? "text-ok font-medium" : "text-muted"}>
-                      {voiceGateOpen ? "Speaking" : "Gated"} ({Math.round(voiceLevelDb)} dB)
-                    </span>
-                  </div>
+                  <VoiceLevelMeter sensitivityDb={voiceSensitivityDb} />
 
                   <Scrubber
                     ariaLabel="Voice Input Sensitivity"
@@ -1516,18 +1668,16 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   />
                   <ComfortSwitchRow
                     title="Auto-Sensitivity"
-                    description="Continuously adapts threshold to steady room noise."
+                    tip="Adapts mic threshold automatically to background noise"
                     checked={voiceAutoSensitivity}
                     onChange={(v) => updateVoiceConfig({ autoSensitivity: v })}
                   />
                 </div>
 
                 <div className="px-3 py-2 space-y-2">
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
                     <div className="text-[13px] font-medium text-white">AI Noise Cancellation</div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Off preserves raw mic and music bit-for-bit; Balanced removes fans &amp; clicks with natural vocal warmth; Strong applies deep background silence.
-                    </div>
+                    <InfoTipDot tip="Off preserves raw audio; Balanced removes fans; Strong filters heavy noise" />
                   </div>
                   <SegmentedTabs<VoiceNoiseMode>
                     ariaLabel="Noise Cancellation Mode"
@@ -1544,11 +1694,9 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 </div>
 
                 <div className="px-3 py-2 space-y-2">
-                  <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
                     <div className="text-[13px] font-medium text-white">Movie Auto-Ducking</div>
-                    <div className="text-xs text-secondary leading-relaxed mt-0.5">
-                      Smoothly lowers movie volume while friends speak without moving your player slider.
-                    </div>
+                    <InfoTipDot tip="Gently lowers movie volume while friends speak" />
                   </div>
                   <SegmentedTabs<VoiceDuckingMode>
                     ariaLabel="Movie Auto-Ducking"
@@ -1576,7 +1724,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                         Advanced Audio &amp; Network
                       </div>
                       <div className="text-[11px] text-muted">
-                        Compression, echo protection, P2P relay &amp; Voice Health
+                        Echo protection, P2P relay &amp; Voice Health
                       </div>
                     </div>
                     <AppChevronIcon
@@ -1590,52 +1738,19 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                   <AnimatedCollapse open={voiceAdvancedOpen} innerClassName="pt-2 space-y-2.5">
                     <ComfortSwitchRow
-                      title="Dynamic Compression & Loudness Leveling"
-                      description="Evens quiet whispers and sudden laughs toward -18 dBFS without clipping."
-                      checked={voiceCompression}
-                      onChange={(v) => updateVoiceConfig({ compressionEnabled: v })}
+                      title="Echo Protection"
+                      tip="Prevents speaker playback from leaking back into your mic"
+                      checked={voiceEchoGuard || voiceAecEnabled}
+                      onChange={(v) => updateVoiceConfig({ echoGuardEnabled: v, aecEnabled: v })}
                     />
 
                     <ComfortSwitchRow
-                      title="Cinema Mode Tight Gate"
-                      description="Tightens mic sensitivity by +3 dB while the movie is playing to block snacking/breathing."
-                      checked={voiceCinemaTightGate}
-                      onChange={(v) => updateVoiceConfig({ cinemaTightGate: v })}
-                    />
-
-                    <ComfortSwitchRow
-                      title="Subtle Spatial Separation"
-                      description="Gently pans multiple speakers slightly left/right so voices stand apart from center dialogue."
-                      checked={voiceSpatialPan}
-                      onChange={(v) => updateVoiceConfig({ spatialPan: v })}
-                    />
-
-                    <ComfortSwitchRow
-                      title="Speaker Half-Duplex Echo Guard"
-                      description="Detects speaker playback leaking into your mic and softens capture while friends speak."
-                      checked={voiceEchoGuard}
-                      onChange={(v) => updateVoiceConfig({ echoGuardEnabled: v })}
-                    />
-
-                    <ComfortSwitchRow
-                      title="Adaptive Echo Canceller (NLMS)"
-                      description="Experimental pure-Rust adaptive echo cancellation when Windows communications AEC is unavailable."
-                      checked={voiceAecEnabled}
-                      onChange={(v) => updateVoiceConfig({ aecEnabled: v })}
-                    />
-
-                    <ComfortSwitchRow
-                      title="Relay Voice for Strict-NAT Friends"
-                      description="Allow your open network to forward encrypted voice for up to 2 blocked peers (decrypted per hop in RAM)."
-                      checked={voiceAllowRelayForOthers}
-                      onChange={(v) => updateVoiceConfig({ allowRelayForOthers: v })}
-                    />
-
-                    <ComfortSwitchRow
-                      title="Allow My Voice to Be Relayed"
-                      description="Permit a room peer to forward your voice if direct UDP between you and another friend is blocked."
-                      checked={voiceAllowRelayedVoice}
-                      onChange={(v) => updateVoiceConfig({ allowRelayedVoice: v })}
+                      title="Allow P2P Voice Relay"
+                      tip="Relays encrypted voice through room peers if strict routers block direct connections"
+                      checked={voiceAllowRelayForOthers && voiceAllowRelayedVoice}
+                      onChange={(v) =>
+                        updateVoiceConfig({ allowRelayForOthers: v, allowRelayedVoice: v })
+                      }
                     />
 
                     <div className="ep-glass-tray rounded-xl px-3 py-2.5 space-y-2 text-[11px]">
@@ -1706,6 +1821,450 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       )}
                     </div>
                   </AnimatedCollapse>
+                </div>
+              </div>
+            )}
+
+            {tab === "storage" && (
+              <div className="anim-tab-in space-y-4">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                      Disk Usage
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {isDesktop() && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void storageOpenUserdataFolder().catch((err) =>
+                              pushNote("error", String(err)),
+                            )
+                          }
+                          className="text-[11px] text-secondary hover:text-white cursor-pointer"
+                        >
+                          Open data folder
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void refreshStorageStats()}
+                        disabled={storageLoading}
+                        className="text-[11px] text-secondary hover:text-white cursor-pointer disabled:opacity-50"
+                      >
+                        {storageLoading ? "Refreshing…" : "Refresh"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="ep-glass-well rounded-2xl divide-y divide-white/[0.06]">
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-white">Your Data</div>
+                        <div className="text-[11px] text-secondary truncate">
+                          Ratings, watched progress, resume &amp; preferences
+                        </div>
+                      </div>
+                      <span className="text-xs font-medium text-primary num shrink-0">
+                        {storageStats ? formatBytesCompact(storageStats.userdataBytes) : "—"}
+                      </span>
+                    </div>
+
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-white">Seekbar Thumbnails</div>
+                        <div className="text-[11px] text-secondary">
+                          {storageStats
+                            ? `${storageStats.thumbsFiles} sprites · capped at ${thumbCacheCapMb} MB`
+                            : "Regenerates automatically on scrub"}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs font-medium text-secondary num">
+                          {storageStats ? formatBytesCompact(storageStats.thumbsBytes) : "—"}
+                        </span>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={storageBusyAction !== null}
+                          onClick={async () => {
+                            setStorageBusyAction("thumbs");
+                            try {
+                              await storageClearCache("thumbs");
+                              clearThumbnailCache();
+                              await refreshStorageStats();
+                              pushNote("info", "Cleared seekbar thumbnail cache.");
+                            } finally {
+                              setStorageBusyAction(null);
+                            }
+                          }}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-white">Subtitle Cache</div>
+                        <div className="text-[11px] text-secondary">
+                          {storageStats
+                            ? `${storageStats.subtitlesFiles} cached files`
+                            : "Downloaded & shared subtitle files"}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs font-medium text-secondary num">
+                          {storageStats ? formatBytesCompact(storageStats.subtitlesBytes) : "—"}
+                        </span>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={storageBusyAction !== null}
+                          onClick={async () => {
+                            setStorageBusyAction("subtitles");
+                            try {
+                              await storageClearCache("subtitles");
+                              await refreshStorageStats();
+                              pushNote("info", "Cleared subtitle cache.");
+                            } finally {
+                              setStorageBusyAction(null);
+                            }
+                          }}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-white">Other Cache &amp; Updates</div>
+                        <div className="text-[11px] text-secondary">
+                          Update packages &amp; temporary logs
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs font-medium text-secondary num">
+                          {storageStats ? formatBytesCompact(storageStats.otherCacheBytes) : "—"}
+                        </span>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={storageBusyAction !== null}
+                          onClick={async () => {
+                            setStorageBusyAction("all");
+                            try {
+                              await storageClearCache("all");
+                              clearThumbnailCache();
+                              clearLocalMatchCache();
+                              await refreshStorageStats();
+                              pushNote("success", "Cleared all regenerable caches.");
+                            } finally {
+                              setStorageBusyAction(null);
+                            }
+                          }}
+                        >
+                          Clear all
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                      Thumbnail Cache Limit
+                    </span>
+                    <span className="text-[11px] text-secondary">
+                      Unused sprites expire after 21 days
+                    </span>
+                  </div>
+                  <SegmentedTabs<"12" | "24" | "50" | "100">
+                    ariaLabel="Thumbnail cache limit"
+                    size="sm"
+                    fullWidth
+                    value={
+                      ([12, 24, 50, 100].includes(thumbCacheCapMb)
+                        ? String(thumbCacheCapMb)
+                        : "24") as "12" | "24" | "50" | "100"
+                    }
+                    onChange={(mbStr) => {
+                      const mb = Number(mbStr);
+                      setThumbCacheCapMb(mb);
+                      void storageSetThumbCapMb(mb)
+                        .then(() => refreshStorageStats())
+                        .catch(() => undefined);
+                    }}
+                    items={[
+                      { value: "12", label: "12 MB" },
+                      { value: "24", label: "24 MB" },
+                      { value: "50", label: "50 MB" },
+                      { value: "100", label: "100 MB" },
+                    ]}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                      Backup &amp; Restore
+                    </span>
+                    <span className="text-[11px] text-muted">
+                      Passwords &amp; API keys excluded
+                    </span>
+                  </div>
+
+                  <div className="ep-glass-well rounded-2xl divide-y divide-white/[0.06]">
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-white">Manual Backup</div>
+                        <div className="text-[11px] text-secondary truncate">
+                          Save or load a .epilodbackup file
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={storageBusyAction !== null}
+                          onClick={async () => {
+                            setStorageBusyAction("export");
+                            try {
+                              const payload = buildBackupEnvelopeJson(
+                                updateStatus?.currentVersion ?? "0.1.5",
+                              );
+                              const dateTag = new Date().toISOString().slice(0, 10);
+                              const defaultName = `epilod-party-backup-${dateTag}.epilodbackup`;
+                              if (isDesktop()) {
+                                const path = await saveDialog({
+                                  title: "Export Epilod Party Backup",
+                                  defaultPath: defaultName,
+                                  filters: [{ name: "Epilod Backup", extensions: ["epilodbackup", "json"] }],
+                                });
+                                if (!path) return;
+                                await storageExportBackup(path, payload);
+                              } else {
+                                const blob = new Blob([payload], { type: "application/json" });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url;
+                                a.download = defaultName;
+                                document.body.appendChild(a);
+                                a.click();
+                                a.remove();
+                                URL.revokeObjectURL(url);
+                              }
+                              pushNote("success", "Backup exported cleanly.");
+                            } catch (err) {
+                              pushNote("error", err instanceof Error ? err.message : String(err));
+                            } finally {
+                              setStorageBusyAction(null);
+                            }
+                          }}
+                        >
+                          Export
+                        </Button>
+
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={storageBusyAction !== null}
+                          onClick={async () => {
+                            if (isDesktop()) {
+                              try {
+                                const selected = await openDialog({
+                                  title: "Restore Epilod Party Backup",
+                                  multiple: false,
+                                  filters: [{ name: "Epilod Backup", extensions: ["epilodbackup", "json"] }],
+                                });
+                                if (typeof selected !== "string" || !selected) return;
+                                const raw = await storageImportBackup(selected);
+                                const summary = parseAndValidateBackup(raw);
+                                setPendingRestore({
+                                  summary,
+                                  sourceLabel: selected.split(/[\\/]/).pop() || selected,
+                                });
+                              } catch (err) {
+                                pushNote("error", err instanceof Error ? err.message : String(err));
+                              }
+                            } else {
+                              browserBackupInputRef.current?.click();
+                            }
+                          }}
+                        >
+                          Import
+                        </Button>
+
+                        <input
+                          ref={browserBackupInputRef}
+                          id="ep-restore-backup-file"
+                          name="restoreBackupFile"
+                          type="file"
+                          accept=".epilodbackup,.json,application/json"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = "";
+                            if (!file) return;
+                            void file.text().then((raw) => {
+                              try {
+                                const summary = parseAndValidateBackup(raw);
+                                setPendingRestore({ summary, sourceLabel: file.name });
+                              } catch (err) {
+                                pushNote("error", err instanceof Error ? err.message : String(err));
+                              }
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-white">Restore Mode</div>
+                        <div className="text-[11px] text-secondary truncate">
+                          {restoreMode === "merge"
+                            ? "Merges with existing data (newest wins)"
+                            : "Replaces current ratings, progress & settings"}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        <SegmentedTabs<"merge" | "replace">
+                          ariaLabel="Backup restore mode"
+                          size="sm"
+                          value={restoreMode}
+                          onChange={setRestoreMode}
+                          items={[
+                            { value: "merge", label: "Merge" },
+                            { value: "replace", label: "Replace" },
+                          ]}
+                        />
+                      </div>
+                    </div>
+
+                    {pendingRestore && (
+                      <div className="px-3.5 py-2.5 bg-white/[0.03] flex items-center justify-between gap-3 anim-pop-in">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="text-xs font-semibold text-white truncate">
+                            Ready to {restoreMode}: {pendingRestore.sourceLabel}
+                          </div>
+                          <div className="text-[11px] text-secondary truncate">
+                            {new Date(pendingRestore.summary.envelope.createdAt).toLocaleDateString()} ·{" "}
+                            {pendingRestore.summary.ratingsCount} ratings · {pendingRestore.summary.seriesCount} shows ·{" "}
+                            {pendingRestore.summary.resumeCount} resume · {pendingRestore.summary.roomsCount} rooms
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            disabled={storageBusyAction !== null}
+                            onClick={async () => {
+                              setStorageBusyAction("restore");
+                              try {
+                                await applyBackupEnvelope(pendingRestore.summary.envelope, restoreMode);
+                                setPendingRestore(null);
+                                await refreshStorageStats();
+                                pushNote(
+                                  "success",
+                                  `Restored backup (${restoreMode === "merge" ? "merged" : "replaced"}).`,
+                                );
+                              } catch (err) {
+                                pushNote("error", err instanceof Error ? err.message : String(err));
+                              } finally {
+                                setStorageBusyAction(null);
+                              }
+                            }}
+                          >
+                            Confirm {restoreMode === "merge" ? "Merge" : "Replace"}
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setPendingRestore(null)}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                      Automatic Snapshots (Last 3)
+                    </span>
+                    <button
+                      type="button"
+                      disabled={storageBusyAction !== null}
+                      onClick={async () => {
+                        setStorageBusyAction("snapshot");
+                        try {
+                          const payload = buildBackupEnvelopeJson(updateStatus?.currentVersion ?? "0.1.5");
+                          await storageCreateSnapshot("manual", payload);
+                          await refreshStorageStats();
+                          pushNote("success", "Saved local snapshot.");
+                        } catch (err) {
+                          pushNote("error", err instanceof Error ? err.message : String(err));
+                        } finally {
+                          setStorageBusyAction(null);
+                        }
+                      }}
+                      className="text-[11px] text-accent-soft hover:text-white cursor-pointer disabled:opacity-50"
+                    >
+                      Snapshot now
+                    </button>
+                  </div>
+
+                  <div className="ep-glass-well rounded-2xl divide-y divide-white/[0.06]">
+                    {storageStats && storageStats.snapshots.length > 0 ? (
+                      storageStats.snapshots.map((snap) => (
+                        <div
+                          key={snap.fileName}
+                          className="px-3.5 py-2 flex items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-medium text-white truncate">
+                                {new Date(snap.createdAtSecs * 1000).toLocaleString()}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10px] font-medium text-secondary">
+                                {snap.reason}
+                              </span>
+                            </div>
+                            <div className="text-[10.5px] text-muted num">
+                              {formatBytesCompact(snap.sizeBytes)}
+                            </div>
+                          </div>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={storageBusyAction !== null}
+                            onClick={async () => {
+                              try {
+                                const raw = await storageReadSnapshot(snap.fileName);
+                                const summary = parseAndValidateBackup(raw);
+                                setPendingRestore({ summary, sourceLabel: snap.fileName });
+                              } catch (err) {
+                                pushNote("error", err instanceof Error ? err.message : String(err));
+                              }
+                            }}
+                          >
+                            Restore
+                          </Button>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="px-3.5 py-3 text-xs text-muted">
+                        Weekly and pre-update snapshots appear here automatically.
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1919,18 +2478,33 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     </div>
                 </div>
 
-                <div className="pt-0.5 space-y-0.5">
-                  <ComfortSwitchRow
-                    title="Automatic updates"
-                    description="Automatically download and verify new updates in the background so they are ready to install in one click."
-                    checked={autoDownloadUpdates}
-                    onChange={setAutoDownloadUpdates}
-                  />
-                  <ComfortSwitchRow
-                    title="Check for updates automatically"
-                    description="Quietly check GitHub Releases on launch and periodically while the app is open."
-                    checked={autoCheckUpdates}
-                    onChange={setAutoCheckUpdates}
+                <div className="px-3 py-2 space-y-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <div className="text-[13px] font-medium text-white">App Updates</div>
+                    <InfoTipDot tip="Auto installs updates in the background; Notify checks and lets you download manually" />
+                  </div>
+                  <SegmentedTabs<"auto" | "notify" | "manual">
+                    ariaLabel="App update behavior"
+                    size="sm"
+                    fullWidth
+                    value={autoDownloadUpdates ? "auto" : autoCheckUpdates ? "notify" : "manual"}
+                    items={[
+                      { value: "auto", label: "Auto" },
+                      { value: "notify", label: "Notify" },
+                      { value: "manual", label: "Manual" },
+                    ]}
+                    onChange={(mode) => {
+                      if (mode === "auto") {
+                        setAutoCheckUpdates(true);
+                        setAutoDownloadUpdates(true);
+                      } else if (mode === "notify") {
+                        setAutoCheckUpdates(true);
+                        setAutoDownloadUpdates(false);
+                      } else {
+                        setAutoCheckUpdates(false);
+                        setAutoDownloadUpdates(false);
+                      }
+                    }}
                   />
                 </div>
               </div>
@@ -1938,89 +2512,38 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
             {tab === "server" && (
               <div className="anim-tab-in space-y-4">
-                <div className="space-y-1.5">
-                  <div className="text-xs font-medium text-white">Sync Backend Preset</div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEndpointDraft(SYNCPLAY_ENDPOINT);
-                        setCustomEndpointOpen(false);
-                        setEndpointError(null);
-                      }}
-                      className={`rounded-lg border px-3 py-2 text-left transition cursor-pointer ${
-                        !customEndpointOpen &&
-                        endpointDraft.trim().toLowerCase() === SYNCPLAY_ENDPOINT.toLowerCase()
-                          ? "border-accent bg-accent/15 text-white"
-                          : "border-white/10 bg-white/[0.03] text-secondary hover:border-white/20 hover:text-white"
-                      }`}
-                    >
-                      <div className="text-xs font-medium">Syncplay Public</div>
-                      <div className="text-[11px] opacity-75">Default · Port 8999</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEndpointDraft(CLOUD_ENDPOINT);
-                        setCustomEndpointOpen(false);
-                        setEndpointError(null);
-                      }}
-                      className={`ep-press rounded-lg border px-3 py-2 text-left transition-all duration-200 cursor-pointer ${
-                        !customEndpointOpen &&
-                        endpointDraft.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase()
-                          ? "border-accent bg-accent/15 text-white"
-                          : "border-white/10 bg-white/[0.03] text-secondary hover:border-white/20 hover:text-white"
-                      }`}
-                    >
-                      <div className="text-xs font-medium">Epilod Cloud</div>
-                      <div className="text-[11px] opacity-75">Cloudflare Edge · TLS</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCustomEndpointOpen(true);
-                        if (
-                          endpointDraft.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase()
-                        ) {
-                          setEndpointDraft("");
-                        }
-                        setEndpointError(null);
-                      }}
-                      className={`ep-press rounded-lg border px-3 py-2 text-left transition-all duration-200 cursor-pointer ${
-                        customEndpointOpen
-                          ? "border-accent bg-accent/15 text-white"
-                          : "border-white/10 bg-white/[0.03] text-secondary hover:border-white/20 hover:text-white"
-                      }`}
-                    >
-                      <div className="text-xs font-medium">Custom Server</div>
-                      <div className="text-[11px] opacity-75">Self-hosted / Other</div>
-                    </button>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-1.5">
+                    <div className="text-xs font-medium text-white">Sync Backend</div>
+                    <InfoTipDot tip="Friends in the same room must use the same server." />
+                  </div>
+                  <SegmentedTabs<"syncplay" | "cloud">
+                    ariaLabel="Sync Backend"
+                    size="sm"
+                    fullWidth
+                    value={selectedBackend}
+                    items={[
+                      {
+                        value: "syncplay",
+                        label: "Syncplay Public",
+                        title: "Default · syncplay.pl:8999",
+                      },
+                      {
+                        value: "cloud",
+                        label: "Epilod Cloud",
+                        title: "Cloudflare Edge · TLS",
+                      },
+                    ]}
+                    onChange={(mode) => {
+                      setEndpointDraft(mode === "cloud" ? CLOUD_ENDPOINT : SYNCPLAY_ENDPOINT);
+                    }}
+                  />
+                  <div className="text-[11px] text-secondary px-1">
+                    {selectedBackend === "cloud"
+                      ? "Cloudflare Edge · TLS"
+                      : "Default · syncplay.pl:8999"}
                   </div>
                 </div>
-
-                <AnimatedCollapse open={customEndpointOpen}>
-                  <TextField
-                    label="Sync Server Address"
-                    value={endpointDraft}
-                    placeholder={DEFAULT_ENDPOINT}
-                    onChange={(e) => {
-                      setEndpointDraft(e.target.value);
-                      if (endpointError) setEndpointError(null);
-                    }}
-                    error={endpointError}
-                    hint="Syncplay (host:port) or Epilod Cloud (wss://host). Friends in the same room must use the same server."
-                  />
-                </AnimatedCollapse>
-                <AnimatedCollapse open={!customEndpointOpen}>
-                  <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-[11.5px] text-secondary">
-                    Connected provider:{" "}
-                    <span className="font-medium text-white">
-                      {endpointDraft.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase()
-                        ? "Epilod Cloud"
-                        : "Syncplay Public"}
-                    </span>
-                  </div>
-                </AnimatedCollapse>
 
                 <TextField
                   label="Server / Room Password (Optional)"
@@ -2038,7 +2561,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     size="sm"
                     onClick={() => {
                       setEndpointDraft(DEFAULT_ENDPOINT);
-                      setEndpointError(null);
                     }}
                   >
                     <AppResetIcon size={13} />
@@ -2128,7 +2650,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
               <div className="anim-tab-in space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] text-muted truncate">
-                    {logsPath || "In-memory session log (latest 150 events)"}
+                    {logsPath || "Session log"}
                   </p>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <Button

@@ -23,9 +23,9 @@ export function GlassSwitchTrack({
 
   return (
     <span
-      className={`ep-switch-track ${trackSize} rounded-full p-0.5 flex items-center shrink-0 ${
+      className={`ep-switch-track ${trackSize} rounded-full p-0.5 flex items-center shrink-0 overflow-hidden ${
         checked
-          ? "bg-accent shadow-[0_0_12px_-2px_rgba(124,58,237,0.45)]"
+          ? "bg-accent shadow-[0_0_12px_-2px_rgba(124,58,237,0.45)] hover:ring-1 hover:ring-white/25"
           : "bg-white/15"
       } ${className}`}
     >

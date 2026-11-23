@@ -182,7 +182,6 @@ interface VoiceState {
   setJoining: (joining: boolean) => void;
   setMuted: (muted: boolean) => void;
   setDeafened: (deafened: boolean) => void;
-  setPttActive: (pttActive: boolean) => void;
   applyLocalState: (muted: boolean, deafened: boolean, pttActive?: boolean) => void;
   flashMicCue: (muted: boolean) => void;
   clearMicCue: () => void;
@@ -307,7 +306,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     });
     void voiceSetDeafen(deafened).catch(() => undefined);
   },
-  setPttActive: (pttActive) => set({ pttActive }),
   applyLocalState: (muted, deafened, pttActive) =>
     set((s) => ({
       muted,
@@ -439,5 +437,6 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       speakingPeers: [],
       roster: [],
       micCue: null,
+      calibration: null,
     }),
 }));

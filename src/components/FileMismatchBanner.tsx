@@ -51,11 +51,13 @@ export function FileMismatchBanner({
   const presence = usePresencePayload(mismatch, 180);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const mismatchSig = mismatch?.signature ?? null;
   useEffect(() => {
     setSelectedIdx(0);
     setPickerOpen(false);
+    setDetailsOpen(false);
   }, [mismatchSig, localMatches.length]);
 
   if (!presence.mounted || !presence.value) {
@@ -85,6 +87,15 @@ export function FileMismatchBanner({
     item.sourceRelation === "differentCut" &&
     Boolean(onAlignScene);
 
+  const hasPrimaryFix = Boolean(
+    item.matchedPlaylistItem || activeLocalMatch || showFpsButton || showAlignButton,
+  );
+  const showInlineSeasonFolder =
+    !hasPrimaryFix && item.kind === "notOpenOnPc" && Boolean(onChooseFolder);
+  const hasSecondaryDetails = Boolean(
+    (item.localChip && item.peerChip) || activeLocalMatch || hasPrimaryFix,
+  );
+
   return (
     <div
       role="alert"
@@ -103,8 +114,8 @@ export function FileMismatchBanner({
             : "pointer-events-auto anim-fade-slide-up"
         }`}
       >
-        <div className="ep-warning-badge h-8 w-8 rounded-full flex items-center justify-center text-warn shrink-0 mt-0.5">
-          <AppAlertIcon variant="warn" size={16} />
+        <div className="ep-warning-badge h-7 w-7 rounded-full flex items-center justify-center text-warn shrink-0 mt-0.5">
+          <AppAlertIcon variant="warn" size={15} />
         </div>
 
         <div className="min-w-0 flex-1 space-y-1.5">
@@ -120,7 +131,7 @@ export function FileMismatchBanner({
                   </span>
                 )}
               </div>
-              <p className="text-[11.5px] text-secondary leading-snug mt-0.5">{item.message}</p>
+              <p className="text-[11px] text-secondary leading-snug mt-0.5 truncate">{item.message}</p>
             </div>
 
             <button
@@ -134,30 +145,7 @@ export function FileMismatchBanner({
             </button>
           </div>
 
-          {item.localChip && item.peerChip && (
-            <div className="flex items-center gap-1.5 text-[10.5px] min-w-0">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/[0.08] text-secondary min-w-0 max-w-[46%]">
-                <span className="text-muted shrink-0">Your PC:</span>
-                <span
-                  className="truncate text-primary/90 font-medium"
-                  title={item.localChipTitle ?? undefined}
-                >
-                  {item.localChip}
-                </span>
-              </span>
-              <span className="inline-flex items-center text-muted/75 shrink-0" aria-hidden="true">
-                <PartyMismatchIcon size={13} />
-              </span>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-warn/10 border border-warn/25 text-warn min-w-0 max-w-[48%]">
-                <span className="opacity-80 shrink-0">{item.peerChipOwner}:</span>
-                <span className="truncate font-medium" title={item.peerChipTitle ?? undefined}>
-                  {item.peerChip}
-                </span>
-              </span>
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {item.matchedPlaylistItem && onSwitchEpisode && (
               <button
                 type="button"
@@ -175,7 +163,7 @@ export function FileMismatchBanner({
                   type="button"
                   title={`${activeLocalMatch.path}\n${activeLocalMatch.reason}`}
                   onClick={() => onOpenLocalMatch(activeLocalMatch)}
-                  className="ep-warning-action ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-semibold text-white cursor-pointer max-w-[270px]"
+                  className="ep-warning-action ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-semibold text-white cursor-pointer max-w-[260px]"
                 >
                   <PlayerPlayIcon size={11} className="shrink-0" />
                   <span className="truncate">
@@ -189,7 +177,7 @@ export function FileMismatchBanner({
                     type="button"
                     onClick={() => setPickerOpen((v) => !v)}
                     aria-expanded={pickerOpen}
-                    className="ep-bar-pill h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium text-secondary hover:text-white cursor-pointer"
+                    className="ep-bar-pill ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium text-secondary hover:text-white cursor-pointer"
                   >
                     <span>{localMatches.length} matches</span>
                     <AppChevronIcon
@@ -232,42 +220,92 @@ export function FileMismatchBanner({
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={onChooseFile}
-              className={`${
-                item.matchedPlaylistItem || activeLocalMatch || showFpsButton || showAlignButton
-                  ? "ep-bar-pill text-secondary hover:text-white"
-                  : "ep-warning-action ep-press text-white font-semibold"
-              } h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer`}
-            >
-              <AppFolderIcon size={12} />
-              <span>
-                {item.kind === "notOpenOnPc" ? "Open Video…" : "Choose Different Video…"}
-              </span>
-            </button>
-
-            {item.kind === "notOpenOnPc" &&
-              !item.matchedPlaylistItem &&
-              !activeLocalMatch &&
-              onChooseFolder && (
+            {!hasPrimaryFix && (
+              <>
                 <button
                   type="button"
-                  onClick={onChooseFolder}
-                  className="ep-bar-pill h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+                  onClick={onChooseFile}
+                  className="ep-warning-action ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-semibold text-white cursor-pointer"
                 >
-                  <AppSeasonFolderIcon size={12} />
-                  <span>Season Folder…</span>
+                  <AppFolderIcon size={12} />
+                  <span>{item.kind === "notOpenOnPc" ? "Open Video…" : "Choose Different Video…"}</span>
                 </button>
-              )}
+                {showInlineSeasonFolder && (
+                  <button
+                    type="button"
+                    onClick={onChooseFolder}
+                    className="ep-bar-pill ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+                  >
+                    <AppSeasonFolderIcon size={12} />
+                    <span>Season Folder…</span>
+                  </button>
+                )}
+              </>
+            )}
+
+            {hasSecondaryDetails && (
+              <button
+                type="button"
+                aria-expanded={detailsOpen}
+                onClick={() => setDetailsOpen((v) => !v)}
+                className="ep-bar-pill ep-press h-6.5 px-2 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium text-secondary hover:text-white cursor-pointer"
+              >
+                <span>{detailsOpen ? "Less" : "Details"}</span>
+                <AppChevronIcon
+                  direction="right"
+                  size={10}
+                  className={`transition-transform duration-150 ${detailsOpen ? "rotate-90" : ""}`}
+                />
+              </button>
+            )}
           </div>
 
-          {activeLocalMatch && (
-            <div className="text-[10.5px] text-secondary/90 truncate">
-              Found in <span className="text-primary">{activeLocalMatch.folderLabel}</span> ·{" "}
-              {activeLocalMatch.reason}
-            </div>
-          )}
+          <AnimatedCollapse open={detailsOpen} innerClassName="pt-1 space-y-1.5">
+            {item.localChip && item.peerChip && (
+              <div className="flex items-center gap-1.5 text-[10.5px] min-w-0">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/[0.08] text-secondary min-w-0 max-w-[46%]">
+                  <span className="text-muted shrink-0">Your PC:</span>
+                  <span
+                    className="truncate text-primary/90 font-medium"
+                    title={item.localChipTitle ?? undefined}
+                  >
+                    {item.localChip}
+                  </span>
+                </span>
+                <span className="inline-flex items-center text-muted/75 shrink-0" aria-hidden="true">
+                  <PartyMismatchIcon size={13} />
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-warn/10 border border-warn/25 text-warn min-w-0 max-w-[48%]">
+                  <span className="opacity-80 shrink-0">{item.peerChipOwner}:</span>
+                  <span className="truncate font-medium" title={item.peerChipTitle ?? undefined}>
+                    {item.peerChip}
+                  </span>
+                </span>
+              </div>
+            )}
+
+            {activeLocalMatch && (
+              <div className="text-[10.5px] text-secondary/90 truncate">
+                Found in <span className="text-primary">{activeLocalMatch.folderLabel}</span> ·{" "}
+                {activeLocalMatch.reason}
+              </div>
+            )}
+
+            {hasPrimaryFix && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={onChooseFile}
+                  className="ep-bar-pill ep-press h-6.5 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
+                >
+                  <AppFolderIcon size={12} />
+                  <span>
+                    {item.kind === "notOpenOnPc" ? "Open Video…" : "Choose Different Video…"}
+                  </span>
+                </button>
+              </div>
+            )}
+          </AnimatedCollapse>
 
           <AnimatedCollapse
             open={pickerOpen && localMatches.length > 1}

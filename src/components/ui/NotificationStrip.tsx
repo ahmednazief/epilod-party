@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppCloseIcon } from "./AppIcons";
 import { prefersReducedMotion } from "../../lib/useAnimatedPresence";
 import {
@@ -34,8 +34,17 @@ export function NotificationStrip({
     items.map((item) => ({ item, exiting: false })),
   );
 
+  const exitTimersRef = useRef<Map<number, number>>(new Map());
+
   useEffect(() => {
     const activeIds = new Set(items.map((i) => i.id));
+    for (const id of activeIds) {
+      const existingTimer = exitTimersRef.current.get(id);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        exitTimersRef.current.delete(id);
+      }
+    }
     setEntries((prev) => {
       const next: RenderedNotification[] = [];
       const seen = new Set<number>();
@@ -61,14 +70,27 @@ export function NotificationStrip({
 
   useEffect(() => {
     if (!exitingKey) return;
-    const activeIds = new Set(items.map((i) => i.id));
-    const timer = window.setTimeout(() => {
-      setEntries((prev) =>
-        prev.filter((entry) => !entry.exiting || activeIds.has(entry.item.id)),
-      );
-    }, 175);
-    return () => window.clearTimeout(timer);
-  }, [exitingKey, items]);
+    for (const id of exitingIds) {
+      if (exitTimersRef.current.has(id)) continue;
+      const timer = window.setTimeout(() => {
+        exitTimersRef.current.delete(id);
+        const activeIdsNow = new Set(useNotificationStore.getState().items.map((i) => i.id));
+        setEntries((prev) =>
+          prev.filter((entry) => entry.item.id !== id || activeIdsNow.has(entry.item.id)),
+        );
+      }, 175);
+      exitTimersRef.current.set(id, timer);
+    }
+  }, [exitingKey]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of exitTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      exitTimersRef.current.clear();
+    };
+  }, []);
 
   if (entries.length === 0) {
     return null;
@@ -79,7 +101,7 @@ export function NotificationStrip({
       className={
         inline
           ? "pointer-events-none flex flex-col items-center gap-1.5 max-w-md w-full"
-          : `pointer-events-none fixed left-1/2 -translate-x-1/2 z-[45] flex flex-col items-center gap-1.5 max-w-md w-full px-4 transition-[top] duration-300 ${
+          : `pointer-events-none fixed left-1/2 -translate-x-1/2 z-[65] flex flex-col items-center gap-1.5 max-w-md w-full px-4 transition-[top] duration-300 ${
               belowTitleBar ? "top-14" : "top-4"
             }`
       }

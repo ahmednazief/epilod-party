@@ -16,6 +16,7 @@ export function computeRoomSyncHealth(params: {
   localUsername: string;
   localLoaded: boolean;
   localPositionSecs: number;
+  roomPositionSecs?: number | null;
   timelineOffsetSecs?: number;
   timelineScale?: number;
   timelineSegments?: readonly TimelineSegment[];
@@ -26,6 +27,7 @@ export function computeRoomSyncHealth(params: {
     localUsername,
     localLoaded,
     localPositionSecs,
+    roomPositionSecs,
     timelineOffsetSecs = 0,
     timelineScale = 1,
     timelineSegments,
@@ -101,11 +103,23 @@ export function computeRoomSyncHealth(params: {
       continue;
     }
     // Syncplay's user list reports position 0 for peers (real position travels only in playstate
-    // messages), so 0 means "unknown" and must not be compared against our own position.
-    if (!Number.isFinite(peer.position) || peer.position <= 0) {
+    // messages), and Cloud snapshots emit 0 (reporting live delta in lagSecs), so 0 means
+    // "no per-peer snapshot position".
+    let drift = 0;
+    if (Number.isFinite(peer.position) && peer.position > 0) {
+      drift = Math.abs(localRoomPos - peer.position);
+    } else if (
+      typeof roomPositionSecs === "number" &&
+      Number.isFinite(roomPositionSecs) &&
+      roomPositionSecs > 0
+    ) {
+      const peerLag =
+        typeof peer.lagSecs === "number" && Number.isFinite(peer.lagSecs) ? peer.lagSecs : 0;
+      const peerRoomPos = roomPositionSecs - peerLag;
+      drift = Math.abs(localRoomPos - peerRoomPos);
+    } else {
       continue;
     }
-    const drift = Math.abs(localRoomPos - peer.position);
     if (drift > maxDriftSecs) {
       maxDriftSecs = drift;
     }
@@ -129,21 +143,27 @@ export interface ParticipantDriftInfo {
 }
 
 export function computeParticipantDrift(
-  participant: Pick<Participant, "fileName" | "fileMatch" | "position">,
+  participant: Pick<Participant, "fileName" | "fileMatch" | "position" | "lagSecs">,
   referencePositionSecs: number,
 ): ParticipantDriftInfo | null {
   if (!participant.fileName || participant.fileMatch === "noFile") {
     return null;
   }
-  if (
-    !Number.isFinite(participant.position) ||
-    participant.position <= 0 ||
-    !Number.isFinite(referencePositionSecs) ||
-    referencePositionSecs <= 0
+  let deltaSecs: number | null = null;
+  if (typeof participant.lagSecs === "number" && Number.isFinite(participant.lagSecs)) {
+    // Cloud server computes lagSecs = roomPos - reportedPosition; positive lag means peer is behind.
+    deltaSecs = -participant.lagSecs;
+  } else if (
+    Number.isFinite(participant.position) &&
+    participant.position > 0 &&
+    Number.isFinite(referencePositionSecs) &&
+    referencePositionSecs > 0
   ) {
+    deltaSecs = participant.position - referencePositionSecs;
+  }
+  if (deltaSecs === null) {
     return null;
   }
-  const deltaSecs = participant.position - referencePositionSecs;
   const absSecs = Math.abs(deltaSecs);
   const level: "ok" | "warn" | "bad" = absSecs < 0.5 ? "ok" : absSecs < 2.0 ? "warn" : "bad";
   const sign = deltaSecs >= 0 ? "+" : "-";

@@ -33,6 +33,9 @@ pub async fn connect_and_run_ipc<F>(
     volume_reassert_cb: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     file_loaded_cb: Arc<dyn Fn() + Send + Sync>,
     vo_ready_cb: Arc<dyn Fn(bool) + Send + Sync>,
+    buffering: Arc<AtomicBool>,
+    seek_lead_ms: Arc<AtomicU64>,
+    last_seek_at: Arc<Mutex<Option<Instant>>>,
     check_child_exited: F,
 ) -> String
 where
@@ -71,6 +74,7 @@ where
         encode_observe(6, 6, "chapter-list"),
         encode_observe(7, 7, "seeking"),
         encode_observe(8, 8, "vo-configured"),
+        encode_observe(9, 9, "paused-for-cache"),
     ];
     for c in init_cmds {
         if writer_half.write_all(c.as_bytes()).await.is_err() {
@@ -152,6 +156,22 @@ where
                         if all_restarted {
                             ui_time_throttle.reset();
                             let _ = app.emit("mpv://seek-settled", ());
+                            if let Ok(mut g) = last_seek_at.lock() {
+                                if let Some(started) = g.take() {
+                                    let elapsed = started.elapsed();
+                                    if elapsed <= Duration::from_millis(1500) {
+                                        let sample_ms = (elapsed.as_millis() as u64).min(500);
+                                        let prev = seek_lead_ms.load(Ordering::Acquire);
+                                        let next = if prev == 0 {
+                                            sample_ms
+                                        } else {
+                                            ((prev as f64) * 0.7 + (sample_ms as f64) * 0.3).round()
+                                                as u64
+                                        };
+                                        seek_lead_ms.store(next, Ordering::Release);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -198,6 +218,9 @@ where
                         snap.paused = paused;
                     }
                     let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
+                }
+                MpvEvent::PausedForCache(b) => {
+                    buffering.store(b, Ordering::Release);
                 }
                 MpvEvent::EofReached(eof) => {
                     if !eof {
