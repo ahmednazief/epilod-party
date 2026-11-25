@@ -1493,6 +1493,135 @@ export function PlayerCollapseRightIcon({ size = 15, className = "" }: PlayerIco
 }
 
 /**
+ * Leftward dock-collapse glyph for the Left Party Lounge.
+ */
+export function PlayerCollapseLeftIcon({ size = 15, className = "" }: PlayerIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path d="M18.5 12H10" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+      <path
+        d="M13.5 8.2L9.7 12L13.5 15.8"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M6 5.5V18.5" stroke="currentColor" strokeOpacity="0.85" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * Custom Liquid-Glass Left Party & Voice Lounge icon with sculpted theater frame,
+ * luminous docked lounge column, and active Royal Purple crystal refraction.
+ */
+export function PartyDockLeftIcon({
+  size = 15,
+  active = false,
+  className = "",
+}: PlayerIconProps & { active?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const gradId = `ep-dock-left-fill-${uid}`;
+  const sheenId = `ep-dock-left-sheen-${uid}`;
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={gradId} x1="4" y1="5" x2="12" y2="19" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.96" />
+          <stop offset="55%" stopColor="#E9D5FF" stopOpacity="0.90" />
+          <stop offset="100%" stopColor="#A78BFA" stopOpacity="0.94" />
+        </linearGradient>
+        <linearGradient id={sheenId} x1="3" y1="4" x2="18" y2="14" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.34" />
+          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+
+      <rect
+        x="2.8"
+        y="4.2"
+        width="18.4"
+        height="15.6"
+        rx="4.2"
+        fill="currentColor"
+        fillOpacity={active ? "0.10" : "0.05"}
+        stroke="currentColor"
+        strokeOpacity={active ? "0.92" : "0.86"}
+        strokeWidth="1.6"
+      />
+
+      {active ? (
+        <>
+          <rect x="4.8" y="6.1" width="6.2" height="11.8" rx="2.1" fill={`url(#${gradId})`} />
+          <rect x="4.8" y="6.1" width="6.2" height="11.8" rx="2.1" fill={`url(#${sheenId})`} />
+          <circle cx="7.9" cy="9.4" r="1.15" fill="#18122B" />
+          <path d="M6.4 13.1H9.4" stroke="#18122B" strokeWidth="1.35" strokeLinecap="round" />
+          <path d="M6.7 15.3H9.1" stroke="#18122B" strokeOpacity="0.7" strokeWidth="1.2" strokeLinecap="round" />
+        </>
+      ) : (
+        <>
+          <rect
+            x="4.8"
+            y="6.1"
+            width="6.2"
+            height="11.8"
+            rx="2.1"
+            fill="currentColor"
+            fillOpacity="0.22"
+            stroke="currentColor"
+            strokeOpacity="0.7"
+            strokeWidth="1.1"
+          />
+          <circle cx="7.9" cy="9.4" r="0.95" fill="currentColor" />
+          <path d="M6.6 13.1H9.2" stroke="currentColor" strokeOpacity="0.85" strokeWidth="1.2" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Custom Liquid-Glass Unpin-to-Play-Bar glyph with floating capsule pill and crystal sheen.
+ */
+export function PartyUnpinIcon({ size = 14, className = "" }: PlayerIconProps) {
+  const uid = useId().replace(/:/g, "");
+  const pillId = `ep-unpin-pill-${uid}`;
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={pillId} x1="6" y1="13" x2="18" y2="18" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.95" />
+          <stop offset="100%" stopColor="#C4B5FD" stopOpacity="0.88" />
+        </linearGradient>
+      </defs>
+      <rect
+        x="2.8"
+        y="4.2"
+        width="18.4"
+        height="15.6"
+        rx="4.2"
+        fill="currentColor"
+        fillOpacity="0.06"
+        stroke="currentColor"
+        strokeOpacity="0.86"
+        strokeWidth="1.6"
+      />
+      <rect x="5.8" y="13.4" width="12.4" height="4.1" rx="2.05" fill={`url(#${pillId})`} />
+      <path
+        d="M12 7.4V10.9M12 10.9L9.9 8.9M12 10.9L14.1 8.9"
+        stroke="currentColor"
+        strokeOpacity="0.82"
+        strokeWidth="1.45"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
  * Custom iOS 27 Liquid-Glass sculpted rating star with soft squircle-rounded points,
  * translucent warm-gold glass body, inner refraction glow, and top-left specular crescent.
  */
@@ -1564,6 +1693,82 @@ export function PlayerRatingStarIcon({
           strokeWidth="1.35"
           strokeLinejoin="round"
         />
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Custom Smoked-Amethyst Liquid-Glass watched episode badge with a translucent
+ * crystal squircle lens, inner violet refraction glow, top-left specular crescent,
+ * refractive glass rim, and luminous sculpted check glyph.
+ */
+export function PlayerWatchedCheckIcon({
+  watched = true,
+  size = 18,
+  className = "",
+}: PlayerIconProps & { watched?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const bodyId = `ep-watched-body-${uid}`;
+  const rimId = `ep-watched-rim-${uid}`;
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <defs>
+        <linearGradient id={bodyId} x1="5" y1="4" x2="19" y2="20" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#A78BFA" stopOpacity="0.26" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.34" />
+        </linearGradient>
+        <linearGradient id={rimId} x1="5" y1="4" x2="19" y2="20" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#EDE9FE" stopOpacity="0.46" />
+          <stop offset="100%" stopColor="#A78BFA" stopOpacity="0.24" />
+        </linearGradient>
+      </defs>
+      {watched ? (
+        <>
+          <circle
+            cx="12"
+            cy="12"
+            r="8.5"
+            fill={`url(#${bodyId})`}
+            stroke={`url(#${rimId})`}
+            strokeWidth="1.1"
+          />
+          <path
+            d="M8.6 12.15L10.85 14.4L15.5 9.6"
+            stroke="#F5F3FF"
+            strokeWidth="1.9"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      ) : (
+        <>
+          <circle
+            cx="12"
+            cy="12"
+            r="8.5"
+            fill="rgba(255,255,255,0.035)"
+            stroke="currentColor"
+            strokeOpacity="0.26"
+            strokeWidth="1.1"
+          />
+          <path
+            d="M8.6 12.15L10.85 14.4L15.5 9.6"
+            stroke="currentColor"
+            strokeOpacity="0.58"
+            strokeWidth="1.75"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
       )}
     </svg>
   );

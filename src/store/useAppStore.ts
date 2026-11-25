@@ -18,6 +18,7 @@ import {
   PEER_LEFT_TAG_PREFIX,
 } from "../lib/syncReady";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
+import { clampPartySidebarWidth, DEFAULT_PARTY_SIDEBAR_WIDTH } from "../lib/partyLayout";
 import { useRatingStore } from "./useRatingStore";
 import {
   sanitizeCustomServerEndpoint,
@@ -112,6 +113,7 @@ export type SkipIntroMode = "off" | "manual" | "auto";
 export type OutroNextMode = "off" | "manual" | "auto";
 export type AutoFetchSubtitleMode = "missing" | "language" | "off";
 export type ChatTriggerPlacement = "playbar" | "edge";
+export type PartyDisplayMode = "popover" | "sidebar";
 
 interface AppState {
   screen: AppScreen;
@@ -148,6 +150,9 @@ interface AppState {
   reactionsEnabled: boolean;
   chatPeeksEnabled: boolean;
   chatTriggerPlacement: ChatTriggerPlacement;
+  partyDisplayMode: PartyDisplayMode;
+  partySidebarOpen: boolean;
+  partySidebarWidth: number;
   recentEmojis: string[];
   reactionPresets: string[];
   fullWidthPlayBar: boolean;
@@ -197,6 +202,9 @@ interface AppState {
   setReactionsEnabled: (enabled: boolean) => void;
   setChatPeeksEnabled: (enabled: boolean) => void;
   setChatTriggerPlacement: (placement: ChatTriggerPlacement) => void;
+  setPartyDisplayMode: (mode: PartyDisplayMode) => void;
+  setPartySidebarOpen: (open: boolean) => void;
+  setPartySidebarWidth: (width: number) => void;
   pushRecentEmoji: (emoji: string) => void;
   setReactionPresetAt: (index: number, emoji: string) => void;
   reorderReactionPresets: (fromIndex: number, toIndex: number) => void;
@@ -290,6 +298,12 @@ const initialReactionsEnabled = readStorage("ep.reactionsEnabled", "true") !== "
 const initialChatPeeksEnabled = readStorage("ep.chatPeeksEnabled", "true") !== "false";
 const initialChatTriggerPlacement: ChatTriggerPlacement =
   readStorage("ep.chatTriggerPlacement", "playbar") === "edge" ? "edge" : "playbar";
+const initialPartyDisplayMode: PartyDisplayMode =
+  readStorage("ep.partyDisplayMode.v1", "popover") === "sidebar" ? "sidebar" : "popover";
+const initialPartySidebarWidth: number = (() => {
+  const raw = Number(readStorage("ep.partyWidth.v1", String(DEFAULT_PARTY_SIDEBAR_WIDTH)));
+  return Number.isFinite(raw) ? clampPartySidebarWidth(raw) : DEFAULT_PARTY_SIDEBAR_WIDTH;
+})();
 const initialRecentEmojis: string[] = (() => {
   try {
     const parsed = JSON.parse(readStorage("ep.recentEmojis", "[]"));
@@ -365,6 +379,9 @@ export const useAppStore = create<AppState>((set) => ({
   reactionsEnabled: initialReactionsEnabled,
   chatPeeksEnabled: initialChatPeeksEnabled,
   chatTriggerPlacement: initialChatTriggerPlacement,
+  partyDisplayMode: initialPartyDisplayMode,
+  partySidebarOpen: initialPartyDisplayMode === "sidebar",
+  partySidebarWidth: initialPartySidebarWidth,
   recentEmojis: initialRecentEmojis,
   reactionPresets: initialReactionPresets,
   fullWidthPlayBar: initialFullWidthPlayBar,
@@ -400,6 +417,10 @@ export const useAppStore = create<AppState>((set) => ({
       return {
         roomCode: cleaned,
         creatingRoom: cleaned ? s.creatingRoom : false,
+        partySidebarOpen:
+          cleaned && !s.roomCode && s.partyDisplayMode === "sidebar"
+            ? true
+            : s.partySidebarOpen,
       };
     }),
 
@@ -577,6 +598,22 @@ export const useAppStore = create<AppState>((set) => ({
     set({ chatTriggerPlacement });
   },
 
+  setPartyDisplayMode: (partyDisplayMode) => {
+    writeStorage("ep.partyDisplayMode.v1", partyDisplayMode);
+    set({
+      partyDisplayMode,
+      partySidebarOpen: partyDisplayMode === "sidebar",
+    });
+  },
+
+  setPartySidebarOpen: (partySidebarOpen) => set({ partySidebarOpen }),
+
+  setPartySidebarWidth: (width) => {
+    const clamped = clampPartySidebarWidth(width);
+    writeStorage("ep.partyWidth.v1", String(clamped));
+    set({ partySidebarWidth: clamped });
+  },
+
   pushRecentEmoji: (emoji) =>
     set((s) => {
       const clean = emoji.trim();
@@ -675,6 +712,7 @@ export const useAppStore = create<AppState>((set) => ({
         literalRoom: lit,
         hostOnlyRoom: hostOnlyRoom ?? false,
         creatingRoom: Boolean(creatingRoom && !lit && cleaned),
+        partySidebarOpen: s.partyDisplayMode === "sidebar",
         settingsOpen: false,
         shortcutsOpen: false,
       };

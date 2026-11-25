@@ -389,10 +389,14 @@ test("voiceActions speaking predicates and multi-surface Voice UX components are
     "utf8",
   );
 
+  const partySidebar = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/PartySidebar.tsx"),
+    "utf8",
+  );
   const roomPanel = fs.readFileSync(path.join(REPO_ROOT, "src/components/RoomPanel.tsx"), "utf8");
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
 
-  assert.equal(chatSidebar.includes("VoiceQuickSettingsTray"), true);
+  assert.equal(partySidebar.includes("VoiceQuickSettingsTray"), true);
   assert.equal(quickTray.includes('navigateTo("input", "push")'), true);
   assert.equal(quickTray.includes('navigateTo("output", "push")'), true);
   assert.equal(quickTray.includes('navigateTo("filters", "push")'), true);
@@ -400,12 +404,15 @@ test("voiceActions speaking predicates and multi-surface Voice UX components are
   assert.equal(quickTray.includes("anim-submenu-pop"), true);
   assert.equal(roomPanel.includes("ep-popover-bloom"), true);
   assert.equal(roomPanel.includes("ep-popover-bloom-out"), true);
-  assert.equal(chatSidebar.includes("ep-popover-bloom"), true);
-  assert.equal(chatSidebar.includes("ep-popover-bloom-out"), true);
+  assert.equal(partySidebar.includes("ep-popover-bloom"), true);
+  assert.equal(partySidebar.includes("ep-popover-bloom-out"), true);
   assert.equal(globalsCss.includes("@keyframes ep-submenu-push"), true);
   assert.equal(globalsCss.includes("@keyframes ep-submenu-pop"), true);
   assert.equal(transportBar.includes("Auto-ducking movie"), true);
-  assert.equal(transportBar.includes("ep-speaking-ring"), true);
+  assert.equal(transportBar.includes("PresenceAvatar"), true);
+  assert.equal(transportBar.includes("ep-speaking-ring"), false);
+  assert.equal(globalsCss.includes(".ep-presence-ring"), true);
+  assert.equal(globalsCss.includes("@keyframes ep-speaking-ring-pulse"), false);
   assert.equal(quickTray.includes('aria-label="All Voice & Audio Settings"'), true);
   assert.equal(quickTray.includes("wasOpenRef"), true);
   assert.equal(settingsModal.includes("wasVoiceTabOpenRef"), true);

@@ -618,7 +618,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
   return (
     <div role="menu" aria-label="Subtitle options" className="flex flex-col gap-4">
       {/* Top Quick Actions */}
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         <button
           type="button"
           role="menuitemcheckbox"
@@ -668,7 +668,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               }
             }
           }}
-          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
         >
           <span className="flex items-center gap-3 min-w-0">
             <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
@@ -688,7 +688,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           role="menuitem"
           aria-expanded={showOnlineSearch}
           onClick={handleToggleOnlineSearch}
-          className={`ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs cursor-pointer ${
+          className={`ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs cursor-pointer ${
             showOnlineSearch ? "text-white font-medium" : "text-accent-soft hover:text-white"
           }`}
           data-active={showOnlineSearch}
@@ -833,7 +833,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           role="menuitem"
           disabled={!loaded}
           onClick={() => void handleLoadExternalSubtitle()}
-          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs text-primary/95 hover:text-white cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
         >
           <span className="flex items-center gap-3 min-w-0">
             <span className="w-4 h-4 flex items-center justify-center shrink-0 text-secondary">
@@ -849,7 +849,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             role="menuitem"
             disabled={sharingSub}
             onClick={() => void handleShareSubtitle()}
-            className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-accent-soft hover:text-white cursor-pointer disabled:opacity-45 disabled:pointer-events-none"
+            className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs text-accent-soft hover:text-white cursor-pointer disabled:opacity-45 disabled:pointer-events-none"
           >
             <span className="flex items-center gap-3 min-w-0">
               <span className="w-4 h-4 flex items-center justify-center shrink-0">
@@ -864,7 +864,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       </div>
 
       {/* Subtitle Track List */}
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
           <span>Subtitle Track</span>
           {loaded && subOptions.length > 0 && (
@@ -883,7 +883,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               : "No tracks yet — search online or add a file"}
           </div>
         ) : (
-          <div className="ep-menu-scroll max-h-40 overflow-y-auto overflow-x-hidden pr-1 space-y-1.5">
+          <div className="ep-menu-scroll max-h-32 overflow-y-auto overflow-x-hidden pr-1 space-y-1">
             {subOptions.map((opt) => {
               const active = opt.value === currentSubVal;
               const t = opt.track!;
@@ -927,7 +927,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                       clearExternalTrackState: clearLoadedTrack,
                     });
                   }}
-                  className={`ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs cursor-pointer ${
+                  className={`ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs cursor-pointer ${
                     active ? "text-white font-medium" : "text-primary/90 hover:text-white"
                   }`}
                 >
@@ -1060,7 +1060,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       </div>
 
       {/* Timing & Magic Sync */}
-      <div className="space-y-2">
+      <div className="space-y-1.5">
         <div className="px-3 flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-white/45">
           <span>Timing &amp; Sync</span>
           <span
@@ -1082,9 +1082,9 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
           </span>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           {autoSyncBusy ? (
-            <div className="rounded-xl bg-white/[0.04] border border-white/10 px-3 py-2 flex items-center justify-between gap-2.5">
+            <div className="rounded-xl bg-white/[0.04] border border-white/10 px-3 py-1.5 flex items-center justify-between gap-2.5">
               <span className="flex items-center gap-2.5 min-w-0">
                 <span className="w-4 h-4 flex items-center justify-center shrink-0 animate-pulse">
                   <AppSparkleIcon size={14} active />
@@ -1114,7 +1114,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                   ? "Select a subtitle track above or add a subtitle file first"
                   : "Automatically align subtitles to speech"
               }
-              className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs font-medium text-accent-soft hover:text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+              className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs font-medium text-accent-soft hover:text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
             >
               <span className="flex items-center gap-3 min-w-0">
                 <span className="w-4 h-4 flex items-center justify-center shrink-0">
@@ -1181,12 +1181,12 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
             </div>
           )}
 
-          <div className="ep-glass-tray p-1 rounded-full grid grid-cols-5 gap-1 text-[11px]">
+          <div className="grid grid-cols-5 gap-1.5 text-[11px]">
             <button
               type="button"
               disabled={!loaded}
               onClick={() => handleNudge(-0.5)}
-              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+              className="ep-glass-pill ep-press h-8 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
             >
               -0.5s
             </button>
@@ -1194,7 +1194,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               type="button"
               disabled={!loaded}
               onClick={() => handleNudge(-0.1)}
-              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+              className="ep-glass-pill ep-press h-8 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
             >
               -0.1s
             </button>
@@ -1208,7 +1208,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
                 const durNow = usePlayerStore.getState().durationSecs;
                 clearPerFileSubtitlePref(buildMediaFileKey(appNow.selectedFileName, durNow));
               }}
-              className="ep-press ep-tray-option h-7.5 rounded-full text-muted hover:text-white disabled:opacity-30 cursor-pointer"
+              className="ep-glass-pill ep-press h-8 rounded-full text-muted hover:text-white disabled:opacity-30 cursor-pointer"
             >
               Reset
             </button>
@@ -1216,7 +1216,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               type="button"
               disabled={!loaded}
               onClick={() => handleNudge(0.1)}
-              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+              className="ep-glass-pill ep-press h-8 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
             >
               +0.1s
             </button>
@@ -1224,7 +1224,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               type="button"
               disabled={!loaded}
               onClick={() => handleNudge(0.5)}
-              className="ep-press ep-tray-option h-7.5 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
+              className="ep-glass-pill ep-press h-8 rounded-full num text-secondary hover:text-white disabled:opacity-35 cursor-pointer"
             >
               +0.5s
             </button>
@@ -1281,7 +1281,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
       </div>
 
       {/* Encoding & Advanced Options */}
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {hasExternalFile && (
           <SelectMenu
             variant="row"
@@ -1306,7 +1306,7 @@ export const SubtitlePanel = memo(function SubtitlePanel() {
               return next;
             })
           }
-          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-xs text-secondary hover:text-white cursor-pointer"
+          className="ep-menu-row ep-press w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-xs text-secondary hover:text-white cursor-pointer"
         >
           <span className="flex items-center gap-3 min-w-0">
             <span className="w-4 h-4 flex items-center justify-center shrink-0">

@@ -28,7 +28,7 @@ interface TipCoords {
 
 const ACCENT_DOT_CLASS: Record<NonNullable<GlassHoverTipProps["accent"]>, string> = {
   default: "",
-  speaking: "bg-[#38BDF8] shadow-[0_0_8px_rgba(56,189,248,0.8)]",
+  speaking: "bg-[#4ADE80]",
   host: "bg-[#FDE68A] shadow-[0_0_8px_rgba(253,230,138,0.65)]",
   admin: "bg-[#C4B5FD] shadow-[0_0_8px_rgba(196,181,253,0.65)]",
   ok: "bg-ok shadow-[0_0_8px_rgba(74,222,128,0.65)]",

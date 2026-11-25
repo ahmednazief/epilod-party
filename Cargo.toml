@@ -14,3 +14,40 @@ opt-level = "z"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Keep neural voice denoising, FFTs, AEC3, and resampling at full SIMD speed in release builds.
+[profile.release.package.dfn3_rs]
+opt-level = 3
+
+[profile.release.package.realfft]
+opt-level = 3
+
+[profile.release.package.rustfft]
+opt-level = 3
+
+[profile.release.package.sonora]
+opt-level = 3
+
+[profile.release.package.sonora-aec3]
+opt-level = 3
+
+[profile.release.package.sonora-agc2]
+opt-level = 3
+
+[profile.release.package.sonora-ns]
+opt-level = 3
+
+[profile.release.package.sonora-fft]
+opt-level = 3
+
+[profile.release.package.sonora-simd]
+opt-level = 3
+
+[profile.release.package.sonora-common-audio]
+opt-level = 3
+
+[profile.release.package.rubato]
+opt-level = 3
+
+[profile.release.package.epilod-core]
+opt-level = 3

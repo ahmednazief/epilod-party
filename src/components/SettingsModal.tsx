@@ -64,6 +64,7 @@ import {
   type AutoFetchSubtitleMode,
   type ChatTriggerPlacement,
   type OutroNextMode,
+  type PartyDisplayMode,
   type SettingsTab,
   type SkipIntroMode,
 } from "../store/useAppStore";
@@ -293,6 +294,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const chatPeeksEnabled = useAppStore((s) => s.chatPeeksEnabled);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
+  const partyDisplayMode = useAppStore((s) => s.partyDisplayMode);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const playBarOpacity = useAppStore((s) => s.playBarOpacity);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
@@ -326,6 +328,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setReactionsEnabled = useAppStore((s) => s.setReactionsEnabled);
   const setChatPeeksEnabled = useAppStore((s) => s.setChatPeeksEnabled);
   const setChatTriggerPlacement = useAppStore((s) => s.setChatTriggerPlacement);
+  const setPartyDisplayMode = useAppStore((s) => s.setPartyDisplayMode);
   const setFullWidthPlayBar = useAppStore((s) => s.setFullWidthPlayBar);
   const setPlayBarOpacity = useAppStore((s) => s.setPlayBarOpacity);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
@@ -1018,8 +1021,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 />
 
                 <ComfortSwitchRow
-                  title="Quiet Background Sync"
-                  tip="Reduces background CPU/GPU work during long movies"
+                  title="Low Power Mode"
+                  tip="Disables live video glass effects and reduces background CPU/GPU work"
                   checked={lowPowerMode}
                   onChange={setLowPowerMode}
                 />
@@ -1315,6 +1318,21 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   checked={chatPeeksEnabled}
                   onChange={setChatPeeksEnabled}
                 />
+
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="text-[13px] font-medium text-white">Party Lounge Layout</div>
+                  <SegmentedTabs<PartyDisplayMode>
+                    ariaLabel="Party Lounge Layout"
+                    size="sm"
+                    fullWidth
+                    value={partyDisplayMode}
+                    onChange={setPartyDisplayMode}
+                    items={[
+                      { value: "popover", label: "Play Bar Popover" },
+                      { value: "sidebar", label: "Left Sidebar" },
+                    ]}
+                  />
+                </div>
 
                 <div className="px-3 py-3 space-y-2.5">
                   <div className="text-[13px] font-medium text-white">Chat Button Placement</div>

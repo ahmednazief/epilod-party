@@ -207,7 +207,8 @@ mod windows_app {
         loadfile_cmd, set_aid_cmd, set_aspect_mode_cmds, set_dialogue_boost_cmd, set_loop_cmd,
         set_mute_cmd, set_pause_cmd, set_secondary_sub_delay_cmd, set_secondary_sub_pos_cmd,
         set_secondary_sub_track_cmd, set_sid_cmd, set_speed_cmd, set_sub_delay_cmd,
-        set_sub_style_cmds_with_bold, set_video_margin_right_cmd, set_volume_cmd,
+        set_sub_style_cmds_with_bold, set_video_margin_left_cmd, set_video_margin_right_cmd,
+        set_volume_cmd,
         show_osd_text_cmd, sub_add_cmd_with_title, sub_remove_cmd,
     };
     use epilod_core::p2p::{
@@ -509,6 +510,17 @@ mod windows_app {
     ) -> Result<(), String> {
         let req = state.mpv.next_request_id();
         state.mpv.send_command(set_dialogue_boost_cmd(req, enabled))
+    }
+
+    #[tauri::command]
+    async fn mpv_set_video_margin_left(
+        state: State<'_, AppState>,
+        ratio: f64,
+    ) -> Result<(), String> {
+        let req = state.mpv.next_request_id();
+        state
+            .mpv
+            .send_command(set_video_margin_left_cmd(req, ratio))
     }
 
     #[tauri::command]
@@ -2675,6 +2687,7 @@ mod windows_app {
                 mpv_set_loop,
                 mpv_set_aspect_mode,
                 mpv_set_dialogue_boost,
+                mpv_set_video_margin_left,
                 mpv_set_video_margin_right,
                 mpv_add_subtitle,
                 mpv_remove_subtitle,

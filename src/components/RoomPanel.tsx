@@ -86,6 +86,7 @@ import {
   PartyAlignSceneIcon,
   PartyCopyIcon,
   PartyCreateIcon,
+  PartyDockLeftIcon,
   PartyFpsMatchIcon,
   PartyHostIcon,
   PartyLeaveIcon,
@@ -97,7 +98,8 @@ import {
   PlayerReadyIcon,
   PlayerResyncIcon,
 } from "./ui/PlayerIcons";
-import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
+import { PresenceAvatar } from "./ui/PresenceAvatar";
+import { resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { StatusDot } from "./ui/StatusDot";
@@ -131,6 +133,7 @@ function voiceTransportLabel(transport: string | undefined): string {
 
 interface RoomPanelProps {
   onClose?: () => void;
+  onDockLeft?: () => void;
   onChooseFile?: () => void;
   onChooseFolder?: () => void;
   onSwitchEpisode?: (index: number) => void;
@@ -244,6 +247,7 @@ const SecondAnchorButton = memo(function SecondAnchorButton({
 
 export const RoomPanel = memo(function RoomPanel({
   onClose,
+  onDockLeft,
   onChooseFile,
   onChooseFolder,
   onSwitchEpisode,
@@ -1052,6 +1056,18 @@ export const RoomPanel = memo(function RoomPanel({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {roomCode && onDockLeft && (
+            <GlassHoverTip label="Dock to Left" detail="Keep Party & Voice beside the video">
+              <button
+                type="button"
+                onClick={onDockLeft}
+                aria-label="Dock Party Lounge to left"
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer"
+              >
+                <PartyDockLeftIcon size={14} />
+              </button>
+            </GlassHoverTip>
+          )}
           {roomCode && (
             <GlassHoverTip label="Leave Watch Party" detail="Keep watching solo">
               <button
@@ -1376,7 +1392,7 @@ export const RoomPanel = memo(function RoomPanel({
                       <span
                         className={`text-[11.5px] font-medium truncate ${
                           roomActiveSpeakers.length > 0
-                            ? "text-[#38BDF8]"
+                            ? "text-white"
                             : voiceDeafened
                               ? "text-bad/90"
                               : voiceMuted
@@ -1757,18 +1773,12 @@ export const RoomPanel = memo(function RoomPanel({
                     }}
                     className="px-2 py-1.5 rounded-xl flex items-start gap-2.5 min-w-0 hover:bg-white/[0.045] transition-colors"
                   >
-                    <ProfileAvatar
+                    <PresenceAvatar
                       avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId)}
                       size={26}
-                      className={`ring-2 shrink-0 mt-0.5 transition-shadow duration-150 ${
-                        peerSpeaking && !peerLocallyMuted
-                          ? "ring-[#38BDF8] ep-speaking-ring"
-                          : badge.isMismatch
-                            ? "ring-warn/85"
-                            : p.isReady
-                              ? "ring-ok/80"
-                              : "ring-warn/75"
-                      }`}
+                      speaking={peerSpeaking && !peerLocallyMuted}
+                      status={badge.isMismatch ? "mismatch" : "none"}
+                      className="mt-0.5"
                     />
                     <div className="min-w-0 flex-1 space-y-0.5">
                       <div className="flex items-center justify-between gap-2 min-w-0">
@@ -1827,7 +1837,7 @@ export const RoomPanel = memo(function RoomPanel({
                                     : voiceEntry?.deafened || voiceEntry?.muted || peerLocallyMuted
                                       ? "text-bad bg-bad/10"
                                       : peerSpeaking
-                                        ? "text-[#38BDF8] bg-[#38BDF8]/15"
+                                        ? "text-white"
                                         : "text-secondary"
                                 }`}
                               >
@@ -2153,7 +2163,6 @@ export const RoomPanel = memo(function RoomPanel({
               ref={memberMenuBoxRef}
               role="menu"
               aria-label={`Actions for ${menuPeer.username}`}
-              data-glass-region="true"
               style={{
                 left: `${coords.left}px`,
                 ...(coords.top !== undefined ? { top: `${coords.top}px` } : {}),
@@ -2167,14 +2176,11 @@ export const RoomPanel = memo(function RoomPanel({
             >
               <div className="px-2 py-1 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 min-w-0">
-                  <ProfileAvatar
+                  <PresenceAvatar
                     avatarId={resolvePeerAvatarId(menuPeer.username, effectiveUsername, avatarId)}
                     size={18}
-                    className={`ring-1 shrink-0 ${
-                      menuMeta.peerSpeaking && !menuMeta.peerLocallyMuted
-                        ? "ring-[#38BDF8]"
-                        : "ring-white/20"
-                    }`}
+                    speaking={menuMeta.peerSpeaking && !menuMeta.peerLocallyMuted}
+                    avatarClassName="ring-1 ring-white/20"
                   />
                   <span className="text-[11.5px] font-medium text-white truncate">
                     {menuPeer.username}
@@ -2319,7 +2325,6 @@ export const RoomPanel = memo(function RoomPanel({
         createPortal(
           <div
             ref={voiceSetupBoxRef}
-            data-glass-region="true"
             style={{
               left: `${voiceSetupPresence.value.left}px`,
               transformOrigin: voiceSetupPresence.value.origin,

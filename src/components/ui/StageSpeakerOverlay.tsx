@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { AppHeadphonesIcon, AppMicIcon, AppVoiceWaveIcon } from "./AppIcons";
-import { ProfileAvatar, resolvePeerAvatarId, type AvatarId } from "./ProfileAvatar";
+import { PresenceAvatar } from "./PresenceAvatar";
+import { resolvePeerAvatarId, type AvatarId } from "./ProfileAvatar";
 
 interface StageSpeakerOverlayProps {
   enabled: boolean;
@@ -19,8 +20,8 @@ interface AnimatedSpeaker {
   exiting: boolean;
 }
 
-const HOLD_MS = 350;
-const EXIT_MS = 180;
+const HOLD_MS = 0;
+const EXIT_MS = 120;
 
 /**
  * Passive top-left speaker pills shown when panels are hidden (fullscreen or idle chrome),
@@ -126,16 +127,17 @@ export const StageSpeakerOverlay = memo(function StageSpeakerOverlay({
                 : "text-white"
           }`}
         >
-          <ProfileAvatar
+          <PresenceAvatar
             avatarId={localAvatarId}
             size={18}
-            className={`ring-2 shrink-0 ${
+            speaking={localSpeaking && !localMuted && !localDeafened && localCaptureHealthy}
+            status={
               !localCaptureHealthy
-                ? "ring-warn/80"
+                ? "alert"
                 : localDeafened || localMuted
-                  ? "ring-bad/70"
-                  : "ring-[#38BDF8] ep-speaking-ring"
-            }`}
+                  ? "muted"
+                  : "none"
+            }
           />
           {localDeafened ? (
             <AppHeadphonesIcon deafened size={12} className="shrink-0 text-bad" />
@@ -149,7 +151,7 @@ export const StageSpeakerOverlay = memo(function StageSpeakerOverlay({
                   ? "text-warn"
                   : localMuted
                     ? "text-bad"
-                    : "text-[#38BDF8]"
+                    : "text-white/90"
               }`}
             />
           )}
@@ -171,12 +173,12 @@ export const StageSpeakerOverlay = memo(function StageSpeakerOverlay({
             speaker.exiting ? "anim-pop-out" : "anim-pop-in"
           } ep-bar-pill px-2.5 py-1 rounded-full inline-flex items-center gap-2 text-xs font-medium text-white`}
         >
-          <ProfileAvatar
+          <PresenceAvatar
             avatarId={resolvePeerAvatarId(speaker.name, localUsername, localAvatarId)}
             size={18}
-            className="ring-2 ring-[#38BDF8] ep-speaking-ring shrink-0"
+            speaking={!speaker.exiting}
           />
-          <AppVoiceWaveIcon active speaking size={12} className="shrink-0 text-[#38BDF8]" />
+          <AppVoiceWaveIcon active speaking={!speaker.exiting} size={12} className="shrink-0" />
           <span className="truncate max-w-[120px]">{speaker.name}</span>
         </div>
       ))}

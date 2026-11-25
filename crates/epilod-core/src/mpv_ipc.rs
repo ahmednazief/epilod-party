@@ -206,15 +206,25 @@ pub fn set_dialogue_boost_cmd(request_id: u64, enabled: bool) -> String {
     set_property_cmd(request_id, "af", json!(filter))
 }
 
-/// Shifts and scales live rendered video + subtitles horizontally on the GPU without resizing
-/// the underlying child HWND (`0.0` = full stage, `0.25` = 25% right margin for docked panels).
-pub fn set_video_margin_right_cmd(request_id: u64, ratio: f64) -> String {
+fn set_video_margin_cmd(request_id: u64, property: &str, ratio: f64) -> String {
     let clamped = if ratio.is_finite() {
         (ratio.clamp(0.0, 0.75) * 10_000.0).round() / 10_000.0
     } else {
         0.0
     };
-    set_property_cmd(request_id, "video-margin-ratio-right", json!(clamped))
+    set_property_cmd(request_id, property, json!(clamped))
+}
+
+/// Shifts and scales live rendered video + subtitles horizontally on the GPU without resizing
+/// the underlying child HWND (`0.0` = full stage, `0.25` = 25% left margin for docked panels).
+pub fn set_video_margin_left_cmd(request_id: u64, ratio: f64) -> String {
+    set_video_margin_cmd(request_id, "video-margin-ratio-left", ratio)
+}
+
+/// Shifts and scales live rendered video + subtitles horizontally on the GPU without resizing
+/// the underlying child HWND (`0.0` = full stage, `0.25` = 25% right margin for docked panels).
+pub fn set_video_margin_right_cmd(request_id: u64, ratio: f64) -> String {
+    set_video_margin_cmd(request_id, "video-margin-ratio-right", ratio)
 }
 
 /// Add an external subtitle track and optionally attach a user-facing title so transcoded or
@@ -1856,6 +1866,19 @@ mod tests {
         assert_eq!(
             parsed4["command"],
             json!(["set_property", "video-margin-ratio-right", 0.0])
+        );
+
+        let left_margin = set_video_margin_left_cmd(59, 0.21875);
+        let parsed5: Value = serde_json::from_str(left_margin.trim()).expect("valid left margin json");
+        assert_eq!(
+            parsed5["command"],
+            json!(["set_property", "video-margin-ratio-left", 0.2188])
+        );
+        let left_clamped = set_video_margin_left_cmd(60, 1.5);
+        let parsed6: Value = serde_json::from_str(left_clamped.trim()).expect("valid clamped json");
+        assert_eq!(
+            parsed6["command"],
+            json!(["set_property", "video-margin-ratio-left", 0.75])
         );
     }
 

@@ -315,6 +315,10 @@ export async function mpvSetDialogueBoost(enabled: boolean): Promise<void> {
   await safeInvoke("mpv_set_dialogue_boost", { enabled });
 }
 
+export async function mpvSetVideoMarginLeft(ratio: number): Promise<void> {
+  await safeInvoke("mpv_set_video_margin_left", { ratio });
+}
+
 export async function mpvSetVideoMarginRight(ratio: number): Promise<void> {
   await safeInvoke("mpv_set_video_margin_right", { ratio });
 }

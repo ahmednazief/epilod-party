@@ -1102,7 +1102,7 @@ export function AppMicIcon({
   const uid = useId().replace(/:/g, "");
   const capGradId = `ep-mic-cap-${uid}`;
   const isSpeaking = speaking && !muted;
-  const strokeMain = muted ? "currentColor" : isSpeaking ? "#38BDF8" : "currentColor";
+  const strokeMain = muted ? "currentColor" : isSpeaking ? "#4ADE80" : "currentColor";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
@@ -1110,13 +1110,13 @@ export function AppMicIcon({
         <linearGradient id={capGradId} x1="9" y1="3" x2="15" y2="14" gradientUnits="userSpaceOnUse">
           <stop
             offset="0%"
-            stopColor={isSpeaking ? "#E0F2FE" : "#FFFFFF"}
-            stopOpacity={muted ? "0.14" : isSpeaking ? "0.62" : "0.34"}
+            stopColor={isSpeaking ? "#DCFCE7" : "#FFFFFF"}
+            stopOpacity={muted ? "0.14" : isSpeaking ? "0.5" : "0.34"}
           />
           <stop
             offset="100%"
-            stopColor={isSpeaking ? "#0284C7" : "#A78BFA"}
-            stopOpacity={muted ? "0.08" : isSpeaking ? "0.52" : "0.24"}
+            stopColor={isSpeaking ? "#16A34A" : "#A78BFA"}
+            stopOpacity={muted ? "0.08" : isSpeaking ? "0.42" : "0.24"}
           />
         </linearGradient>
       </defs>
@@ -1133,14 +1133,14 @@ export function AppMicIcon({
       />
       <path
         d="M10.7 6.8H13.3M10.7 9.5H13.3"
-        stroke={isSpeaking ? "#BAE6FD" : "currentColor"}
+        stroke={isSpeaking ? "#BBF7D0" : "currentColor"}
         strokeOpacity={muted ? "0.25" : "0.72"}
         strokeWidth="1.25"
         strokeLinecap="round"
       />
       <path
         d="M5.4 11.3a6.6 6.6 0 0 0 13.2 0"
-        stroke={isSpeaking ? "#7DD3FC" : "currentColor"}
+        stroke={isSpeaking ? "#86EFAC" : "currentColor"}
         strokeWidth="1.8"
         strokeLinecap="round"
         strokeOpacity={muted ? "0.42" : "0.95"}
@@ -1155,7 +1155,7 @@ export function AppMicIcon({
       {isSpeaking && (
         <path
           d="M3.1 8.1a9.8 9.8 0 0 0 0 5.8M20.9 8.1a9.8 9.8 0 0 1 0 5.8"
-          stroke="#38BDF8"
+          stroke="#4ADE80"
           strokeWidth="1.65"
           strokeLinecap="round"
           strokeOpacity="0.95"
@@ -1274,7 +1274,8 @@ export function AppVoiceTuneIcon({
 }
 
 /**
- * Custom sculpted crystal Voice Waveform bars with active (green) & speaking (sky-cyan) states.
+ * Custom sculpted crystal Voice Waveform bars. Idle/connected stays neutral;
+ * only the live, animated state turns green so "speaking" is the one colored voice signal.
  */
 export function AppVoiceWaveIcon({
   active = false,
@@ -1282,8 +1283,8 @@ export function AppVoiceWaveIcon({
   size = 14,
   className = "",
 }: AppIconProps & { speaking?: boolean }) {
-  const barSecondary = speaking ? "#38BDF8" : active ? "#4ADE80" : "currentColor";
-  const barPrimary = speaking ? "#7DD3FC" : active ? "#A7F3D0" : "currentColor";
+  const barSecondary = speaking ? "#4ADE80" : "currentColor";
+  const barPrimary = speaking ? "#86EFAC" : "currentColor";
 
   return (
     <svg
@@ -1384,7 +1385,7 @@ export function AppSignalBarsIcon({
   className = "",
 }: AppIconProps & { bars?: number; speaking?: boolean }) {
   const activeCount = Math.max(1, Math.min(4, Math.round(bars)));
-  const activeColor = speaking ? "#38BDF8" : "#A7F3D0";
+  const activeColor = speaking ? "#4ADE80" : "#A7F3D0";
   const heights = [5, 8.5, 12, 15.5];
   const xs = [3.5, 8.2, 12.9, 17.6];
 

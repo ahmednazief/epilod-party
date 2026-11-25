@@ -72,9 +72,11 @@ test("Playback, Subtitles, Episodes, and Select menus render clean custom crysta
     "AppFolderIcon",
     "AppPlusIcon",
     "PlayerCaptionsIcon",
+    "PlayerWatchedCheckIcon",
   ]) {
     assert.equal(episodes.includes(sym), true, `EpisodesPanel must use ${sym}`);
   }
+  assert.equal(episodes.includes("lucide-react"), false, "EpisodesPanel must not import stock lucide-react icons");
   const playerIcons = readRepoFile("src/components/ui/PlayerIcons.tsx");
   assert.match(playerIcons, /export function PlayerAutoNextIcon\(/);
   assert.match(playerIcons, /export function PlayerFollowIcon\(/);

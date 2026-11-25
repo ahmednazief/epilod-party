@@ -30,8 +30,9 @@ use wasapi::{
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::Threading::{
-    CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
+    CreateWaitableTimerExW, GetCurrentThread, SetThreadPriority, SetWaitableTimer,
+    WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE,
+    THREAD_PRIORITY_HIGHEST, TIMER_ALL_ACCESS,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
@@ -2287,6 +2288,9 @@ fn drain_mono_stream_to_48k(
 }
 
 fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    }
     let mut hpf = BiquadHighPass::new_80hz_48k();
     let mut noop_aec = NoopEchoCanceller;
     let mut webrtc_aec3 = WebRtcAec3Canceller::new();
@@ -2304,7 +2308,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let _ = encoder.set_bitrate(Bitrate::BitsPerSecond(64_000));
     let _ = encoder.set_complexity(9);
     let _ = encoder.set_inband_fec(true);
-    let _ = encoder.set_packet_loss_perc(1);
+    let _ = encoder.set_packet_loss_perc(5);
     let _ = encoder.set_dtx(false);
     let _ = encoder.set_signal(Signal::Voice);
     let mut last_signal_is_auto = false;
@@ -2523,8 +2527,8 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
         if let Some((_, ref mut cons, _)) = active_stream {
             drain_mono_stream_to_48k(cons, &mut raw_accum, &mut resampler, &mut mono_48k_fifo);
-            // Keep capture mic latency tightly bounded (max 60 ms) across OS stalls
-            let max_tx_fifo = VOICE_FRAME_10MS * 6;
+            // Keep capture mic latency bounded (max 120 ms) while absorbing OS scheduling spikes without dropping speech
+            let max_tx_fifo = VOICE_FRAME_10MS * 12;
             if mono_48k_fifo.len() > max_tx_fifo {
                 let excess_frames = (mono_48k_fifo.len() - max_tx_fifo) / VOICE_FRAME_10MS;
                 if excess_frames > 0 {
@@ -2697,10 +2701,10 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
             let tight_boost =
                 if cfg.cinema_tight_gate && shared.movie_playing.load(Ordering::Relaxed) {
-                    1.5
+                    0.75
                 } else {
                     0.0
-                } + if half_duplex_guard { 1.5 } else { 0.0 };
+                } + if half_duplex_guard { 1.25 } else { 0.0 };
             let eff_thresh = (base_thresh + tight_boost).clamp(-75.0, 0.0);
             let ptt_opt = match cfg.input_mode {
                 InputModeWire::Vad => None,
@@ -2722,7 +2726,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 &mut gate_out,
             );
 
-            if last_level_emit.elapsed() >= Duration::from_millis(50) {
+            if is_open != was_gate_open || last_level_emit.elapsed() >= Duration::from_millis(50) {
                 last_level_emit = Instant::now();
                 if let Some(ref app) = *shared.app_handle.read().unwrap_or_else(|e| e.into_inner())
                 {
@@ -2894,6 +2898,9 @@ fn run_mix_rx_thread(
     shared: Arc<SharedVoiceRuntime>,
     test_lb_rx: std::sync::mpsc::Receiver<Vec<f32>>,
 ) {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    }
     let err_flag = Arc::new(AtomicBool::new(false));
     let _wasapi_notif = register_wasapi_flag_notifier(Arc::clone(&err_flag));
     let mut out_watchdog = StreamWatchdogState::new();
@@ -3148,9 +3155,10 @@ fn run_mix_rx_thread(
             }
             if peer_muted
                 || deafened
+                || !state.jitter.is_active()
                 || state
                     .last_speaking_at
-                    .is_some_and(|t| t.elapsed() >= Duration::from_millis(220))
+                    .is_some_and(|t| t.elapsed() >= Duration::from_millis(80))
             {
                 state.is_speaking = false;
             }

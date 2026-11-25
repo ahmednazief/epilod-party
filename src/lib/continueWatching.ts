@@ -1,5 +1,5 @@
 import { getFileDisplayName } from "./fileDrop";
-import { formatDisplayMediaTitle } from "./playlist";
+import { formatDisplayMediaTitle, formatSeasonFolderTitle } from "./playlist";
 import type { ResumeEntry } from "./resume";
 import {
   extractParentFolderPath,
@@ -37,6 +37,23 @@ export function formatTimeLeftShort(positionSecs: number, durationSecs: number):
   const hrs = Math.floor(mins / 60);
   const remMins = mins % 60;
   return remMins > 0 ? `${hrs}h ${remMins}m left` : `${hrs}h left`;
+}
+
+function formatSeriesContinueTitle(entry: SeriesProgressEntry): string {
+  const formatted = formatSeasonFolderTitle(entry.folderName);
+  if (/^Season\s+\d+$/i.test(formatted) || formatted === "Season Queue") {
+    const parentPath = extractParentFolderPath(entry.folderPath);
+    const parentName = parentPath ? getFileDisplayName(parentPath) : "";
+    const parentFormatted = parentName ? formatSeasonFolderTitle(parentName) : "";
+    if (
+      parentFormatted &&
+      parentFormatted !== "Season Queue" &&
+      !/^Season\s+\d+$/i.test(parentFormatted)
+    ) {
+      return formatted === "Season Queue" ? parentFormatted : `${parentFormatted} · ${formatted}`;
+    }
+  }
+  return formatted || entry.folderName;
 }
 
 function findMatchingResumeForSeries(
@@ -100,7 +117,7 @@ export function buildContinueWatchingItems(
     items.push({
       kind: "series",
       id: `series:${entry.seriesKey}`,
-      title: entry.folderName,
+      title: formatSeriesContinueTitle(entry),
       badgeText,
       progressRatio,
       timeLeftLabel,

@@ -50,7 +50,7 @@ interface ContextMenuProps {
 interface MenuBoxCoords {
   left: number;
   top: number;
-  maxHeight: number;
+  maxHeight?: number;
 }
 
 interface SubmenuTriggerState {
@@ -160,8 +160,13 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
     const left = Math.max(pad, Math.min(position.x, vw - width - pad));
     const maxHeight = Math.max(140, Math.floor(maxBottom - minTop));
     const clampedHeight = Math.min(height, maxHeight);
-    const top = Math.max(minTop, Math.min(position.y, maxBottom - clampedHeight));
-    setCoords({ left, top, maxHeight: Math.floor(maxBottom - top) });
+    const top = Math.max(minTop, Math.floor(Math.min(position.y, maxBottom - clampedHeight)));
+    const availableBelow = Math.floor(maxBottom - top);
+    setCoords({
+      left,
+      top,
+      maxHeight: height > availableBelow ? availableBelow : undefined,
+    });
   }, [position, entries.length]);
 
   useLayoutEffect(() => {
@@ -189,8 +194,13 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
 
     const maxHeight = Math.max(140, Math.floor(maxBottom - minTop));
     const clampedHeight = Math.min(height, maxHeight);
-    const top = Math.max(minTop, Math.min(r.top - 6, maxBottom - clampedHeight));
-    setSubCoords({ left, top, maxHeight: Math.floor(maxBottom - top) });
+    const top = Math.max(minTop, Math.floor(Math.min(r.top - 6, maxBottom - clampedHeight)));
+    const availableBelow = Math.floor(maxBottom - top);
+    setSubCoords({
+      left,
+      top,
+      maxHeight: height > availableBelow ? availableBelow : undefined,
+    });
   }, [openSubmenu, entries]);
 
   useEffect(() => {
@@ -265,8 +275,8 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
       return (
         <div
           key={entry.id}
-          className={`ep-hairline-divider -mx-1.5 ${isRoot ? "my-1" : "my-0.5"}`}
-          role="separator"
+          className={isRoot ? "h-1.5" : "h-1"}
+          aria-hidden="true"
         />
       );
     }
@@ -402,12 +412,13 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
           top: `${coords?.top ?? activePosition.y}px`,
           maxHeight: coords ? `${coords.maxHeight}px` : undefined,
         }}
-        className={`ep-glass-submenu ${
+        className={`ep-glass-submenu ep-context-menu ${
           exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
         } fixed z-[55] w-[276px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[18px] py-2 flex flex-col select-none`}
       >
         <div
           ref={menuScrollRef}
+          style={{ overflowY: coords?.maxHeight ? "auto" : "hidden" }}
           className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1.5 flex flex-col gap-0.5"
         >
           {renderedMenu.entries.map((entry, idx) => renderEntry(entry, true, idx === 0))}
@@ -425,14 +436,15 @@ export function ContextMenu({ position, entries, onClose }: ContextMenuProps) {
           style={{
             left: `${subCoords?.left ?? subPresence.value.rect.right + 8}px`,
             top: `${subCoords?.top ?? subPresence.value.rect.top}px`,
-            maxHeight: subCoords ? `${subCoords.maxHeight}px` : undefined,
+            maxHeight: subCoords?.maxHeight ? `${subCoords.maxHeight}px` : undefined,
           }}
-          className={`ep-glass-submenu ${
+          className={`ep-glass-submenu ep-context-menu ${
             subPresence.exiting || exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
           } fixed z-[60] w-[256px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[18px] py-2 flex flex-col select-none`}
         >
           <div
             ref={subScrollRef}
+            style={{ overflowY: subCoords?.maxHeight ? "auto" : "hidden" }}
             className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1.5 flex flex-col gap-1"
           >
             {subPresence.value.entries.map((entry, idx) => renderEntry(entry, false, idx === 0))}

@@ -127,7 +127,7 @@ export function NotificationStrip({
                   dismiss(item.id);
                   fn?.();
                 }}
-                className="ep-bar-pill ep-press h-5.5 px-2.5 rounded-full text-[11px] font-semibold text-white cursor-pointer"
+                className="ep-glass-primary-pill ep-press h-6 px-2.5 rounded-full text-[11px] font-semibold text-white cursor-pointer"
               >
                 {item.action.label}
               </button>

@@ -1,6 +1,6 @@
 import {
   AppCloseIcon,
-  AppVoiceWaveIcon,
+  AppHeadphonesIcon,
 } from "./ui/AppIcons";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
@@ -36,11 +36,12 @@ import {
 import {
   cancelSeekbarThumbnails,
   generateSeekbarThumbnails,
+  getCachedSeekbarThumbnails,
   getThumbnailFrameStyle,
   type ThumbnailSprite,
 } from "../lib/thumbnails";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
-import { isParticipantSpeaking } from "../lib/voiceActions";
+import { isCaptureHealthy, isLocalVoiceSpeaking, isParticipantSpeaking } from "../lib/voiceActions";
 import { useAppStore } from "../store/useAppStore";
 import { useChatStore } from "../store/useChatStore";
 import { getEffectiveIntroSegments, useIntroStore } from "../store/useIntroStore";
@@ -68,7 +69,9 @@ import {
   PlayerSkipEpisodeIcon,
   PlayerVolumeIcon,
 } from "./ui/PlayerIcons";
-import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
+import { PresenceAvatar } from "./ui/PresenceAvatar";
+import { resolvePeerAvatarId } from "./ui/ProfileAvatar";
+import { VoiceMicDeafenPills } from "./ui/VoiceQuickControls";
 import { Scrubber } from "./ui/Scrubber";
 
 export type CapsuleTab = "room" | "episodes" | "playback" | "subtitles" | "reactions";
@@ -247,29 +250,39 @@ function PlaybackScrubber({
   const skipIntroEnabled = useAppStore((s) => s.skipIntroMode !== "off");
   const selectedFilePath = useAppStore((s) => s.selectedFilePath);
   const seekbarThumbnails = useAppStore((s) => s.seekbarThumbnails);
-  const introDetecting = useIntroStore((s) => s.detecting);
-  const [thumbSprite, setThumbSprite] = useState<ThumbnailSprite | null>(null);
+  const durationReady = loaded && durationSecs >= 15;
+  const durationRef = useRef(durationSecs);
+  durationRef.current = durationSecs;
+  const [thumbSprite, setThumbSprite] = useState<ThumbnailSprite | null>(() =>
+    getCachedSeekbarThumbnails(selectedFilePath, durationSecs),
+  );
 
   useEffect(() => {
-    setThumbSprite(null);
-    if (!seekbarThumbnails || !loaded || !selectedFilePath || durationSecs < 15 || introDetecting) {
-      if (!introDetecting) void cancelSeekbarThumbnails();
+    if (!seekbarThumbnails || !durationReady || !selectedFilePath) {
+      setThumbSprite(null);
+      void cancelSeekbarThumbnails();
       return;
     }
+    const cached = getCachedSeekbarThumbnails(selectedFilePath, durationRef.current);
+    if (cached) {
+      setThumbSprite(cached);
+      return;
+    }
+    setThumbSprite(null);
     let active = true;
     const timer = window.setTimeout(() => {
-      void generateSeekbarThumbnails(selectedFilePath, durationSecs)
+      void generateSeekbarThumbnails(selectedFilePath, durationRef.current)
         .then((sprite) => {
           if (active && sprite) setThumbSprite(sprite);
         })
         .catch(() => undefined);
-    }, 800);
+    }, 320);
     return () => {
       active = false;
       window.clearTimeout(timer);
       void cancelSeekbarThumbnails();
     };
-  }, [durationSecs, introDetecting, loaded, seekbarThumbnails, selectedFilePath]);
+  }, [durationReady, seekbarThumbnails, selectedFilePath]);
   const introHighlight = useMemo(() => {
     if (!skipIntroEnabled) return null;
     const effective = getEffectiveIntroSegments(introSegments, manualIntro);
@@ -344,14 +357,14 @@ function PlaybackScrubber({
                   introHighlight && val >= introHighlight.start && val <= introHighlight.end,
                 );
                 return (
-                  <div className="relative rounded-xl overflow-hidden bg-black/85 ring-1 ring-white/20 shadow-inner">
+                  <div className="relative rounded-[10px] overflow-hidden bg-black/90 shadow-[0_12px_28px_-6px_rgba(0,0,0,0.82)]">
                     <div style={getThumbnailFrameStyle(thumbSprite, val)} />
-                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-black/75 via-black/30 to-transparent" />
-                    <div className="ep-glass-pill absolute bottom-1.5 left-1/2 -translate-x-1/2 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full whitespace-nowrap">
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+                    <div className="pointer-events-none absolute inset-x-0 bottom-1.5 flex items-center justify-center gap-1.5 px-2 whitespace-nowrap">
                       {inIntro && (
                         <span className="h-1.5 w-1.5 rounded-full bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.85)]" />
                       )}
-                      <span className="text-[11px] font-semibold num text-white/95 tracking-tight">
+                      <span className="text-[11px] font-semibold num text-white/95 tracking-tight drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)]">
                         {inIntro
                           ? `${formatClock(val)} · ${introHighlight?.kind === "recap" ? "Recap" : "Intro"}`
                           : formatClock(val)}
@@ -540,6 +553,7 @@ interface TransportBarProps {
   onToggleFullscreen: () => void;
   onPrevEpisode?: () => void;
   onNextEpisode?: () => void;
+  onTogglePartySidebar?: () => void;
   onBarHoverChange?: (hovered: boolean) => void;
   drawerTabs?: ReactNode;
   expandedDrawer?: ReactNode;
@@ -556,6 +570,7 @@ export const TransportBar = memo(function TransportBar({
   onToggleFullscreen,
   onPrevEpisode,
   onNextEpisode,
+  onTogglePartySidebar,
   onBarHoverChange,
   drawerTabs,
   expandedDrawer,
@@ -584,6 +599,8 @@ export const TransportBar = memo(function TransportBar({
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
+  const partyDisplayMode = useAppStore((s) => s.partyDisplayMode);
+  const partySidebarOpen = useAppStore((s) => s.partySidebarOpen);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const openSettings = useAppStore((s) => s.openSettings);
   const unreadChatCount = useChatStore((s) => s.unreadCount);
@@ -1131,15 +1148,13 @@ export const TransportBar = memo(function TransportBar({
                   effectiveUsername,
                   voiceCheckInput,
                 );
-                const ringClass = peerSpeaking
-                  ? "ring-[#38BDF8] ep-speaking-ring"
-                  : badge.isMismatch
-                    ? "ring-warn/90"
-                    : p.isReady
-                      ? "ring-ok/85"
-                      : "ring-warn/80";
+                const presenceStatus = badge.isMismatch
+                  ? "mismatch"
+                  : p.isReady
+                    ? "none"
+                    : "notReady";
                 return (
-                  <ProfileAvatar
+                  <PresenceAvatar
                     key={p.username}
                     avatarId={resolvePeerAvatarId(
                       p.username,
@@ -1147,30 +1162,29 @@ export const TransportBar = memo(function TransportBar({
                       avatarId,
                     )}
                     size={20}
+                    speaking={peerSpeaking}
+                    status={presenceStatus}
                     title={`${p.username}${peerSpeaking ? " · Speaking" : p.isReady ? " · Ready" : " · Not Ready"}${
                       badge.isMismatch ? ` · ${badge.text}` : ""
                     }`}
-                    className={`ring-2 ${ringClass} shrink-0 transition-shadow duration-150`}
                   />
                 );
               })}
-              {extraPeerCount > 0 && (
-                <span className="h-5 w-5 rounded-full bg-raised text-[10px] text-secondary font-medium flex items-center justify-center ring-2 ring-canvas/90 shrink-0">
-                  +{extraPeerCount}
-                </span>
-              )}
             </span>
+            {extraPeerCount > 0 && (
+              <span className="h-5 px-1.5 rounded-full bg-raised text-[10px] text-secondary font-medium inline-flex items-center justify-center ring-1 ring-white/10 shrink-0">
+                +{extraPeerCount}
+              </span>
+            )}
             {barLayout.showPartyCount && (
               <span className="text-[11px] font-medium leading-none num">
                 {participants.length}
               </span>
             )}
             {voiceEnabled && !voiceJoined && voicePeersInCall.length > 0 && (
-              <AppVoiceWaveIcon
-                active
-                speaking={remoteSpeakingCount > 0}
-                size={11}
-                className="shrink-0"
+              <AppHeadphonesIcon
+                size={12}
+                className={remoteSpeakingCount > 0 ? "text-ok shrink-0" : "text-accent-soft shrink-0"}
               />
             )}
             {mismatch && (
@@ -1210,42 +1224,161 @@ export const TransportBar = memo(function TransportBar({
         )}
       </button>
 
-      {(chatTriggerPlacement === "playbar" || reactionsEnabled) && (() => {
+      {voiceEnabled && voiceJoined && !isMini && (
+        <VoiceMicDeafenPills
+          variant="bare"
+          muted={voiceMuted}
+          deafened={voiceDeafened}
+          speaking={isLocalVoiceSpeaking(voiceCheckInput)}
+          captureHealthy={isCaptureHealthy(voiceStreamStatus)}
+          size="lg"
+          showDeafen={false}
+        />
+      )}
+
+      {(onTogglePartySidebar || chatTriggerPlacement === "playbar" || reactionsEnabled) && (() => {
         const showChat = chatTriggerPlacement === "playbar";
         const showReactions = reactionsEnabled;
         const circleDim = isMini ? "h-7 w-7" : "h-7.5 w-7.5";
+        const dockHeight = isMini ? "h-7" : "h-7.5";
+        const partySidebarActive = partyDisplayMode === "sidebar" && partySidebarOpen;
         return (
           <div className="inline-flex items-center gap-1.5 shrink-0">
-            {showChat && (
-              <button
-                type="button"
-                data-capsule-anchor="chat"
-                aria-pressed={chatOpen}
-                onClick={() => onToggleChat?.()}
-                aria-label="Party chat"
-                title="Party Chat (C)"
-                className={`ep-bar-pill ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
-                  chatOpen
-                    ? "ep-droplet-indicator text-white"
-                    : "text-secondary hover:text-white"
-                }`}
+            {onTogglePartySidebar && showChat ? (
+              <div
+                className={`ep-split-pill ${dockHeight} rounded-full inline-flex items-center p-[2px] gap-[1px] overflow-visible shrink-0`}
               >
-                <PlayerChatIcon
-                  active={chatOpen}
-                  size={isMini ? 15 : 17}
-                  className="shrink-0"
-                />
-                {unreadChatCount > 0 && !chatOpen ? (
-                  <span className="anim-pop-in absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
-                    {unreadChatCount > 9 ? "9+" : unreadChatCount}
-                  </span>
-                ) : chatTypingCount > 0 && !chatOpen ? (
-                  <span
-                    aria-hidden="true"
-                    className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
+                <button
+                  type="button"
+                  data-capsule-anchor="party-sidebar"
+                  aria-pressed={partySidebarActive}
+                  onClick={() => onTogglePartySidebar()}
+                  aria-label="Party & Voice sidebar"
+                  title="Party & Voice Lounge (P)"
+                  className={`ep-press relative ${isMini ? "w-7" : "w-8"} h-full rounded-full inline-flex items-center justify-center cursor-pointer ${
+                    partySidebarActive
+                      ? "bg-white/[0.18] shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.28)] text-white"
+                      : "text-secondary hover:text-white hover:bg-white/[0.08]"
+                  }`}
+                >
+                  <AppHeadphonesIcon
+                    deafened={voiceJoined && voiceDeafened}
+                    size={isMini ? 14 : 15}
+                    className="shrink-0"
                   />
-                ) : null}
-              </button>
+                  {voiceEnabled &&
+                    (voiceJoined || voicePeersInCall.length > 0) &&
+                    !partySidebarActive && (
+                      <span
+                        aria-hidden="true"
+                        className={`absolute top-1 right-1 h-1.5 w-1.5 rounded-full ring-2 ring-canvas/85 z-10 ${
+                          remoteSpeakingCount > 0 ? "bg-ok" : "bg-accent-soft"
+                        }`}
+                      />
+                    )}
+                </button>
+                <span
+                  aria-hidden="true"
+                  className={`w-px h-3 bg-white/[0.14] shrink-0 transition-opacity duration-150 ${
+                    partySidebarActive || chatOpen ? "opacity-0" : "opacity-100"
+                  }`}
+                />
+                <button
+                  type="button"
+                  data-capsule-anchor="chat"
+                  aria-pressed={chatOpen}
+                  onClick={() => onToggleChat?.()}
+                  aria-label="Party chat"
+                  title="Party Chat (C)"
+                  className={`ep-press relative ${isMini ? "w-7" : "w-8"} h-full rounded-full inline-flex items-center justify-center cursor-pointer ${
+                    chatOpen
+                      ? "bg-white/[0.18] shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.28)] text-white"
+                      : "text-secondary hover:text-white hover:bg-white/[0.08]"
+                  }`}
+                >
+                  <PlayerChatIcon
+                    active={chatOpen}
+                    size={isMini ? 14 : 15}
+                    className="shrink-0"
+                  />
+                  {unreadChatCount > 0 && !chatOpen ? (
+                    <span className="anim-pop-in absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
+                      {unreadChatCount > 9 ? "9+" : unreadChatCount}
+                    </span>
+                  ) : chatTypingCount > 0 && !chatOpen ? (
+                    <span
+                      aria-hidden="true"
+                      className="absolute top-1 right-1.5 h-1.5 w-1.5 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
+                    />
+                  ) : null}
+                </button>
+              </div>
+            ) : (
+              <>
+                {onTogglePartySidebar && (
+                  <button
+                    type="button"
+                    data-capsule-anchor="party-sidebar"
+                    aria-pressed={partySidebarActive}
+                    onClick={() => onTogglePartySidebar()}
+                    aria-label="Party & Voice sidebar"
+                    title="Party & Voice Lounge (P)"
+                    className={`ep-bar-pill ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                      partySidebarActive
+                        ? "ep-droplet-indicator text-white"
+                        : "text-secondary hover:text-white"
+                    }`}
+                  >
+                    <AppHeadphonesIcon
+                      deafened={voiceJoined && voiceDeafened}
+                      size={isMini ? 14 : 15}
+                      className="shrink-0"
+                    />
+                    {voiceEnabled &&
+                      (voiceJoined || voicePeersInCall.length > 0) &&
+                      !partySidebarActive && (
+                        <span
+                          aria-hidden="true"
+                          className={`absolute top-0.5 right-0.5 h-2 w-2 rounded-full ring-2 ring-canvas/85 z-10 ${
+                            remoteSpeakingCount > 0 ? "bg-ok" : "bg-accent-soft"
+                          }`}
+                        />
+                      )}
+                  </button>
+                )}
+
+                {showChat && (
+                  <button
+                    type="button"
+                    data-capsule-anchor="chat"
+                    aria-pressed={chatOpen}
+                    onClick={() => onToggleChat?.()}
+                    aria-label="Party chat"
+                    title="Party Chat (C)"
+                    className={`ep-bar-pill ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                      chatOpen
+                        ? "ep-droplet-indicator text-white"
+                        : "text-secondary hover:text-white"
+                    }`}
+                  >
+                    <PlayerChatIcon
+                      active={chatOpen}
+                      size={isMini ? 15 : 17}
+                      className="shrink-0"
+                    />
+                    {unreadChatCount > 0 && !chatOpen ? (
+                      <span className="anim-pop-in absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
+                        {unreadChatCount > 9 ? "9+" : unreadChatCount}
+                      </span>
+                    ) : chatTypingCount > 0 && !chatOpen ? (
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
+                      />
+                    ) : null}
+                  </button>
+                )}
+              </>
             )}
 
             {showReactions && (
@@ -1341,7 +1474,7 @@ export const TransportBar = memo(function TransportBar({
       <GlassHoverTip
         label="Auto-ducking movie"
         detail="Lowering volume while friends speak"
-        accent="speaking"
+        accent="admin"
         disabled={!duckingActive}
       >
         <button
@@ -1365,7 +1498,7 @@ export const TransportBar = memo(function TransportBar({
           {duckingActive && (
             <span
               aria-hidden="true"
-              className="anim-pop-in absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[#38BDF8] ep-speaking-ring"
+              className="anim-pop-in absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-accent-soft ring-1 ring-canvas/80"
             />
           )}
         </button>

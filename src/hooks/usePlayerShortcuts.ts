@@ -40,6 +40,7 @@ interface UsePlayerShortcutsOptions {
   hasOpenOverlay?: () => boolean;
   onToggleReactions?: () => void;
   onToggleChat?: () => void;
+  onToggleParty?: () => void;
   onWakeChrome?: () => void;
 }
 
@@ -49,6 +50,7 @@ export function usePlayerShortcuts({
   hasOpenOverlay,
   onToggleReactions,
   onToggleChat,
+  onToggleParty,
   onWakeChrome,
 }: UsePlayerShortcutsOptions): void {
   useEffect(() => {
@@ -139,6 +141,20 @@ export function usePlayerShortcuts({
         e.preventDefault();
         onToggleChat?.();
         return;
+      }
+
+      if (appState.roomCode && e.code === "KeyP") {
+        const voiceState = useVoiceStore.getState();
+        const pttUsesP =
+          voiceState.voiceEnabled &&
+          voiceState.joined &&
+          voiceState.inputMode === "ptt" &&
+          voiceState.pttVk === 0x50;
+        if (!pttUsesP) {
+          e.preventDefault();
+          onToggleParty?.();
+          return;
+        }
       }
 
       // Mic Mute / Unmute via M when connected to voice chat (works even before media loads)
@@ -332,5 +348,5 @@ export function usePlayerShortcuts({
       throttledSeek.cancel();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [hasOpenOverlay, onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleReactions, onWakeChrome]);
+  }, [hasOpenOverlay, onExitFullscreen, onToggleChat, onToggleFullscreen, onToggleParty, onToggleReactions, onWakeChrome]);
 }

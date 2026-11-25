@@ -49,7 +49,6 @@ export function Scrubber({
   const pointerDownXRef = useRef(0);
   const pointerDownValRef = useRef(value);
   const lastValRef = useRef(value);
-  const hoverGlassNotifiedRef = useRef(false);
   const draggingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
   const dragMovedRef = useRef(false);
@@ -90,10 +89,6 @@ export function Scrubber({
     const relX = clamp(clientX - rect.left, effectivePad, rect.width - effectivePad);
     setHoverX(relX);
     setHoverRatio(span > 0 ? clamp((relX - effectivePad) / span, 0, 1) : 0);
-    if (formatTooltip && tooltipVariant !== "plain" && !disabled && !hoverGlassNotifiedRef.current) {
-      hoverGlassNotifiedRef.current = true;
-      window.dispatchEvent(new Event("ep:glass-layout"));
-    }
   };
 
   const handlePointerDown = (e: PointerEvent<HTMLDivElement>) => {
@@ -198,10 +193,6 @@ export function Scrubber({
       onLostPointerCapture={finishPointerDrag}
       onPointerLeave={() => {
         setHoverRatio(null);
-        if (hoverGlassNotifiedRef.current) {
-          hoverGlassNotifiedRef.current = false;
-          window.dispatchEvent(new Event("ep:glass-layout"));
-        }
       }}
       onKeyDown={handleKeyDown}
       className={`ep-scrubber group relative h-6 flex items-center select-none touch-none ${
@@ -213,11 +204,10 @@ export function Scrubber({
         if (previewNode) {
           return (
             <div
-              data-glass-region="true"
-              className={`anim-pop-in ep-glass-thumb-preview pointer-events-none absolute z-30 -translate-x-1/2 p-1.5 rounded-2xl transition-[left] duration-75 ease-out ${
-                tooltipPlacement === "bottom" ? "top-7" : "bottom-7"
+              className={`ep-glass-thumb-preview pointer-events-none absolute z-30 -translate-x-1/2 ${
+                tooltipPlacement === "bottom" ? "top-6" : "bottom-6"
               }`}
-              style={{ left: `clamp(min(94px, 50%), ${hoverX}px, max(50%, calc(100% - 94px)))` }}
+              style={{ left: `clamp(min(80px, 50%), ${hoverX}px, max(50%, calc(100% - 80px)))` }}
             >
               {previewNode}
             </div>

@@ -342,7 +342,7 @@ test("Real-time liquid-glass backdrop sampling and convex bezel lens invariants 
   assert.equal(backdropSrc.includes("bezelThickness"), true);
   assert.equal(backdropSrc.includes("devicePixelRatio"), true);
   assert.equal(backdropSrc.includes("pausedRefreshKey"), true);
-  assert.equal(backdropSrc.includes("computeEffectiveZOrder"), true);
+  assert.equal(backdropSrc.includes("computeRegionPlacement"), true);
 
   const notifSrc = fs.readFileSync(
     path.join(REPO_ROOT, "src/components/ui/NotificationStrip.tsx"),
@@ -436,7 +436,7 @@ test("Auto-hiding and re-showing play bar, top bar, and video backdrop glide smo
     "utf8",
   );
   assert.match(backdropSrc, /globalAlpha\s*=\s*0\.92\s*\*\s*regionAlpha/);
-  assert.equal(backdropSrc.includes("computeEffectiveRegionAlpha"), true);
+  assert.equal(backdropSrc.includes("computeRegionPlacement"), true);
   assert.equal(backdropSrc.includes("cur.parentElement"), true);
 });
 
@@ -726,13 +726,8 @@ test("Non-context menus omit unnecessary separating strokes while right-click Co
   );
   assert.equal(
     contextMenuSrc.includes("ep-hairline-divider"),
-    true,
-    "Right-click ContextMenu must keep its section dividers",
-  );
-  assert.match(
-    contextMenuSrc,
-    /ep-hairline-divider\s+-mx-1\.5/,
-    "ContextMenu dividers should extend the full menu width cleanly",
+    false,
+    "Right-click ContextMenu should group sections with clean spacing instead of hairline divider strokes",
   );
   assert.match(
     contextMenuSrc,

@@ -74,6 +74,50 @@ impl BiquadHighPass {
     }
 }
 
+/// Transposed Direct-Form II peaking EQ biquad for transparent studio vocal shaping.
+#[derive(Debug, Clone)]
+pub struct BiquadPeakingEq {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl BiquadPeakingEq {
+    pub fn new(freq_hz: f32, q: f32, gain_db: f32, sample_rate_hz: f32) -> Self {
+        let a = 10.0f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * freq_hz / sample_rate_hz;
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        Self {
+            b0: (1.0 + alpha * a) / a0,
+            b1: (-2.0 * cos_w0) / a0,
+            b2: (1.0 - alpha * a) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha / a) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn process_sample(&mut self, input: f32) -> f32 {
+        let y = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * y + self.z2;
+        self.z2 = self.b2 * input - self.a2 * y;
+        y
+    }
+
+    pub fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+}
+
 /// Optional echo cancellation trait so v1.1 can drop in WASAPI loopback AEC3/SpeexDSP cleanly.
 pub trait EchoCanceller: Send {
     fn process_10ms(
@@ -488,6 +532,7 @@ pub struct VoiceDenoiser {
     in_scaled: [f32; VOICE_FRAME_10MS],
     out_scaled: [f32; VOICE_FRAME_10MS],
     speech_rms_env: f32,
+    noise_rms_env: f32,
     prob_smooth: f32,
     hangover_frames: u8,
     post_gain_smooth: f32,
@@ -504,10 +549,10 @@ impl Default for VoiceDenoiser {
 impl VoiceDenoiser {
     const SPEECH_HANGOVER_FRAMES: u8 = 22; // 220 ms tail protection against word-end clipping
     const TARGET_INPUT_RMS: f32 = 0.063; // ~ -24 dBFS pre-leveling sweet spot for quiet mics
-    const MAX_PRE_GAIN: f32 = 2.0; // +6 dB bounded lift for quiet mics without amplifying room fans
+    const MAX_PRE_GAIN: f32 = 3.16; // +10 dB SNR-guarded lift for quiet mics without amplifying loud fans
     const SUBFRAME_LEN: usize = 120; // 2.5 ms @ 48 kHz
     const BALANCED_ATTEN_LIMIT_DB: f32 = 18.0;
-    const STRONG_ATTEN_LIMIT_DB: f32 = 100.0;
+    const STRONG_ATTEN_LIMIT_DB: f32 = 38.0; // Deep noise removal while preserving unvoiced consonants (s/f/t/k)
 
     pub fn new() -> Self {
         let mut dfn = Dfn3Denoiser::new();
@@ -519,6 +564,7 @@ impl VoiceDenoiser {
             in_scaled: [0.0; VOICE_FRAME_10MS],
             out_scaled: [0.0; VOICE_FRAME_10MS],
             speech_rms_env: Self::TARGET_INPUT_RMS,
+            noise_rms_env: 0.003,
             prob_smooth: 0.0,
             hangover_frames: 0,
             post_gain_smooth: 1.0,
@@ -533,6 +579,7 @@ impl VoiceDenoiser {
         self.in_scaled.fill(0.0);
         self.out_scaled.fill(0.0);
         self.speech_rms_env = Self::TARGET_INPUT_RMS;
+        self.noise_rms_env = 0.003;
         self.prob_smooth = 0.0;
         self.hangover_frames = 0;
         self.post_gain_smooth = 1.0;
@@ -553,17 +600,20 @@ impl VoiceDenoiser {
             return 1.0;
         }
 
-        // Stage A: Sub-frame transient de-clicker (2.5 ms windows before neural enhancement).
-        // Mechanical switches and mouse clicks show a sharp broadband RMS spike + high HF derivative
-        // energy; attenuating them pre-denoiser stops transient spikes from bleeding through.
+        // Stage A: Lookahead-verified 2.5 ms sub-frame impulse de-clicker.
+        // Mechanical switches and mouse clicks spike sharply for 1 sub-window and either decay
+        // immediately or stay ultra-HF, whereas vocal plosives/fricatives transition into sustained speech.
         self.stage_a_buf.copy_from_slice(dry);
         let spike_mult = match mode {
-            NoiseSuppressionMode::Strong => 3.2,
-            _ => 4.2,
+            NoiseSuppressionMode::Strong => 3.4,
+            _ => 4.4,
         };
-        for w in 0..(VOICE_FRAME_10MS / Self::SUBFRAME_LEN) {
+        const NUM_SUB: usize = VOICE_FRAME_10MS / VoiceDenoiser::SUBFRAME_LEN;
+        let mut sub_rms_arr = [0.0f32; NUM_SUB];
+        let mut hf_ratio_arr = [0.0f32; NUM_SUB];
+        for w in 0..NUM_SUB {
             let start = w * Self::SUBFRAME_LEN;
-            let win = &mut self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
+            let win = &self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
             let mut sum_sq = 0.0f32;
             let mut diff_sum = 0.0f32;
             let mut prev_s = win[0];
@@ -573,19 +623,32 @@ impl VoiceDenoiser {
                 prev_s = s;
             }
             let sub_rms = (sum_sq / Self::SUBFRAME_LEN as f32).sqrt();
-            let hf_ratio = if sub_rms > 1e-5 {
+            sub_rms_arr[w] = sub_rms;
+            hf_ratio_arr[w] = if sub_rms > 1e-5 {
                 (diff_sum / Self::SUBFRAME_LEN as f32) / sub_rms
             } else {
                 0.0
             };
+        }
+
+        for w in 0..NUM_SUB {
+            let sub_rms = sub_rms_arr[w];
+            let hf_ratio = hf_ratio_arr[w];
+            let looks_sustained_speech = if w + 1 < NUM_SUB {
+                sub_rms_arr[w + 1] >= sub_rms * 0.68 && hf_ratio_arr[w + 1] < 0.40
+            } else {
+                hf_ratio < 0.48
+            };
             let is_click_transient = self.hangover_frames == 0
                 && sub_rms > (self.prev_sub_rms * spike_mult).max(0.015)
-                && hf_ratio > 0.36;
+                && hf_ratio > 0.36
+                && !looks_sustained_speech;
             if is_click_transient {
+                let start = w * Self::SUBFRAME_LEN;
+                let win = &mut self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
                 let target_rms = (self.prev_sub_rms * 1.4).max(0.004);
                 let atten = (target_rms / sub_rms.max(1e-5)).clamp(0.08, 0.45);
                 for (idx, s) in win.iter_mut().enumerate() {
-                    // Gentle 8-sample fade in/out inside sub-window avoids sharp step clicks
                     let edge = if idx < 8 {
                         idx as f32 / 8.0
                     } else if idx >= Self::SUBFRAME_LEN - 8 {
@@ -606,7 +669,7 @@ impl VoiceDenoiser {
             }
         }
 
-        // Stage B: Bounded pre-gain so quiet mics enter DeepFilterNet3 near -24 dBFS, then neural core.
+        // Stage B: SNR-guarded pre-gain so quiet mics enter DeepFilterNet3 near -24 dBFS without boosting loud fans.
         if mode != self.last_mode {
             let limit_db = match mode {
                 NoiseSuppressionMode::Strong => Self::STRONG_ATTEN_LIMIT_DB,
@@ -621,8 +684,15 @@ impl VoiceDenoiser {
 
         let dry_rms =
             (self.stage_a_buf.iter().map(|s| s * s).sum::<f32>() / VOICE_FRAME_10MS as f32).sqrt();
+        let noise_cap_gain = if self.noise_rms_env > 1e-4 {
+            (0.018 / self.noise_rms_env).clamp(1.0, Self::MAX_PRE_GAIN)
+        } else {
+            Self::MAX_PRE_GAIN
+        };
         let pre_gain = if self.speech_rms_env > 1e-4 {
-            (Self::TARGET_INPUT_RMS / self.speech_rms_env).clamp(1.0, Self::MAX_PRE_GAIN)
+            (Self::TARGET_INPUT_RMS / self.speech_rms_env)
+                .clamp(1.0, Self::MAX_PRE_GAIN)
+                .min(noise_cap_gain)
         } else {
             1.0
         };
@@ -641,47 +711,51 @@ impl VoiceDenoiser {
             0.0
         };
 
-        if raw_prob >= 0.80 && dry_rms > 0.008 {
-            self.speech_rms_env = (self.speech_rms_env * 0.96 + dry_rms * 0.04).clamp(0.031, 0.25);
+        if raw_prob >= 0.72 && dry_rms > 0.0035 {
+            self.speech_rms_env = (self.speech_rms_env * 0.95 + dry_rms * 0.05).clamp(0.018, 0.25);
+        } else if raw_prob < 0.22 {
+            self.noise_rms_env = (self.noise_rms_env * 0.98 + dry_rms * 0.02).clamp(0.0005, 0.08);
         }
 
         let prob_alpha = if raw_prob > self.prob_smooth {
-            0.55
+            0.60
         } else {
-            0.14
+            0.26
         };
         self.prob_smooth += prob_alpha * (raw_prob - self.prob_smooth);
-        if self.prob_smooth >= 0.45 {
+        if self.prob_smooth >= 0.42 {
             self.hangover_frames = Self::SPEECH_HANGOVER_FRAMES;
         } else if self.hangover_frames > 0 {
             self.hangover_frames -= 1;
         }
 
-        // Stage C: Post-denoiser residual noise-floor expander & Strong-mode HF hiss damper.
-        // Note: dfn3_rs already applies sample-aligned dry/wet attenuation mixing internally (30 ms
-        // delay), so we must NOT blend undelayed stage_a_buf with out_scaled here.
+        // Stage C: Silence-only residual floor expander (leaves soft speech >= 0.28 at full unity gain)
+        // with fast ~1.2 ms onset recovery so VoiceGate never gets starved on soft words.
         let floor_gain = match mode {
             NoiseSuppressionMode::Off => 1.0,
-            NoiseSuppressionMode::Balanced => 0.25, // -12 dB residual attenuation
-            NoiseSuppressionMode::Strong => 0.08,   // -22 dB deep silence floor
+            NoiseSuppressionMode::Balanced => 0.22,
+            NoiseSuppressionMode::Strong => 0.08,
         };
-        let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= 0.40 {
+        let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= 0.28 {
             1.0
         } else {
-            let t = (self.prob_smooth / 0.40).clamp(0.0, 1.0);
+            let t = (self.prob_smooth / 0.28).clamp(0.0, 1.0);
             floor_gain + (1.0 - floor_gain) * (t * t)
         };
-        let strong_hf_damp = if mode == NoiseSuppressionMode::Strong && raw_prob < 0.72 {
-            ((0.72 - raw_prob) / 0.72).clamp(0.0, 0.65)
+        let strong_hf_damp = if mode == NoiseSuppressionMode::Strong
+            && self.hangover_frames == 0
+            && raw_prob < 0.55
+        {
+            ((0.55 - raw_prob) / 0.55).clamp(0.0, 0.55)
         } else {
             0.0
         };
 
         let inv_pre_gain = 1.0 / pre_gain;
         let post_coeff = if target_post_gain > self.post_gain_smooth {
-            0.006
+            0.035
         } else {
-            0.00045
+            0.00055
         };
 
         for (dst, &clean_s) in out.iter_mut().zip(self.out_scaled.iter()) {
@@ -711,7 +785,7 @@ pub fn frame_dbfs(samples: &[f32]) -> f32 {
     }
 }
 
-/// Hysteresis VAD gate with 20 ms pre-roll, 250 ms hangover, and click-free 5 ms ramps.
+/// Hysteresis VAD gate with 20 ms pre-roll, 200 ms hangover, and click-free 5 ms ramps.
 #[derive(Debug, Clone)]
 pub struct VoiceGate {
     pre_roll: [[f32; VOICE_FRAME_10MS]; 2],
@@ -730,8 +804,8 @@ impl Default for VoiceGate {
 }
 
 impl VoiceGate {
-    const HANGOVER_TARGET_FRAMES: usize = 40; // 40 * 10 ms = 400 ms (Discord-style hold)
-    const RAMP_SAMPLES: usize = 240; // 5 ms @ 48 kHz
+    const HANGOVER_TARGET_FRAMES: usize = 20; // 20 * 10 ms = 200 ms snappy release without clipping word endings
+    const RAMP_SAMPLES: usize = 384; // 8 ms @ 48 kHz smooth S-curve ramp inside 10 ms frame
 
     pub fn new() -> Self {
         Self {
@@ -768,7 +842,10 @@ impl VoiceGate {
             } else {
                 self.current_gain -= step;
             }
-            *s *= self.current_gain;
+            let g = self.current_gain;
+            // Smoothstep S-curve avoids linear slope discontinuities (zero click artifacts)
+            let smooth_g = g * g * (3.0 - 2.0 * g);
+            *s *= smooth_g;
         }
     }
 
@@ -794,7 +871,13 @@ impl VoiceGate {
             ptt
         } else if self.is_open {
             self.speech_streak = 0;
-            let hold_ok = (vad_assisted && speech_prob >= 0.25) || db >= (threshold_db - 6.0);
+            let hold_ok = if vad_assisted {
+                (speech_prob >= 0.35 && db >= (threshold_db - 4.0))
+                    || (speech_prob >= 0.20 && db >= (threshold_db + 2.0))
+                    || (speech_prob >= 0.58 && db >= (threshold_db - 9.5))
+            } else {
+                db >= (threshold_db - 4.0)
+            };
             if hold_ok {
                 self.hangover_frames = Self::HANGOVER_TARGET_FRAMES;
                 true
@@ -807,12 +890,14 @@ impl VoiceGate {
         } else if !vad_assisted {
             self.speech_streak = 0;
             db >= threshold_db
-        } else if speech_prob >= 0.65 && db >= (threshold_db + 3.0) {
-            // Immediate open on clear speech onset (strict enough to reject 10 ms clicks)
+        } else if (speech_prob >= 0.65 && db >= (threshold_db + 2.0))
+            || (speech_prob >= 0.76 && db >= (threshold_db - 1.5))
+        {
+            // Immediate open on confident speech onset (still rejects 10 ms clicks)
             self.speech_streak = 0;
             true
-        } else if speech_prob >= 0.40 && db >= (threshold_db - 1.5) {
-            // 20 ms confirmation rejects 10 ms keyboard/mouse clicks while catching soft speech
+        } else if speech_prob >= 0.40 && db >= (threshold_db - 4.0) {
+            // 20 ms confirmation rejects 10 ms keyboard/mouse clicks while catching soft/quiet mics
             self.speech_streak = self.speech_streak.saturating_add(1);
             if self.speech_streak >= 2 {
                 self.speech_streak = 0;
@@ -887,13 +972,20 @@ impl VoiceGate {
     }
 }
 
-/// Two-stage speech-gated dynamic compressor + subtle vocal clarity/de-esser + fast peak limiter.
+/// Studio broadcast vocal processor:
+/// - Stage 1: Transparent surgical EQ (-1.8 dB @ 360 Hz boxiness trim + +1.6 dB @ 3.0 kHz articulation bell)
+/// - Stage 2: SNR-guarded speech-gated AGC & soft-knee downward compressor (lifts quiet -52 dBFS mics cleanly)
+/// - Stage 3: Split-band >5.5 kHz dynamic sibilance de-esser + fast peak compressor + -1 dBFS ceiling limiter
 #[derive(Debug, Clone)]
 pub struct VoiceCompressor {
     env_rms: f32,
+    noise_floor_rms: f32,
     gain_smooth: f32,
     peak_env: f32,
-    presence_lp: f32,
+    mud_eq: BiquadPeakingEq,
+    presence_eq: BiquadPeakingEq,
+    deess_lp: f32,
+    body_env: f32,
     sibilance_env: f32,
 }
 
@@ -908,25 +1000,33 @@ impl VoiceCompressor {
     const COMP_THRESH_DB: f32 = -22.0;
     const COMP_RATIO: f32 = 3.5;
     const COMP_KNEE_DB: f32 = 6.0;
-    const MAX_AGC_GAIN_DB: f32 = 12.0;
+    const MAX_AGC_GAIN_DB: f32 = 14.0;
     const PEAK_THRESH: f32 = 0.3548; // -9.0 dBFS fast peak knee
     const LIMITER_CEILING: f32 = 0.89125; // -1 dBFS
 
     pub fn new() -> Self {
         Self {
             env_rms: 0.015,
+            noise_floor_rms: 0.0012,
             gain_smooth: 1.0,
             peak_env: 0.0,
-            presence_lp: 0.0,
+            mud_eq: BiquadPeakingEq::new(360.0, 1.1, -1.8, VOICE_SAMPLE_RATE as f32),
+            presence_eq: BiquadPeakingEq::new(3000.0, 0.85, 1.6, VOICE_SAMPLE_RATE as f32),
+            deess_lp: 0.0,
+            body_env: 0.01,
             sibilance_env: 0.0,
         }
     }
 
     pub fn reset(&mut self) {
         self.env_rms = 0.015;
+        self.noise_floor_rms = 0.0012;
         self.gain_smooth = 1.0;
         self.peak_env = 0.0;
-        self.presence_lp = 0.0;
+        self.mud_eq.reset();
+        self.presence_eq.reset();
+        self.deess_lp = 0.0;
+        self.body_env = 0.01;
         self.sibilance_env = 0.0;
     }
 
@@ -952,16 +1052,22 @@ impl VoiceCompressor {
         let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
         let frame_rms = (sum_sq / samples.len() as f32).sqrt();
 
-        // Stage 1: Speech-gated loudness tracker — freezes AGC during silence/pauses so room noise never pumps.
-        if speech_prob >= 0.55 && frame_rms > 0.005 {
-            let alpha = if frame_rms > self.env_rms { 0.25 } else { 0.06 };
+        // Track speech down to -52 dBFS (0.0025) so very quiet mics still get leveled,
+        // while tracking residual noise floor during non-speech to cap hiss amplification.
+        if speech_prob >= 0.50 && frame_rms > 0.0025 {
+            let alpha = if frame_rms > self.env_rms { 0.25 } else { 0.07 };
             self.env_rms = (1.0 - alpha) * self.env_rms + alpha * frame_rms;
+        } else if speech_prob < 0.20 {
+            self.noise_floor_rms =
+                (0.96 * self.noise_floor_rms + 0.04 * frame_rms).clamp(0.0003, 0.04);
         }
         let env_db = if self.env_rms <= 1e-5 {
             -70.0
         } else {
             20.0 * self.env_rms.log10()
         };
+        let noise_db = 20.0 * self.noise_floor_rms.max(1e-5).log10();
+        let snr_db = (env_db - noise_db).max(0.0);
 
         // Soft-knee downward compression above COMP_THRESH_DB
         let over = env_db - Self::COMP_THRESH_DB;
@@ -976,14 +1082,17 @@ impl VoiceCompressor {
         };
         let comp_reduction_db = compressed_db - env_db;
 
-        // Bounded speech-only AGC lift toward -18 dBFS
-        let agc_boost_db = if speech_prob >= 0.55 && env_db > -48.0 {
-            (Self::TARGET_RMS_DB - env_db).clamp(-6.0, Self::MAX_AGC_GAIN_DB) * 0.60
+        // SNR-bounded speech-only AGC lift toward -18 dBFS (up to +10.5 dB on clean quiet mics,
+        // automatically scaled back if mic has high analog static floor).
+        let max_safe_boost_db = (snr_db * 0.65).clamp(2.0, 10.5);
+        let agc_boost_db = if speech_prob >= 0.50 && env_db > -54.0 {
+            ((Self::TARGET_RMS_DB - env_db).clamp(-6.0, Self::MAX_AGC_GAIN_DB) * 0.75)
+                .min(max_safe_boost_db)
         } else {
             0.0
         };
 
-        let target_gain = if speech_prob >= 0.55 || self.gain_smooth <= 1.0 {
+        let target_gain = if speech_prob >= 0.50 || self.gain_smooth <= 1.0 {
             10.0f32.powf((comp_reduction_db + agc_boost_db) / 20.0)
         } else {
             self.gain_smooth
@@ -992,26 +1101,30 @@ impl VoiceCompressor {
 
         for s in samples.iter_mut() {
             self.gain_smooth += gain_step;
-            let mut x = *s * self.gain_smooth;
+            let leveled = *s * self.gain_smooth;
 
-            // Stage 2: Gentle ~2.2 kHz vocal clarity tilt + dynamic sibilance de-esser
-            self.presence_lp += 0.24 * (x - self.presence_lp);
-            let hf = x - self.presence_lp;
+            // Subtle studio EQ: clean 360 Hz plastic/room mud + 3.0 kHz vocal articulation
+            let mut x = self.presence_eq.process_sample(self.mud_eq.process_sample(leveled));
+
+            // Split-band >5.5 kHz dynamic sibilance de-esser (engages only when harsh 'S'/'SH' exceeds vocal body)
+            self.deess_lp += 0.52 * (x - self.deess_lp);
+            let hf = x - self.deess_lp;
+            let body_abs = self.deess_lp.abs();
             let hf_abs = hf.abs();
+            self.body_env += 0.008 * (body_abs - self.body_env);
             let sib_alpha = if hf_abs > self.sibilance_env {
-                0.04
+                0.05
             } else {
-                0.002
+                0.0025
             };
             self.sibilance_env += sib_alpha * (hf_abs - self.sibilance_env);
-            if self.sibilance_env > 0.14 {
-                let deess = (0.14 / self.sibilance_env).clamp(0.45, 1.0);
-                x = self.presence_lp + hf * deess;
-            } else {
-                x += hf * 0.18; // ~ +1.4 dB articulation boost over movie audio
+            let sib_thresh = (self.body_env * 0.62).max(0.085);
+            if self.sibilance_env > sib_thresh {
+                let deess = (sib_thresh / self.sibilance_env).clamp(0.42, 1.0);
+                x = self.deess_lp + hf * deess;
             }
 
-            // Stage 3: Fast ~0.5 ms attack / ~50 ms release peak compressor + -1 dBFS true ceiling limiter
+            // Fast ~0.5 ms attack / ~50 ms release peak compressor + -1 dBFS true ceiling limiter
             let x_abs = x.abs();
             let pk_alpha = if x_abs > self.peak_env { 0.04 } else { 0.0004 };
             self.peak_env += pk_alpha * (x_abs - self.peak_env);
@@ -1300,7 +1413,7 @@ impl PeerJitterBuffer {
             if !is_dtx_gap {
                 let d = (d_arr - d_ts).unsigned_abs() as f64;
                 self.interarrival_jitter_ms += (d - self.interarrival_jitter_ms) / 16.0;
-                self.target_frames = if self.interarrival_jitter_ms < 12.0 {
+                self.target_frames = if self.interarrival_jitter_ms < 6.0 {
                     1
                 } else if self.interarrival_jitter_ms < 28.0 {
                     2
@@ -1453,7 +1566,7 @@ impl AdaptiveBitrateController {
         Self {
             bitrate_bps: 64_000,
             fec_enabled: true,
-            expected_loss_pct: 1,
+            expected_loss_pct: 5,
             clean_ticks: 0,
             upshift_probe_ticks: 0,
             hold_ticks_req: 500,
@@ -1578,7 +1691,7 @@ impl AdaptiveBitrateController {
                         // Monitor next 2 s closely in case upshift triggers congestion again
                         self.upshift_probe_ticks = 100;
                     }
-                    self.expected_loss_pct = 1;
+                    self.expected_loss_pct = 5;
                     self.hold_ticks_req = 500;
                 }
             }
@@ -1730,20 +1843,44 @@ mod tests {
         assert!(out[0][0].abs() < 0.001);
         assert!(out[0][VOICE_FRAME_10MS - 1].abs() > 0.0);
 
-        // Dropping below threshold stays open for 40 hangover frames (400 ms)
-        for _ in 0..40 {
+        // Dropping below threshold stays open for 20 hangover frames (200 ms)
+        for _ in 0..20 {
             let (c, is_open, _) =
                 gate.process_10ms(&quiet, 0.0, -40.0, true, None, false, &mut out);
             assert_eq!(c, 1);
             assert!(is_open);
         }
-        // 41st quiet frame starts closing with ramp-down, then goes silent
+        // 21st quiet frame starts closing with ramp-down, then goes silent
         let (c_close, _, _) = gate.process_10ms(&quiet, 0.0, -40.0, true, None, false, &mut out);
         assert_eq!(c_close, 1);
         let (c_closed, is_open_after, _) =
             gate.process_10ms(&quiet, 0.0, -40.0, true, None, false, &mut out);
         assert_eq!(c_closed, 0);
         assert!(!is_open_after);
+
+        // Background room noise (0 speech_prob at -44 dB) or faint residual speech_prob (0.28)
+        // must NOT hold the VAD-assisted gate stuck open after speech ends.
+        let (_, open2, _) = gate.process_10ms(&loud, 0.9, -40.0, true, None, false, &mut out);
+        assert!(open2);
+        let room_noise = [0.0063f32; VOICE_FRAME_10MS]; // ~-44 dBFS (within 4 dB of -40 dB)
+        for _ in 0..22 {
+            gate.process_10ms(&room_noise, 0.05, -40.0, true, None, false, &mut out);
+        }
+        let (_, still_open_noise, _) =
+            gate.process_10ms(&room_noise, 0.05, -40.0, true, None, false, &mut out);
+        assert!(!still_open_noise, "Room noise must not hold VAD gate open");
+
+        let (_, open3, _) = gate.process_10ms(&loud, 0.9, -40.0, true, None, false, &mut out);
+        assert!(open3);
+        for _ in 0..22 {
+            gate.process_10ms(&quiet, 0.28, -40.0, true, None, false, &mut out);
+        }
+        let (_, still_open_prob, _) =
+            gate.process_10ms(&quiet, 0.28, -40.0, true, None, false, &mut out);
+        assert!(
+            !still_open_prob,
+            "Quiet residual speech_prob=0.28 must not hold VAD gate open"
+        );
     }
 
     #[test]
@@ -2492,6 +2629,43 @@ mod tests {
             assert!(noise <= -59.0);
             assert!(speak >= -25.0);
             assert!(threshold.is_finite());
+        }
+    }
+
+    #[test]
+    fn quiet_mic_leveling_studio_eq_and_soft_trailing_syllable_retention() {
+        // 1. Very quiet -48 dBFS speech (~0.004 RMS) gets lifted cleanly by VoiceCompressor
+        let mut comp = VoiceCompressor::new();
+        let mut quiet_rms = 0.004f32;
+        for f_idx in 0..30usize {
+            let mut frame = vec![0.0f32; VOICE_FRAME_20MS];
+            for (i, s) in frame.iter_mut().enumerate() {
+                let t = ((f_idx * VOICE_FRAME_20MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                *s = 0.0055 * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
+            }
+            comp.process_with_speech_prob(&mut frame, 0.88, true);
+            quiet_rms = (frame.iter().map(|s| s * s).sum::<f32>() / (frame.len() as f32)).sqrt();
+        }
+        assert!(
+            quiet_rms > 0.009,
+            "Quiet -48 dBFS mic must be lifted cleanly by SNR-bounded AGC; got rms={quiet_rms}"
+        );
+
+        // 2. Soft trailing words (speech_prob = 0.68 at threshold - 8 dB) stay held open without mid-sentence chop
+        let mut gate = VoiceGate::new();
+        let mut gout = [[0.0f32; VOICE_FRAME_10MS]; 3];
+        let normal_speech = [0.05f32; VOICE_FRAME_10MS]; // ~-26 dBFS
+        let soft_tail = [0.004f32; VOICE_FRAME_10MS]; // ~-48 dBFS (8 dB below -40 dB threshold)
+        let (_, opened, _) =
+            gate.process_10ms(&normal_speech, 0.90, -40.0, true, None, false, &mut gout);
+        assert!(opened);
+        for _ in 0..35 {
+            let (cnt, still_open, _) =
+                gate.process_10ms(&soft_tail, 0.68, -40.0, true, None, false, &mut gout);
+            assert!(
+                still_open && cnt == 1,
+                "Confident soft trailing syllables must not cut out mid-sentence"
+            );
         }
     }
 }

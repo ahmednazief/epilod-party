@@ -8,9 +8,7 @@ import {
   AppEditIcon,
   AppKeyboardIcon,
   AppKeyIcon,
-  AppLogsIcon,
   AppResetIcon,
-  AppSlidersIcon,
   AppSparkleIcon,
 } from "./ui/AppIcons";
 import { MenuMediaDiscIcon } from "./ui/MenuIcons";
@@ -971,19 +969,6 @@ export function HomeScreen() {
           icon: <AppKeyboardIcon size={14} />,
           onSelect: openShortcuts,
         },
-        { type: "divider", id: "lobby-prefs-div" },
-        {
-          id: "server-settings",
-          label: "Connection & Server…",
-          icon: <AppSlidersIcon size={14} />,
-          onSelect: () => openSettings("server"),
-        },
-        {
-          id: "diagnostics",
-          label: "Session Diagnostics…",
-          icon: <AppLogsIcon size={14} />,
-          onSelect: () => openSettings("logs"),
-        },
       ],
     },
   ];
@@ -1156,107 +1141,84 @@ export function HomeScreen() {
                   {continueItems.map((item) => {
                     const isSeries = item.kind === "series" && Boolean(item.seriesEntry);
                     const isMissing = isSeries && missingSeriesKey === item.seriesEntry?.seriesKey;
-                    const linkedRoomLabel = item.linkedRoom
-                      ? item.linkedRoom.nickname ||
-                        (item.linkedRoom.literalRoom
-                          ? item.linkedRoom.roomName
-                          : formatRoomCodeDisplay(item.linkedRoom.roomName))
-                      : null;
+                    const episodeOrKindLabel = item.badgeText?.replace(/^Resume\s+/i, "") || null;
                     return (
                       <div
                         key={item.id}
-                        className="ep-menu-row relative overflow-hidden rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-xs group"
+                        className="ep-menu-row relative rounded-xl px-3 py-2.5 flex flex-col gap-2 text-xs group"
                       >
-                        <button
-                          type="button"
-                          title={
-                            linkedRoomLabel
-                              ? `Resume in Watch Party (${linkedRoomLabel})`
-                              : undefined
-                          }
-                          onClick={() => {
-                            if (item.kind === "series" && item.seriesEntry) {
-                              void handleContinueSeries(item.seriesEntry);
-                            } else {
-                              void handleContinueMovie(item);
-                            }
-                          }}
-                          className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
-                        >
-                          {item.kind === "series" ? (
-                            <PlayerEpisodesIcon size={15} className="text-accent-soft shrink-0" />
-                          ) : (
-                            <MenuMediaDiscIcon size={15} className="text-accent-soft shrink-0" />
-                          )}
-                          <span className="truncate font-medium text-white">{item.title}</span>
-                          {item.badgeText && (
-                            <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10px] text-secondary num shrink-0">
-                              {item.badgeText}
-                            </span>
-                          )}
-                          {item.timeLeftLabel && (
-                            <span className="text-[10px] text-muted num shrink-0">
-                              {item.timeLeftLabel}
-                            </span>
-                          )}
-                          {linkedRoomLabel && (
-                            <span className="px-1.5 py-0.5 rounded-full bg-accent/18 text-[10px] text-accent-soft truncate max-w-[100px] shrink-0">
-                              Party · {linkedRoomLabel}
-                            </span>
-                          )}
-                        </button>
-                        {!isMissing && item.linkedRoom && (
+                        <div className="flex items-center justify-between gap-2.5">
                           <button
                             type="button"
                             onClick={() => {
                               if (item.kind === "series" && item.seriesEntry) {
-                                void handleContinueSeries(item.seriesEntry, { solo: true });
+                                void handleContinueSeries(item.seriesEntry);
                               } else {
-                                void handleContinueMovie(item, { solo: true });
+                                void handleContinueMovie(item);
                               }
                             }}
-                            title="Watch alone instead"
-                            className="ep-press px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-[11px] text-secondary hover:text-white shrink-0 cursor-pointer"
+                            className="flex-1 flex items-center gap-2.5 min-w-0 text-left cursor-pointer"
                           >
-                            Solo
+                            {item.kind === "series" ? (
+                              <PlayerEpisodesIcon size={16} className="text-accent-soft shrink-0" />
+                            ) : (
+                              <MenuMediaDiscIcon size={16} className="text-accent-soft shrink-0" />
+                            )}
+                            <div className="flex-1 flex items-center gap-2 min-w-0">
+                              <span className="truncate font-medium text-white">
+                                {item.title}
+                              </span>
+                              {episodeOrKindLabel && (
+                                <span className="px-1.5 py-0.5 rounded-full bg-white/[0.08] text-[10px] leading-tight text-secondary num shrink-0">
+                                  {episodeOrKindLabel}
+                                </span>
+                              )}
+                              {item.timeLeftLabel && (
+                                <span className="text-[11px] text-muted num shrink-0">
+                                  {item.timeLeftLabel}
+                                </span>
+                              )}
+                            </div>
                           </button>
-                        )}
-                        {isMissing && item.seriesEntry && (
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <span className="text-[11px] text-warn">Folder not found</span>
-                            <button
-                              type="button"
-                              onClick={() => void handleLocateSeriesFolder(item.seriesEntry!)}
-                              className="ep-press px-2 py-1 rounded-lg bg-white/[0.1] hover:bg-white/[0.16] text-[11px] text-white cursor-pointer"
-                            >
-                              Locate folder
-                            </button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {isMissing && item.seriesEntry && (
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <span className="text-[11px] text-warn">Folder not found</span>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleLocateSeriesFolder(item.seriesEntry!)}
+                                  className="ep-press px-2 py-1 rounded-lg bg-white/[0.1] hover:bg-white/[0.16] text-[11px] text-white cursor-pointer"
+                                >
+                                  Locate folder
+                                </button>
+                              </div>
+                            )}
+                            {!isMissing && (
+                              <button
+                                type="button"
+                                aria-label={`Remove ${item.title} from continue watching`}
+                                title="Remove"
+                                onClick={() => {
+                                  if (item.kind === "series" && item.seriesEntry) {
+                                    removeSeries(item.seriesEntry.seriesKey);
+                                  } else if (item.resumeKey) {
+                                    removeResumePosition(item.resumeKey);
+                                  }
+                                }}
+                                className="ep-press p-1 rounded-lg text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-bad hover:bg-white/[0.08] shrink-0 cursor-pointer transition-opacity"
+                              >
+                                <X size={12} />
+                              </button>
+                            )}
                           </div>
-                        )}
-                        {!isMissing && (
-                          <button
-                            type="button"
-                            aria-label={`Remove ${item.title} from continue watching`}
-                            title="Remove"
-                            onClick={() => {
-                              if (item.kind === "series" && item.seriesEntry) {
-                                removeSeries(item.seriesEntry.seriesKey);
-                              } else if (item.resumeKey) {
-                                removeResumePosition(item.resumeKey);
-                              }
-                            }}
-                            className="ep-press p-1 rounded-lg text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-bad hover:bg-white/[0.08] shrink-0 cursor-pointer transition-opacity"
-                          >
-                            <X size={12} />
-                          </button>
-                        )}
+                        </div>
                         {item.progressRatio !== null && (
                           <div
                             aria-hidden="true"
-                            className="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-white/[0.06]"
+                            className="ep-episode-progress-track pointer-events-none w-full"
                           >
                             <div
-                              className="h-full bg-accent/85"
+                              className="ep-episode-progress-fill block"
                               style={{ width: `${Math.round(item.progressRatio * 100)}%` }}
                             />
                           </div>

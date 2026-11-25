@@ -1,4 +1,3 @@
-import { Check } from "lucide-react";
 import {
   AppCloseIcon,
   AppFolderIcon,
@@ -11,6 +10,7 @@ import {
   PlayerCaptionsIcon,
   PlayerFollowIcon,
   PlayerRatingStarIcon,
+  PlayerWatchedCheckIcon,
 } from "./ui/PlayerIcons";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
@@ -65,6 +65,11 @@ export const EpisodesPanel = memo(function EpisodesPanel({
 
   const paused = usePlayerStore((s) => s.paused);
   const loaded = usePlayerStore((s) => s.loaded);
+  const liveProgressPct = usePlayerStore((s) =>
+    s.loaded && s.durationSecs > 0
+      ? Math.min(98, Math.max(4, Math.round((s.positionSecs / s.durationSecs) * 100)))
+      : 0,
+  );
 
   const roomCode = useAppStore((s) => s.roomCode);
   const username = useAppStore((s) => s.username);
@@ -285,10 +290,11 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             const resumeMatch = Object.entries(resumeEntries).find(([k]) =>
               k.startsWith(namePrefix),
             )?.[1];
-            const progressPct =
+            const savedPct =
               !isWatched && resumeMatch && resumeMatch.durationSecs > 0
                 ? Math.min(95, Math.max(4, Math.round((resumeMatch.positionSecs / resumeMatch.durationSecs) * 100)))
                 : 0;
+            const progressPct = active && liveProgressPct > 0 ? liveProgressPct : savedPct;
             const peersHere = roomCode
               ? participants.filter(
                   (p) => matchPeerEpisodeInPlaylist(p.fileName, [item]) === 0,
@@ -366,7 +372,12 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                     const mediaId = buildEpisodeRatingId(item.fileName);
                     const personalScore = mediaId ? personalByMediaId[mediaId]?.score ?? null : null;
 
-                    if (!item.subtitlePath && officialScore === null && personalScore === null) {
+                    if (
+                      !item.subtitlePath &&
+                      officialScore === null &&
+                      personalScore === null &&
+                      progressPct <= 0
+                    ) {
                       return null;
                     }
 
@@ -428,6 +439,26 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                             </span>
                           </GlassHoverTip>
                         ) : null}
+                        {progressPct > 0 &&
+                          (item.subtitlePath || officialScore !== null || personalScore !== null) && (
+                            <span aria-hidden="true" className="text-white/25">·</span>
+                          )}
+                        {progressPct > 0 && (
+                          <span
+                            title={`${progressPct}% watched`}
+                            className="inline-flex items-center min-w-[44px] flex-1 max-w-[82px]"
+                          >
+                            <span
+                              aria-hidden="true"
+                              className="ep-episode-progress-track w-full"
+                            >
+                              <span
+                                className="ep-episode-progress-fill block"
+                                style={{ width: `${progressPct}%` }}
+                              />
+                            </span>
+                          </span>
+                        )}
                       </div>
                     );
                   })()}
@@ -478,25 +509,14 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                       }}
                       className={`w-5 h-5 rounded-full flex items-center justify-center transition-opacity ${
                         isWatched
-                          ? "bg-ok/20 text-ok opacity-100"
-                          : "text-white/40 hover:text-white hover:bg-white/[0.1] opacity-0 group-hover:opacity-100"
+                          ? "opacity-100"
+                          : "text-white/55 hover:text-white opacity-0 group-hover:opacity-100"
                       }`}
                     >
-                      <Check size={11} />
+                      <PlayerWatchedCheckIcon watched={isWatched} size={16} />
                     </span>
                   )}
                 </div>
-                {progressPct > 0 && (
-                  <span
-                    aria-hidden="true"
-                    className="absolute bottom-0 left-2.5 right-2.5 h-[2px] rounded-full bg-white/[0.08] overflow-hidden"
-                  >
-                    <span
-                      className="block h-full bg-accent/80 rounded-full"
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </span>
-                )}
               </button>
             );
           })}
@@ -515,6 +535,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
               {
                 id: "toggle-watched",
                 label: targetWatched ? "Mark as unwatched" : "Mark as watched",
+                icon: <PlayerWatchedCheckIcon watched={!targetWatched} size={14} />,
                 onSelect: () => {
                   const key = upsertSeries({
                     folderPath: seriesFolderPath,
@@ -528,6 +549,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                     {
                       id: "mark-above-watched",
                       label: "Mark all above as watched",
+                      icon: <PlayerWatchedCheckIcon watched size={14} />,
                       onSelect: () => {
                         const key = upsertSeries({
                           folderPath: seriesFolderPath,
