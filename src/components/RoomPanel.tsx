@@ -11,8 +11,8 @@ import {
   AppSignalBarsIcon,
   AppSlidersIcon,
   AppSpeakerVolumeIcon,
+  AppVoiceIcon,
   AppVoiceTuneIcon,
-  AppVoiceWaveIcon,
 } from "./ui/AppIcons";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
@@ -328,6 +328,11 @@ export const RoomPanel = memo(function RoomPanel({
   const voicePttMod = useVoiceStore((s) => s.pttMod);
   const setVoicePeerVolume = useVoiceStore((s) => s.setPeerVolume);
   const [btPreJoinConfirm, setBtPreJoinConfirm] = useState(false);
+  const [leaveRoomConfirm, setLeaveRoomConfirm] = useState(false);
+
+  useEffect(() => {
+    if (!voiceJoined) setLeaveRoomConfirm(false);
+  }, [voiceJoined]);
   const [voiceSetupOpen, setVoiceSetupOpen] = useState(false);
   const [syncHealth, setSyncHealth] = useState<SyncHealthPayload | null>(null);
   const [healthCopied, setHealthCopied] = useState(false);
@@ -1039,17 +1044,17 @@ export const RoomPanel = memo(function RoomPanel({
                   }
                   pulse={!syncConnected}
                 />
-                <span>
-                  {status.state === "error"
-                    ? "Paused"
-                    : status.state === "reconnecting"
-                      ? "Reconnecting"
-                      : syncConnected
-                        ? healthCopied
+                {(!syncConnected || healthCopied) && (
+                  <span>
+                    {status.state === "error"
+                      ? "Paused"
+                      : status.state === "reconnecting"
+                        ? "Reconnecting"
+                        : healthCopied
                           ? "Copied"
-                          : "Connected"
-                        : "Connecting…"}
-                </span>
+                          : "Connecting…"}
+                  </span>
+                )}
               </button>
             </GlassHoverTip>
           )}
@@ -1069,14 +1074,26 @@ export const RoomPanel = memo(function RoomPanel({
             </GlassHoverTip>
           )}
           {roomCode && (
-            <GlassHoverTip label="Leave Watch Party" detail="Keep watching solo">
+            <GlassHoverTip
+              label="Leave Watch Party Room"
+              detail="Keep watching solo"
+              accent="bad"
+              disabled={leaveRoomConfirm && voiceJoined}
+            >
               <button
                 type="button"
-                onClick={handleLeaveParty}
+                aria-label="Leave Watch Party Room"
+                onClick={() => {
+                  if (voiceJoined) {
+                    setLeaveRoomConfirm((prev) => !prev);
+                  } else {
+                    handleLeaveParty();
+                  }
+                }}
                 className="ep-bar-icon-btn h-7 px-2 rounded-full inline-flex items-center gap-1 text-[11.5px] font-medium text-secondary hover:text-bad cursor-pointer"
               >
                 <PartyLeaveIcon size={14} className="shrink-0" />
-                <span>Leave</span>
+                <span>Leave Room</span>
               </button>
             </GlassHoverTip>
           )}
@@ -1094,6 +1111,53 @@ export const RoomPanel = memo(function RoomPanel({
           )}
         </div>
       </div>
+
+      {roomCode && (
+        <AnimatedCollapse open={leaveRoomConfirm && voiceJoined} innerClassName="pb-2">
+          <div className="rounded-xl bg-bad/[0.09] ring-1 ring-inset ring-bad/20 px-3 py-2 space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-[11px] font-medium text-white/90 leading-snug">
+                Leave the entire Watch Party room, or just disconnect from voice chat?
+              </p>
+              <button
+                type="button"
+                aria-label="Cancel"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setLeaveRoomConfirm(false);
+                }}
+                className="h-5 w-5 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-white/[0.1] shrink-0 cursor-pointer"
+              >
+                <AppCloseIcon size={11} />
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setLeaveRoomConfirm(false);
+                  handleLeaveParty();
+                }}
+                className="ep-press h-6.5 px-2.5 rounded-full bg-bad/20 hover:bg-bad/30 text-[10.5px] font-semibold text-bad cursor-pointer"
+              >
+                Leave Room
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setLeaveRoomConfirm(false);
+                  void handleToggleVoice(false);
+                }}
+                className="ep-bar-pill ep-press h-6.5 px-2.5 rounded-full text-[10.5px] font-medium text-white cursor-pointer"
+              >
+                Leave Voice Only
+              </button>
+            </div>
+          </div>
+        </AnimatedCollapse>
+      )}
 
       {!roomCode ? (
         <div className="anim-tab-in flex flex-col gap-3.5 px-1 pb-0.5">
@@ -1354,7 +1418,7 @@ export const RoomPanel = memo(function RoomPanel({
                     onClick={() => openSettings("voice")}
                     className="ep-bar-pill ep-press h-7 px-3 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-muted hover:text-white cursor-pointer"
                   >
-                    <AppVoiceWaveIcon active={false} speaking={false} size={13} />
+                    <AppVoiceIcon active={false} size={13} />
                     <span>Voice Disabled</span>
                   </button>
                 ) : voiceJoined ? (
@@ -1383,10 +1447,11 @@ export const RoomPanel = memo(function RoomPanel({
                     className="inline-flex items-center min-w-0"
                   >
                     <div className="flex items-center gap-2 min-w-0 cursor-default">
-                      <AppVoiceWaveIcon
+                      <AppVoiceIcon
                         active
-                        speaking={roomActiveSpeakers.length > 0}
-                        size={13}
+                        connected={!voiceDeafened}
+                        deafened={voiceDeafened}
+                        size={14}
                         className="shrink-0"
                       />
                       <span
@@ -1432,7 +1497,7 @@ export const RoomPanel = memo(function RoomPanel({
                       onClick={() => void handleToggleVoice(false)}
                       className="ep-glass-primary-pill ep-press h-7 px-3 rounded-full inline-flex items-center gap-1.5 text-[11px] font-medium text-white cursor-pointer disabled:opacity-60"
                     >
-                      <AppVoiceWaveIcon active={false} speaking={false} size={13} />
+                      <AppVoiceIcon active={false} size={13} />
                       <span>
                         {voiceJoining
                           ? "Starting Voice…"

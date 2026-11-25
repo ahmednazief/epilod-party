@@ -16,7 +16,7 @@ use epilod_core::voice_dsp::{
     frame_dbfs, mix_mono_peers_to_stereo, soft_limit, AdaptiveBitrateController, BiquadHighPass,
     EchoCanceller, JitterPacket, NoiseSuppressionMode, NoopEchoCanceller, PeerJitterBuffer,
     PeerRxLeveler, SpeakerEchoDetector, VoiceCalibrator, VoiceCompressor, VoiceDenoiser, VoiceGate,
-    WebRtcAec3Canceller, VOICE_FRAME_10MS, VOICE_FRAME_20MS, VOICE_SAMPLE_RATE,
+    WebRtcAec3Canceller, WebRtcAgc2Leveler, VOICE_FRAME_10MS, VOICE_FRAME_20MS, VOICE_SAMPLE_RATE,
 };
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
@@ -2297,6 +2297,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let mut echo_detector = SpeakerEchoDetector::new();
     let mut calibrator: Option<(VoiceCalibrator, Instant, u8)> = None;
     let mut denoiser = VoiceDenoiser::new();
+    let mut agc2 = WebRtcAgc2Leveler::new();
     let mut gate = VoiceGate::new();
     let mut comp = VoiceCompressor::new();
     let mut abr = AdaptiveBitrateController::new();
@@ -2342,6 +2343,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let mut frame_10ms = [0.0f32; VOICE_FRAME_10MS];
     let mut aec_out = [0.0f32; VOICE_FRAME_10MS];
     let mut ns_out = [0.0f32; VOICE_FRAME_10MS];
+    let mut leveled_out = [0.0f32; VOICE_FRAME_10MS];
     let mut gate_out = [[0.0f32; VOICE_FRAME_10MS]; 3];
     let mut encode_accum: Vec<f32> = Vec::with_capacity(VOICE_FRAME_20MS * 2);
     let mut opus_out = [0u8; MAX_VOICE_OPUS_BYTES];
@@ -2443,6 +2445,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             webrtc_aec3.reset();
             echo_detector.reset();
             denoiser.reset();
+            agc2.reset();
             gate.reset();
             comp.reset();
         }
@@ -2631,11 +2634,13 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
             let ns_mode = cfg.noise_mode.into_core();
             let speech_prob = denoiser.process_10ms(ns_mode, &aec_out, &mut ns_out);
+            let use_agc2 = cfg.compression_enabled && ns_mode != NoiseSuppressionMode::Off;
+            agc2.process_10ms(&ns_out, &mut leveled_out, use_agc2);
 
             // Handle 3-second mic calibration onboarding if active
             if let Some((ref mut cal, started_at, ref mut last_pct)) = calibrator {
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                let db_now = frame_dbfs(&ns_out);
+                let db_now = frame_dbfs(&leveled_out);
                 if elapsed_ms < 1200 {
                     cal.push_quiet_db(db_now);
                     let pct = ((elapsed_ms * 40) / 1200).min(40) as u8;
@@ -2689,7 +2694,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
             // Smooth slow ambient noise floor tracking when Auto-Sensitivity is on
             let base_thresh = if cfg.auto_sensitivity {
-                let raw_db = frame_dbfs(&ns_out);
+                let raw_db = frame_dbfs(&leveled_out);
                 if speech_prob < 0.3 && raw_db < -25.0 {
                     auto_noise_floor_db = auto_noise_floor_db * 0.992 + raw_db * 0.008;
                 }
@@ -2717,7 +2722,7 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             let vad_assisted = ns_mode != NoiseSuppressionMode::Off;
 
             let (out_cnt, is_open, db) = gate.process_10ms(
-                &ns_out,
+                &leveled_out,
                 speech_prob,
                 eff_thresh,
                 vad_assisted,

@@ -498,3 +498,53 @@ test("toggleVoiceMute flashes fluid micCue for mute/unmute and KeyM routes mic m
   assert.equal(globalsCss.includes("@keyframes ep-mic-cue-out"), true);
   assert.equal(globalsCss.includes("@keyframes ep-mic-halo-pulse"), true);
 });
+
+test("clicking or pressing mute does not wake the hidden play bar", () => {
+  const shortcutsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/hooks/usePlayerShortcuts.ts"),
+    "utf8",
+  );
+  const watchRoomSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/WatchRoom.tsx"),
+    "utf8",
+  );
+  const partySidebarSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/PartySidebar.tsx"),
+    "utf8",
+  );
+  const chatSidebarSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ChatSidebar.tsx"),
+    "utf8",
+  );
+  const voiceControlsSrc = fs.readFileSync(
+    path.join(REPO_ROOT, "src/components/ui/VoiceQuickControls.tsx"),
+    "utf8",
+  );
+
+  // Neither KeyM mic mute nor KeyM video mute should call onWakeChrome
+  assert.doesNotMatch(
+    shortcutsSrc,
+    /if\s*\(e\.code === "KeyM"[\s\S]*?toggleVoiceMute\(\)/m.source
+      ? /if\s*\(e\.code === "KeyM" && !e\.shiftKey\)[\s\S]*?onWakeChrome\?\.\(\)[\s\S]*?toggleVoiceMute\(\)/
+      : /$^/,
+  );
+  assert.doesNotMatch(
+    shortcutsSrc,
+    /if\s*\(e\.code === "KeyM"\)\s*\{[^}]*onWakeChrome\?\.\(\)[^}]*toggleMutePlayback\(\)/,
+  );
+
+  // Sidebar surfaces (both docked and floating) are excluded from WatchRoom wakeChrome pointer handlers
+  assert.match(partySidebarSrc, /data-sidebar-surface="true"/);
+  assert.match(chatSidebarSrc, /data-sidebar-surface="true"/);
+  assert.equal(
+    watchRoomSrc.split('closest(\'[data-docked-sidebar="true"], [data-sidebar-surface="true"]\')')
+      .length - 1,
+    2,
+  );
+
+  // Mic mute button stops pointerDown propagation
+  assert.match(
+    voiceControlsSrc,
+    /aria-label=\{muted \? "Unmute microphone" : "Mute microphone"\}[\s\S]*?onPointerDown=\{\(e\) => e\.stopPropagation\(\)\}/,
+  );
+});

@@ -3159,7 +3159,10 @@ export function WatchRoom() {
 
   useEffect(() => {
     const onPointerActivity = (e: MouseEvent) => {
-      if (e.target instanceof Element && e.target.closest('[data-docked-sidebar="true"]')) {
+      if (
+        e.target instanceof Element &&
+        e.target.closest('[data-docked-sidebar="true"], [data-sidebar-surface="true"]')
+      ) {
         return;
       }
       onPassivePointerMove();
@@ -4507,7 +4510,10 @@ export function WatchRoom() {
       ref={stageRef}
       onMouseEnter={wakeChrome}
       onPointerDown={(e) => {
-        if (e.target instanceof Element && e.target.closest('[data-docked-sidebar="true"]')) {
+        if (
+          e.target instanceof Element &&
+          e.target.closest('[data-docked-sidebar="true"], [data-sidebar-surface="true"]')
+        ) {
           return;
         }
         wakeChrome();

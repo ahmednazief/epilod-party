@@ -2,8 +2,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use dfn3_rs::Denoiser as Dfn3Denoiser;
-use sonora::config::EchoCanceller as SonoraEchoCancellerConfig;
+use sonora::config::{
+    AdaptiveDigital as SonoraAdaptiveDigitalConfig, EchoCanceller as SonoraEchoCancellerConfig,
+    FixedDigital as SonoraFixedDigitalConfig, GainController2 as SonoraGainController2Config,
+    MaxProcessingRate as SonoraMaxProcessingRate, Pipeline as SonoraPipelineConfig,
+};
 use sonora::{AudioProcessing, Config as SonoraConfig, StreamConfig as SonoraStreamConfig};
+use sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper;
 
 pub const VOICE_SAMPLE_RATE: usize = 48_000;
 pub const VOICE_FRAME_10MS: usize = 480;
@@ -340,6 +345,100 @@ impl EchoCanceller for WebRtcAec3Canceller {
     }
 }
 
+/// WebRTC AGC2 adaptive digital gain controller + saturation protector + limiter backed by
+/// pure-Rust `sonora` (48 kHz mono, 10 ms frames).
+///
+/// Lifts quiet/distant laptop microphones up to +32 dB during speech while refusing to amplify
+/// background noise (`max_output_noise_level_dbfs = -52 dBFS`) and smoothly taming close-up peaks.
+pub struct WebRtcAgc2Leveler {
+    apm: AudioProcessing,
+    in_scratch: [f32; VOICE_FRAME_10MS],
+}
+
+impl Default for WebRtcAgc2Leveler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WebRtcAgc2Leveler {
+    fn build_apm() -> AudioProcessing {
+        let cfg = SonoraConfig {
+            pipeline: SonoraPipelineConfig {
+                maximum_internal_processing_rate: SonoraMaxProcessingRate::Rate48kHz,
+                multi_channel_render: false,
+                multi_channel_capture: false,
+                ..Default::default()
+            },
+            gain_controller2: Some(SonoraGainController2Config {
+                input_volume_controller: false,
+                adaptive_digital: Some(SonoraAdaptiveDigitalConfig {
+                    headroom_db: 4.0,
+                    max_gain_db: 34.0,
+                    initial_gain_db: 15.0,
+                    max_gain_change_db_per_second: 12.0,
+                    max_output_noise_level_dbfs: -52.0,
+                }),
+                fixed_digital: SonoraFixedDigitalConfig { gain_db: 4.0 },
+            }),
+            ..Default::default()
+        };
+        let stream_cfg = SonoraStreamConfig::new(VOICE_SAMPLE_RATE as u32, 1);
+        AudioProcessing::builder()
+            .config(cfg)
+            .capture_config(stream_cfg)
+            .render_config(stream_cfg)
+            .build()
+    }
+
+    pub fn new() -> Self {
+        Self {
+            apm: Self::build_apm(),
+            in_scratch: [0.0; VOICE_FRAME_10MS],
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.apm = Self::build_apm();
+        self.in_scratch.fill(0.0);
+    }
+
+    /// Processes a 10 ms 48 kHz mono frame in `[-1.0, 1.0]`.
+    pub fn process_10ms(
+        &mut self,
+        input: &[f32; VOICE_FRAME_10MS],
+        out: &mut [f32; VOICE_FRAME_10MS],
+        enabled: bool,
+    ) {
+        if !enabled {
+            out.copy_from_slice(input);
+            return;
+        }
+        for (dst, &src) in self.in_scratch.iter_mut().zip(input.iter()) {
+            *dst = if src.is_finite() {
+                src.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        if self
+            .apm
+            .process_capture_f32(&[self.in_scratch.as_slice()], &mut [&mut out[..]])
+            .is_err()
+        {
+            out.copy_from_slice(&self.in_scratch);
+            return;
+        }
+        for s in out.iter_mut() {
+            if !s.is_finite() {
+                *s = 0.0;
+            } else {
+                *s = s.clamp(-0.98, 0.98);
+            }
+        }
+    }
+}
+
 /// Detects speaker-to-mic acoustic leak by correlating 10 ms RMS envelopes across 0..160 ms lags.
 #[derive(Debug, Clone)]
 pub struct SpeakerEchoDetector {
@@ -521,23 +620,24 @@ impl VoiceCalibrator {
     }
 }
 
-/// Local DeepFilterNet3 wrapper with 3-stage processing:
-/// - Stage A: 2.5 ms sub-frame transient de-clicker (rejects keyboard/mouse clicks pre-denoiser)
-/// - Stage B: Quiet-mic pre-leveled 48 kHz DeepFilterNet3 neural core (sample-aligned internal dry/wet)
-/// - Stage C: Residual floor expander & Strong-mode HF hiss damper
+/// Local DeepFilterNet3 + WebRTC 24 kHz RNN-VAD wrapper:
+/// - Stage A: 2.5 ms sub-frame transient de-clicker (rejects sharp keyboard/mouse clicks pre-denoiser)
+/// - Stage B: Quiet-mic pre-leveled 48 kHz DeepFilterNet3 neural core (32 dB Balanced / 60 dB Strong)
+/// - Stage C: WebRTC 24 kHz Neural RNN-VAD fused with DFN3 LSNR + gentle silence-only floor smoother
 pub struct VoiceDenoiser {
     dfn: Dfn3Denoiser,
+    rnn_vad: VoiceActivityDetectorWrapper,
     last_mode: NoiseSuppressionMode,
     stage_a_buf: [f32; VOICE_FRAME_10MS],
     in_scaled: [f32; VOICE_FRAME_10MS],
     out_scaled: [f32; VOICE_FRAME_10MS],
+    vad_pcm_buf: [f32; VOICE_FRAME_10MS],
     speech_rms_env: f32,
     noise_rms_env: f32,
     prob_smooth: f32,
     hangover_frames: u8,
     post_gain_smooth: f32,
     prev_sub_rms: f32,
-    hiss_lp_state: f32,
 }
 
 impl Default for VoiceDenoiser {
@@ -547,44 +647,53 @@ impl Default for VoiceDenoiser {
 }
 
 impl VoiceDenoiser {
-    const SPEECH_HANGOVER_FRAMES: u8 = 22; // 220 ms tail protection against word-end clipping
-    const TARGET_INPUT_RMS: f32 = 0.063; // ~ -24 dBFS pre-leveling sweet spot for quiet mics
-    const MAX_PRE_GAIN: f32 = 3.16; // +10 dB SNR-guarded lift for quiet mics without amplifying loud fans
+    const SPEECH_HANGOVER_FRAMES: u8 = 24; // 240 ms tail protection against word-end clipping
+    const TARGET_INPUT_RMS: f32 = 0.075; // ~ -22.5 dBFS pre-leveling sweet spot for distant laptop mics
+    const MAX_PRE_GAIN: f32 = 4.0; // +12 dB SNR-guarded lift for quiet mics without amplifying loud fans
     const SUBFRAME_LEN: usize = 120; // 2.5 ms @ 48 kHz
-    const BALANCED_ATTEN_LIMIT_DB: f32 = 18.0;
-    const STRONG_ATTEN_LIMIT_DB: f32 = 38.0; // Deep noise removal while preserving unvoiced consonants (s/f/t/k)
+    const BALANCED_ATTEN_LIMIT_DB: f32 = 28.0;
+    const STRONG_ATTEN_LIMIT_DB: f32 = 45.0; // Deep Krisp-class neural suppression while preserving low-SNR speech
 
     pub fn new() -> Self {
         let mut dfn = Dfn3Denoiser::new();
         dfn.set_attenuation_limit(Self::BALANCED_ATTEN_LIMIT_DB);
+        let rnn_vad = VoiceActivityDetectorWrapper::new(
+            sonora_simd::detect_backend(),
+            VOICE_SAMPLE_RATE as i32,
+        );
         Self {
             dfn,
+            rnn_vad,
             last_mode: NoiseSuppressionMode::Balanced,
             stage_a_buf: [0.0; VOICE_FRAME_10MS],
             in_scaled: [0.0; VOICE_FRAME_10MS],
             out_scaled: [0.0; VOICE_FRAME_10MS],
+            vad_pcm_buf: [0.0; VOICE_FRAME_10MS],
             speech_rms_env: Self::TARGET_INPUT_RMS,
             noise_rms_env: 0.003,
             prob_smooth: 0.0,
             hangover_frames: 0,
             post_gain_smooth: 1.0,
             prev_sub_rms: 0.005,
-            hiss_lp_state: 0.0,
         }
     }
 
     pub fn reset(&mut self) {
         self.dfn.reset();
+        self.rnn_vad = VoiceActivityDetectorWrapper::new(
+            sonora_simd::detect_backend(),
+            VOICE_SAMPLE_RATE as i32,
+        );
         self.stage_a_buf.fill(0.0);
         self.in_scaled.fill(0.0);
         self.out_scaled.fill(0.0);
+        self.vad_pcm_buf.fill(0.0);
         self.speech_rms_env = Self::TARGET_INPUT_RMS;
         self.noise_rms_env = 0.003;
         self.prob_smooth = 0.0;
         self.hangover_frames = 0;
         self.post_gain_smooth = 1.0;
         self.prev_sub_rms = 0.005;
-        self.hiss_lp_state = 0.0;
     }
 
     /// Processes a 10 ms 48 kHz mono frame in [-1.0, 1.0].
@@ -631,6 +740,7 @@ impl VoiceDenoiser {
             };
         }
 
+        let mut had_click_transient = false;
         for w in 0..NUM_SUB {
             let sub_rms = sub_rms_arr[w];
             let hf_ratio = hf_ratio_arr[w];
@@ -644,20 +754,13 @@ impl VoiceDenoiser {
                 && hf_ratio > 0.36
                 && !looks_sustained_speech;
             if is_click_transient {
+                had_click_transient = true;
                 let start = w * Self::SUBFRAME_LEN;
                 let win = &mut self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
                 let target_rms = (self.prev_sub_rms * 1.4).max(0.004);
                 let atten = (target_rms / sub_rms.max(1e-5)).clamp(0.08, 0.45);
-                for (idx, s) in win.iter_mut().enumerate() {
-                    let edge = if idx < 8 {
-                        idx as f32 / 8.0
-                    } else if idx >= Self::SUBFRAME_LEN - 8 {
-                        (Self::SUBFRAME_LEN - 1 - idx) as f32 / 8.0
-                    } else {
-                        1.0
-                    };
-                    let g = 1.0 - edge * (1.0 - atten);
-                    *s *= g;
+                for s in win.iter_mut() {
+                    *s *= atten;
                 }
             } else {
                 let alpha = if sub_rms > self.prev_sub_rms {
@@ -705,67 +808,76 @@ impl VoiceDenoiser {
         }
 
         let lsnr = self.dfn.process(&self.in_scaled, &mut self.out_scaled);
-        let raw_prob = if lsnr.is_finite() {
+        let lsnr_prob = if lsnr.is_finite() {
             ((lsnr + 6.0) / 14.0).clamp(0.0, 1.0)
         } else {
             0.0
         };
 
-        if raw_prob >= 0.72 && dry_rms > 0.0035 {
-            self.speech_rms_env = (self.speech_rms_env * 0.95 + dry_rms * 0.05).clamp(0.018, 0.25);
-        } else if raw_prob < 0.22 {
+        // Run Google WebRTC 24 kHz Neural RNN-VAD on the pre-leveled denoised frame (WebRTC int16 float scale).
+        for (dst, &s) in self.vad_pcm_buf.iter_mut().zip(self.out_scaled.iter()) {
+            *dst = if s.is_finite() {
+                (s * 32768.0).clamp(-32768.0, 32767.0)
+            } else {
+                0.0
+            };
+        }
+        let rnn_prob = self.rnn_vad.analyze(&self.vad_pcm_buf).clamp(0.0, 1.0);
+        let raw_prob = if had_click_transient && rnn_prob < 0.25 {
+            rnn_prob.min(0.12)
+        } else if rnn_prob >= 0.45 {
+            rnn_prob.max(lsnr_prob)
+        } else if rnn_prob < 0.08 && lsnr_prob < 0.92 {
+            (rnn_prob * 0.70 + lsnr_prob * 0.30).min(0.18)
+        } else if rnn_prob < 0.12 && lsnr_prob < 0.72 {
+            (rnn_prob * 0.65 + lsnr_prob * 0.35).min(0.24)
+        } else {
+            (rnn_prob * 0.60 + lsnr_prob * 0.40).clamp(0.0, 1.0)
+        };
+
+        if raw_prob >= 0.62 && dry_rms > 0.0020 {
+            self.speech_rms_env = (self.speech_rms_env * 0.94 + dry_rms * 0.06).clamp(0.012, 0.25);
+        } else if raw_prob < 0.20 {
             self.noise_rms_env = (self.noise_rms_env * 0.98 + dry_rms * 0.02).clamp(0.0005, 0.08);
         }
 
         let prob_alpha = if raw_prob > self.prob_smooth {
-            0.60
+            0.65
         } else {
-            0.26
+            0.24
         };
         self.prob_smooth += prob_alpha * (raw_prob - self.prob_smooth);
-        if self.prob_smooth >= 0.42 {
+        if self.prob_smooth >= 0.38 {
             self.hangover_frames = Self::SPEECH_HANGOVER_FRAMES;
         } else if self.hangover_frames > 0 {
             self.hangover_frames -= 1;
         }
 
-        // Stage C: Silence-only residual floor expander (leaves soft speech >= 0.28 at full unity gain)
-        // with fast ~1.2 ms onset recovery so VoiceGate never gets starved on soft words.
+        // Stage C: Gentle silence-only residual floor smoother (no HF muffling low-pass;
+        // keeps soft speech >= 0.20 at full unity gain so VoiceGate & AGC2 never starve).
         let floor_gain = match mode {
             NoiseSuppressionMode::Off => 1.0,
             NoiseSuppressionMode::Balanced => 0.22,
             NoiseSuppressionMode::Strong => 0.08,
         };
-        let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= 0.28 {
+        let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= 0.20 {
             1.0
         } else {
-            let t = (self.prob_smooth / 0.28).clamp(0.0, 1.0);
+            let t = (self.prob_smooth / 0.20).clamp(0.0, 1.0);
             floor_gain + (1.0 - floor_gain) * (t * t)
-        };
-        let strong_hf_damp = if mode == NoiseSuppressionMode::Strong
-            && self.hangover_frames == 0
-            && raw_prob < 0.55
-        {
-            ((0.55 - raw_prob) / 0.55).clamp(0.0, 0.55)
-        } else {
-            0.0
         };
 
         let inv_pre_gain = 1.0 / pre_gain;
         let post_coeff = if target_post_gain > self.post_gain_smooth {
-            0.035
+            0.045
         } else {
-            0.00055
+            0.0007
         };
 
         for (dst, &clean_s) in out.iter_mut().zip(self.out_scaled.iter()) {
             self.post_gain_smooth += post_coeff * (target_post_gain - self.post_gain_smooth);
-            let mut blended = (clean_s * inv_pre_gain).clamp(-1.0, 1.0);
-            self.hiss_lp_state += 0.36 * (blended - self.hiss_lp_state);
-            if strong_hf_damp > 0.0 {
-                blended = blended * (1.0 - strong_hf_damp) + self.hiss_lp_state * strong_hf_damp;
-            }
-            *dst = blended * self.post_gain_smooth;
+            let clean = (clean_s * inv_pre_gain).clamp(-1.0, 1.0);
+            *dst = clean * self.post_gain_smooth;
         }
 
         raw_prob.max(self.prob_smooth)
@@ -2667,5 +2779,172 @@ mod tests {
                 "Confident soft trailing syllables must not cut out mid-sentence"
             );
         }
+    }
+
+    #[test]
+    fn bad_audio_laptop_mic_secret_sauce_benchmark() {
+        use std::time::Instant;
+
+        // Synthesizes a realistic human voiced speech frame (pitch ~135 Hz with pitch contour
+        // + vowel formants F1/F2/F3 + natural 4 Hz syllable envelope) scaled to target RMS.
+        fn synth_speech_frame(frame_idx: usize, target_rms: f32) -> [f32; VOICE_FRAME_10MS] {
+            let mut out = [0.0f32; VOICE_FRAME_10MS];
+            let mut sq = 0.0f32;
+            for (i, s) in out.iter_mut().enumerate() {
+                let n = frame_idx * VOICE_FRAME_10MS + i;
+                let t = (n as f32) / (VOICE_SAMPLE_RATE as f32);
+                let f0 = 135.0 + 18.0 * (2.0 * std::f32::consts::PI * 1.6 * t).sin();
+                let syllable = 0.55 + 0.45 * (2.0 * std::f32::consts::PI * 3.8 * t).sin().abs();
+                let mut v = 0.0f32;
+                for h in 1..=12usize {
+                    let freq = f0 * (h as f32);
+                    // Vowel-like formant envelope around 500 Hz, 1450 Hz, 2600 Hz
+                    let w1 = (-((freq - 500.0) / 260.0).powi(2)).exp();
+                    let w2 = 0.75 * (-((freq - 1450.0) / 420.0).powi(2)).exp();
+                    let w3 = 0.35 * (-((freq - 2600.0) / 600.0).powi(2)).exp();
+                    let amp = (w1 + w2 + w3 + 0.08) / (h as f32).sqrt();
+                    v += amp * (2.0 * std::f32::consts::PI * freq * t).sin();
+                }
+                *s = v * syllable;
+                sq += (*s) * (*s);
+            }
+            let rms = (sq / VOICE_FRAME_10MS as f32).sqrt().max(1e-6);
+            let scale = target_rms / rms;
+            for s in out.iter_mut() {
+                *s *= scale;
+            }
+            out
+        }
+
+        // Deterministic colored laptop fan + room hum noise generator.
+        fn synth_fan_noise_frame(seed: &mut u64, lp: &mut f32, target_rms: f32) -> [f32; VOICE_FRAME_10MS] {
+            let mut out = [0.0f32; VOICE_FRAME_10MS];
+            let mut sq = 0.0f32;
+            for s in out.iter_mut() {
+                *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let u = (((*seed >> 33) as u32) as f32 / (u32::MAX as f32)) * 2.0 - 1.0;
+                *lp = *lp * 0.72 + u * 0.28;
+                *s = *lp;
+                sq += (*s) * (*s);
+            }
+            let rms = (sq / VOICE_FRAME_10MS as f32).sqrt().max(1e-6);
+            let scale = target_rms / rms;
+            for s in out.iter_mut() {
+                *s *= scale;
+            }
+            out
+        }
+
+        let run_chain = |frames: &[[f32; VOICE_FRAME_10MS]], mode: NoiseSuppressionMode, threshold_db: f32| {
+            let mut hpf = BiquadHighPass::new_80hz_48k();
+            let mut denoiser = VoiceDenoiser::new();
+            let mut agc2 = WebRtcAgc2Leveler::new();
+            let mut gate = VoiceGate::new();
+            let mut comp = VoiceCompressor::new();
+            let mut ns_out = [0.0f32; VOICE_FRAME_10MS];
+            let mut leveled = [0.0f32; VOICE_FRAME_10MS];
+            let mut gate_out = [[0.0f32; VOICE_FRAME_10MS]; 3];
+
+            let start = Instant::now();
+            let mut open_frames = 0usize;
+            let mut peak_abs = 0.0f32;
+            let mut db_sum = 0.0f32;
+            let mut db_count = 0usize;
+            let mut prob_sum = 0.0f32;
+            let warmup = frames.len() / 3;
+
+            for (idx, raw) in frames.iter().enumerate() {
+                let mut f = *raw;
+                hpf.process_in_place(&mut f);
+                let prob = denoiser.process_10ms(mode, &f, &mut ns_out);
+                agc2.process_10ms(&ns_out, &mut leveled, true);
+                let (cnt, is_open, _) =
+                    gate.process_10ms(&leveled, prob, threshold_db, true, None, false, &mut gate_out);
+                if idx >= warmup {
+                    prob_sum += prob;
+                    if is_open {
+                        open_frames += 1;
+                    }
+                    let mut final_frame = leveled;
+                    if cnt > 0 {
+                        final_frame = gate_out[cnt - 1];
+                        comp.process_with_speech_prob(&mut final_frame, prob, true);
+                    }
+                    for &s in &final_frame {
+                        peak_abs = peak_abs.max(s.abs());
+                    }
+                    db_sum += frame_dbfs(&final_frame);
+                    db_count += 1;
+                }
+            }
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let avg_db = db_sum / (db_count.max(1) as f32);
+            let open_pct = (open_frames as f32) * 100.0 / (db_count.max(1) as f32);
+            let avg_prob = prob_sum / (db_count.max(1) as f32);
+            let ms_per_frame = elapsed_ms / (frames.len() as f64);
+            (avg_db, open_pct, avg_prob, peak_abs, ms_per_frame)
+        };
+
+        let mut seed = 0xCAFE_BABE_1234_5678u64;
+        let mut lp = 0.0f32;
+
+        // Scenario 1: Distant laptop mic (-34 dBFS ~ 0.020 RMS) buried in louder fan (-30 dBFS ~ 0.032 RMS, -4 dB SNR)
+        let s1: Vec<_> = (0..180)
+            .map(|i| {
+                let sp = synth_speech_frame(i, 0.020);
+                let nz = synth_fan_noise_frame(&mut seed, &mut lp, 0.032);
+                let mut mix = [0.0f32; VOICE_FRAME_10MS];
+                for j in 0..VOICE_FRAME_10MS {
+                    mix[j] = (sp[j] + nz[j]).clamp(-1.0, 1.0);
+                }
+                mix
+            })
+            .collect();
+        let (s1_db, s1_open, s1_prob, s1_peak, s1_ms) =
+            run_chain(&s1, NoiseSuppressionMode::Strong, -42.0);
+        println!(
+            "[S1 Distant -34dB + Louder Fan -30dB (-4dB SNR)] out={s1_db:.1} dBFS open={s1_open:.1}% prob={s1_prob:.2} peak={s1_peak:.3} cpu={s1_ms:.2} ms/10ms"
+        );
+
+        // Scenario 2: Distance swing — Close-up loud (-6 dBFS ~ 0.50) vs Far quiet (-38 dBFS ~ 0.0126)
+        let s2_close: Vec<_> = (0..150).map(|i| synth_speech_frame(i, 0.45)).collect();
+        let s2_far: Vec<_> = (0..150).map(|i| synth_speech_frame(i, 0.0126)).collect();
+        let (c_db, c_open, _, c_peak, _) = run_chain(&s2_close, NoiseSuppressionMode::Balanced, -42.0);
+        let (f_db, f_open, _, f_peak, _) = run_chain(&s2_far, NoiseSuppressionMode::Balanced, -42.0);
+        let swing_diff = (c_db - f_db).abs();
+        println!(
+            "[S2 Distance Swing 31dB input delta] close={c_db:.1} dBFS ({c_open:.0}% open, peak={c_peak:.3}) | far={f_db:.1} dBFS ({f_open:.0}% open, peak={f_peak:.3}) | out_delta={swing_diff:.1} dB"
+        );
+
+        // Scenario 3: Whisper-level quiet speech (-45 dBFS ~ 0.0056 RMS) in quiet room
+        let s3: Vec<_> = (0..150).map(|i| synth_speech_frame(i, 0.0056)).collect();
+        let (s3_db, s3_open, s3_prob, _, _) = run_chain(&s3, NoiseSuppressionMode::Balanced, -42.0);
+        println!(
+            "[S3 Soft Whisper -45dB] out={s3_db:.1} dBFS open={s3_open:.1}% prob={s3_prob:.2}"
+        );
+
+        // Scenario 4: Pure heavy noise (loud fan -24 dBFS + keyboard click impulses every 15 frames, NO speech)
+        let s4: Vec<_> = (0..180)
+            .map(|i| {
+                let mut nz = synth_fan_noise_frame(&mut seed, &mut lp, 0.06);
+                if i % 15 == 5 {
+                    for j in 20..36 {
+                        nz[j] = if j % 2 == 0 { 0.72 } else { -0.68 };
+                    }
+                }
+                nz
+            })
+            .collect();
+        let (s4_db, s4_open, s4_prob, _, _) = run_chain(&s4, NoiseSuppressionMode::Strong, -42.0);
+        println!(
+            "[S4 Pure Fan -24dB + Keyboard Clicks] out={s4_db:.1} dBFS false_open={s4_open:.1}% prob={s4_prob:.2}"
+        );
+
+        assert!(s1_open >= 70.0, "Distant speech in loud fan must open gate reliably; got {s1_open:.1}%");
+        assert!(swing_diff <= 14.0, "31 dB distance swing should compress to <= 14 dB output delta; got {swing_diff:.1} dB");
+        assert!(c_peak <= 0.99, "Close-up speech must never clip; got peak={c_peak}");
+        assert!(s3_open >= 80.0, "Soft -45 dBFS speech should open gate reliably; got {s3_open:.1}%");
+        assert!(s4_open <= 5.0, "Pure heavy fan + keyboard clicks must not false-trigger gate; got {s4_open:.1}%");
+        assert!(s4_db <= -45.0, "Pure heavy noise floor must be suppressed deeply; got {s4_db:.1} dBFS");
     }
 }

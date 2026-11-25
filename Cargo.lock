@@ -1015,6 +1015,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "sonora",
+ "sonora-agc2",
+ "sonora-simd",
  "thiserror 2.0.21",
  "x25519-dalek",
 ]

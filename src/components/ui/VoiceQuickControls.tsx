@@ -103,6 +103,7 @@ export function VoiceMicDeafenPills({
           aria-label={muted ? "Unmute microphone" : "Mute microphone"}
           aria-pressed={muted}
           data-tone={isFlat || isBare ? undefined : micTone}
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={() => toggleVoiceMute()}
           className={
             isFlat

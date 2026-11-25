@@ -157,13 +157,12 @@ export function usePlayerShortcuts({
         }
       }
 
-      // Mic Mute / Unmute via M when connected to voice chat (works even before media loads)
+      // Mic Mute / Unmute via M when connected to voice chat (works even before media loads, without waking hidden play bar)
       if (e.code === "KeyM" && !e.shiftKey) {
         const voiceState = useVoiceStore.getState();
         if (voiceState.voiceEnabled && voiceState.joined) {
           e.preventDefault();
           if (!e.repeat) {
-            onWakeChrome?.();
             toggleVoiceMute();
           }
           return;
@@ -243,10 +242,9 @@ export function usePlayerShortcuts({
         return;
       }
 
-      // Mute
+      // Mute (toggle without waking hidden play bar)
       if (e.code === "KeyM") {
         e.preventDefault();
-        onWakeChrome?.();
         toggleMutePlayback();
         return;
       }

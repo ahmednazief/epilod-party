@@ -1337,6 +1337,91 @@ export function AppVoiceWaveIcon({
 }
 
 /**
+ * Custom sculpted crystal Voice Chat glyph: microphone capsule with radiating acoustic voice waves.
+ * Clearly communicates voice chat/connected state without looking like headphones or generic signal bars.
+ */
+export function AppVoiceIcon({
+  active = false,
+  connected = false,
+  deafened = false,
+  size = 14,
+  className = "",
+}: AppIconProps & { connected?: boolean; deafened?: boolean }) {
+  const uid = useId().replace(/:/g, "");
+  const capId = `ep-voice-cap-${uid}`;
+  const waveColor = deafened
+    ? "#F87171"
+    : connected
+      ? "#4ADE80"
+      : active
+        ? "#DDD6FE"
+        : "currentColor";
+  const bodyColor = deafened
+    ? "#FCA5A5"
+    : connected
+      ? "#86EFAC"
+      : active
+        ? "#FFFFFF"
+        : "currentColor";
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <defs>
+        <linearGradient id={capId} x1="6" y1="4" x2="11" y2="14" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor={connected ? "#86EFAC" : active ? "#EDE9FE" : "#FFFFFF"} stopOpacity={connected || active ? "0.42" : "0.2"} />
+          <stop offset="100%" stopColor={connected ? "#22C55E" : active ? "#8B5CF6" : "#CBD5E1"} stopOpacity={connected || active ? "0.28" : "0.08"} />
+        </linearGradient>
+      </defs>
+      {/* Microphone capsule */}
+      <rect
+        x="5.2"
+        y="4.2"
+        width="5.6"
+        height="9.2"
+        rx="2.8"
+        fill={`url(#${capId})`}
+        stroke={bodyColor}
+        strokeWidth="1.65"
+      />
+      {/* Cradle & stand */}
+      <path
+        d="M3.3 10.6a4.7 4.7 0 0 0 9.4 0M8 15.3v3.1M5.6 18.4h4.8"
+        stroke={bodyColor}
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {/* Radiating voice waves */}
+      {!deafened ? (
+        <>
+          <path
+            d="M15.2 8.2a4.6 4.6 0 0 1 0 5.6"
+            stroke={waveColor}
+            strokeOpacity={connected || active ? "0.95" : "0.85"}
+            strokeWidth="1.75"
+            strokeLinecap="round"
+          />
+          <path
+            d="M18.1 5.6a8.2 8.2 0 0 1 0 10.8"
+            stroke={waveColor}
+            strokeOpacity={connected || active ? "0.75" : "0.55"}
+            strokeWidth="1.75"
+            strokeLinecap="round"
+          />
+        </>
+      ) : (
+        <path
+          d="M14.5 7.5l5.5 7M20 7.5l-5.5 7"
+          stroke="#F87171"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+      )}
+    </svg>
+  );
+}
+
+/**
  * Custom sculpted crystal Speaker Volume glyph for per-peer voice mixing.
  */
 export function AppSpeakerVolumeIcon({

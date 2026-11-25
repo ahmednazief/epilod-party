@@ -18,4 +18,6 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["fast", "zeroize"] }
 chacha20poly1305 = "0.10"
 sonora = "0.3.0"
+sonora-agc2 = "0.3.0"
+sonora-simd = "0.3.0"
 dfn3_rs = "0.1.2"

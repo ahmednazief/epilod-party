@@ -78,16 +78,16 @@ import { AnimatedCollapse } from "./ui/AnimatedCollapse";
 import {
   AppAlertIcon,
   AppChevronIcon,
+  AppCloseIcon,
   AppFolderIcon,
   AppHeadphonesIcon,
   AppMemberMenuArrowIcon,
   AppMicIcon,
   AppResetIcon,
   AppSeasonFolderIcon,
-  AppSignalBarsIcon,
   AppSlidersIcon,
+  AppVoiceIcon,
   AppVoiceTuneIcon,
-  AppVoiceWaveIcon,
 } from "./ui/AppIcons";
 import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { WatchPartyIcon } from "./ui/LobbyIcons";
@@ -109,7 +109,6 @@ import {
 } from "./ui/PlayerIcons";
 import { PresenceAvatar } from "./ui/PresenceAvatar";
 import { resolvePeerAvatarId } from "./ui/ProfileAvatar";
-import { SegmentedTabs } from "./ui/SegmentedTabs";
 import { StatusDot } from "./ui/StatusDot";
 import { VoiceMicDeafenPills } from "./ui/VoiceQuickControls";
 import { VoiceQuickSettingsTray } from "./ui/VoiceQuickSettingsTray";
@@ -199,6 +198,11 @@ export const PartySidebar = memo(function PartySidebar({
   const [busyAdminUser, setBusyAdminUser] = useState<string | null>(null);
   const [timingOpen, setTimingOpen] = useState(false);
   const [btPreJoinConfirm, setBtPreJoinConfirm] = useState(false);
+  const [leaveRoomConfirm, setLeaveRoomConfirm] = useState(false);
+
+  useEffect(() => {
+    if (!voiceJoined) setLeaveRoomConfirm(false);
+  }, [voiceJoined]);
   const [voiceSetupOpen, setVoiceSetupOpen] = useState(false);
   const [syncHealth, setSyncHealth] = useState<SyncHealthPayload | null>(null);
   const [healthCopied, setHealthCopied] = useState(false);
@@ -938,6 +942,7 @@ export const PartySidebar = memo(function PartySidebar({
       ref={asideRef}
       aria-label="Party Lounge"
       data-docked-sidebar={docked ? "true" : undefined}
+      data-sidebar-surface="true"
       onContextMenu={(e) => {
         if (isTextEntryElement(e.target)) return;
         e.preventDefault();
@@ -1082,22 +1087,17 @@ export const PartySidebar = memo(function PartySidebar({
         </div>
       </div>
 
-      {/* Zone 2: Compact Invite Pill & Active Alerts */}
+      {/* Zone 2: Compact Invite Pill, Leave Room & Active Alerts */}
       <div className="px-3 pb-2 space-y-2 shrink-0 ep-party-zone-stagger-2">
         <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={() => void handleCopyRoom()}
             title="Click to copy invite code"
-            className="ep-menu-row ep-press flex-1 min-w-0 h-8 px-2.5 rounded-lg bg-white/[0.035] hover:bg-white/[0.07] flex items-center justify-between gap-2 text-left cursor-pointer"
+            className="ep-bar-pill ep-press flex-1 min-w-0 h-8 px-3 rounded-full flex items-center justify-between gap-2 text-left cursor-pointer"
           >
-            <span className="inline-flex items-center gap-1.5 min-w-0">
-              <span className="text-[10.5px] text-muted shrink-0">
-                {literalRoom ? "Room" : "Invite"}
-              </span>
-              <span className="text-[12.5px] font-semibold tracking-[0.12em] text-white/90 num truncate">
-                {literalRoom ? roomCode : formatRoomCodeDisplay(roomCode)}
-              </span>
+            <span className="text-[12.5px] font-semibold tracking-[0.12em] text-white/95 num truncate">
+              {literalRoom ? roomCode : formatRoomCodeDisplay(roomCode)}
             </span>
             <span
               className={`inline-flex items-center gap-1 text-[10.5px] font-medium shrink-0 transition-colors ${
@@ -1105,22 +1105,79 @@ export const PartySidebar = memo(function PartySidebar({
               }`}
             >
               <PartyCopyIcon copied={copied} size={12} />
-              <span>{copied ? "Copied" : "Copy"}</span>
+              {copied && <span>Copied</span>}
             </span>
           </button>
 
-          <GlassHoverTip label="Leave Watch Party" detail="Keep watching solo" accent="bad">
+          <GlassHoverTip
+            label="Leave Room"
+            detail="Keep watching solo"
+            accent="bad"
+            disabled={leaveRoomConfirm && voiceJoined}
+          >
             <button
               type="button"
-              onClick={handleLeaveParty}
-              aria-label="Leave Watch Party"
-              className="ep-press h-8 px-2 rounded-lg bg-white/[0.035] hover:bg-bad/15 inline-flex items-center justify-center gap-1 text-[11px] font-medium text-muted hover:text-bad shrink-0 cursor-pointer"
+              onClick={() => {
+                if (voiceJoined) {
+                  setLeaveRoomConfirm((prev) => !prev);
+                } else {
+                  handleLeaveParty();
+                }
+              }}
+              aria-label="Leave Watch Party Room"
+              data-tone={leaveRoomConfirm && voiceJoined ? "bad" : "leave"}
+              className="ep-bar-pill ep-press h-8 px-2.5 rounded-full inline-flex items-center justify-center gap-1 text-[11px] font-medium text-secondary shrink-0 cursor-pointer"
             >
               <PartyLeaveIcon size={12} />
-              <span>Leave</span>
+              <span>Leave Room</span>
             </button>
           </GlassHoverTip>
         </div>
+
+        <AnimatedCollapse open={leaveRoomConfirm && voiceJoined}>
+          <div className="rounded-xl bg-bad/[0.09] ring-1 ring-inset ring-bad/20 px-2.5 py-2 space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-[11px] font-medium text-white/90 leading-snug">
+                Leave the entire Watch Party room, or just disconnect from voice chat?
+              </p>
+              <button
+                type="button"
+                aria-label="Cancel"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setLeaveRoomConfirm(false);
+                }}
+                className="h-5 w-5 rounded-full inline-flex items-center justify-center text-white/70 hover:text-white hover:bg-white/[0.1] shrink-0 cursor-pointer"
+              >
+                <AppCloseIcon size={11} />
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setLeaveRoomConfirm(false);
+                  handleLeaveParty();
+                }}
+                className="ep-press flex-1 h-6.5 px-2 rounded-full bg-bad/20 hover:bg-bad/30 inline-flex items-center justify-center text-[10.5px] font-semibold text-bad cursor-pointer"
+              >
+                Leave Room
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setLeaveRoomConfirm(false);
+                  void handleToggleVoice(false);
+                }}
+                className="ep-bar-pill ep-press flex-1 h-6.5 px-2 rounded-full inline-flex items-center justify-center text-[10.5px] font-medium text-white cursor-pointer"
+              >
+                Leave Voice Only
+              </button>
+            </div>
+          </div>
+        </AnimatedCollapse>
 
         <AnimatedCollapse open={hasConnectionIssue}>
           <div className="px-2 py-1.5 rounded-xl bg-bad/10 flex items-center justify-between gap-2 text-[10.5px] text-bad">
@@ -1229,12 +1286,15 @@ export const PartySidebar = memo(function PartySidebar({
         {syncConnected && (
           <div className="space-y-1">
             {!voiceEnabled ? (
-              <div className="px-2 py-1.5 rounded-lg bg-white/[0.03] flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted">Voice chat disabled</span>
+              <div className="px-2 py-1.5 rounded-xl bg-white/[0.035] flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-[11px] text-muted">
+                  <AppVoiceIcon size={13} className="opacity-65 shrink-0" />
+                  <span>Voice chat disabled</span>
+                </span>
                 <button
                   type="button"
                   onClick={() => openSettings("voice")}
-                  className="ep-press px-2 py-0.5 rounded-md text-[10.5px] font-medium text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                  className="ep-press px-2.5 py-1 rounded-lg bg-white/[0.06] text-[10.5px] font-medium text-secondary hover:text-white hover:bg-white/[0.1] cursor-pointer"
                 >
                   Enable
                 </button>
@@ -1245,7 +1305,7 @@ export const PartySidebar = memo(function PartySidebar({
                   {voiceJoined ? (
                     <div className="flex-1 min-w-0 px-2 py-1 flex items-center justify-between gap-2 text-[11px]">
                       <span className="inline-flex items-center gap-1.5 font-semibold uppercase tracking-wider text-secondary/85 truncate">
-                        <AppVoiceWaveIcon active speaking={false} size={12} />
+                        <AppVoiceIcon active size={13} className="shrink-0" />
                         <span>Voice Lounge</span>
                       </span>
                       <span className="num text-[10.5px] text-muted shrink-0">
@@ -1259,17 +1319,17 @@ export const PartySidebar = memo(function PartySidebar({
                         disabled={voiceJoining}
                         onClick={() => void handleToggleVoice(false)}
                         title="Click to join Voice Lounge"
-                        className="ep-press flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-white/[0.035] hover:bg-white/[0.07] flex items-center justify-between gap-2 text-[11px] text-secondary hover:text-white cursor-pointer disabled:opacity-60"
+                        className="ep-bar-pill ep-press flex-1 min-w-0 h-8 px-3 rounded-full flex items-center justify-between gap-2 text-[11px] text-secondary hover:text-white cursor-pointer disabled:opacity-60"
                       >
                         <span className="inline-flex items-center gap-1.5 font-semibold uppercase tracking-wider truncate">
-                          <AppVoiceWaveIcon active={false} speaking={false} size={12} />
+                          <AppVoiceIcon active size={13} className="text-accent-soft shrink-0" />
                           <span>{voiceJoining ? "Joining…" : "Voice Lounge"}</span>
                         </span>
                         <span className="inline-flex items-center gap-1.5 shrink-0">
                           <span className="num text-[10.5px] text-muted">
                             {voiceMembers.length}
                           </span>
-                          <span className="text-[10.5px] font-medium text-accent-soft">
+                          <span className="text-[10.5px] font-semibold text-accent-soft">
                             Join
                           </span>
                         </span>
@@ -1280,7 +1340,7 @@ export const PartySidebar = memo(function PartySidebar({
                           disabled={voiceJoining}
                           onClick={() => void handleToggleVoice(true)}
                           aria-label="Listen Only"
-                          className="ep-press h-6.5 w-6.5 rounded-md flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer disabled:opacity-60 shrink-0"
+                          className="ep-bar-pill ep-press h-8 w-8 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer disabled:opacity-60 shrink-0"
                         >
                           <AppHeadphonesIcon size={13} />
                         </button>
@@ -1296,21 +1356,21 @@ export const PartySidebar = memo(function PartySidebar({
                 )}
               </>
             ) : (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   disabled={voiceJoining}
                   onClick={() => void handleToggleVoice(false)}
                   title="Click to join Voice Lounge"
-                  className="ep-press flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-white/[0.03] hover:bg-white/[0.07] flex items-center justify-between gap-2 text-left cursor-pointer disabled:opacity-60"
+                  className="ep-glass-primary-pill ep-press flex-1 min-w-0 h-8 px-3 rounded-full flex items-center justify-between gap-2 text-left cursor-pointer disabled:opacity-60"
                 >
                   <span className="inline-flex items-center gap-2 min-w-0">
-                    <AppVoiceWaveIcon active={false} speaking={false} size={13} className="text-secondary shrink-0" />
-                    <span className="text-[12px] font-medium text-white/90 truncate">
-                      {voiceJoining ? "Joining Voice…" : "Voice Lounge"}
+                    <AppVoiceIcon active size={14} className="shrink-0" />
+                    <span className="text-[12px] font-medium text-white truncate">
+                      {voiceJoining ? "Joining Voice…" : "Join Voice"}
                     </span>
                   </span>
-                  <span className="text-[10.5px] font-medium text-muted shrink-0">Join</span>
+                  <span className="text-[10.5px] font-medium text-white/75 shrink-0">Lounge</span>
                 </button>
                 <GlassHoverTip label="Listen Only" detail="Join muted without capturing mic">
                   <button
@@ -1318,7 +1378,7 @@ export const PartySidebar = memo(function PartySidebar({
                     disabled={voiceJoining}
                     onClick={() => void handleToggleVoice(true)}
                     aria-label="Listen Only"
-                    className="ep-press h-8 w-8 rounded-lg bg-white/[0.03] hover:bg-white/[0.07] flex items-center justify-center text-secondary hover:text-white cursor-pointer disabled:opacity-60 shrink-0"
+                    className="ep-bar-pill ep-press h-8 w-8 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer disabled:opacity-60 shrink-0"
                   >
                     <AppHeadphonesIcon size={13} />
                   </button>
@@ -1613,30 +1673,39 @@ export const PartySidebar = memo(function PartySidebar({
                       <div className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-white/70">
                         Framerate Ratio
                       </div>
-                      <SegmentedTabs
-                        ariaLabel="Framerate ratio"
-                        size="sm"
-                        fullWidth
-                        value={
-                          FPS_PRESETS.find((p) => Math.abs(timelineScale - p.scale) <= 0.0002)?.id ??
-                          null
-                        }
-                        items={FPS_PRESETS.map((preset) => ({
-                          value: preset.id,
-                          label: preset.label,
-                          title: preset.shortLabel,
-                        }))}
-                        onChange={(presetId) => {
-                          const preset = FPS_PRESETS.find((p) => p.id === presetId);
-                          if (!preset) return;
-                          void applyTimelineTransform(
-                            { offsetSecs: timelineOffsetSecs, scale: preset.scale },
-                            preset.id === "normal"
-                              ? "Playback speed set to 1.0×"
-                              : `FPS ratio: ${preset.shortLabel}`,
+                      <div
+                        role="radiogroup"
+                        aria-label="Framerate ratio"
+                        className="ep-glass-tray p-0.5 rounded-xl grid grid-cols-2 gap-0.5 text-[10.5px]"
+                      >
+                        {FPS_PRESETS.map((preset) => {
+                          const active = Math.abs(timelineScale - preset.scale) <= 0.0002;
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={active}
+                              title={preset.shortLabel}
+                              onClick={() =>
+                                void applyTimelineTransform(
+                                  { offsetSecs: timelineOffsetSecs, scale: preset.scale },
+                                  preset.id === "normal"
+                                    ? "Playback speed set to 1.0×"
+                                    : `FPS ratio: ${preset.shortLabel}`,
+                                )
+                              }
+                              className={`ep-press ep-tray-option h-6.5 px-2 rounded-[8px] num cursor-pointer truncate ${
+                                active
+                                  ? "bg-white/[0.15] text-white font-semibold shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.22)]"
+                                  : "text-secondary hover:text-white"
+                              }`}
+                            >
+                              {preset.label}
+                            </button>
                           );
-                        }}
-                      />
+                        })}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1656,10 +1725,10 @@ export const PartySidebar = memo(function PartySidebar({
           ))}
       </div>
 
-      {/* Zone 4: Discord-Style 2-Row Voice & User Dock */}
+      {/* Zone 4: Smoked-Amethyst 2-Row Voice & User Dock */}
       <div ref={podRef} className="ep-party-pod-zone shrink-0">
         <AnimatedCollapse open={voiceEnabled && voiceJoined} durationMs={220}>
-          <div className="px-3 py-2 border-b border-white/[0.06] flex items-center justify-between gap-2">
+          <div className="px-3 pt-2 pb-1 flex items-center justify-between gap-2">
             <GlassHoverTip
               label={!voiceCaptureHealthy ? "Voice Issue" : "Voice Connected"}
               detail={
@@ -1675,11 +1744,12 @@ export const PartySidebar = memo(function PartySidebar({
               className="min-w-0 flex-1"
             >
               <div className="min-w-0 flex items-center gap-2 cursor-default">
-                <AppSignalBarsIcon
-                  bars={voiceCaptureHealthy ? 4 : 1}
-                  speaking={voiceCaptureHealthy}
-                  size={14}
-                  className="shrink-0"
+                <AppVoiceIcon
+                  active
+                  connected={voiceCaptureHealthy}
+                  deafened={voiceDeafened}
+                  size={15}
+                  className={`shrink-0 ${!voiceCaptureHealthy ? "text-warn" : ""}`}
                 />
                 <div className="min-w-0">
                   <div
@@ -1704,15 +1774,17 @@ export const PartySidebar = memo(function PartySidebar({
               </div>
             </GlassHoverTip>
 
-            <GlassHoverTip label="Disconnect" detail="Leave voice chat" accent="bad">
+            <GlassHoverTip label="Leave Voice Chat" detail="Stay in Watch Party room" accent="bad">
               <button
                 type="button"
                 disabled={voiceJoining}
-                aria-label="Disconnect voice"
+                aria-label="Leave Voice Chat"
+                data-tone="leave"
                 onClick={() => void handleToggleVoice(false)}
-                className="ep-press h-7 w-7 rounded-lg flex items-center justify-center text-secondary hover:text-bad hover:bg-bad/15 cursor-pointer disabled:opacity-60 shrink-0"
+                className="ep-bar-pill ep-press h-7 px-2.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium text-secondary cursor-pointer disabled:opacity-60 shrink-0"
               >
-                <PartyLeaveIcon size={14} />
+                <PartyLeaveIcon size={12} />
+                <span>Leave Voice</span>
               </button>
             </GlassHoverTip>
           </div>
@@ -1754,11 +1826,11 @@ export const PartySidebar = memo(function PartySidebar({
             </div>
           </div>
 
-          <div className="flex items-center gap-0.5 shrink-0">
+          <div className="flex items-center gap-1 shrink-0">
             {voiceEnabled && voiceJoined ? (
               <>
                 <VoiceMicDeafenPills
-                  variant="flat"
+                  variant="pill"
                   muted={voiceMuted}
                   deafened={voiceDeafened}
                   speaking={localSpeaking}
@@ -1778,13 +1850,13 @@ export const PartySidebar = memo(function PartySidebar({
                       setOpenMemberUser(null);
                       setVoiceSetupOpen((o) => !o);
                     }}
-                    className={`ep-press h-8 w-8 rounded-lg flex items-center justify-center cursor-pointer ${
+                    className={`ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer ${
                       voiceSetupOpen
-                        ? "bg-white/15 text-white"
-                        : "text-secondary hover:text-white hover:bg-white/[0.08]"
+                        ? "ep-droplet-indicator text-white"
+                        : "text-secondary hover:text-white"
                     }`}
                   >
-                    <AppVoiceTuneIcon active={voiceSetupOpen} size={16} />
+                    <AppVoiceTuneIcon active={voiceSetupOpen} size={14} />
                   </button>
                 </GlassHoverTip>
               </>
@@ -1799,10 +1871,10 @@ export const PartySidebar = memo(function PartySidebar({
                     type="button"
                     onClick={() => toggleReadyStatus()}
                     aria-label={localReady ? "Mark not ready" : "Mark ready"}
-                    className={`ep-press h-7 px-2 rounded-lg inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer ${
+                    className={`ep-bar-pill ep-press h-7 px-2.5 rounded-full inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer ${
                       localReady
-                        ? "text-ok hover:bg-white/[0.08]"
-                        : "text-warn bg-warn/10 hover:bg-warn/18"
+                        ? "text-ok"
+                        : "text-warn"
                     }`}
                   >
                     <PlayerReadyIcon ready={localReady} size={12} />
@@ -1825,13 +1897,13 @@ export const PartySidebar = memo(function PartySidebar({
                         setOpenMemberUser(null);
                         setVoiceSetupOpen((o) => !o);
                       }}
-                      className={`ep-press h-8 w-8 rounded-lg flex items-center justify-center cursor-pointer ${
+                      className={`ep-bar-pill ep-press h-7 w-7 rounded-full flex items-center justify-center cursor-pointer ${
                         voiceSetupOpen
-                          ? "bg-white/15 text-white"
-                          : "text-secondary hover:text-white hover:bg-white/[0.08]"
+                          ? "ep-droplet-indicator text-white"
+                          : "text-secondary hover:text-white"
                       }`}
                     >
-                      <AppVoiceTuneIcon active={voiceSetupOpen} size={16} />
+                      <AppVoiceTuneIcon active={voiceSetupOpen} size={14} />
                     </button>
                   </GlassHoverTip>
                 )}

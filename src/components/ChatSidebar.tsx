@@ -649,6 +649,7 @@ export const ChatSidebar = memo(function ChatSidebar({
     <aside
       aria-label="Party Chat"
       data-docked-sidebar={docked ? "true" : undefined}
+      data-sidebar-surface="true"
       style={{ width: `${resolvedSidebarWidth}px` }}
       className={`ep-chat-sidebar relative h-full flex flex-col shrink-0 select-none ${
         docked

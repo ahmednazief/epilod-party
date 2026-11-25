@@ -1,6 +1,6 @@
 import {
   AppCloseIcon,
-  AppHeadphonesIcon,
+  AppVoiceIcon,
 } from "./ui/AppIcons";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
@@ -1182,8 +1182,9 @@ export const TransportBar = memo(function TransportBar({
               </span>
             )}
             {voiceEnabled && !voiceJoined && voicePeersInCall.length > 0 && (
-              <AppHeadphonesIcon
-                size={12}
+              <AppVoiceIcon
+                active
+                size={13}
                 className={remoteSpeakingCount > 0 ? "text-ok shrink-0" : "text-accent-soft shrink-0"}
               />
             )}
@@ -1261,7 +1262,9 @@ export const TransportBar = memo(function TransportBar({
                       : "text-secondary hover:text-white hover:bg-white/[0.08]"
                   }`}
                 >
-                  <AppHeadphonesIcon
+                  <AppVoiceIcon
+                    active={partySidebarActive}
+                    connected={voiceJoined && !voiceDeafened}
                     deafened={voiceJoined && voiceDeafened}
                     size={isMini ? 14 : 15}
                     className="shrink-0"
@@ -1329,7 +1332,9 @@ export const TransportBar = memo(function TransportBar({
                         : "text-secondary hover:text-white"
                     }`}
                   >
-                    <AppHeadphonesIcon
+                    <AppVoiceIcon
+                      active={partySidebarActive}
+                      connected={voiceJoined && !voiceDeafened}
                       deafened={voiceJoined && voiceDeafened}
                       size={isMini ? 14 : 15}
                       className="shrink-0"
