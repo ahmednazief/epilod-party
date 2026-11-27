@@ -350,10 +350,10 @@ void main() {
   float effectiveScrim = baseScrim * (1.0 - rimTranslucency * 0.42);
   vec3 bodyColor = mix(toneMapped, obsidianTint, effectiveScrim);
 
-  // 3D Fresnel refractive glass rim stroke + cursor-reactive rim light seated cleanly inside the AA edge
-  float rimEnvelope = smoothstep(0.0, max(0.85, aa * 1.15), distInside);
+  // 3D Fresnel refractive glass rim stroke + cursor-reactive rim light seated right at the AA edge (no dark outer border)
+  float rimEnvelope = smoothstep(-aa * 0.45, max(0.65, aa * 0.85), distInside);
   float outerRim = exp(-distInside * 1.15) * rimEnvelope;
-  float crispEdge = exp(-pow((distInside - 0.75) / 0.85, 2.0)) * rimEnvelope;
+  float crispEdge = exp(-pow(max(0.0, distInside - 0.35) / 0.85, 2.0)) * rimEnvelope;
   float keyLight = max(0.0, dot(normal, normalize(vec2(-0.58, -0.81))));
   float bounceLight = max(0.0, dot(normal, normalize(vec2(0.55, 0.83))));
 

@@ -20,6 +20,8 @@ pub enum ValidationError {
     InvalidSpeed,
     #[error("Invalid aspect ratio mode.")]
     InvalidAspectMode,
+    #[error("Stream URL must be a public https:// media URL (local/private hosts and unsafe schemes are blocked).")]
+    InvalidStreamUrl,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -312,6 +314,77 @@ pub fn is_allowed_webview_url(url: &str) -> bool {
         || lower.starts_with("http://127.0.0.1:1420")
 }
 
+fn is_disallowed_stream_host(host: &str) -> bool {
+    let low = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if low.is_empty()
+        || low == "localhost"
+        || low.ends_with(".localhost")
+        || low.ends_with(".local")
+        || low.ends_with(".internal")
+    {
+        return true;
+    }
+    if let Ok(v4) = low.parse::<std::net::Ipv4Addr>() {
+        let [a, b, _, _] = v4.octets();
+        let is_cgnat = a == 100 && (64..=127).contains(&b);
+        return v4.is_private()
+            || v4.is_loopback()
+            || v4.is_link_local()
+            || v4.is_broadcast()
+            || v4.is_multicast()
+            || v4.is_unspecified()
+            || is_cgnat;
+    }
+    let stripped_v6 = low.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(v6) = stripped_v6.parse::<Ipv6Addr>() {
+        let seg0 = v6.segments()[0];
+        let is_ula = (seg0 & 0xfe00) == 0xfc00;
+        let is_ll = (seg0 & 0xffc0) == 0xfe80;
+        return v6.is_loopback() || v6.is_multicast() || v6.is_unspecified() || is_ula || is_ll;
+    }
+    false
+}
+
+pub fn validate_stream_url(raw: &str) -> Result<String, ValidationError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 2048
+        || has_unsafe_unicode(trimmed)
+        || trimmed.chars().any(|c| c.is_whitespace())
+    {
+        return Err(ValidationError::InvalidStreamUrl);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if lower.starts_with("https://") {
+        &trimmed[8..]
+    } else {
+        return Err(ValidationError::InvalidStreamUrl);
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ValidationError::InvalidStreamUrl);
+    }
+    let host = if authority.starts_with('[') {
+        authority
+            .split(']')
+            .next()
+            .map(|h| format!("{h}]"))
+            .unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    if is_disallowed_stream_host(&host) {
+        return Err(ValidationError::InvalidStreamUrl);
+    }
+    if !authority.starts_with('[')
+        && !is_valid_hostname(&host)
+        && host.parse::<std::net::Ipv4Addr>().is_err()
+    {
+        return Err(ValidationError::InvalidStreamUrl);
+    }
+    Ok(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +464,21 @@ mod tests {
         assert!(is_allowed_webview_url("http://localhost:1420/"));
         assert!(!is_allowed_webview_url("https://evil.example/"));
         assert!(!is_allowed_webview_url("file:///C:/Windows/System32"));
+    }
+
+    #[test]
+    fn test_validate_stream_url() {
+        assert_eq!(
+            validate_stream_url("https://cdn.example.com/videos/ep01.mp4").unwrap(),
+            "https://cdn.example.com/videos/ep01.mp4"
+        );
+        assert!(validate_stream_url("https://stream.example.org/hls/master.m3u8?t=1").is_ok());
+        assert!(validate_stream_url("http://cdn.example.com/video.mp4").is_err());
+        assert!(validate_stream_url("lavfi://testsrc").is_err());
+        assert!(validate_stream_url("file:///C:/video.mkv").is_err());
+        assert!(validate_stream_url("https://127.0.0.1/video.mp4").is_err());
+        assert!(validate_stream_url("https://192.168.1.10/video.mp4").is_err());
+        assert!(validate_stream_url("https://localhost/video.mp4").is_err());
+        assert!(validate_stream_url("https://user:pass@cdn.example.com/v.mp4").is_err());
     }
 }

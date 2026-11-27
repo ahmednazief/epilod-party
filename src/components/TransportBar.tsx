@@ -47,6 +47,11 @@ import { useChatStore } from "../store/useChatStore";
 import { getEffectiveIntroSegments, useIntroStore } from "../store/useIntroStore";
 import { useNotificationStore } from "../store/useNotificationStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import {
+  getReactionBucketAt,
+  getReactionHotspots,
+  subscribeReactionTimeline,
+} from "../store/useReactionStore";
 import { usePlaylistStore } from "../store/usePlaylistStore";
 import { useSyncStore } from "../store/useSyncStore";
 import { useVoiceStore } from "../store/useVoiceStore";
@@ -250,7 +255,22 @@ function PlaybackScrubber({
   const skipIntroEnabled = useAppStore((s) => s.skipIntroMode !== "off");
   const selectedFilePath = useAppStore((s) => s.selectedFilePath);
   const seekbarThumbnails = useAppStore((s) => s.seekbarThumbnails);
+  const lowPowerMode = useAppStore((s) => s.lowPowerMode);
+  const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const durationReady = loaded && durationSecs >= 15;
+  const [reactionTick, setReactionTick] = useState(0);
+  useEffect(() => {
+    if (lowPowerMode || !reactionsEnabled) return;
+    return subscribeReactionTimeline(() => setReactionTick((n) => n + 1));
+  }, [lowPowerMode, reactionsEnabled]);
+  const reactionHotspots = useMemo(
+    () =>
+      !lowPowerMode && reactionsEnabled && durationReady
+        ? getReactionHotspots(durationSecs)
+        : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [durationReady, durationSecs, lowPowerMode, reactionsEnabled, reactionTick],
+  );
   const durationRef = useRef(durationSecs);
   durationRef.current = durationSecs;
   const [thumbSprite, setThumbSprite] = useState<ThumbnailSprite | null>(() =>
@@ -258,7 +278,13 @@ function PlaybackScrubber({
   );
 
   useEffect(() => {
-    if (!seekbarThumbnails || !durationReady || !selectedFilePath) {
+    if (
+      !seekbarThumbnails ||
+      !durationReady ||
+      !selectedFilePath ||
+      selectedFilePath.startsWith("https://") ||
+      selectedFilePath.startsWith("http://")
+    ) {
       setThumbSprite(null);
       void cancelSeekbarThumbnails();
       return;
@@ -345,6 +371,7 @@ function PlaybackScrubber({
         min={0}
         max={Math.max(1, durationSecs)}
         highlightRange={introHighlight}
+        hotspots={reactionHotspots}
         formatTooltip={(val) =>
           introHighlight && val >= introHighlight.start && val <= introHighlight.end
             ? `${formatClock(val)} · ${introHighlight.kind === "recap" ? "Recap" : "Intro"}`
@@ -356,9 +383,17 @@ function PlaybackScrubber({
                 const inIntro = Boolean(
                   introHighlight && val >= introHighlight.start && val <= introHighlight.end,
                 );
+                const bucket =
+                  !lowPowerMode && reactionsEnabled ? getReactionBucketAt(val) : null;
                 return (
                   <div className="relative rounded-[10px] overflow-hidden bg-black/90 shadow-[0_12px_28px_-6px_rgba(0,0,0,0.82)]">
                     <div style={getThumbnailFrameStyle(thumbSprite, val)} />
+                    {bucket && (
+                      <div className="pointer-events-none absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-full bg-black/65 border border-white/15 text-[10px] font-semibold text-white num flex items-center gap-0.5">
+                        <span>{bucket.topEmoji}</span>
+                        <span>×{bucket.total}</span>
+                      </div>
+                    )}
                     <div className="pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
                     <div className="pointer-events-none absolute inset-x-0 bottom-1.5 flex items-center justify-center gap-1.5 px-2 whitespace-nowrap">
                       {inIntro && (
@@ -501,7 +536,7 @@ const ResyncButton = memo(function ResyncButton({
   };
 
   const sizeClass = showLabel
-    ? "h-7.5 w-auto px-2.5"
+    ? "h-7.5 w-auto pl-[7.5px] pr-2.5"
     : compact
       ? "h-7 w-7"
       : "h-7.5 w-7.5";
@@ -553,7 +588,6 @@ interface TransportBarProps {
   onToggleFullscreen: () => void;
   onPrevEpisode?: () => void;
   onNextEpisode?: () => void;
-  onTogglePartySidebar?: () => void;
   onBarHoverChange?: (hovered: boolean) => void;
   drawerTabs?: ReactNode;
   expandedDrawer?: ReactNode;
@@ -570,7 +604,6 @@ export const TransportBar = memo(function TransportBar({
   onToggleFullscreen,
   onPrevEpisode,
   onNextEpisode,
-  onTogglePartySidebar,
   onBarHoverChange,
   drawerTabs,
   expandedDrawer,
@@ -582,6 +615,7 @@ export const TransportBar = memo(function TransportBar({
   const isFullscreen = usePlayerStore((s) => s.isFullscreen);
 
   const setVolume = usePlayerStore((s) => s.setVolume);
+  const [socialHover, setSocialHover] = useState<"chat" | "reactions" | null>(null);
 
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
@@ -593,14 +627,13 @@ export const TransportBar = memo(function TransportBar({
 
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
+  const peerAvatars = useAppStore((s) => s.peerAvatars);
   const roomCode = useAppStore((s) => s.roomCode);
   const selectedFileName = useAppStore((s) => s.selectedFileName);
   const playerError = usePlayerStore((s) => s.playerError);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
-  const partyDisplayMode = useAppStore((s) => s.partyDisplayMode);
-  const partySidebarOpen = useAppStore((s) => s.partySidebarOpen);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const openSettings = useAppStore((s) => s.openSettings);
   const unreadChatCount = useChatStore((s) => s.unreadCount);
@@ -702,9 +735,14 @@ export const TransportBar = memo(function TransportBar({
     const syncStageMetrics = () => {
       const w = outerEl.clientWidth;
       if (w > 0) {
-        if (Math.abs(w - lastMeasuredWidthRef.current) > 12) {
+        const delta = w - lastMeasuredWidthRef.current;
+        // Only reset fitLevel when expanding noticeably (or on first measure) so shrinking
+        // during sidebar dock animation never flickers labels/avatars back on mid-flight.
+        if (lastMeasuredWidthRef.current === 0 || delta > 24) {
           lastMeasuredWidthRef.current = w;
           setFitLevel(0);
+        } else if (delta < -12) {
+          lastMeasuredWidthRef.current = w;
         }
         const next = resolvePlayBarLayout(w);
         const nextKey = getPlayBarLayoutKey(next);
@@ -857,9 +895,7 @@ export const TransportBar = memo(function TransportBar({
   const centerDockRef = useRef<HTMLDivElement | null>(null);
   const centerBtnRefs = useRef<Partial<Record<TransportControlKey, HTMLButtonElement | null>>>({});
   const prevTransportKeyRef = useRef<TransportControlKey | null>(null);
-  const transportMorphTimerRef = useRef<number | null>(null);
   const [hoveredTransport, setHoveredTransport] = useState<TransportControlKey | null>(null);
-  const [transportMorphing, setTransportMorphing] = useState(false);
   const [transportPressed, setTransportPressed] = useState(false);
   const [transportLens, setTransportLens] = useState<{
     left: number;
@@ -876,14 +912,6 @@ export const TransportBar = memo(function TransportBar({
     visible: false,
     animateSlide: false,
   });
-
-  useEffect(() => {
-    return () => {
-      if (transportMorphTimerRef.current !== null) {
-        window.clearTimeout(transportMorphTimerRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (!visible) {
@@ -923,22 +951,15 @@ export const TransportBar = memo(function TransportBar({
 
     if (!hoveredTransport) {
       setTransportLens((prev) => (prev.visible ? { ...prev, visible: false } : prev));
-      setTransportMorphing(false);
-      if (transportMorphTimerRef.current !== null) {
-        window.clearTimeout(transportMorphTimerRef.current);
-        transportMorphTimerRef.current = null;
-      }
     } else {
       const btn = centerBtnRefs.current[hoveredTransport];
       if (!btn) {
         setTransportLens((prev) => (prev.visible ? { ...prev, visible: false } : prev));
       } else {
-        const dockRect = dock.getBoundingClientRect();
-        const btnRect = btn.getBoundingClientRect();
         const nextWidth = btn.offsetWidth;
         const nextHeight = btn.offsetHeight;
-        const nextLeft = Math.round(((btnRect.left + btnRect.width / 2 - dockRect.left) - nextWidth / 2) * 100) / 100;
-        const nextTop = Math.round(((btnRect.top + btnRect.height / 2 - dockRect.top) - nextHeight / 2) * 100) / 100;
+        const nextLeft = Math.round(btn.offsetLeft);
+        const nextTop = Math.round(btn.offsetTop);
         setTransportLens((prev) =>
           prev.left === nextLeft &&
           prev.top === nextTop &&
@@ -956,13 +977,6 @@ export const TransportBar = memo(function TransportBar({
                 animateSlide: switchedBetween,
               },
         );
-      }
-      if (switchedBetween) {
-        setTransportMorphing(true);
-        if (transportMorphTimerRef.current !== null) {
-          window.clearTimeout(transportMorphTimerRef.current);
-        }
-        transportMorphTimerRef.current = window.setTimeout(() => setTransportMorphing(false), 195);
       }
     }
     prevTransportKeyRef.current = hoveredTransport;
@@ -1073,7 +1087,7 @@ export const TransportBar = memo(function TransportBar({
         onClick={handleToggleReady}
         title={loaded ? "Toggle Ready status (R)" : "Load a local video first"}
         className={`ep-bar-icon-btn ${
-          barLayout.showTextLabels ? "h-7.5 w-auto px-2.5" : iconBtnSize
+          barLayout.showTextLabels ? "h-7.5 w-auto pl-[7.5px] pr-2.5" : iconBtnSize
         } rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer disabled:opacity-45 disabled:pointer-events-none ${
           !loaded
             ? "text-secondary hover:text-white"
@@ -1106,7 +1120,7 @@ export const TransportBar = memo(function TransportBar({
         type="button"
         data-capsule-anchor="room"
         onClick={() => onToggleTab("room")}
-        aria-label="Open party lounge"
+        aria-label="Watch Party room"
         aria-pressed={activeTab === "room"}
         title={
           mismatch
@@ -1119,7 +1133,7 @@ export const TransportBar = memo(function TransportBar({
         }
         className={`ep-bar-pill ep-party-pill ${
           !hideParticipants && visiblePeers.length > 0
-            ? `h-7.5 w-auto pl-1 ${barLayout.showPartyCount ? "pr-2.5" : "pr-2"} gap-1.5`
+            ? "h-7.5 w-auto pl-[5px] pr-2.5 gap-2"
             : barLayout.showTextLabels
               ? "h-7.5 w-auto px-2.5 gap-1.5"
               : barLayout.showPartyChevron
@@ -1133,7 +1147,7 @@ export const TransportBar = memo(function TransportBar({
       >
         {!hideParticipants && visiblePeers.length > 0 ? (
           <>
-            <span className="flex items-center -space-x-1.5">
+            <span className="flex items-center gap-1.5">
               {visiblePeers.map((p) => {
                 const isSelf =
                   p.username.trim().toLowerCase() === effectiveUsername.trim().toLowerCase();
@@ -1160,8 +1174,9 @@ export const TransportBar = memo(function TransportBar({
                       p.username,
                       effectiveUsername,
                       avatarId,
+                      peerAvatars,
                     )}
-                    size={20}
+                    size={18}
                     speaking={peerSpeaking}
                     status={presenceStatus}
                     title={`${p.username}${peerSpeaking ? " · Speaking" : p.isReady ? " · Ready" : " · Not Ready"}${
@@ -1172,13 +1187,8 @@ export const TransportBar = memo(function TransportBar({
               })}
             </span>
             {extraPeerCount > 0 && (
-              <span className="h-5 px-1.5 rounded-full bg-raised text-[10px] text-secondary font-medium inline-flex items-center justify-center ring-1 ring-white/10 shrink-0">
+              <span className="text-[11px] text-white/80 font-medium leading-none num shrink-0">
                 +{extraPeerCount}
-              </span>
-            )}
-            {barLayout.showPartyCount && (
-              <span className="text-[11px] font-medium leading-none num">
-                {participants.length}
               </span>
             )}
             {voiceEnabled && !voiceJoined && voicePeersInCall.length > 0 && (
@@ -1237,153 +1247,81 @@ export const TransportBar = memo(function TransportBar({
         />
       )}
 
-      {(onTogglePartySidebar || chatTriggerPlacement === "playbar" || reactionsEnabled) && (() => {
+      {(chatTriggerPlacement === "playbar" || reactionsEnabled) && (() => {
         const showChat = chatTriggerPlacement === "playbar";
         const showReactions = reactionsEnabled;
         const circleDim = isMini ? "h-7 w-7" : "h-7.5 w-7.5";
-        const dockHeight = isMini ? "h-7" : "h-7.5";
-        const partySidebarActive = partyDisplayMode === "sidebar" && partySidebarOpen;
+        const hasVoiceActivity =
+          voiceEnabled && (voiceJoined || voicePeersInCall.length > 0) && !chatOpen;
         return (
           <div className="inline-flex items-center gap-1.5 shrink-0">
-            {onTogglePartySidebar && showChat ? (
-              <div
-                className={`ep-split-pill ${dockHeight} rounded-full inline-flex items-center p-[2px] gap-[1px] overflow-visible shrink-0`}
+            {showChat && (
+              <button
+                type="button"
+                data-capsule-anchor="chat"
+                aria-pressed={chatOpen}
+                onClick={() => onToggleChat?.()}
+                onMouseEnter={() => setSocialHover("chat")}
+                onMouseLeave={() => setSocialHover((cur) => (cur === "chat" ? null : cur))}
+                aria-label="Party Lounge (Chat & Voice)"
+                title="Party Lounge (C)"
+                className={`ep-bar-icon-btn ep-social-bare-btn ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
+                  chatOpen || socialHover === "chat"
+                    ? "text-white"
+                    : "text-white/85 hover:text-white"
+                }`}
               >
-                <button
-                  type="button"
-                  data-capsule-anchor="party-sidebar"
-                  aria-pressed={partySidebarActive}
-                  onClick={() => onTogglePartySidebar()}
-                  aria-label="Party & Voice sidebar"
-                  title="Party & Voice Lounge (P)"
-                  className={`ep-press relative ${isMini ? "w-7" : "w-8"} h-full rounded-full inline-flex items-center justify-center cursor-pointer ${
-                    partySidebarActive
-                      ? "bg-white/[0.18] shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.28)] text-white"
-                      : "text-secondary hover:text-white hover:bg-white/[0.08]"
-                  }`}
-                >
-                  <AppVoiceIcon
-                    active={partySidebarActive}
-                    connected={voiceJoined && !voiceDeafened}
-                    deafened={voiceJoined && voiceDeafened}
-                    size={isMini ? 14 : 15}
-                    className="shrink-0"
-                  />
-                  {voiceEnabled &&
-                    (voiceJoined || voicePeersInCall.length > 0) &&
-                    !partySidebarActive && (
-                      <span
-                        aria-hidden="true"
-                        className={`absolute top-1 right-1 h-1.5 w-1.5 rounded-full ring-2 ring-canvas/85 z-10 ${
-                          remoteSpeakingCount > 0 ? "bg-ok" : "bg-accent-soft"
-                        }`}
-                      />
-                    )}
-                </button>
-                <span
-                  aria-hidden="true"
-                  className={`w-px h-3 bg-white/[0.14] shrink-0 transition-opacity duration-150 ${
-                    partySidebarActive || chatOpen ? "opacity-0" : "opacity-100"
-                  }`}
+                <PlayerChatIcon
+                  active={chatOpen || socialHover === "chat"}
+                  size={isMini ? 15 : 17}
+                  className="shrink-0"
                 />
-                <button
-                  type="button"
-                  data-capsule-anchor="chat"
-                  aria-pressed={chatOpen}
-                  onClick={() => onToggleChat?.()}
-                  aria-label="Party chat"
-                  title="Party Chat (C)"
-                  className={`ep-press relative ${isMini ? "w-7" : "w-8"} h-full rounded-full inline-flex items-center justify-center cursor-pointer ${
-                    chatOpen
-                      ? "bg-white/[0.18] shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.28)] text-white"
-                      : "text-secondary hover:text-white hover:bg-white/[0.08]"
-                  }`}
-                >
-                  <PlayerChatIcon
-                    active={chatOpen}
-                    size={isMini ? 14 : 15}
-                    className="shrink-0"
-                  />
-                  {unreadChatCount > 0 && !chatOpen ? (
-                    <span className="anim-pop-in absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
-                      {unreadChatCount > 9 ? "9+" : unreadChatCount}
-                    </span>
-                  ) : chatTypingCount > 0 && !chatOpen ? (
-                    <span
-                      aria-hidden="true"
-                      className="absolute top-1 right-1.5 h-1.5 w-1.5 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
-                    />
-                  ) : null}
-                </button>
-              </div>
-            ) : (
-              <>
-                {onTogglePartySidebar && (
-                  <button
-                    type="button"
-                    data-capsule-anchor="party-sidebar"
-                    aria-pressed={partySidebarActive}
-                    onClick={() => onTogglePartySidebar()}
-                    aria-label="Party & Voice sidebar"
-                    title="Party & Voice Lounge (P)"
-                    className={`ep-bar-pill ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
-                      partySidebarActive
-                        ? "ep-droplet-indicator text-white"
-                        : "text-secondary hover:text-white"
-                    }`}
+                {unreadChatCount > 0 && !chatOpen ? (
+                  <span className="anim-pop-in absolute -top-0.5 -right-0.5 min-w-3.5 h-3.5 px-1 rounded-full bg-accent text-[9px] font-semibold text-white flex items-center justify-center ring-1 ring-black/40 num leading-none z-10">
+                    {unreadChatCount > 9 ? "9+" : unreadChatCount}
+                  </span>
+                ) : chatTypingCount > 0 && !chatOpen ? (
+                  <svg
+                    aria-hidden="true"
+                    width="8"
+                    height="8"
+                    viewBox="0 0 8 8"
+                    shapeRendering="geometricPrecision"
+                    className="pointer-events-none absolute top-[3px] right-[3px] h-2 w-2 shrink-0 animate-pulse z-10"
                   >
-                    <AppVoiceIcon
-                      active={partySidebarActive}
-                      connected={voiceJoined && !voiceDeafened}
-                      deafened={voiceJoined && voiceDeafened}
-                      size={isMini ? 14 : 15}
-                      className="shrink-0"
+                    <circle
+                      cx="4"
+                      cy="4"
+                      r="2.65"
+                      fill="var(--color-accent-soft)"
+                      stroke="rgba(6, 6, 10, 0.72)"
+                      strokeWidth="1.2"
                     />
-                    {voiceEnabled &&
-                      (voiceJoined || voicePeersInCall.length > 0) &&
-                      !partySidebarActive && (
-                        <span
-                          aria-hidden="true"
-                          className={`absolute top-0.5 right-0.5 h-2 w-2 rounded-full ring-2 ring-canvas/85 z-10 ${
-                            remoteSpeakingCount > 0 ? "bg-ok" : "bg-accent-soft"
-                          }`}
-                        />
-                      )}
-                  </button>
-                )}
-
-                {showChat && (
-                  <button
-                    type="button"
-                    data-capsule-anchor="chat"
-                    aria-pressed={chatOpen}
-                    onClick={() => onToggleChat?.()}
-                    aria-label="Party chat"
-                    title="Party Chat (C)"
-                    className={`ep-bar-pill ep-press relative ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
-                      chatOpen
-                        ? "ep-droplet-indicator text-white"
-                        : "text-secondary hover:text-white"
-                    }`}
+                  </svg>
+                ) : hasVoiceActivity && !chatOpen ? (
+                  <svg
+                    aria-hidden="true"
+                    width="8"
+                    height="8"
+                    viewBox="0 0 8 8"
+                    shapeRendering="geometricPrecision"
+                    className="pointer-events-none absolute top-[3px] right-[3px] h-2 w-2 shrink-0 z-10"
                   >
-                    <PlayerChatIcon
-                      active={chatOpen}
-                      size={isMini ? 15 : 17}
-                      className="shrink-0"
+                    <circle
+                      cx="4"
+                      cy="4"
+                      r="2.65"
+                      fill={
+                        remoteSpeakingCount > 0
+                          ? "var(--color-ok)"
+                          : "var(--color-accent-soft)"
+                      }
+                      stroke="rgba(6, 6, 10, 0.72)"
+                      strokeWidth="1.2"
                     />
-                    {unreadChatCount > 0 && !chatOpen ? (
-                      <span className="anim-pop-in absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center ring-2 ring-canvas/85 num leading-none z-10">
-                        {unreadChatCount > 9 ? "9+" : unreadChatCount}
-                      </span>
-                    ) : chatTypingCount > 0 && !chatOpen ? (
-                      <span
-                        aria-hidden="true"
-                        className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-accent-soft animate-pulse ring-2 ring-canvas/85 z-10"
-                      />
-                    ) : null}
-                  </button>
-                )}
-              </>
+                  </svg>
+                ) : null}
+              </button>
             )}
 
             {showReactions && (
@@ -1392,16 +1330,16 @@ export const TransportBar = memo(function TransportBar({
                 data-capsule-anchor="reactions"
                 aria-pressed={activeTab === "reactions"}
                 onClick={() => onToggleTab("reactions")}
+                onMouseEnter={() => setSocialHover("reactions")}
+                onMouseLeave={() => setSocialHover((cur) => (cur === "reactions" ? null : cur))}
                 aria-label="Live party reactions"
                 title="Live party reactions (E, or keys 1–7)"
-                className={`ep-bar-icon-btn ep-press ep-reaction-icon-btn ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer ${
-                  activeTab === "reactions" ? "ep-droplet-indicator" : ""
-                }`}
+                className={`ep-bar-icon-btn ep-press ep-reaction-icon-btn ${circleDim} rounded-full inline-flex items-center justify-center shrink-0 cursor-pointer`}
               >
                 <PlayerReactionsIcon
-                  active={activeTab === "reactions"}
-                  size={isMini ? 18 : 20}
-                  className="shrink-0"
+                  active={activeTab === "reactions" || socialHover === "reactions"}
+                  size={isMini ? 16 : 18}
+                  className="shrink-0 block"
                 />
               </button>
             )}
@@ -1418,7 +1356,7 @@ export const TransportBar = memo(function TransportBar({
       aria-pressed={activeTab === "room"}
       title="Start or join a Watch Party"
       className={`ep-bar-pill ep-party-pill ${
-        barLayout.showTextLabels ? "h-7.5 w-auto px-3" : iconBtnSize
+        barLayout.showTextLabels ? "h-7.5 w-auto pl-[7px] pr-3" : iconBtnSize
       } rounded-full inline-flex items-center justify-center gap-1.5 text-xs font-medium cursor-pointer shrink-0 ${
         activeTab === "room"
           ? "ep-droplet-indicator text-white font-semibold"
@@ -1487,7 +1425,7 @@ export const TransportBar = memo(function TransportBar({
           onClick={() => toggleMutePlayback()}
           aria-label={muted ? "Unmute" : "Mute"}
           data-muted={muted || volume === 0 ? "true" : "false"}
-          className="ep-bar-icon-btn ep-vol-btn relative h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0"
+          className={`ep-bar-icon-btn ep-vol-btn relative ${iconBtnSize} rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer shrink-0`}
           title={
             duckingActive
               ? undefined
@@ -1501,15 +1439,30 @@ export const TransportBar = memo(function TransportBar({
             size={isMini ? 16 : 18}
           />
           {duckingActive && (
-            <span
+            <svg
               aria-hidden="true"
-              className="anim-pop-in absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-accent-soft ring-1 ring-canvas/80"
-            />
+              width="8"
+              height="8"
+              viewBox="0 0 8 8"
+              shapeRendering="geometricPrecision"
+              className="anim-pop-in pointer-events-none absolute top-[3px] right-[3px] h-2 w-2 shrink-0"
+            >
+              <circle
+                cx="4"
+                cy="4"
+                r="2.65"
+                fill="var(--color-accent-soft)"
+                stroke="rgba(6, 6, 10, 0.72)"
+                strokeWidth="1.2"
+              />
+            </svg>
           )}
         </button>
       </GlassHoverTip>
       {barLayout.volumeSliderWidth !== "none" && (
-        <div className={`${VOLUME_WIDTH_CLASSES[barLayout.volumeSliderWidth]} shrink-0`}>
+        <div
+          className={`${VOLUME_WIDTH_CLASSES[barLayout.volumeSliderWidth]} shrink-0 transition-[width] duration-200 ease-[var(--ease-glass)]`}
+        >
           <Scrubber
             ariaLabel="Volume"
             value={muted ? 0 : volume}
@@ -1564,7 +1517,7 @@ export const TransportBar = memo(function TransportBar({
         aria-hidden="true"
         className={`pointer-events-none absolute top-0 left-0 z-0 ${
           transportLens.animateSlide
-            ? "transition-[transform,width,height] duration-[400ms] ease-[cubic-bezier(0.22,1.28,0.36,1)]"
+            ? "transition-[transform,width,height] duration-[240ms] ease-[var(--spring-soft)]"
             : ""
         }`}
         style={{
@@ -1575,7 +1528,6 @@ export const TransportBar = memo(function TransportBar({
       >
         <span
           data-visible={transportLens.visible ? "true" : "false"}
-          data-morphing={transportMorphing ? "true" : undefined}
           data-pressed={transportPressed ? "true" : undefined}
           className="ep-droplet-indicator ep-droplet-core ep-transport-lens block h-full w-full rounded-full"
         />
@@ -1638,20 +1590,11 @@ export const TransportBar = memo(function TransportBar({
       </button>
 
       <button
-        ref={(el) => {
-          centerBtnRefs.current.play = el;
-        }}
         type="button"
         disabled={!loaded || ctrlLock.lockedForLocalUser}
         onMouseEnter={() => {
-          if (loaded && !ctrlLock.lockedForLocalUser) {
-            setHoveredTransport("play");
-          } else {
-            setHoveredTransport(null);
-          }
-        }}
-        onPointerDown={() => {
-          if (loaded && !ctrlLock.lockedForLocalUser) setTransportPressed(true);
+          setHoveredTransport(null);
+          setTransportPressed(false);
         }}
         onClick={handlePlayPause}
         aria-label={paused ? "Play" : "Pause"}
@@ -1782,7 +1725,7 @@ export const TransportBar = memo(function TransportBar({
             aria-label="Episodes drawer"
             title="Season folder & episodes queue"
             className={`relative z-10 ${
-              barLayout.showTextLabels ? "h-7.5 w-auto px-2 max-w-[140px]" : iconBtnSize
+              barLayout.showTextLabels ? "h-7.5 w-auto pl-1.5 pr-2.5 max-w-[140px]" : iconBtnSize
             } rounded-full inline-flex items-center justify-center gap-1.5 text-xs min-w-0 shrink-0 cursor-pointer ${
               activeTab === "episodes"
                 ? "ep-press border border-transparent text-white font-semibold"
@@ -1814,7 +1757,7 @@ export const TransportBar = memo(function TransportBar({
           aria-label="Subtitles popover"
           title="Subtitles & Magic Sync"
           className={`relative z-10 ${
-            barLayout.showTextLabels ? "h-7.5 w-auto px-2" : iconBtnSize
+            barLayout.showTextLabels ? "h-7.5 w-auto pl-1.5 pr-2.5" : iconBtnSize
           } rounded-full inline-flex items-center justify-center gap-1.5 text-xs shrink-0 cursor-pointer ${
             activeTab === "subtitles"
               ? "ep-press border border-transparent text-white font-semibold"
@@ -1840,7 +1783,7 @@ export const TransportBar = memo(function TransportBar({
           aria-label="Audio & playback popover"
           title="Audio & Playback"
           className={`relative z-10 ${
-            barLayout.showTextLabels ? "h-7.5 w-auto px-2" : iconBtnSize
+            barLayout.showTextLabels ? "h-7.5 w-auto pl-1.5 pr-2.5" : iconBtnSize
           } rounded-full inline-flex items-center justify-center gap-1.5 text-xs shrink-0 cursor-pointer ${
             activeTab === "playback"
               ? "ep-press border border-transparent text-white font-semibold"

@@ -19,9 +19,9 @@ import {
 } from "../lib/syncReady";
 import { DEFAULT_ENDPOINT } from "../lib/syncStatusDisplay";
 import { clampPartySidebarWidth, DEFAULT_PARTY_SIDEBAR_WIDTH } from "../lib/partyLayout";
+import { useChatStore } from "./useChatStore";
 import { useRatingStore } from "./useRatingStore";
 import {
-  sanitizeCustomServerEndpoint,
   sanitizeRoomCodeInput,
   sanitizeUsername,
 } from "../lib/webviewHardening";
@@ -62,7 +62,8 @@ function applyReducedMotionAttribute(enabled: boolean): void {
   }
 }
 
-export const DEFAULT_PLAY_BAR_OPACITY = 60;
+export const DEFAULT_PLAY_BAR_OPACITY = 95;
+const PLAY_BAR_MID_PIVOT = 60;
 
 export function clampPlayBarOpacity(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_PLAY_BAR_OPACITY;
@@ -72,9 +73,9 @@ export function clampPlayBarOpacity(value: number): number {
 function interpolatePlayBarAlpha(opacity: number, atZero: number, atDefault: number, atSolid: number): string {
   const clamped = clampPlayBarOpacity(opacity);
   const val =
-    clamped <= DEFAULT_PLAY_BAR_OPACITY
-      ? atZero + (atDefault - atZero) * (clamped / DEFAULT_PLAY_BAR_OPACITY)
-      : atDefault + (atSolid - atDefault) * ((clamped - DEFAULT_PLAY_BAR_OPACITY) / (100 - DEFAULT_PLAY_BAR_OPACITY));
+    clamped <= PLAY_BAR_MID_PIVOT
+      ? atZero + (atDefault - atZero) * (clamped / PLAY_BAR_MID_PIVOT)
+      : atDefault + (atSolid - atDefault) * ((clamped - PLAY_BAR_MID_PIVOT) / (100 - PLAY_BAR_MID_PIVOT));
   return val.toFixed(3);
 }
 
@@ -114,11 +115,14 @@ export type OutroNextMode = "off" | "manual" | "auto";
 export type AutoFetchSubtitleMode = "missing" | "language" | "off";
 export type ChatTriggerPlacement = "playbar" | "edge";
 export type PartyDisplayMode = "popover" | "sidebar";
+export type ChatImageMode = "auto" | "tap" | "off";
+export type ChatImageRetention = "30m" | "session";
 
 interface AppState {
   screen: AppScreen;
   username: string;
   avatarId: AvatarId;
+  peerAvatars: Record<string, AvatarId>;
   roomCode: string;
   literalRoom: boolean;
   hostOnlyRoom: boolean;
@@ -150,6 +154,8 @@ interface AppState {
   reactionsEnabled: boolean;
   chatPeeksEnabled: boolean;
   chatTriggerPlacement: ChatTriggerPlacement;
+  chatImageMode: ChatImageMode;
+  chatImageRetention: ChatImageRetention;
   partyDisplayMode: PartyDisplayMode;
   partySidebarOpen: boolean;
   partySidebarWidth: number;
@@ -171,6 +177,8 @@ interface AppState {
   setPendingDeepLinkPasswordRoomId: (roomId: string | null) => void;
   setUsername: (name: string) => void;
   setAvatarId: (avatarId: AvatarId) => void;
+  setPeerAvatar: (username: string, avatarId: string) => void;
+  clearPeerAvatars: () => void;
   setRoomCode: (code: string) => void;
   setHostOnlyRoom: (hostOnly: boolean) => void;
   setCreatingRoom: (creating: boolean) => void;
@@ -202,6 +210,8 @@ interface AppState {
   setReactionsEnabled: (enabled: boolean) => void;
   setChatPeeksEnabled: (enabled: boolean) => void;
   setChatTriggerPlacement: (placement: ChatTriggerPlacement) => void;
+  setChatImageMode: (mode: ChatImageMode) => void;
+  setChatImageRetention: (retention: ChatImageRetention) => void;
   setPartyDisplayMode: (mode: PartyDisplayMode) => void;
   setPartySidebarOpen: (open: boolean) => void;
   setPartySidebarWidth: (width: number) => void;
@@ -234,7 +244,7 @@ interface AppState {
 const initialUsername = sanitizeUsername(readStorage("ep.username", "")) || "Viewer";
 const rawAvatarId = readStorage("ep.avatarId", DEFAULT_AVATAR_ID);
 const initialAvatarId: AvatarId = isValidAvatarId(rawAvatarId) ? rawAvatarId : DEFAULT_AVATAR_ID;
-const initialServer = sanitizeCustomServerEndpoint(readStorage("ep.server", DEFAULT_ENDPOINT)) || DEFAULT_ENDPOINT;
+const initialServer = DEFAULT_ENDPOINT;
 const initialHideParticipants = readStorage("ep.hideViewers", "false") === "true";
 const initialHashFilenames = readStorage("ep.hashFilenames", "false") === "true";
 const initialAutoFixFileMismatch = readStorage("ep.autoFixFileMismatch", "true") !== "false";
@@ -298,6 +308,13 @@ const initialReactionsEnabled = readStorage("ep.reactionsEnabled", "true") !== "
 const initialChatPeeksEnabled = readStorage("ep.chatPeeksEnabled", "true") !== "false";
 const initialChatTriggerPlacement: ChatTriggerPlacement =
   readStorage("ep.chatTriggerPlacement", "playbar") === "edge" ? "edge" : "playbar";
+const initialChatImageMode: ChatImageMode = (() => {
+  const raw = readStorage("ep.chatImageMode", "auto");
+  if (raw === "auto" || raw === "tap" || raw === "off") return raw;
+  return "auto";
+})();
+const initialChatImageRetention: ChatImageRetention =
+  readStorage("ep.chatImageRetention", "30m") === "session" ? "session" : "30m";
 const initialPartyDisplayMode: PartyDisplayMode =
   readStorage("ep.partyDisplayMode.v1", "popover") === "sidebar" ? "sidebar" : "popover";
 const initialPartySidebarWidth: number = (() => {
@@ -349,6 +366,7 @@ export const useAppStore = create<AppState>((set) => ({
   screen: "home",
   username: initialUsername,
   avatarId: initialAvatarId,
+  peerAvatars: {},
   roomCode: "",
   literalRoom: false,
   hostOnlyRoom: false,
@@ -379,6 +397,8 @@ export const useAppStore = create<AppState>((set) => ({
   reactionsEnabled: initialReactionsEnabled,
   chatPeeksEnabled: initialChatPeeksEnabled,
   chatTriggerPlacement: initialChatTriggerPlacement,
+  chatImageMode: initialChatImageMode,
+  chatImageRetention: initialChatImageRetention,
   partyDisplayMode: initialPartyDisplayMode,
   partySidebarOpen: initialPartyDisplayMode === "sidebar",
   partySidebarWidth: initialPartySidebarWidth,
@@ -411,6 +431,22 @@ export const useAppStore = create<AppState>((set) => ({
     set({ avatarId });
   },
 
+  setPeerAvatar: (username, rawAvatarId) => {
+    const cleanPeer = username.trim().toLowerCase();
+    if (!cleanPeer || !isValidAvatarId(rawAvatarId)) return;
+    set((s) => {
+      if (s.peerAvatars[cleanPeer] === rawAvatarId) return s;
+      return {
+        peerAvatars: {
+          ...s.peerAvatars,
+          [cleanPeer]: rawAvatarId,
+        },
+      };
+    });
+  },
+
+  clearPeerAvatars: () => set({ peerAvatars: {} }),
+
   setRoomCode: (code) =>
     set((s) => {
       const cleaned = sanitizeRoomCodeInput(code, s.literalRoom);
@@ -434,10 +470,9 @@ export const useAppStore = create<AppState>((set) => ({
       creatingRoom: false,
     }),
 
-  setServerEndpoint: (endpoint) => {
-    const clean = sanitizeCustomServerEndpoint(endpoint) || DEFAULT_ENDPOINT;
-    writeStorage("ep.server", clean);
-    set({ serverEndpoint: clean });
+  setServerEndpoint: (_endpoint) => {
+    writeStorage("ep.server", DEFAULT_ENDPOINT);
+    set({ serverEndpoint: DEFAULT_ENDPOINT });
   },
 
   setServerPassword: (serverPassword) => set({ serverPassword }),
@@ -598,6 +633,17 @@ export const useAppStore = create<AppState>((set) => ({
     set({ chatTriggerPlacement });
   },
 
+  setChatImageMode: (chatImageMode) => {
+    writeStorage("ep.chatImageMode", chatImageMode);
+    set({ chatImageMode });
+  },
+
+  setChatImageRetention: (chatImageRetention) => {
+    writeStorage("ep.chatImageRetention", chatImageRetention);
+    set({ chatImageRetention });
+    useChatStore.getState().syncImageRetention(chatImageRetention);
+  },
+
   setPartyDisplayMode: (partyDisplayMode) => {
     writeStorage("ep.partyDisplayMode.v1", partyDisplayMode);
     set({
@@ -713,6 +759,7 @@ export const useAppStore = create<AppState>((set) => ({
         hostOnlyRoom: hostOnlyRoom ?? false,
         creatingRoom: Boolean(creatingRoom && !lit && cleaned),
         partySidebarOpen: s.partyDisplayMode === "sidebar",
+        peerAvatars: {},
         settingsOpen: false,
         shortcutsOpen: false,
       };
@@ -739,6 +786,7 @@ export const useAppStore = create<AppState>((set) => ({
       roomCode: "",
       hostOnlyRoom: false,
       creatingRoom: false,
+      peerAvatars: {},
       selectedFilePath: null,
       selectedFileName: null,
       settingsOpen: false,

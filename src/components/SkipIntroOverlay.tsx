@@ -1,20 +1,23 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { executeSkipIntro, findActiveIntroAt } from "../lib/introActions";
 import type { DetectedIntro } from "../lib/mpv";
+import { resolveEffectiveUsername } from "../lib/syncController";
+import { syncSendIntroSkipVote } from "../lib/syncplay";
 import { usePresencePayload } from "../lib/useAnimatedPresence";
 import { useAppStore } from "../store/useAppStore";
 import {
   buildIntroSegmentKey,
+  buildIntroVoteKey,
   getEffectiveIntroSegments,
   useIntroStore,
 } from "../store/useIntroStore";
 import { usePlayerStore } from "../store/usePlayerStore";
+import { useSyncStore } from "../store/useSyncStore";
 import { PlayerSkipIntroIcon } from "./ui/PlayerIcons";
 
 const AUTO_SKIP_DELAY_MS = 1600;
 
 interface SkipIntroOverlayProps {
-  chromeVisible: boolean;
   popoverOpen: boolean;
   lockedForLocalUser: boolean;
 }
@@ -25,7 +28,6 @@ interface ActiveIntroPayload {
 }
 
 export const SkipIntroOverlay = memo(function SkipIntroOverlay({
-  chromeVisible,
   popoverOpen,
   lockedForLocalUser,
 }: SkipIntroOverlayProps) {
@@ -35,6 +37,11 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
 
   const skipIntroMode = useAppStore((s) => s.skipIntroMode);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
+  const roomCode = useAppStore((s) => s.roomCode);
+  const username = useAppStore((s) => s.username);
+  const syncStatus = useSyncStore((s) => s.status);
+  const participantCount = useSyncStore((s) => s.participants.length);
+  const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
   const introEnabled = skipIntroMode !== "off";
   const autoSkipIntro = skipIntroMode === "auto";
 
@@ -43,6 +50,8 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
   const manualIntro = useIntroStore((s) => s.manualIntro);
   const dismissedKeys = useIntroStore((s) => s.dismissedKeys);
   const autoSkippedKeys = useIntroStore((s) => s.autoSkippedKeys);
+  const skipVotesBySegKey = useIntroStore((s) => s.skipVotesBySegKey);
+  const recordSkipVote = useIntroStore((s) => s.recordSkipVote);
   const markAutoSkipped = useIntroStore((s) => s.markAutoSkipped);
 
   const effectiveSegments = useMemo(
@@ -50,8 +59,10 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
     [segments, manualIntro],
   );
 
+  const canVoteOnly = lockedForLocalUser && Boolean(roomCode) && syncStatus.state === "connected";
+
   const activeSegIndex = useMemo(() => {
-    if (!loaded || !introEnabled || lockedForLocalUser || popoverOpen) {
+    if (!loaded || !introEnabled || (lockedForLocalUser && !canVoteOnly) || popoverOpen) {
       return -1;
     }
     const found = findActiveIntroAt(posHalfSec, effectiveSegments);
@@ -60,6 +71,7 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
     loaded,
     introEnabled,
     lockedForLocalUser,
+    canVoteOnly,
     popoverOpen,
     posHalfSec,
     effectiveSegments,
@@ -84,6 +96,7 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
     Boolean(activePayload) &&
     !presence.exiting &&
     autoSkipIntro &&
+    !canVoteOnly &&
     !paused &&
     Boolean(currentKey) &&
     !autoSkippedKeys.includes(currentKey);
@@ -121,38 +134,53 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
     dispatchLayout();
     const settled = window.setTimeout(dispatchLayout, 320);
     return () => window.clearTimeout(settled);
-  }, [presence.mounted, presence.exiting, chromeVisible, fullWidthPlayBar]);
+  }, [presence.mounted, presence.exiting, fullWidthPlayBar]);
 
   if (!presence.mounted || !current) return null;
 
   const { segment } = current;
+  const voteKey = buildIntroVoteKey(segment);
+  const voters = skipVotesBySegKey[voteKey] ?? [];
+  const iVoted = voters.some(
+    (u) => u.trim().toLowerCase() === effectiveUsername.trim().toLowerCase(),
+  );
   const spanSecs = Math.max(1, Math.round(segment.skipTargetSecs - segment.startSecs));
-  const titleText =
-    segment.source === "audioMatch" && segment.matchedEpisodes >= 2
+  const titleText = canVoteOnly
+    ? iVoted
+      ? `Voted to skip (${voters.length}/${Math.max(1, participantCount)}) · Waiting for host`
+      : "Vote to ask the host to skip"
+    : segment.source === "audioMatch" && segment.matchedEpisodes >= 2
       ? `Matched opening across ${segment.matchedEpisodes} episodes (${spanSecs}s) · Press I to skip`
       : `Detected opening (${spanSecs}s) · Press I to skip`;
 
   const handleManualSkip = () => {
+    if (canVoteOnly) {
+      if (!iVoted) {
+        recordSkipVote(voteKey, effectiveUsername);
+        void syncSendIntroSkipVote(voteKey).catch(() => undefined);
+      }
+      return;
+    }
     void executeSkipIntro(segment);
   };
 
+  const pillLabel = canVoteOnly
+    ? iVoted
+      ? `Voted to Skip (${voters.length}/${Math.max(1, participantCount)})`
+      : voters.length > 0
+        ? `Vote to Skip (${voters.length}/${Math.max(1, participantCount)})`
+        : "Vote to Skip"
+    : voters.length > 0
+      ? `${segment.label} · ${voters.length} asked`
+      : segment.label;
+
   return (
     <div
-      style={
-        chromeVisible
-          ? {
-              bottom: `var(--ep-playbar-clearance, ${fullWidthPlayBar ? "124px" : "140px"})`,
-            }
-          : undefined
-      }
-      className={`absolute inset-x-0 z-40 pointer-events-none flex justify-center transition-[bottom] duration-300 ease-out ${
+      style={{
+        bottom: `var(--ep-playbar-clearance, ${fullWidthPlayBar ? "124px" : "140px"})`,
+      }}
+      className={`absolute inset-x-0 z-40 pointer-events-none flex justify-center ${
         fullWidthPlayBar ? "px-4 sm:px-6" : "px-4"
-      } ${
-        chromeVisible
-          ? fullWidthPlayBar
-            ? "bottom-[122px] sm:bottom-[124px]"
-            : "bottom-[138px] sm:bottom-[140px]"
-          : "bottom-7 sm:bottom-8"
       }`}
     >
       <div className={`w-full flex justify-end ${fullWidthPlayBar ? "" : "max-w-[1140px]"}`}>
@@ -175,7 +203,7 @@ export const SkipIntroOverlay = memo(function SkipIntroOverlay({
           )}
           <span className="relative z-[1] flex items-center gap-2">
             <PlayerSkipIntroIcon size={15} />
-            <span>{segment.label}</span>
+            <span>{pillLabel}</span>
           </span>
         </button>
       </div>

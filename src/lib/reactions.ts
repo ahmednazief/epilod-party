@@ -215,6 +215,7 @@ export function triggerPartyReaction(
     emoji: clean,
     count: 1,
     isSelf: true,
+    positionSecs: usePlayerStore.getState().positionSecs,
   });
 
   if (options?.soundMode !== "none") {

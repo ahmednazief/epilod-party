@@ -515,6 +515,192 @@ export function AppShuffleIcon({ size = 13, className = "" }: AppIconProps) {
 }
 
 /**
+ * Custom dual-tone crystal Studio sparkle emblem.
+ */
+export function AppStudioIcon({ size = 13, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M11.5 3.8L13.1 8.4L17.7 10L13.1 11.6L11.5 16.2L9.9 11.6L5.3 10L9.9 8.4L11.5 3.8Z"
+        fill="#A78BFA"
+        fillOpacity="0.18"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M18.2 14.5L19 16.8L21.3 17.6L19 18.4L18.2 20.7L17.4 18.4L15.1 17.6L17.4 16.8L18.2 14.5Z"
+        fill="#DDD6FE"
+      />
+    </svg>
+  );
+}
+
+/** Custom crystal Skin Tone droplet icon. */
+export function AppSkinIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M12 3.8C12 3.8 6.2 10.2 6.2 14.4A5.8 5.8 0 0 0 17.8 14.4C17.8 10.2 12 3.8 12 3.8Z"
+        fill="#A78BFA"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <path d="M9.5 15.2A2.6 2.6 0 0 0 12.2 17.6" stroke="#DDD6FE" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Custom crystal Hair & Hijab silhouette icon. */
+export function AppHairIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M5.5 14.5C5.5 8.5 8.5 5 12 5C15.5 5 18.5 8.5 18.5 14.5C18.5 17.5 17 19.2 15.5 19.8H8.5C7 19.2 5.5 17.5 5.5 14.5Z"
+        fill="#A78BFA"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8.5 11.5C9.8 9.2 11.5 8.6 12.6 10.2C13.8 8.8 15.2 9.4 15.8 11.5"
+        stroke="#DDD6FE"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/** Custom crystal Eye icon. */
+export function AppEyeIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M3.2 12C5.2 8.2 8.4 6.5 12 6.5C15.6 6.5 18.8 8.2 20.8 12C18.8 15.8 15.6 17.5 12 17.5C8.4 17.5 5.2 15.8 3.2 12Z"
+        fill="#A78BFA"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="2.7" stroke="#DDD6FE" strokeWidth="1.65" />
+    </svg>
+  );
+}
+
+/** Custom crystal Expression / Face icon. */
+export function AppSmileIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle
+        cx="12"
+        cy="12"
+        r="8.2"
+        fill="#A78BFA"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <circle cx="9.2" cy="10.2" r="1" fill="#DDD6FE" />
+      <circle cx="14.8" cy="10.2" r="1" fill="#DDD6FE" />
+      <path d="M8.8 14.2Q12 16.8 15.2 14.2" stroke="#DDD6FE" strokeWidth="1.65" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Custom crystal Glasses icon. */
+export function AppGlassesIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle
+        cx="7.4"
+        cy="13"
+        r="3.8"
+        fill="#A78BFA"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <circle
+        cx="16.6"
+        cy="13"
+        r="3.8"
+        fill="#A78BFA"
+        fillOpacity="0.16"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <path d="M11.2 12.6H12.8" stroke="#DDD6FE" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="M3.8 12L5.5 7.5M20.2 12L18.5 7.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Custom crystal Outfit / Hoodie icon. */
+export function AppOutfitIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M8.2 5.2L4.2 8.2L5.8 12.2L7.5 11.4V19H16.5V11.4L18.2 12.2L19.8 8.2L15.8 5.2C14.8 6.6 13.5 7.2 12 7.2C10.5 7.2 9.2 6.6 8.2 5.2Z"
+        fill="#A78BFA"
+        fillOpacity="0.15"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path d="M9.6 6.8Q12 9.4 14.4 6.8" stroke="#DDD6FE" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Custom crystal Headphones / Extras icon. */
+export function AppExtrasIcon({ size = 15, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M4.8 13.5A7.2 7.2 0 0 1 19.2 13.5"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <rect x="4" y="12.5" width="3.5" height="6" rx="1.6" fill="#A78BFA" fillOpacity="0.22" stroke="#DDD6FE" strokeWidth="1.5" />
+      <rect x="16.5" y="12.5" width="3.5" height="6" rx="1.6" fill="#A78BFA" fillOpacity="0.22" stroke="#DDD6FE" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+/** Custom crystal My Characters emblem (avatar silhouette + crystal accent). */
+export function AppCustomCharsIcon({ size = 13, className = "" }: AppIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle
+        cx="10.5"
+        cy="8.5"
+        r="3.4"
+        fill="#A78BFA"
+        fillOpacity="0.18"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <path
+        d="M4.5 18.8C4.8 15.6 7.3 14 10.5 14C13.7 14 16.2 15.6 16.5 18.8"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+      <path
+        d="M18.5 5.2L19.3 7.3L21.4 8.1L19.3 8.9L18.5 11L17.7 8.9L15.6 8.1L17.7 7.3L18.5 5.2Z"
+        fill="#DDD6FE"
+      />
+    </svg>
+  );
+}
+
+/**
  * Custom sculpted crystal calibration Hex Dial icon for Advanced settings.
  */
 export function AppWrenchIcon({ size = 13, active = false, className = "" }: AppIconProps) {
@@ -1101,71 +1287,66 @@ export function AppMicIcon({
 }: AppIconProps & { muted?: boolean; speaking?: boolean }) {
   const uid = useId().replace(/:/g, "");
   const capGradId = `ep-mic-cap-${uid}`;
+  const maskId = `ep-mic-cut-${uid}`;
   const isSpeaking = speaking && !muted;
-  const strokeMain = muted ? "currentColor" : isSpeaking ? "#4ADE80" : "currentColor";
+  const strokeMain = isSpeaking ? "#4ADE80" : "currentColor";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={capGradId} x1="9" y1="3" x2="15" y2="14" gradientUnits="userSpaceOnUse">
+        <linearGradient id={capGradId} x1="9" y1="2.5" x2="15" y2="13.5" gradientUnits="userSpaceOnUse">
           <stop
             offset="0%"
             stopColor={isSpeaking ? "#DCFCE7" : "#FFFFFF"}
-            stopOpacity={muted ? "0.14" : isSpeaking ? "0.5" : "0.34"}
+            stopOpacity={muted ? "0.14" : isSpeaking ? "0.45" : "0.24"}
           />
           <stop
             offset="100%"
             stopColor={isSpeaking ? "#16A34A" : "#A78BFA"}
-            stopOpacity={muted ? "0.08" : isSpeaking ? "0.42" : "0.24"}
+            stopOpacity={muted ? "0.06" : isSpeaking ? "0.35" : "0.14"}
           />
         </linearGradient>
+        {muted && (
+          <mask id={maskId}>
+            <rect width="24" height="24" fill="white" />
+            <path d="M3.5 3.5L20.5 20.5" stroke="black" strokeWidth="4.4" strokeLinecap="round" />
+          </mask>
+        )}
       </defs>
-      <rect
-        x="8.6"
-        y="3.2"
-        width="6.8"
-        height="10.6"
-        rx="3.4"
-        fill={`url(#${capGradId})`}
-        stroke={strokeMain}
-        strokeWidth="1.75"
-        strokeOpacity={muted ? "0.42" : "1"}
-      />
-      <path
-        d="M10.7 6.8H13.3M10.7 9.5H13.3"
-        stroke={isSpeaking ? "#BBF7D0" : "currentColor"}
-        strokeOpacity={muted ? "0.25" : "0.72"}
-        strokeWidth="1.25"
-        strokeLinecap="round"
-      />
-      <path
-        d="M5.4 11.3a6.6 6.6 0 0 0 13.2 0"
-        stroke={isSpeaking ? "#86EFAC" : "currentColor"}
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeOpacity={muted ? "0.42" : "0.95"}
-      />
-      <path
-        d="M12 17.9v2.7M9.2 20.6h5.6"
-        stroke={strokeMain}
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeOpacity={muted ? "0.42" : "0.92"}
-      />
-      {isSpeaking && (
-        <path
-          d="M3.1 8.1a9.8 9.8 0 0 0 0 5.8M20.9 8.1a9.8 9.8 0 0 1 0 5.8"
-          stroke="#4ADE80"
-          strokeWidth="1.65"
-          strokeLinecap="round"
-          strokeOpacity="0.95"
+
+      <g mask={muted ? `url(#${maskId})` : undefined}>
+        <rect
+          x="9"
+          y="2.5"
+          width="6"
+          height="11"
+          rx="3"
+          fill={`url(#${capGradId})`}
+          stroke={strokeMain}
+          strokeWidth="1.75"
+          strokeOpacity={muted ? "0.72" : "1"}
         />
-      )}
+        <path
+          d="M5.5 10.5a6.5 6.5 0 0 0 13 0"
+          stroke={isSpeaking ? "#86EFAC" : "currentColor"}
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeOpacity={muted ? "0.72" : "0.95"}
+        />
+        <path
+          d="M12 17v3.5M8.8 20.5h6.4"
+          stroke={strokeMain}
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeOpacity={muted ? "0.72" : "0.92"}
+        />
+      </g>
+
       {muted && (
         <path
-          d="M4.4 4.4L19.6 19.6"
+          d="M4.2 4.2L19.8 19.8"
           stroke="#FB7185"
-          strokeWidth="2.1"
+          strokeWidth="2"
           strokeLinecap="round"
         />
       )}
@@ -1337,8 +1518,8 @@ export function AppVoiceWaveIcon({
 }
 
 /**
- * Custom sculpted crystal Voice Chat glyph: microphone capsule with radiating acoustic voice waves.
- * Clearly communicates voice chat/connected state without looking like headphones or generic signal bars.
+ * Custom sculpted liquid-crystal Voice Lounge loudspeaker glyph (Windows 11 / Discord voice-channel silhouette).
+ * Distinct from AppMicIcon (microphone mute) with a bespoke faceted horn chamber, inner acoustic seam, and dual sound arcs.
  */
 export function AppVoiceIcon({
   active = false,
@@ -1348,7 +1529,10 @@ export function AppVoiceIcon({
   className = "",
 }: AppIconProps & { connected?: boolean; deafened?: boolean }) {
   const uid = useId().replace(/:/g, "");
-  const capId = `ep-voice-cap-${uid}`;
+  const hornId = `ep-voice-horn-${uid}`;
+  const sheenId = `ep-voice-sheen-${uid}`;
+  const clipId = `ep-voice-clip-${uid}`;
+
   const waveColor = deafened
     ? "#F87171"
     : connected
@@ -1364,56 +1548,77 @@ export function AppVoiceIcon({
         ? "#FFFFFF"
         : "currentColor";
 
+  const hornPath =
+    "M3.35 10.3C3.35 9.47 4.02 8.8 4.85 8.8H7.3L11.48 5.18C12.14 4.61 13.15 5.08 13.15 5.95V18.05C13.15 18.92 12.14 19.39 11.48 18.82L7.3 15.2H4.85C4.02 15.2 3.35 14.53 3.35 13.7V10.3Z";
+
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <defs>
-        <linearGradient id={capId} x1="6" y1="4" x2="11" y2="14" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor={connected ? "#86EFAC" : active ? "#EDE9FE" : "#FFFFFF"} stopOpacity={connected || active ? "0.42" : "0.2"} />
-          <stop offset="100%" stopColor={connected ? "#22C55E" : active ? "#8B5CF6" : "#CBD5E1"} stopOpacity={connected || active ? "0.28" : "0.08"} />
+        <linearGradient id={hornId} x1="3.35" y1="5" x2="13.15" y2="19" gradientUnits="userSpaceOnUse">
+          <stop
+            offset="0%"
+            stopColor={deafened ? "#FECACA" : connected ? "#BBF7D0" : active ? "#EDE9FE" : "#FFFFFF"}
+            stopOpacity={deafened ? "0.22" : connected ? "0.46" : active ? "0.42" : "0.24"}
+          />
+          <stop
+            offset="100%"
+            stopColor={deafened ? "#F87171" : connected ? "#22C55E" : active ? "#8B5CF6" : "#94A3B8"}
+            stopOpacity={deafened ? "0.12" : connected ? "0.28" : active ? "0.26" : "0.10"}
+          />
         </linearGradient>
+        <linearGradient id={sheenId} x1="3.5" y1="5" x2="12.5" y2="12.5" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity={deafened ? "0.18" : "0.55"} />
+          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+        </linearGradient>
+        <clipPath id={clipId}>
+          <path d={hornPath} />
+        </clipPath>
       </defs>
-      {/* Microphone capsule */}
-      <rect
-        x="5.2"
-        y="4.2"
-        width="5.6"
-        height="9.2"
-        rx="2.8"
-        fill={`url(#${capId})`}
+
+      {/* Sculpted crystal loudspeaker horn */}
+      <path
+        d={hornPath}
+        fill={`url(#${hornId})`}
         stroke={bodyColor}
         strokeWidth="1.65"
-      />
-      {/* Cradle & stand */}
-      <path
-        d="M3.3 10.6a4.7 4.7 0 0 0 9.4 0M8 15.3v3.1M5.6 18.4h4.8"
-        stroke={bodyColor}
-        strokeWidth="1.6"
-        strokeLinecap="round"
         strokeLinejoin="round"
+        strokeOpacity={deafened ? "0.72" : "1"}
       />
-      {/* Radiating voice waves */}
+      <g clipPath={`url(#${clipId})`}>
+        <polygon points="3,4.6 13.5,4.6 13.5,11.4 3,13.1" fill={`url(#${sheenId})`} />
+      </g>
+      {/* Subtle acoustic chamber seam for custom hardware craft */}
+      <path
+        d="M7.35 9.35V14.65"
+        stroke={bodyColor}
+        strokeOpacity={deafened ? "0.28" : "0.42"}
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+
+      {/* Radiating voice lounge arcs or deafened cross */}
       {!deafened ? (
         <>
           <path
-            d="M15.2 8.2a4.6 4.6 0 0 1 0 5.6"
+            d="M15.75 9.25a4.2 4.2 0 0 1 0 5.5"
             stroke={waveColor}
-            strokeOpacity={connected || active ? "0.95" : "0.85"}
-            strokeWidth="1.75"
+            strokeOpacity={connected || active ? "0.98" : "0.86"}
+            strokeWidth="1.8"
             strokeLinecap="round"
           />
           <path
-            d="M18.1 5.6a8.2 8.2 0 0 1 0 10.8"
+            d="M18.55 6.65a7.75 7.75 0 0 1 0 10.7"
             stroke={waveColor}
-            strokeOpacity={connected || active ? "0.75" : "0.55"}
+            strokeOpacity={connected || active ? "0.78" : "0.56"}
             strokeWidth="1.75"
             strokeLinecap="round"
           />
         </>
       ) : (
         <path
-          d="M14.5 7.5l5.5 7M20 7.5l-5.5 7"
+          d="M15.85 9.4L20.45 14.6M20.45 9.4L15.85 14.6"
           stroke="#F87171"
-          strokeWidth="1.8"
+          strokeWidth="1.9"
           strokeLinecap="round"
         />
       )}

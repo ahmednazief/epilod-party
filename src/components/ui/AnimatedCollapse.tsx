@@ -10,6 +10,7 @@ interface AnimatedCollapseProps {
   className?: string;
   innerClassName?: string;
   durationMs?: number;
+  variant?: "default" | "liquid";
 }
 
 /**
@@ -22,6 +23,7 @@ export function AnimatedCollapse({
   className = "",
   innerClassName = "",
   durationMs = 250,
+  variant = "default",
 }: AnimatedCollapseProps) {
   const { mounted } = useAnimatedPresence(open, durationMs);
   const [revealed, setRevealed] = useState(open);
@@ -50,11 +52,11 @@ export function AnimatedCollapse({
 
   return (
     <div
-      className={`ep-collapse ${className}`}
+      className={`ep-collapse ${variant === "liquid" ? "ep-collapse-liquid" : ""} ${className}`}
       data-open={revealed ? "true" : "false"}
       aria-hidden={!open}
       inert={!open}
-      style={{ transitionDuration: `${durationMs}ms` }}
+      style={variant === "default" ? { transitionDuration: `${durationMs}ms` } : undefined}
     >
       <div className="ep-collapse-inner">
         {innerClassName ? <div className={innerClassName}>{children}</div> : children}

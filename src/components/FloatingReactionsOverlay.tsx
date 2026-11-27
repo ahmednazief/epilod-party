@@ -6,7 +6,6 @@ import {
   type ReactionSpawnItem,
 } from "../store/useReactionStore";
 import {
-  AVATAR_PRESETS,
   isValidAvatarId,
   ProfileAvatar,
   resolvePeerAvatarId,
@@ -90,7 +89,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
   dockOpen = false,
 }: FloatingReactionsOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const avatarDomRefs = useRef<Partial<Record<AvatarId, HTMLSpanElement | null>>>({});
+  const avatarDomRefs = useRef<Record<string, HTMLSpanElement | null>>({});
 
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
@@ -104,6 +103,7 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
   const avatarBitmapCacheRef = useRef<Map<AvatarId, HTMLCanvasElement>>(new Map());
   const emojiBitmapCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const badgeBitmapCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const laneCursorRef = useRef(0);
 
   const configRef = useRef({
     enabled,
@@ -347,8 +347,19 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
 
     const ensureAvatarRequested = (avatarId: AvatarId) => {
       if (!requestedSetRef.current.has(avatarId)) {
+        if (requestedSetRef.current.size >= 64) {
+          const oldest = requestedSetRef.current.values().next().value;
+          if (oldest !== undefined) {
+            requestedSetRef.current.delete(oldest);
+            avatarBitmapCacheRef.current.delete(oldest);
+          }
+        }
         requestedSetRef.current.add(avatarId);
-        setRequestedAvatars((prev) => (prev.includes(avatarId) ? prev : [...prev, avatarId]));
+        setRequestedAvatars((prev) => {
+          if (prev.includes(avatarId)) return prev;
+          const next = prev.length >= 64 ? prev.slice(prev.length - 63) : prev;
+          return [...next, avatarId];
+        });
       }
     };
 
@@ -375,24 +386,50 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
       const vh = canvasRect?.height || canvasRef.current?.clientHeight || window.innerHeight || 720;
       const canvasLeft = canvasRect?.left ?? 0;
       const canvasTop = canvasRect?.top ?? 0;
+      const nowMs = performance.now();
+      const recentParticles = particles.filter((p) => nowMs - p.bornAt < 1400);
       const hasDock = Boolean(dockRect && dockRect.width > 40 && dockRect.top > 120);
-      const anchoredXRatio = hasDock && dockRect
-        ? Math.max(
-            0.14,
-            Math.min(
-              0.88,
-              (dockRect.left - canvasLeft + dockRect.width * (0.24 + Math.random() * 0.52)) / vw,
-            ),
-          )
-        : 0.78 + Math.random() * 0.14;
+
+      // Spread 4 distinct horizontal lanes across ~420px anchored around the dock (or right stage when closed)
+      const bandWidth = 420;
+      const anchorCenterX =
+        hasDock && dockRect
+          ? dockRect.left - canvasLeft + dockRect.width / 2
+          : vw - bandWidth / 2 - 48;
+      const bandMin = Math.max(72, Math.min(vw - 72 - bandWidth, anchorCenterX - bandWidth / 2));
+      const bandMax = Math.min(vw - 72, bandMin + bandWidth);
+      const computeLaneX = (laneIdx: number) =>
+        bandMin + ((laneIdx + 0.5) / 4) * (bandMax - bandMin);
+
+      // Pick the round-robin lane that maximizes horizontal distance from recently spawned particles
+      const startCursor = laneCursorRef.current % 4;
+      let chosenLane = startCursor;
+      if (recentParticles.length > 0) {
+        let bestScore = -1;
+        for (let offset = 0; offset < 4; offset++) {
+          const candidate = (startCursor + offset) % 4;
+          const candX = computeLaneX(candidate);
+          let minDist = Infinity;
+          for (const rp of recentParticles) {
+            const rpX = rp.startXRatio * vw + rp.jitterX;
+            minDist = Math.min(minDist, Math.abs(candX - rpX));
+          }
+          if (minDist > bestScore) {
+            bestScore = minDist;
+            chosenLane = candidate;
+          }
+        }
+      }
+      laneCursorRef.current = (chosenLane + 1) % 4096;
+
+      const anchoredXRatio = computeLaneX(chosenLane) / vw;
       const minBottomClearance = hasDock && dockRect
         ? Math.max(196, Math.round(canvasTop + vh - dockRect.top + 48))
         : cfg.dockOpen
           ? 196
           : 0;
 
-      const burstOffset = particles.length % 3;
-      const laneJitter = (burstOffset - 1) * 34 + (Math.random() - 0.5) * 22;
+      const laneJitter = (Math.random() - 0.5) * 6;
 
       particles.push({
         id: item.id,
@@ -401,18 +438,18 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
         avatarId: resolvedAvatar,
         isSelf: item.isSelf,
         showBadge: item.showBadge,
-        bornAt: performance.now(),
-        durationMs: reduced ? 1900 + Math.random() * 350 : 2650 + Math.random() * 800,
+        bornAt: nowMs,
+        durationMs: reduced ? 1900 + Math.random() * 300 : 2700 + Math.random() * 650,
         startXRatio: anchoredXRatio,
         jitterX: laneJitter,
-        driftX: reduced ? 0 : (Math.random() - 0.55) * 38,
-        risePx: reduced ? 56 + Math.random() * 24 : 330 + Math.random() * 170,
-        swayAmp: reduced ? 0 : 14 + Math.random() * 20,
-        swayFreq: 1.2 + Math.random() * 1.1,
-        swayPhase: Math.random() * Math.PI * 2,
-        tiltAmp: reduced ? 0 : 0.08 + Math.random() * 0.1,
-        baseScale: 0.9 + Math.random() * 0.24,
-        minBottomClearance: minBottomClearance + burstOffset * 28,
+        driftX: 0,
+        risePx: reduced ? 56 + Math.random() * 24 : 340 + Math.random() * 130,
+        swayAmp: reduced ? 0 : 4 + Math.random() * 4,
+        swayFreq: 1.0 + Math.random() * 0.6,
+        swayPhase: (chosenLane * Math.PI) / 2,
+        tiltAmp: reduced ? 0 : 0.05 + Math.random() * 0.06,
+        baseScale: 0.92 + Math.random() * 0.16,
+        minBottomClearance: minBottomClearance + (chosenLane % 2) * 56,
       });
 
       if (!rafId) {
@@ -480,8 +517,8 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
           springPopScale(popT) *
           (t > 0.72 ? 1 + ((t - 0.72) / 0.28) * 0.08 : 1);
 
-        const maxSafeX = Math.max(70, cssW - 58);
-        const minSafeX = Math.max(58, cssW - 270);
+        const maxSafeX = Math.max(72, cssW - 64);
+        const minSafeX = 64;
         const laneX = Math.max(minSafeX, Math.min(maxSafeX, cssW * p.startXRatio + p.jitterX));
         const swayX = Math.sin(t * Math.PI * 2 * p.swayFreq + p.swayPhase) * p.swayAmp;
         const x = Math.max(46, Math.min(cssW - 46, laneX + swayX + p.driftX * t));
@@ -578,14 +615,14 @@ export const FloatingReactionsOverlay = memo(function FloatingReactionsOverlay({
         aria-hidden="true"
         className="fixed -left-[9999px] -top-[9999px] w-0 h-0 overflow-hidden opacity-0 pointer-events-none"
       >
-        {AVATAR_PRESETS.filter((p) => requestedAvatars.includes(p.id)).map((preset) => (
+        {requestedAvatars.map((id) => (
           <span
-            key={preset.id}
+            key={id}
             ref={(el) => {
-              avatarDomRefs.current[preset.id] = el;
+              avatarDomRefs.current[id] = el;
             }}
           >
-            <ProfileAvatar avatarId={preset.id} size={48} />
+            <ProfileAvatar avatarId={id} size={48} />
           </span>
         ))}
       </div>

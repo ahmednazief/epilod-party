@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use audiopus::coder::{Decoder as OpusDecoder, Encoder as OpusEncoder};
 use audiopus::packet::Packet as OpusPacket;
@@ -16,13 +16,14 @@ use epilod_core::voice_dsp::{
     frame_dbfs, mix_mono_peers_to_stereo, soft_limit, AdaptiveBitrateController, BiquadHighPass,
     EchoCanceller, JitterPacket, NoiseSuppressionMode, NoopEchoCanceller, PeerJitterBuffer,
     PeerRxLeveler, SpeakerEchoDetector, VoiceCalibrator, VoiceCompressor, VoiceDenoiser, VoiceGate,
-    WebRtcAec3Canceller, WebRtcAgc2Leveler, VOICE_FRAME_10MS, VOICE_FRAME_20MS, VOICE_SAMPLE_RATE,
+    WebRtcAec3Canceller, WebRtcAgc2Leveler, WebRtcAgc2Params, VOICE_FRAME_10MS, VOICE_FRAME_20MS,
+    VOICE_SAMPLE_RATE,
 };
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use wasapi::{
     initialize_mta, AudioClientProperties, DeviceEnumerator, DeviceEventCallbacks, Direction, Role,
     SampleType, StreamCategory, StreamMode, WaveFormat,
@@ -31,8 +32,8 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::Threading::{
     CreateWaitableTimerExW, GetCurrentThread, SetThreadPriority, SetWaitableTimer,
-    WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE,
-    THREAD_PRIORITY_HIGHEST, TIMER_ALL_ACCESS,
+    WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, THREAD_PRIORITY_HIGHEST,
+    TIMER_ALL_ACCESS,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
@@ -85,6 +86,17 @@ impl DuckingModeWire {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VoiceEngineModeWire {
+    Aura,
+    Classic,
+}
+
+fn default_engine_mode() -> VoiceEngineModeWire {
+    VoiceEngineModeWire::Aura
+}
+
 fn default_true() -> bool {
     true
 }
@@ -128,6 +140,10 @@ pub struct VoiceConfigDto {
     pub echo_guard_enabled: bool,
     #[serde(default)]
     pub aec_enabled: bool,
+    #[serde(default = "default_engine_mode")]
+    pub engine_mode: VoiceEngineModeWire,
+    #[serde(default)]
+    pub use_windows_comm_aec: bool,
     pub allow_relay_for_others: bool,
     pub allow_relayed_voice: bool,
     #[serde(default = "default_one")]
@@ -156,7 +172,9 @@ impl Default for VoiceConfigDto {
             cinema_tight_gate: true,
             spatial_pan: false,
             echo_guard_enabled: true,
-            aec_enabled: cfg!(feature = "aec"),
+            aec_enabled: false,
+            engine_mode: VoiceEngineModeWire::Aura,
+            use_windows_comm_aec: false,
             allow_relay_for_others: true,
             allow_relayed_voice: true,
             master_volume: 1.0,
@@ -203,6 +221,7 @@ pub struct VoiceDiagnosticsDto {
     pub bluetooth_hfp_dropped: bool,
     pub windows_comm_aec_active: bool,
     pub aec_backend: String,
+    pub capture_backend: String,
     pub speaker_leak_detected: bool,
     pub low_bandwidth_warning: bool,
     pub nat_mode: String,
@@ -218,6 +237,22 @@ pub struct VoiceDiagnosticsDto {
     pub permission_denied: bool,
     pub stream_error: Option<String>,
     pub peers: Vec<VoicePeerRosterDto>,
+    pub tx_fifo_dropped_frames: u64,
+    pub dsp_overrun_frames: u64,
+    pub dsp_avg_frame_us: u64,
+    pub dsp_max_frame_us: u64,
+    pub gate_transitions: u64,
+    pub rx_jitter_underruns: u64,
+    pub rx_rate_limited_drops: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticCaptureResultDto {
+    pub raw_path: String,
+    pub processed_path: String,
+    pub duration_sec: f32,
+    pub sample_rate: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -738,6 +773,7 @@ struct SharedVoiceRuntime {
     low_bandwidth_warning: AtomicBool,
     stream_status: RwLock<String>,
     aec_backend: RwLock<String>,
+    capture_backend: RwLock<String>,
     active_input_name: RwLock<Option<String>>,
     active_output_name: RwLock<Option<String>>,
     stream_error: RwLock<Option<String>>,
@@ -749,11 +785,38 @@ struct SharedVoiceRuntime {
     voice_logs: Mutex<VecDeque<String>>,
     test_loopback_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<f32>>>>,
     duck: Arc<DuckController>,
+    tx_fifo_dropped_frames: AtomicU64,
+    dsp_frame_count: AtomicU64,
+    dsp_total_frame_us: AtomicU64,
+    dsp_max_frame_us: AtomicU64,
+    dsp_overrun_frames: AtomicU64,
+    gate_transitions: AtomicU64,
+    rx_jitter_underruns: AtomicU64,
+    diag_capture_active: AtomicBool,
+    diag_capture_tx: Mutex<
+        Option<std::sync::mpsc::SyncSender<([f32; VOICE_FRAME_10MS], [f32; VOICE_FRAME_10MS])>>,
+    >,
+    diag_capture_worker: Mutex<
+        Option<(
+            std::thread::JoinHandle<Result<DiagnosticCaptureResultDto, String>>,
+            Arc<AtomicBool>,
+        )>,
+    >,
 }
 
 impl SharedVoiceRuntime {
     fn now_ms(&self) -> u64 {
         self.runtime_epoch.elapsed().as_millis() as u64
+    }
+
+    fn reset_diag_counters(&self) {
+        self.tx_fifo_dropped_frames.store(0, Ordering::Relaxed);
+        self.dsp_frame_count.store(0, Ordering::Relaxed);
+        self.dsp_total_frame_us.store(0, Ordering::Relaxed);
+        self.dsp_max_frame_us.store(0, Ordering::Relaxed);
+        self.dsp_overrun_frames.store(0, Ordering::Relaxed);
+        self.gate_transitions.store(0, Ordering::Relaxed);
+        self.rx_jitter_underruns.store(0, Ordering::Relaxed);
     }
 
     fn mark_config_device_changes(&self, input_changed: bool, output_changed: bool) {
@@ -913,6 +976,7 @@ impl VoiceController {
             low_bandwidth_warning: AtomicBool::new(false),
             stream_status: RwLock::new("idle".to_string()),
             aec_backend: RwLock::new("none".to_string()),
+            capture_backend: RwLock::new("none".to_string()),
             active_input_name: RwLock::new(None),
             active_output_name: RwLock::new(None),
             stream_error: RwLock::new(None),
@@ -924,6 +988,16 @@ impl VoiceController {
             voice_logs: Mutex::new(VecDeque::with_capacity(200)),
             test_loopback_tx: Mutex::new(None),
             duck,
+            tx_fifo_dropped_frames: AtomicU64::new(0),
+            dsp_frame_count: AtomicU64::new(0),
+            dsp_total_frame_us: AtomicU64::new(0),
+            dsp_max_frame_us: AtomicU64::new(0),
+            dsp_overrun_frames: AtomicU64::new(0),
+            gate_transitions: AtomicU64::new(0),
+            rx_jitter_underruns: AtomicU64::new(0),
+            diag_capture_active: AtomicBool::new(false),
+            diag_capture_tx: Mutex::new(None),
+            diag_capture_worker: Mutex::new(None),
         });
         Self {
             shared,
@@ -1044,7 +1118,9 @@ impl VoiceController {
                 .config
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            let in_c = prev.input_device != cfg.input_device;
+            let in_c = prev.input_device != cfg.input_device
+                || prev.engine_mode != cfg.engine_mode
+                || prev.use_windows_comm_aec != cfg.use_windows_comm_aec;
             let out_c = prev.output_device != cfg.output_device;
             let dis = !cfg.voice_enabled && self.shared.in_voice.load(Ordering::Acquire);
             *prev = cfg.clone();
@@ -1091,6 +1167,11 @@ impl VoiceController {
         self.shared
             .speaker_leak_detected
             .store(false, Ordering::Release);
+        let was_idle = !self.shared.in_voice.load(Ordering::Acquire)
+            && !self.shared.mic_monitor.load(Ordering::Acquire);
+        if was_idle {
+            self.shared.reset_diag_counters();
+        }
         let epoch = self
             .shared
             .epoch
@@ -1144,6 +1225,11 @@ impl VoiceController {
 
     pub fn start_mic_monitor(&self, app: AppHandle, loopback: bool) {
         self.bind_app_handle(app);
+        let was_idle = !self.shared.in_voice.load(Ordering::Acquire)
+            && !self.shared.mic_monitor.load(Ordering::Acquire);
+        if was_idle {
+            self.shared.reset_diag_counters();
+        }
         self.shared.mic_monitor.store(true, Ordering::Release);
         self.shared
             .mic_test_loopback
@@ -1234,6 +1320,8 @@ impl VoiceController {
             } else {
                 (0, "disconnected".to_string(), 0, 0, 0, Vec::new())
             };
+        let dsp_frames = self.shared.dsp_frame_count.load(Ordering::Relaxed);
+        let dsp_total_us = self.shared.dsp_total_frame_us.load(Ordering::Relaxed);
         VoiceDiagnosticsDto {
             voice_enabled: cfg.voice_enabled,
             in_voice: self.shared.in_voice.load(Ordering::Relaxed),
@@ -1258,6 +1346,12 @@ impl VoiceController {
             aec_backend: self
                 .shared
                 .aec_backend
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            capture_backend: self
+                .shared
+                .capture_backend
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
@@ -1286,6 +1380,15 @@ impl VoiceController {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
             peers,
+            tx_fifo_dropped_frames: self.shared.tx_fifo_dropped_frames.load(Ordering::Relaxed),
+            dsp_overrun_frames: self.shared.dsp_overrun_frames.load(Ordering::Relaxed),
+            dsp_avg_frame_us: dsp_total_us / dsp_frames.max(1),
+            dsp_max_frame_us: self.shared.dsp_max_frame_us.load(Ordering::Relaxed),
+            gate_transitions: self.shared.gate_transitions.load(Ordering::Relaxed),
+            rx_jitter_underruns: self.shared.rx_jitter_underruns.load(Ordering::Relaxed),
+            rx_rate_limited_drops: tr_opt
+                .as_ref()
+                .map_or(0, |tr| tr.rx_rate_limited_drops.load(Ordering::Relaxed)),
         }
     }
 
@@ -1322,6 +1425,172 @@ impl VoiceController {
         serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
     }
 
+    pub fn start_diagnostic_capture(&self, app: AppHandle, max_seconds: u32) -> Result<(), String> {
+        self.bind_app_handle(app.clone());
+        if !self.shared.in_voice.load(Ordering::Acquire)
+            && !self.shared.mic_monitor.load(Ordering::Acquire)
+        {
+            return Err(
+                "Join voice or open Voice settings mic monitor before recording a diagnostic sample."
+                    .to_string(),
+            );
+        }
+
+        let mut worker_guard = self
+            .shared
+            .diag_capture_worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((handle, stop_req)) = worker_guard.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                *worker_guard = Some((handle, stop_req));
+                return Err("A diagnostic voice recording is already in progress.".to_string());
+            }
+        }
+
+        let base_dir = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .or_else(crate::storage::local_epilod_root_dir)
+            .ok_or_else(|| "Unable to determine local app data directory".to_string())?;
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let capture_dir = base_dir
+            .join("voice-captures")
+            .join(format!("capture-{ts_ms}"));
+        std::fs::create_dir_all(&capture_dir)
+            .map_err(|e| format!("Failed creating voice capture directory: {e}"))?;
+
+        let raw_path = capture_dir.join("raw_mic.wav");
+        let proc_path = capture_dir.join("processed_tx.wav");
+        let max_frames = (max_seconds.clamp(5, 120) as usize) * 100;
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(
+            [f32; VOICE_FRAME_10MS],
+            [f32; VOICE_FRAME_10MS],
+        )>(256);
+        *self
+            .shared
+            .diag_capture_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(tx);
+
+        let stop_req = Arc::new(AtomicBool::new(false));
+        let stop_worker = Arc::clone(&stop_req);
+        let shared_worker = Arc::clone(&self.shared);
+        self.shared
+            .diag_capture_active
+            .store(true, Ordering::Release);
+        self.shared.record_log(&format!(
+            "voice.diag-capture started max={}s",
+            max_seconds.clamp(5, 120)
+        ));
+
+        let raw_path_clone = raw_path.clone();
+        let proc_path_clone = proc_path.clone();
+        let handle = std::thread::Builder::new()
+            .name("epilod-voice-diag-cap".to_string())
+            .spawn(move || -> Result<DiagnosticCaptureResultDto, String> {
+                let mut raw_samples = Vec::with_capacity(max_frames.min(12_000) * VOICE_FRAME_10MS);
+                let mut proc_samples =
+                    Vec::with_capacity(max_frames.min(12_000) * VOICE_FRAME_10MS);
+                let mut frames = 0usize;
+
+                while frames < max_frames && !stop_worker.load(Ordering::Acquire) {
+                    match rx.recv_timeout(Duration::from_millis(40)) {
+                        Ok((raw_f, proc_f)) => {
+                            raw_samples.extend_from_slice(&raw_f);
+                            proc_samples.extend_from_slice(&proc_f);
+                            frames += 1;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                while frames < max_frames {
+                    match rx.try_recv() {
+                        Ok((raw_f, proc_f)) => {
+                            raw_samples.extend_from_slice(&raw_f);
+                            proc_samples.extend_from_slice(&proc_f);
+                            frames += 1;
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                shared_worker
+                    .diag_capture_active
+                    .store(false, Ordering::Release);
+                *shared_worker
+                    .diag_capture_tx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+
+                epilod_core::wav_io::write_wav_mono_i16(
+                    &raw_path_clone,
+                    VOICE_SAMPLE_RATE as u32,
+                    &raw_samples,
+                )?;
+                epilod_core::wav_io::write_wav_mono_i16(
+                    &proc_path_clone,
+                    VOICE_SAMPLE_RATE as u32,
+                    &proc_samples,
+                )?;
+
+                let dto = DiagnosticCaptureResultDto {
+                    raw_path: raw_path_clone.to_string_lossy().into_owned(),
+                    processed_path: proc_path_clone.to_string_lossy().into_owned(),
+                    duration_sec: (frames as f32) * 0.01,
+                    sample_rate: VOICE_SAMPLE_RATE as u32,
+                };
+                shared_worker.record_log(&format!(
+                    "voice.diag-capture saved {:.2}s to {}",
+                    dto.duration_sec, dto.raw_path
+                ));
+                if let Some(ref app) = *shared_worker
+                    .app_handle
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                {
+                    let _ = app.emit("voice://diagnostic-capture-finished", &dto);
+                }
+                Ok(dto)
+            })
+            .map_err(|e| format!("Failed starting diagnostic capture thread: {e}"))?;
+
+        *worker_guard = Some((handle, stop_req));
+        Ok(())
+    }
+
+    pub fn stop_diagnostic_capture(&self) -> Result<DiagnosticCaptureResultDto, String> {
+        self.shared
+            .diag_capture_active
+            .store(false, Ordering::Release);
+        *self
+            .shared
+            .diag_capture_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        let worker = self
+            .shared
+            .diag_capture_worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some((handle, stop_req)) = worker else {
+            return Err("No diagnostic voice recording is currently active.".to_string());
+        };
+        stop_req.store(true, Ordering::Release);
+        handle
+            .join()
+            .map_err(|_| "Diagnostic voice capture thread panicked".to_string())?
+    }
+
     pub fn shutdown(&self) {
         self.shared.hotplug_stop.store(true, Ordering::Release);
         self.shared.in_voice.store(false, Ordering::Release);
@@ -1332,6 +1601,24 @@ impl VoiceController {
         self.shared
             .calibrate_requested
             .store(false, Ordering::Release);
+        self.shared
+            .diag_capture_active
+            .store(false, Ordering::Release);
+        *self
+            .shared
+            .diag_capture_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        if let Some((handle, stop_req)) = self
+            .shared
+            .diag_capture_worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            stop_req.store(true, Ordering::Release);
+            let _ = handle.join();
+        }
         self.detach_p2p();
         self.shared.duck.restore_full();
         self.stop_workers();
@@ -1463,6 +1750,7 @@ struct OpenedInputStream {
     device_name: String,
     is_bt: bool,
     comm_aec_active: bool,
+    capture_backend: &'static str,
 }
 
 struct VoiceResamplerState {
@@ -1584,6 +1872,7 @@ fn setup_and_run_wasapi_comm_capture(
     selected_input: &str,
     chosen_name: &str,
     selected_output: &str,
+    use_comm_category: bool,
     mut prod: ringbuf::HeapProd<f32>,
     stop_worker: Arc<AtomicBool>,
     err_worker: Arc<AtomicBool>,
@@ -1621,8 +1910,11 @@ fn setup_and_run_wasapi_comm_capture(
 
         let mut audio_client = input_dev.get_iaudioclient().ok()?;
         let (_def_time, min_time) = audio_client.get_device_period().ok()?;
-        let properties = AudioClientProperties::new().set_category(StreamCategory::Communications);
-        let _ = audio_client.set_properties(properties);
+        if use_comm_category {
+            let properties =
+                AudioClientProperties::new().set_category(StreamCategory::Communications);
+            let _ = audio_client.set_properties(properties);
+        }
 
         let desired_format =
             WaveFormat::new(32, 32, SampleType::Float, VOICE_SAMPLE_RATE, 1, None);
@@ -1635,7 +1927,7 @@ fn setup_and_run_wasapi_comm_capture(
             .ok()?;
 
         let mut aec_active = false;
-        if audio_client.is_aec_supported().unwrap_or(false) {
+        if use_comm_category && audio_client.is_aec_supported().unwrap_or(false) {
             if let Ok(aec_ctrl) = audio_client.get_aec_control() {
                 let out_dev_opt = if selected_output == "default" || selected_output.trim().is_empty() {
                     enumerator
@@ -1711,6 +2003,7 @@ fn try_open_wasapi_comm_input_stream(
     chosen_name: &str,
     selected_output: &str,
     is_bt: bool,
+    use_comm_category: bool,
     err_flag: Arc<AtomicBool>,
     shared: Arc<SharedVoiceRuntime>,
 ) -> Option<OpenedInputStream> {
@@ -1733,6 +2026,7 @@ fn try_open_wasapi_comm_input_stream(
                 &sel_in,
                 &ch_name,
                 &sel_out,
+                use_comm_category,
                 prod,
                 stop_worker,
                 err_worker,
@@ -1747,8 +2041,13 @@ fn try_open_wasapi_comm_input_stream(
         return None;
     };
 
+    let capture_backend = if use_comm_category {
+        "wasapi-comm"
+    } else {
+        "wasapi-raw"
+    };
     shared.record_log(&format!(
-        "voice.wasapi-comm capture opened: '{chosen_name}' aec={aec_active}"
+        "voice.{capture_backend} capture opened: '{chosen_name}' aec={aec_active}"
     ));
 
     Some(OpenedInputStream {
@@ -1761,12 +2060,14 @@ fn try_open_wasapi_comm_input_stream(
         device_name: chosen_name.to_string(),
         is_bt,
         comm_aec_active: aec_active,
+        capture_backend,
     })
 }
 
 fn open_input_stream(
     selected: &str,
     selected_output: &str,
+    use_comm_category: bool,
     err_flag: Arc<AtomicBool>,
     shared: Arc<SharedVoiceRuntime>,
 ) -> Result<OpenedInputStream, (&'static str, bool, String)> {
@@ -1798,6 +2099,7 @@ fn open_input_stream(
             &chosen_name,
             &out_name,
             is_bt,
+            use_comm_category,
             Arc::clone(&err_flag),
             Arc::clone(&shared),
         ) {
@@ -1859,6 +2161,7 @@ fn open_input_stream(
         device_name: chosen_name,
         is_bt,
         comm_aec_active: false,
+        capture_backend: "cpal",
     })
 }
 
@@ -2287,6 +2590,68 @@ fn drain_mono_stream_to_48k(
     }
 }
 
+struct DiagCaptureAligner {
+    raw_hold: VecDeque<[f32; VOICE_FRAME_10MS]>,
+    proc_hold: VecDeque<[f32; VOICE_FRAME_10MS]>,
+}
+
+impl DiagCaptureAligner {
+    fn new() -> Self {
+        Self {
+            raw_hold: VecDeque::with_capacity(8),
+            proc_hold: VecDeque::with_capacity(8),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.raw_hold.clear();
+        self.proc_hold.clear();
+    }
+
+    fn push_raw(&mut self, frame: &[f32; VOICE_FRAME_10MS]) {
+        if self.raw_hold.len() >= 8 {
+            self.raw_hold.pop_front();
+        }
+        self.raw_hold.push_back(*frame);
+    }
+
+    fn push_compressed_20ms(&mut self, pcm20: &[f32; VOICE_FRAME_20MS], skip_second_half: bool) {
+        let mut p0 = [0.0f32; VOICE_FRAME_10MS];
+        p0.copy_from_slice(&pcm20[..VOICE_FRAME_10MS]);
+        if self.proc_hold.len() < 8 {
+            self.proc_hold.push_back(p0);
+        }
+        if !skip_second_half && self.proc_hold.len() < 8 {
+            let mut p1 = [0.0f32; VOICE_FRAME_10MS];
+            p1.copy_from_slice(&pcm20[VOICE_FRAME_10MS..VOICE_FRAME_20MS]);
+            self.proc_hold.push_back(p1);
+        }
+    }
+
+    fn drain_aligned<F>(&mut self, is_gate_open: bool, encode_accum_len: usize, mut emit_pair: F)
+    where
+        F: FnMut([f32; VOICE_FRAME_10MS], [f32; VOICE_FRAME_10MS]),
+    {
+        let rem_chunks = encode_accum_len / VOICE_FRAME_10MS;
+        while self.proc_hold.len() + rem_chunks > self.raw_hold.len() && !self.proc_hold.is_empty()
+        {
+            self.proc_hold.pop_front();
+        }
+        while !self.raw_hold.is_empty() && !self.proc_hold.is_empty() {
+            if let (Some(r), Some(p)) = (self.raw_hold.pop_front(), self.proc_hold.pop_front()) {
+                emit_pair(r, p);
+            }
+        }
+        if !is_gate_open && encode_accum_len == 0 {
+            while self.raw_hold.len() > 2 {
+                if let Some(r) = self.raw_hold.pop_front() {
+                    emit_pair(r, [0.0f32; VOICE_FRAME_10MS]);
+                }
+            }
+        }
+    }
+}
+
 fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -2296,8 +2661,24 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let mut webrtc_aec3 = WebRtcAec3Canceller::new();
     let mut echo_detector = SpeakerEchoDetector::new();
     let mut calibrator: Option<(VoiceCalibrator, Instant, u8)> = None;
-    let mut denoiser = VoiceDenoiser::new();
-    let mut agc2 = WebRtcAgc2Leveler::new();
+    let initial_engine_mode = shared
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .engine_mode;
+    let mut last_engine_mode = initial_engine_mode;
+    let mut denoiser = if initial_engine_mode == VoiceEngineModeWire::Aura {
+        VoiceDenoiser::new_aura()
+    } else {
+        VoiceDenoiser::new()
+    };
+    let mut agc2 =
+        WebRtcAgc2Leveler::with_params(if initial_engine_mode == VoiceEngineModeWire::Aura {
+            WebRtcAgc2Params::aura()
+        } else {
+            WebRtcAgc2Params::default()
+        });
+    let mut lb_empty_ticks: u32 = 0;
     let mut gate = VoiceGate::new();
     let mut comp = VoiceCompressor::new();
     let mut abr = AdaptiveBitrateController::new();
@@ -2361,6 +2742,9 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
     let mut last_mono_clock = Instant::now();
     let mut last_comm_default: Option<String> = None;
     let mut prev_cb_ms = 0u64;
+    let mut diag_aligner = DiagCaptureAligner::new();
+    let mut diag_prev_active = false;
+    let mut diag_raw_10ms = [0.0f32; VOICE_FRAME_10MS];
 
     while !shared.stop_flag.load(Ordering::Acquire) {
         let cfg = shared
@@ -2476,9 +2860,12 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 std::thread::sleep(Duration::from_millis(25));
                 continue;
             }
+            let use_comm_category =
+                cfg.engine_mode == VoiceEngineModeWire::Classic || cfg.use_windows_comm_aec;
             match open_input_stream(
                 &cfg.input_device,
                 &cfg.output_device,
+                use_comm_category,
                 Arc::clone(&err_flag),
                 Arc::clone(&shared),
             ) {
@@ -2496,6 +2883,10 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                         .active_input_name
                         .write()
                         .unwrap_or_else(|e| e.into_inner()) = Some(opened.device_name);
+                    *shared
+                        .capture_backend
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner()) = opened.capture_backend.to_string();
                     shared.set_stream_status("live", None);
                     resampler = build_mono_48k_resampler(opened.sample_rate);
                     active_stream = Some((opened.stream, opened.cons, opened.sample_rate));
@@ -2536,6 +2927,9 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 let excess_frames = (mono_48k_fifo.len() - max_tx_fifo) / VOICE_FRAME_10MS;
                 if excess_frames > 0 {
                     mono_48k_fifo.drain(..excess_frames * VOICE_FRAME_10MS);
+                    shared
+                        .tx_fifo_dropped_frames
+                        .fetch_add(excess_frames as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -2555,32 +2949,48 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
         let mut processed_any = false;
         while mono_48k_fifo.len() >= VOICE_FRAME_10MS {
             processed_any = true;
+            let t_dsp0 = Instant::now();
             for s in &mut frame_10ms {
                 *s = mono_48k_fifo.pop_front().unwrap_or(0.0);
             }
 
+            let diag_active = shared.diag_capture_active.load(Ordering::Relaxed);
+            if diag_active != diag_prev_active {
+                diag_aligner.clear();
+                diag_prev_active = diag_active;
+            }
+            if diag_active {
+                diag_raw_10ms.copy_from_slice(&frame_10ms);
+                diag_aligner.push_raw(&diag_raw_10ms);
+            }
+
             hpf.process_in_place(&mut frame_10ms);
 
+            let is_aura = cfg.engine_mode == VoiceEngineModeWire::Aura;
             // Feed playback far-end reference: prefer system WASAPI render loopback (covers mpv movie + voice)
             // and fall back to mixed peer voices only when loopback is not open.
             let far_frame = if active_loopback.is_some() {
                 if lb_mono_48k_fifo.len() >= VOICE_FRAME_10MS {
+                    lb_empty_ticks = 0;
                     let mut f = [0.0f32; VOICE_FRAME_10MS];
                     for dst in &mut f {
                         *dst = lb_mono_48k_fifo.pop_front().unwrap_or(0.0);
                     }
                     Some(f)
                 } else {
+                    lb_empty_ticks = lb_empty_ticks.saturating_add(1);
                     // Windows WASAPI loopback pauses callbacks during system silence; keep reference continuous with zeros
                     Some([0.0f32; VOICE_FRAME_10MS])
                 }
             } else {
+                lb_empty_ticks = lb_empty_ticks.saturating_add(1);
                 shared
                     .far_end_ref_fifo
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .pop_front()
             };
+            let lb_has_live_audio = active_loopback.is_some() && lb_empty_ticks < 20;
             let far_rms = if let Some(ref f) = far_frame {
                 (f.iter().map(|s| s * s).sum::<f32>() / VOICE_FRAME_10MS as f32).sqrt()
             } else {
@@ -2609,8 +3019,12 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 shared.emit_status_snapshot();
             }
 
-            let use_aec =
-                cfg.aec_enabled || (cfg.echo_guard_enabled && detected_leak && !live_comm_aec);
+            let use_aec = if is_aura {
+                (cfg.aec_enabled || (cfg.echo_guard_enabled && detected_leak && !live_comm_aec))
+                    && lb_has_live_audio
+            } else {
+                cfg.aec_enabled || (cfg.echo_guard_enabled && detected_leak && !live_comm_aec)
+            };
             if use_aec {
                 webrtc_aec3.set_delay_ms((echo_detector.best_lag_frames() as i32) * 10);
                 let ref_slice = far_frame.unwrap_or([0.0; VOICE_FRAME_10MS]);
@@ -2624,12 +3038,31 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             let half_duplex_guard = cfg.echo_guard_enabled
                 && detected_leak
                 && !live_comm_aec
-                && (!use_aec || active_loopback.is_none())
+                && (!use_aec
+                    || (if is_aura {
+                        !lb_has_live_audio
+                    } else {
+                        active_loopback.is_none()
+                    }))
                 && (shared.duck.is_remote_speaking() || far_rms > 0.025);
             if half_duplex_guard {
                 for s in &mut aec_out {
                     *s *= 0.55;
                 }
+            }
+
+            if cfg.engine_mode != last_engine_mode {
+                last_engine_mode = cfg.engine_mode;
+                denoiser = if is_aura {
+                    VoiceDenoiser::new_aura()
+                } else {
+                    VoiceDenoiser::new()
+                };
+                agc2 = WebRtcAgc2Leveler::with_params(if is_aura {
+                    WebRtcAgc2Params::aura()
+                } else {
+                    WebRtcAgc2Params::default()
+                });
             }
 
             let ns_mode = cfg.noise_mode.into_core();
@@ -2694,11 +3127,19 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
             // Smooth slow ambient noise floor tracking when Auto-Sensitivity is on
             let base_thresh = if cfg.auto_sensitivity {
-                let raw_db = frame_dbfs(&leveled_out);
+                let raw_db = if is_aura {
+                    frame_dbfs(&ns_out)
+                } else {
+                    frame_dbfs(&leveled_out)
+                };
                 if speech_prob < 0.3 && raw_db < -25.0 {
                     auto_noise_floor_db = auto_noise_floor_db * 0.992 + raw_db * 0.008;
                 }
-                let auto_th = (auto_noise_floor_db + 8.0).clamp(-58.0, -32.0);
+                let auto_th = if is_aura {
+                    (auto_noise_floor_db + 8.0).clamp(-60.0, -34.0)
+                } else {
+                    (auto_noise_floor_db + 8.0).clamp(-58.0, -32.0)
+                };
                 (cfg.sensitivity_db * 0.35 + auto_th * 0.65).clamp(-75.0, 0.0)
             } else {
                 cfg.sensitivity_db
@@ -2721,16 +3162,31 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             let eff_muted = if mic_test { false } else { muted };
             let vad_assisted = ns_mode != NoiseSuppressionMode::Off;
 
-            let (out_cnt, is_open, db) = gate.process_10ms(
-                &leveled_out,
-                speech_prob,
-                eff_thresh,
-                vad_assisted,
-                eff_ptt,
-                eff_muted,
-                &mut gate_out,
-            );
+            let (out_cnt, is_open, db) = if is_aura {
+                gate.process_10ms_aura(
+                    &leveled_out,
+                    speech_prob,
+                    eff_thresh,
+                    vad_assisted,
+                    eff_ptt,
+                    eff_muted,
+                    &mut gate_out,
+                )
+            } else {
+                gate.process_10ms(
+                    &leveled_out,
+                    speech_prob,
+                    eff_thresh,
+                    vad_assisted,
+                    eff_ptt,
+                    eff_muted,
+                    &mut gate_out,
+                )
+            };
 
+            if is_open != was_gate_open {
+                shared.gate_transitions.fetch_add(1, Ordering::Relaxed);
+            }
             if is_open != was_gate_open || last_level_emit.elapsed() >= Duration::from_millis(50) {
                 last_level_emit = Instant::now();
                 if let Some(ref app) = *shared.app_handle.read().unwrap_or_else(|e| e.into_inner())
@@ -2756,8 +3212,10 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             }
             // Zero-pad and flush any leftover 10 ms tail when gate closes so it does not shift
             // the next talkspurt by +10 ms or cause a double-packet jitter burst on onset.
+            let mut padded_tail = false;
             if !is_open && mono_48k_fifo.len() < VOICE_FRAME_10MS && !encode_accum.is_empty() {
                 encode_accum.resize(VOICE_FRAME_20MS, 0.0);
+                padded_tail = true;
             }
 
             while encode_accum.len() >= VOICE_FRAME_20MS {
@@ -2765,7 +3223,20 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 pcm20.copy_from_slice(&encode_accum[..VOICE_FRAME_20MS]);
                 encode_accum.drain(..VOICE_FRAME_20MS);
 
-                comp.process_with_speech_prob(&mut pcm20, speech_prob, cfg.compression_enabled);
+                if is_aura {
+                    if cfg.compression_enabled {
+                        comp.process_aura_broadcast(&mut pcm20, speech_prob);
+                    } else {
+                        comp.process_limiter_only(&mut pcm20);
+                    }
+                } else {
+                    comp.process_with_speech_prob(&mut pcm20, speech_prob, cfg.compression_enabled);
+                }
+
+                if diag_active {
+                    diag_aligner
+                        .push_compressed_20ms(&pcm20, padded_tail && encode_accum.is_empty());
+                }
 
                 // Switch Opus signal hint dynamically so Off mode preserves raw music/instruments cleanly
                 let want_auto_signal = cfg.noise_mode == NoiseModeWire::Off;
@@ -2871,6 +3342,26 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                     }
                     eot_remaining -= 1;
                 }
+            }
+
+            if diag_active {
+                if let Ok(guard) = shared.diag_capture_tx.try_lock() {
+                    if let Some(ref tx) = *guard {
+                        diag_aligner.drain_aligned(is_open, encode_accum.len(), |r, p| {
+                            let _ = tx.try_send((r, p));
+                        });
+                    }
+                }
+            }
+
+            let dsp_us = t_dsp0.elapsed().as_micros() as u64;
+            shared.dsp_frame_count.fetch_add(1, Ordering::Relaxed);
+            shared
+                .dsp_total_frame_us
+                .fetch_add(dsp_us, Ordering::Relaxed);
+            shared.dsp_max_frame_us.fetch_max(dsp_us, Ordering::Relaxed);
+            if dsp_us > 8_000 {
+                shared.dsp_overrun_frames.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -3043,11 +3534,19 @@ fn run_mix_rx_thread(
                         else {
                             return;
                         };
+                        let mut jitter = PeerJitterBuffer::new();
+                        jitter.set_min_target_frames(
+                            if cfg.engine_mode == VoiceEngineModeWire::Aura {
+                                2
+                            } else {
+                                1
+                            },
+                        );
                         peers.insert(
                             pkt.origin_key.clone(),
                             PeerDecoderState {
                                 username: pkt.origin_username.clone(),
-                                jitter: PeerJitterBuffer::new(),
+                                jitter,
                                 decoder,
                                 leveler: PeerRxLeveler::new(),
                                 last_speaking_at: None,
@@ -3111,6 +3610,7 @@ fn run_mix_rx_thread(
         let mut loss_sum = 0.0f32;
         let mut jitter_sum = 0usize;
         let mut peer_cnt = 0usize;
+        let mut underrun_sum = 0u64;
 
         // Prune stale peer decoders whenever P2P roster changes (including last peer leaving!)
         if let Some(ref tr) = *shared.transport.read().unwrap_or_else(|e| e.into_inner()) {
@@ -3123,13 +3623,18 @@ fn run_mix_rx_thread(
             peers.retain(|k, _| active_set.contains(k));
         }
 
+        let is_aura = cfg.engine_mode == VoiceEngineModeWire::Aura;
         let total_peers = peers.len().max(1);
         for (idx, (key, state)) in peers.iter_mut().enumerate() {
+            state
+                .jitter
+                .set_min_target_frames(if is_aura { 2 } else { 1 });
             loss_sum += state.jitter.loss_pct();
             jitter_sum += state.jitter.target_delay_ms();
             peer_cnt += 1;
 
             let (pkt_opt, fec, plc) = state.jitter.pop_step();
+            underrun_sum += state.jitter.underrun_count();
             let mut has_audio = false;
             if let Some(ref bytes) = pkt_opt {
                 if let (Ok(pkt), Ok(sig)) = (
@@ -3175,7 +3680,11 @@ fn run_mix_rx_thread(
                 if peer_muted {
                     continue;
                 }
-                state.leveler.process_in_place(&mut decoded_buf);
+                state.leveler.process_in_place_with_plc(
+                    &mut decoded_buf,
+                    plc && pkt_opt.is_none(),
+                    is_aura,
+                );
                 let master = cfg.master_volume.clamp(0.0, 2.0);
                 let gain = (ov.map_or(1.0, |o| o.volume) * master).clamp(0.0, 2.0);
                 let pan = if cfg.spatial_pan && total_peers > 1 {
@@ -3218,6 +3727,9 @@ fn run_mix_rx_thread(
             shared.avg_loss_x10.store(0, Ordering::Relaxed);
             shared.avg_jitter_ms.store(0, Ordering::Relaxed);
         }
+        shared
+            .rx_jitter_underruns
+            .store(underrun_sum, Ordering::Relaxed);
 
         // Update movie ducking on remote speech (~20 ms cadence)
         shared.duck.set_remote_speaking(!active_speakers.is_empty());
@@ -3932,5 +4444,111 @@ mod tests {
         assert!(!vc.shared.deafened.load(Ordering::Acquire));
         assert!(!vc.shared.pre_deafen_muted.load(Ordering::Acquire));
         assert!(!vc.shared.ptt_held.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn diag_capture_aligner_keeps_raw_and_processed_aligned_across_preroll_and_reopen() {
+        let mut gate = VoiceGate::new();
+        let mut comp = VoiceCompressor::new();
+        let mut aligner = DiagCaptureAligner::new();
+        let mut encode_accum: Vec<f32> = Vec::with_capacity(VOICE_FRAME_20MS * 2);
+        let mut gate_out = [[0.0f32; VOICE_FRAME_10MS]; 3];
+
+        // 180 x 10 ms frames: silence (0..30), tone 1 (30..60), silence (60..110), tone 2 (110..140), silence (140..180)
+        let total_frames = 180usize;
+        let mut raw_emitted = Vec::with_capacity(total_frames);
+        let mut proc_emitted = Vec::with_capacity(total_frames);
+
+        for f_idx in 0..total_frames {
+            let mut raw = [0.0f32; VOICE_FRAME_10MS];
+            let active = (30..60).contains(&f_idx) || (110..140).contains(&f_idx);
+            if active {
+                for (i, s) in raw.iter_mut().enumerate() {
+                    let t = ((f_idx * VOICE_FRAME_10MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                    *s = 0.25 * (2.0 * std::f32::consts::PI * 300.0 * t).sin();
+                }
+            }
+            aligner.push_raw(&raw);
+
+            let (out_cnt, is_open, _) =
+                gate.process_10ms(&raw, 1.0, -38.0, false, None, false, &mut gate_out);
+            for frame in gate_out.iter().take(out_cnt) {
+                encode_accum.extend_from_slice(frame);
+            }
+            let mut padded_tail = false;
+            if !is_open && !encode_accum.is_empty() && encode_accum.len() < VOICE_FRAME_20MS {
+                encode_accum.resize(VOICE_FRAME_20MS, 0.0);
+                padded_tail = true;
+            }
+            while encode_accum.len() >= VOICE_FRAME_20MS {
+                let mut pcm20 = [0.0f32; VOICE_FRAME_20MS];
+                pcm20.copy_from_slice(&encode_accum[..VOICE_FRAME_20MS]);
+                encode_accum.drain(..VOICE_FRAME_20MS);
+                comp.process_with_speech_prob(&mut pcm20, 1.0, true);
+                aligner.push_compressed_20ms(&pcm20, padded_tail && encode_accum.is_empty());
+            }
+
+            aligner.drain_aligned(is_open, encode_accum.len(), |r, p| {
+                raw_emitted.push(r);
+                proc_emitted.push(p);
+            });
+        }
+
+        assert_eq!(raw_emitted.len(), proc_emitted.len());
+        assert!(
+            raw_emitted.len() >= total_frames - 2,
+            "at most 2 trailing silent pre-roll frames may remain held: got {}",
+            raw_emitted.len()
+        );
+
+        let raw_active: Vec<usize> = raw_emitted
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| (frame_dbfs(f) > -40.0).then_some(i))
+            .collect();
+        let proc_active: Vec<usize> = proc_emitted
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| (frame_dbfs(f) > -40.0).then_some(i))
+            .collect();
+
+        assert!(!raw_active.is_empty() && !proc_active.is_empty());
+        assert_eq!(
+            raw_active[0], proc_active[0],
+            "burst 1 onset misaligned between raw and processed"
+        );
+        let raw_b2 = raw_active.iter().copied().find(|&i| i >= 100).unwrap();
+        let proc_b2 = proc_active.iter().copied().find(|&i| i >= 100).unwrap();
+        assert_eq!(
+            raw_b2, proc_b2,
+            "burst 2 onset misaligned between raw and processed after gate reopen"
+        );
+    }
+
+    #[test]
+    fn aura_mode_skips_aec3_when_loopback_is_paused() {
+        let mut aec3 = WebRtcAec3Canceller::new();
+        let mut noop = NoopEchoCanceller;
+        let zero_ref = [0.0f32; VOICE_FRAME_10MS];
+        let mut near = [0.0f32; VOICE_FRAME_10MS];
+        for (i, s) in near.iter_mut().enumerate() {
+            let t = i as f32 / VOICE_SAMPLE_RATE as f32;
+            *s = 0.25 * (2.0 * std::f32::consts::PI * 300.0 * t).sin();
+        }
+        let mut aec_out = [0.0f32; VOICE_FRAME_10MS];
+        let mut noop_out = [0.0f32; VOICE_FRAME_10MS];
+
+        // Simulate paused loopback: lb_has_live_audio == false -> Aura bypasses AEC3
+        let lb_has_live_audio = false;
+        let aec_requested = true;
+        let use_aec_aura = aec_requested && lb_has_live_audio;
+        assert!(!use_aec_aura);
+
+        noop.process_10ms(&near, None, &mut noop_out);
+        aec3.process_10ms(&near, Some(&zero_ref), &mut aec_out);
+        assert!(frame_dbfs(&noop_out) > -20.0);
+        // Noop passes near-end signal unmodified
+        assert!((frame_dbfs(&noop_out) - frame_dbfs(&near)).abs() < 0.01);
+        let _ = aec_out;
     }
 }

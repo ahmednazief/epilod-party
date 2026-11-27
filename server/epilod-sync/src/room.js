@@ -696,7 +696,7 @@ export class RoomDO extends DurableObject {
           typeof msg.clientServerMs === "number" &&
           Number.isFinite(msg.clientServerMs)
         ) {
-          const latMs = Math.max(0, Math.min(600, nowMs - msg.clientServerMs));
+          const latMs = Math.max(0, Math.min(2500, nowMs - msg.clientServerMs));
           if (msg.type === "play") {
             effectiveServerTimeMs = nowMs - latMs;
           } else if (!nextPaused) {
@@ -918,6 +918,36 @@ export class RoomDO extends DurableObject {
             targetMsgId,
             username: att.username,
             emoji,
+          },
+          ws
+        );
+        return;
+      }
+
+      case "chatSeen": {
+        if (!this.checkRateLimit(ws, "chat")) return;
+        const lastMsgId = clampString(msg.lastMsgId, 32);
+        if (!lastMsgId) return;
+        this.broadcastJson(
+          {
+            type: "chatSeen",
+            username: att.username,
+            lastMsgId,
+          },
+          ws
+        );
+        return;
+      }
+
+      case "introSkipVote": {
+        if (!this.checkRateLimit(ws, "chat")) return;
+        const segKey = clampString(msg.segKey, 128);
+        if (!segKey) return;
+        this.broadcastJson(
+          {
+            type: "introSkipVote",
+            username: att.username,
+            segKey,
           },
           ws
         );

@@ -25,6 +25,46 @@ export interface RatingSummary {
   voters: RatingVoteEntry[];
 }
 
+export interface PartyEpisodeRatingSummary {
+  average: number;
+  totalVotes: number;
+  voters: RatingVoteEntry[];
+  updatedAt: number;
+}
+
+export type RatingTier = "low" | "mid" | "high" | "masterpiece";
+
+export function getRatingTier(score: number): RatingTier {
+  const s = Math.round(score);
+  if (s >= 10) return "masterpiece";
+  if (s >= 8) return "high";
+  if (s >= 5) return "mid";
+  return "low";
+}
+
+export function computeConsensusBadge(voters: RatingVoteEntry[]): {
+  label: string;
+  tone: "consensus" | "split" | "neutral";
+} {
+  if (voters.length < 2) {
+    return { label: "Party Score", tone: "neutral" };
+  }
+  let min = 10;
+  let max = 1;
+  for (const v of voters) {
+    if (v.score < min) min = v.score;
+    if (v.score > max) max = v.score;
+  }
+  const spread = max - min;
+  if (spread <= 1) {
+    return { label: "Consensus", tone: "consensus" };
+  }
+  if (spread >= 4) {
+    return { label: "Split Opinions", tone: "split" };
+  }
+  return { label: "Party Score", tone: "neutral" };
+}
+
 export const RATING_LABELS: Record<number, string> = {
   1: "Unwatchable",
   2: "Awful",

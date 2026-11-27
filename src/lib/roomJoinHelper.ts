@@ -5,11 +5,8 @@ import { scanMediaPaths } from "./playlist";
 import { pickInitialSeriesIndex, type SeriesProgressEntry } from "./seriesProgress";
 import { syncDisconnect } from "./syncplay";
 import {
-  BACKUP_ENDPOINT,
   CLOUD_ENDPOINT,
-  DEFAULT_ENDPOINT,
   formatServerDisplayName,
-  SYNCPLAY_ENDPOINT,
 } from "./syncStatusDisplay";
 import { useAppStore } from "../store/useAppStore";
 import { useNotificationStore } from "../store/useNotificationStore";
@@ -76,7 +73,7 @@ export async function applyDeepLinkInvite(
   options?: { requireConfirm?: boolean },
 ): Promise<void> {
   const app = useAppStore.getState();
-  const targetEndpoint = invite.serverHost || DEFAULT_ENDPOINT;
+  const targetEndpoint = CLOUD_ENDPOINT;
   const targetId = buildRecentRoomId(invite.roomName, targetEndpoint, invite.literalRoom);
   const currentId =
     app.screen === "room" && app.roomCode
@@ -88,24 +85,12 @@ export async function applyDeepLinkInvite(
     return;
   }
 
-  const officialHosts = [
-    DEFAULT_ENDPOINT,
-    CLOUD_ENDPOINT,
-    SYNCPLAY_ENDPOINT,
-    BACKUP_ENDPOINT,
-  ].map((h) => h.toLowerCase());
-  const isCustomHost = Boolean(
-    invite.serverHost && !officialHosts.includes(invite.serverHost.toLowerCase()),
-  );
-  if ((options?.requireConfirm || isCustomHost) && typeof window !== "undefined" && typeof window.confirm === "function") {
+  if (options?.requireConfirm && typeof window !== "undefined" && typeof window.confirm === "function") {
     const serverLabel = formatServerDisplayName(targetEndpoint);
-    const hostNotice = isCustomHost
-      ? `\n\nWarning: This invite points to a custom server (${serverLabel}). Only join servers you trust.`
-      : `\nServer: ${serverLabel}`;
     const leaveNotice =
       app.screen === "room" ? "\nYou will leave your current Watch Party room." : "";
     const ok = window.confirm(
-      `Join Watch Party room "${invite.roomName}"?${hostNotice}${leaveNotice}`,
+      `Join Watch Party room "${invite.roomName}"?\nServer: ${serverLabel}${leaveNotice}`,
     );
     if (!ok) {
       return;

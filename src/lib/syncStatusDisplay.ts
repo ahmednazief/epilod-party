@@ -73,7 +73,7 @@ export function describeSyncEndpoint(
       badgeText: `Reconnecting (${displayLabel}) in ${status.retryInSecs}s`,
       detailText: status.suggestBackup
         ? isCloud
-          ? "Epilod Cloud unreachable or at daily free cap — switch to Syncplay (syncplay.pl:8999) in Settings."
+          ? "Epilod Cloud is temporarily busy — retrying automatically."
           : "Primary server unreachable — you can try switching everyone in your room to the backup server (:8998)."
         : null,
     };

@@ -35,18 +35,19 @@ export const PresenceAvatar = memo(function PresenceAvatar({
   className = "",
   avatarClassName = "",
 }: PresenceAvatarProps) {
-  const small = size <= 18;
+  const small = size <= 22;
   const style = {
     width: size,
     height: size,
     "--ep-ring-w": `${small ? 1.5 : 2}px`,
-    "--ep-ring-gap": `${small ? 1 : 1.5}px`,
+    "--ep-ring-gap": `${small ? 0 : 1.5}px`,
     "--ep-badge": `${Math.max(6, Math.round(size * 0.32))}px`,
   } as CSSProperties;
 
   return (
     <span
       className={`ep-presence-avatar ${className}`}
+      data-small={small ? "true" : "false"}
       data-speaking={speaking ? "true" : "false"}
       data-flagged={status !== "none" ? "true" : "false"}
       style={style}

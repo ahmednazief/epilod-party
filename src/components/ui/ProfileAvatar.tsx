@@ -1,12 +1,39 @@
-import { AppChevronIcon, AppShuffleIcon } from "./AppIcons";
-import { useState, type ReactNode } from "react";
+import {
+  AppChevronIcon,
+  AppCloseIcon,
+  AppCustomCharsIcon,
+  AppEditIcon,
+  AppPlusIcon,
+  AppShuffleIcon,
+  AppStudioIcon,
+} from "./AppIcons";
+import { useEffect, useState, type ReactNode } from "react";
 import { useAnimatedPresence } from "../../lib/useAnimatedPresence";
 import { AnimatedCollapse } from "./AnimatedCollapse";
 import { SegmentedTabs } from "./SegmentedTabs";
+import { AvatarCustomizerStudio } from "./avatar/AvatarCustomizerStudio";
+import { CustomAvatarSvgContent } from "./avatar/CustomAvatarRenderer";
+import {
+  BG_THEMES,
+  decodeCustomAvatar,
+  encodeCustomAvatar,
+  isValidCustomAvatarId,
+  loadSavedCustomAvatars,
+  MAX_SAVED_CUSTOM_AVATARS,
+  OUTFIT_COLORS,
+  presetToStartingRecipe,
+  randomizeCustomRecipe,
+  removeSavedCustomAvatar,
+  saveCustomAvatarsList,
+  upsertSavedCustomAvatar,
+  type CustomAvatarId,
+} from "./avatar/customAvatarSchema";
+
+export type { CustomAvatarId };
 
 export type AvatarCategory = "girls" | "boys" | "characters";
 
-export type AvatarId =
+export type PresetAvatarId =
   | "nova"
   | "nova-star"
   | "luna"
@@ -32,8 +59,10 @@ export type AvatarId =
   | "astro-pip"
   | "astro-rose";
 
+export type AvatarId = PresetAvatarId | CustomAvatarId;
+
 export interface AvatarPreset {
-  id: AvatarId;
+  id: PresetAvatarId;
   label: string;
   category: AvatarCategory;
 }
@@ -67,22 +96,80 @@ export const AVATAR_PRESETS: readonly AvatarPreset[] = [
 
 export const DEFAULT_AVATAR_ID: AvatarId = "snoo-violet";
 
-const VALID_AVATAR_IDS = new Set<string>(AVATAR_PRESETS.map((p) => p.id));
+const VALID_PRESET_AVATAR_IDS = new Set<string>(AVATAR_PRESETS.map((p) => p.id));
+
+const PRESET_ACCENT_HEX: Record<PresetAvatarId, string> = {
+  nova: "#8B5CF6",
+  "nova-star": "#EC4899",
+  luna: "#6366F1",
+  "luna-mint": "#2DD4BF",
+  sakura: "#F472B6",
+  "sakura-gold": "#F59E0B",
+  maya: "#A855F7",
+  "aria-beret": "#FB7185",
+  leo: "#3B82F6",
+  "leo-amber": "#F59E0B",
+  kai: "#14B8A6",
+  "kai-crimson": "#E11D48",
+  omar: "#10B981",
+  "omar-cobalt": "#3B82F6",
+  zayd: "#8B5CF6",
+  "milo-gamer": "#22C55E",
+  "snoo-violet": "#A78BFA",
+  "snoo-cinema": "#E11D48",
+  "snoo-gold": "#FBBF24",
+  "snoo-mint": "#2DD4BF",
+  "mochi-cat": "#F472B6",
+  "kuro-cat": "#A78BFA",
+  "astro-pip": "#38BDF8",
+  "astro-rose": "#FB7185",
+};
+
+function hexToRgbTriplet(hex: string): string {
+  const clean = hex.replace("#", "").trim();
+  if (clean.length !== 6) return "167, 139, 250";
+  const r = Number.parseInt(clean.slice(0, 2), 16);
+  const g = Number.parseInt(clean.slice(2, 4), 16);
+  const b = Number.parseInt(clean.slice(4, 6), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return "167, 139, 250";
+  return `${r}, ${g}, ${b}`;
+}
+
+/** Extracts the signature RGB color ("r, g, b") for any preset or custom avatar. */
+export function resolveAvatarAccentRgb(id: AvatarId): string {
+  if (isValidCustomAvatarId(id)) {
+    const recipe = decodeCustomAvatar(id);
+    const outfit = OUTFIT_COLORS[recipe.outfitColor % OUTFIT_COLORS.length];
+    const theme = BG_THEMES[recipe.bgTheme % BG_THEMES.length];
+    const pickedHex =
+      outfit && outfit.id !== "obsidian" && outfit.id !== "slate" && outfit.id !== "cream"
+        ? outfit.hex
+        : theme?.glow ?? "#A78BFA";
+    return hexToRgbTriplet(pickedHex);
+  }
+  return hexToRgbTriplet(PRESET_ACCENT_HEX[id] ?? "#A78BFA");
+}
 
 export function isValidAvatarId(raw: string): raw is AvatarId {
-  return VALID_AVATAR_IDS.has(raw);
+  return VALID_PRESET_AVATAR_IDS.has(raw) || isValidCustomAvatarId(raw);
 }
 
 export function resolvePeerAvatarId(
   peerUsername: string,
   localUsername?: string,
   localAvatarId: AvatarId | string = DEFAULT_AVATAR_ID,
+  peerAvatars?: Record<string, AvatarId>,
 ): AvatarId {
   const safeAvatarId = isValidAvatarId(localAvatarId) ? localAvatarId : DEFAULT_AVATAR_ID;
   const cleanPeer = peerUsername.trim().toLowerCase();
   const cleanLocal = (localUsername ?? "").trim().toLowerCase();
   if (cleanPeer && cleanLocal && cleanPeer === cleanLocal) {
     return safeAvatarId;
+  }
+
+  const synced = cleanPeer ? peerAvatars?.[cleanPeer] : undefined;
+  if (synced && isValidAvatarId(synced)) {
+    return synced;
   }
 
   // Natural defaults for common demo/friend names before deterministic hashing
@@ -141,6 +228,10 @@ function Cheeks({ y = 37.8, color = "#FB7185" }: { y?: number; color?: string })
 }
 
 function AvatarIllustration({ id }: { id: AvatarId }): ReactNode {
+  if (isValidCustomAvatarId(id)) {
+    return <CustomAvatarSvgContent avatarId={id} />;
+  }
+
   switch (id) {
     // ── GIRLS ────────────────────────────────────────────────────────────────
     case "nova":
@@ -756,6 +847,7 @@ interface AvatarPickerProps {
   value: AvatarId;
   onChange: (avatarId: AvatarId) => void;
   compact?: boolean;
+  onStudioModeChange?: (active: boolean) => void;
 }
 
 const CATEGORY_TABS: ReadonlyArray<{ value: "all" | AvatarCategory; label: string }> = [
@@ -767,10 +859,89 @@ const CATEGORY_TABS: ReadonlyArray<{ value: "all" | AvatarCategory; label: strin
 
 const COLLAPSED_GRID_LIMIT = 16;
 
-export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerProps) {
+export function AvatarPicker({
+  value,
+  onChange,
+  compact = false,
+  onStudioModeChange,
+}: AvatarPickerProps) {
   const [filter, setFilter] = useState<"all" | AvatarCategory>("all");
   const [expanded, setExpanded] = useState(false);
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [studioInitialId, setStudioInitialId] = useState<CustomAvatarId>(() =>
+    isValidCustomAvatarId(value) ? value : encodeCustomAvatar(presetToStartingRecipe(value)),
+  );
+  const [editingSlotId, setEditingSlotId] = useState<CustomAvatarId | null>(null);
+  const [savedCustoms, setSavedCustoms] = useState<CustomAvatarId[]>(() =>
+    loadSavedCustomAvatars(),
+  );
   const extraPresence = useAnimatedPresence(expanded, 340);
+
+  useEffect(() => {
+    if (isValidCustomAvatarId(value) && !savedCustoms.includes(value)) {
+      const next = upsertSavedCustomAvatar(savedCustoms, value);
+      setSavedCustoms(next);
+      saveCustomAvatarsList(next);
+    }
+  }, [value, savedCustoms]);
+
+  const setStudioActive = (active: boolean) => {
+    setStudioOpen(active);
+    onStudioModeChange?.(active);
+  };
+
+  const openStudioFor = (initial: CustomAvatarId, replaceSlot: CustomAvatarId | null) => {
+    setStudioInitialId(initial);
+    setEditingSlotId(replaceSlot);
+    onChange(initial);
+    const nextSaved = upsertSavedCustomAvatar(savedCustoms, initial, replaceSlot);
+    setSavedCustoms(nextSaved);
+    saveCustomAvatarsList(nextSaved);
+    setEditingSlotId(initial);
+    setStudioActive(true);
+  };
+
+  const handleCustomizeClick = () => {
+    if (isValidCustomAvatarId(value)) {
+      openStudioFor(value, value);
+    } else {
+      const starter = encodeCustomAvatar(presetToStartingRecipe(value));
+      openStudioFor(starter, null);
+    }
+  };
+
+  const handleNewCustomClick = () => {
+    const fresh = encodeCustomAvatar(randomizeCustomRecipe("girl"));
+    openStudioFor(fresh, null);
+  };
+
+  const handleStudioChange = (nextId: CustomAvatarId) => {
+    onChange(nextId);
+    const nextSaved = upsertSavedCustomAvatar(savedCustoms, nextId, editingSlotId);
+    setSavedCustoms(nextSaved);
+    saveCustomAvatarsList(nextSaved);
+    setEditingSlotId(nextId);
+  };
+
+  const handleDeleteSavedCustom = (targetId: CustomAvatarId) => {
+    const nextSaved = removeSavedCustomAvatar(savedCustoms, targetId);
+    setSavedCustoms(nextSaved);
+    saveCustomAvatarsList(nextSaved);
+    if (value === targetId) {
+      onChange(nextSaved[0] ?? DEFAULT_AVATAR_ID);
+    }
+  };
+
+  if (studioOpen) {
+    return (
+      <AvatarCustomizerStudio
+        initialId={studioInitialId}
+        onChange={handleStudioChange}
+        onBack={() => setStudioActive(false)}
+        compact={compact}
+      />
+    );
+  }
 
   const visiblePresets =
     filter === "all"
@@ -835,12 +1006,15 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
     );
   };
 
+  const isCustomActive = isValidCustomAvatarId(value);
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
+    <div className="anim-tab-in space-y-3">
+      <div className="flex items-center justify-between gap-1.5 min-w-0">
         <SegmentedTabs
           ariaLabel="Avatar style category"
           size="sm"
+          className="min-w-0"
           value={filter}
           items={CATEGORY_TABS}
           onChange={(next) => {
@@ -849,16 +1023,97 @@ export function AvatarPicker({ value, onChange, compact = false }: AvatarPickerP
           }}
         />
 
-        <button
-          type="button"
-          onClick={handleRandomAvatar}
-          title="Pick a random look"
-          className="ep-press h-7 whitespace-nowrap shrink-0 inline-flex items-center gap-1 px-2.5 rounded-full bg-white/[0.07] hover:bg-white/[0.14] text-[11px] font-medium text-secondary hover:text-white cursor-pointer"
-        >
-          <AppShuffleIcon size={12} />
-          <span>Surprise me</span>
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={handleRandomAvatar}
+            title="Pick a random look"
+            aria-label="Pick a random look"
+            className="ep-glass-pill ep-press h-8 w-8 rounded-full inline-flex items-center justify-center text-secondary hover:text-white cursor-pointer"
+          >
+            <AppShuffleIcon size={13} />
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCustomizeClick}
+            title={isCustomActive ? "Edit custom character in Studio" : "Create custom character"}
+            className="ep-glass-pill-active ep-press h-8 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-semibold text-white whitespace-nowrap cursor-pointer"
+          >
+            {isCustomActive ? (
+              <AppEditIcon size={12} className="text-accent-soft shrink-0" />
+            ) : (
+              <AppStudioIcon size={12} className="text-accent-soft shrink-0" />
+            )}
+            <span>Custom</span>
+          </button>
+        </div>
       </div>
+
+      {savedCustoms.length > 0 && (
+        <div className="ep-glass-well rounded-2xl p-2.5 space-y-2">
+          <div className="flex items-center justify-between px-0.5">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white/90">
+              <AppCustomCharsIcon size={13} className="text-accent-soft" />
+              <span>My Characters</span>
+            </span>
+            <span className="text-[10px] text-muted num">
+              {savedCustoms.length}/{MAX_SAVED_CUSTOM_AVATARS}
+            </span>
+          </div>
+          <div className={`grid grid-cols-4 ${gridGapClass}`}>
+            {savedCustoms.map((customId, idx) => {
+              const selected = value === customId;
+              return (
+                <div key={customId} className="relative group">
+                  <button
+                    type="button"
+                    onClick={() => onChange(customId)}
+                    aria-label={`Custom Character ${idx + 1}`}
+                    aria-pressed={selected}
+                    className={`ep-press w-full rounded-2xl py-2 px-1 flex items-center justify-center cursor-pointer ${
+                      selected
+                        ? "bg-accent/25 ring-2 ring-accent-soft text-white shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
+                        : "bg-white/[0.045] hover:bg-white/[0.09] text-secondary hover:text-white"
+                    }`}
+                  >
+                    <ProfileAvatar avatarId={customId} size={avatarSize} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteSavedCustom(customId);
+                    }}
+                    aria-label="Remove saved character"
+                    title="Remove saved character"
+                    className="ep-bar-icon-btn ep-press opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity absolute -top-1 -right-1 w-5 h-5 rounded-full bg-[#1a1828] border border-white/15 text-secondary hover:text-white flex items-center justify-center cursor-pointer"
+                  >
+                    <AppCloseIcon size={10} />
+                  </button>
+                </div>
+              );
+            })}
+
+            {savedCustoms.length < MAX_SAVED_CUSTOM_AVATARS && (
+              <button
+                type="button"
+                onClick={handleNewCustomClick}
+                aria-label="Create new custom character"
+                title="Create new character"
+                className="ep-press rounded-2xl py-2 px-1 flex items-center justify-center bg-white/[0.045] hover:bg-white/[0.09] text-secondary hover:text-white cursor-pointer"
+              >
+                <span
+                  style={{ width: avatarSize, height: avatarSize }}
+                  className="rounded-full bg-white/[0.05] border border-white/10 flex items-center justify-center"
+                >
+                  <AppPlusIcon size={18} />
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div>
         <div className={`grid grid-cols-4 ${gridGapClass}`}>

@@ -30,7 +30,7 @@ export function VoiceMicDeafenPills({
   const isBare = variant === "bare";
   const pillDim = isFlat
     ? size === "sm"
-      ? "h-7 w-7"
+      ? "h-7.5 w-7.5"
       : "h-8 w-8"
     : size === "sm"
       ? "h-6.5 w-6.5"
@@ -84,10 +84,10 @@ export function VoiceMicDeafenPills({
           !captureHealthy
             ? "Mic alert"
             : muted
-              ? "Unmute mic"
-              : "Mute mic"
+              ? "Unmute"
+              : "Mute"
         }
-        detail={!captureHealthy ? "Open Voice & Audio to inspect device" : "Shortcut: M"}
+        detail={!captureHealthy ? "Check audio device" : undefined}
         accent={
           !captureHealthy
             ? "warn"
@@ -107,7 +107,7 @@ export function VoiceMicDeafenPills({
           onClick={() => toggleVoiceMute()}
           className={
             isFlat
-              ? `ep-press relative ${pillDim} rounded-lg flex items-center justify-center shrink-0 cursor-pointer ${flatMicClasses}`
+              ? `ep-press relative ${pillDim} rounded-full flex items-center justify-center shrink-0 cursor-pointer ${flatMicClasses}`
               : isBare
                 ? `ep-bar-icon-btn ep-press relative ${pillDim} rounded-full flex items-center justify-center shrink-0 cursor-pointer ${bareMicClasses}`
                 : `ep-bar-pill ep-press relative ${pillDim} rounded-full flex items-center justify-center shrink-0 cursor-pointer text-white`
@@ -115,10 +115,23 @@ export function VoiceMicDeafenPills({
         >
           <AppMicIcon muted={muted} speaking={speaking} size={iconSize} />
           {!captureHealthy && (
-            <span
+            <svg
               aria-hidden="true"
-              className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-warn ring-2 ring-canvas/85"
-            />
+              width="8"
+              height="8"
+              viewBox="0 0 8 8"
+              shapeRendering="geometricPrecision"
+              className="pointer-events-none absolute top-[3px] right-[3px] h-2 w-2 shrink-0"
+            >
+              <circle
+                cx="4"
+                cy="4"
+                r="2.65"
+                fill="var(--color-warn)"
+                stroke="rgba(6, 6, 10, 0.72)"
+                strokeWidth="1.2"
+              />
+            </svg>
           )}
         </button>
       </GlassHoverTip>
@@ -126,7 +139,6 @@ export function VoiceMicDeafenPills({
       {showDeafen && (
         <GlassHoverTip
           label={deafened ? "Undeafen" : "Deafen"}
-          detail={deafened ? "Restore mic & voice" : "Mute mic & voice"}
           accent={deafened ? "bad" : "default"}
         >
           <button
@@ -137,7 +149,7 @@ export function VoiceMicDeafenPills({
             onClick={() => toggleVoiceDeafen()}
             className={
               isFlat
-                ? `ep-press ${pillDim} rounded-lg flex items-center justify-center shrink-0 cursor-pointer ${flatDeafenClasses}`
+                ? `ep-press ${pillDim} rounded-full flex items-center justify-center shrink-0 cursor-pointer ${flatDeafenClasses}`
                 : isBare
                   ? `ep-bar-icon-btn ep-press ${pillDim} rounded-full flex items-center justify-center shrink-0 cursor-pointer ${bareDeafenClasses}`
                   : `ep-bar-pill ep-press ${pillDim} rounded-full flex items-center justify-center shrink-0 cursor-pointer ${

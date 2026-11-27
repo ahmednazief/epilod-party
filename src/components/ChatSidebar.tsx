@@ -6,9 +6,12 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   computeMessageGroupPosition,
   formatChatClock,
@@ -16,17 +19,25 @@ import {
   isPureEmojiMessage,
   MAX_CHAT_MESSAGE_CHARS,
   MESSAGE_QUICK_REACTIONS,
+  notifyPartyChatSeen,
   notifyPartyChatTyping,
   parseChatTokens,
+  requestPartyChatImage,
   resetTypingThrottle,
   resolvePeerNameTint,
   sendPartyChatEdit,
+  sendPartyChatImage,
   sendPartyChatMessage,
   shouldShowTimeDivider,
   textMentionsUsername,
   togglePartyChatReaction,
 } from "../lib/chat";
+import { compressImageToWebP, formatBytesCompact } from "../lib/chatImages";
+import { captureCleanFrozenFrame, mpvSetVisible, safeMpvCall } from "../lib/mpv";
+import { getCachedSeekbarThumbnails, getThumbnailFrameStyle } from "../lib/thumbnails";
 import { filterEmojiCatalog } from "../lib/reactions";
+import { formatInviteLink, formatRoomCodeClipboardText } from "../lib/inviteLinks";
+import { playSoundCue } from "../lib/soundEffects";
 import { resolveEffectiveUsername } from "../lib/syncController";
 import { useAnimatedPresence, usePresencePayload } from "../lib/useAnimatedPresence";
 import { useAppStore } from "../store/useAppStore";
@@ -38,16 +49,39 @@ import {
 } from "../store/useChatStore";
 import { usePlayerStore } from "../store/usePlayerStore";
 import { useSyncStore } from "../store/useSyncStore";
+import { useVoiceStore } from "../store/useVoiceStore";
+import { ChatVoiceStrip } from "./ChatVoiceStrip";
+import { formatRoomCodeDisplay } from "./HomeScreen";
 import { AnimatedCollapse } from "./ui/AnimatedCollapse";
-import { AppCloseIcon, AppSearchIcon } from "./ui/AppIcons";
+import {
+  AppChevronIcon,
+  AppCloseIcon,
+  AppPlusIcon,
+  AppSearchIcon,
+  AppVoiceIcon,
+} from "./ui/AppIcons";
+import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { GlassSwitchTrack } from "./ui/GlassSwitch";
+import { WatchPartyIcon } from "./ui/LobbyIcons";
+import {
+  MenuChatPhotosIcon,
+  MenuChatTriggerIcon,
+  MenuCornerPeekIcon,
+  MenuPhotoRetentionIcon,
+} from "./ui/MenuIcons";
 import { SegmentedTabs } from "./ui/SegmentedTabs";
 import {
+  EphemeralTimerRing,
+  PartyCopyIcon,
+  PartyLinkIcon,
+  PlayerCameraSnapIcon,
   PlayerChatIcon,
   PlayerClockIcon,
   PlayerCollapseRightIcon,
   PlayerEditIcon,
+  PlayerImageIcon,
   PlayerMoreIcon,
+  PlayerPlayIcon,
   PlayerReplyIcon,
   PlayerSendIcon,
   PlayerSmileIcon,
@@ -59,7 +93,6 @@ interface ChatSidebarProps {
   exiting: boolean;
   width?: number;
   topChromeOffset: boolean;
-  partySidebarOpen?: boolean;
   roomPanelOpen?: boolean;
   onClose: () => void;
   onSeekToTimestamp: (secs: number) => void;
@@ -102,7 +135,6 @@ export const ChatSidebar = memo(function ChatSidebar({
   exiting,
   width,
   topChromeOffset,
-  partySidebarOpen = false,
   onClose,
   onSeekToTimestamp,
   onResizingChange,
@@ -115,6 +147,9 @@ export const ChatSidebar = memo(function ChatSidebar({
   const setReplyToId = useChatStore((s) => s.setReplyToId);
   const setEditingMsgId = useChatStore((s) => s.setEditingMsgId);
   const typingPeers = useChatStore((s) => s.typingPeers);
+  const seenByPeer = useChatStore((s) => s.seenByPeer);
+  const chatOpen = useChatStore((s) => s.chatOpen);
+  const revealImageSpoiler = useChatStore((s) => s.revealImageSpoiler);
   const pruneExpiredTyping = useChatStore((s) => s.pruneExpiredTyping);
   const sidebarWidth = useChatStore((s) => s.sidebarWidth);
   const resolvedSidebarWidth = width ?? sidebarWidth;
@@ -130,18 +165,37 @@ export const ChatSidebar = memo(function ChatSidebar({
   const setChatPeeksEnabled = useAppStore((s) => s.setChatPeeksEnabled);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
   const setChatTriggerPlacement = useAppStore((s) => s.setChatTriggerPlacement);
+  const chatImageMode = useAppStore((s) => s.chatImageMode);
+  const setChatImageMode = useAppStore((s) => s.setChatImageMode);
+  const chatImageRetention = useAppStore((s) => s.chatImageRetention);
+  const setChatImageRetention = useAppStore((s) => s.setChatImageRetention);
+  const selectedFilePath = useAppStore((s) => s.selectedFilePath);
+  const seekbarThumbnails = useAppStore((s) => s.seekbarThumbnails);
+  const roomCode = useAppStore((s) => s.roomCode);
+  const literalRoom = useAppStore((s) => s.literalRoom);
+  const serverEndpoint = useAppStore((s) => s.serverEndpoint);
 
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
   const roomControl = useSyncStore((s) => s.roomControl);
+  const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
+  const voiceJoined = useVoiceStore((s) => s.joined);
+  const voiceRoster = useVoiceStore((s) => s.roster);
 
   const mediaLoaded = usePlayerStore((s) => s.loaded);
+  const durationSecs = usePlayerStore((s) => s.durationSecs);
   const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
 
   const [draft, setDraft] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiQuery, setEmojiQuery] = useState("");
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [voiceExpanded, setVoiceExpanded] = useState(false);
+  const [roomCodeCopied, setRoomCodeCopied] = useState(false);
+  const [roomLinkCopied, setRoomLinkCopied] = useState(false);
+  const roomCopyTimerRef = useRef<number | null>(null);
+  const roomLinkCopyTimerRef = useRef<number | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(0);
   const [pulsingMsgId, setPulsingMsgId] = useState<string | null>(null);
@@ -149,6 +203,22 @@ export const ChatSidebar = memo(function ChatSidebar({
   const [resizing, setResizing] = useState(false);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [sendRecoil, setSendRecoil] = useState(false);
+  const [pendingImage, setPendingImage] = useState<{
+    width: number;
+    height: number;
+    byteLen: number;
+    dataB64: string;
+    objectUrl: string;
+    spoiler: boolean;
+  } | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [dragOverImage, setDragOverImage] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{
+    objectUrl: string;
+    caption?: string;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const [dockExpanded, setDockExpanded] = useState(() => !docked || (reducedMotion && !exiting));
   const sendRecoilTimerRef = useRef<number | null>(null);
@@ -181,6 +251,8 @@ export const ChatSidebar = memo(function ChatSidebar({
 
   const optionsPresence = useAnimatedPresence(optionsOpen, 170);
   const optionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const attachMenuPresence = useAnimatedPresence(attachMenuOpen, 160);
+  const attachMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const msgRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -223,23 +295,39 @@ export const ChatSidebar = memo(function ChatSidebar({
     }
   }, [editTarget]);
 
-  // Close options popover on outside click
+  // Close options & attach popovers on outside click
   useEffect(() => {
-    if (!optionsOpen) return;
+    if (!optionsOpen && !attachMenuOpen) return;
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node;
       if (target instanceof Element && target.closest('[role="listbox"]')) {
         return;
       }
-      if (optionsMenuRef.current && !optionsMenuRef.current.contains(target)) {
+      if (optionsOpen && optionsMenuRef.current && !optionsMenuRef.current.contains(target)) {
         setOptionsOpen(false);
+      }
+      if (attachMenuOpen && attachMenuRef.current && !attachMenuRef.current.contains(target)) {
+        setAttachMenuOpen(false);
       }
     };
     window.addEventListener("pointerdown", onPointerDown);
     return () => {
       window.removeEventListener("pointerdown", onPointerDown);
     };
-  }, [optionsOpen]);
+  }, [attachMenuOpen, optionsOpen]);
+
+  useEffect(() => {
+    if (!attachMenuOpen) return;
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setAttachMenuOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [attachMenuOpen]);
 
   const activeTypingNames = useMemo(() => {
     const now = Date.now();
@@ -359,6 +447,160 @@ export const ChatSidebar = memo(function ChatSidebar({
     }
   };
 
+  const clearPendingImage = useCallback((revoke = true) => {
+    setPendingImage((prev) => {
+      if (prev && revoke) {
+        try {
+          URL.revokeObjectURL(prev.objectUrl);
+        } catch {
+          // Ignore revoke errors
+        }
+      }
+      return null;
+    });
+    setImageError(null);
+  }, []);
+
+  useEffect(() => {
+    if (!lightboxImage) return;
+    if (mediaLoaded) {
+      safeMpvCall(mpvSetVisible(false), "chatLightbox:hideMpv");
+    }
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setLightboxImage(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (
+        mediaLoaded &&
+        !useAppStore.getState().settingsOpen &&
+        !useAppStore.getState().shortcutsOpen
+      ) {
+        safeMpvCall(mpvSetVisible(true), "chatLightbox:showMpv");
+      }
+    };
+  }, [lightboxImage, mediaLoaded]);
+
+  useEffect(() => {
+    return () => {
+      clearPendingImage(true);
+    };
+  }, [clearPendingImage]);
+
+  const stageImageSource = useCallback(
+    async (source: Blob | string) => {
+      if (imageBusy) return;
+      setImageBusy(true);
+      setImageError(null);
+      try {
+        const compressed = await compressImageToWebP(source);
+        setPendingImage((prev) => {
+          if (prev) {
+            try {
+              URL.revokeObjectURL(prev.objectUrl);
+            } catch {
+              // Ignore
+            }
+          }
+          return { ...compressed, spoiler: false };
+        });
+      } catch (err) {
+        setImageError(err instanceof Error ? err.message : "Could not process image.");
+      } finally {
+        setImageBusy(false);
+      }
+    },
+    [imageBusy],
+  );
+
+  const handleSnapVideoFrame = useCallback(async () => {
+    if (!mediaLoaded || imageBusy) return;
+    setImageBusy(true);
+    setImageError(null);
+    try {
+      const dataUrl = await captureCleanFrozenFrame();
+      if (!dataUrl) {
+        setImageError("Could not capture current video frame.");
+        return;
+      }
+      const compressed = await compressImageToWebP(dataUrl);
+      setPendingImage((prev) => {
+        if (prev) {
+          try {
+            URL.revokeObjectURL(prev.objectUrl);
+          } catch {
+            // Ignore
+          }
+        }
+        return { ...compressed, spoiler: false };
+      });
+    } catch (err) {
+      setImageError(err instanceof Error ? err.message : "Could not capture frame.");
+    } finally {
+      setImageBusy(false);
+    }
+  }, [imageBusy, mediaLoaded]);
+
+  const handleComposerPaste = useCallback(
+    (e: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            void stageImageSource(file);
+            return;
+          }
+        }
+      }
+    },
+    [stageImageSource],
+  );
+
+  const handleAsideDragOver = useCallback((e: DragEvent<HTMLElement>) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      setDragOverImage(true);
+    }
+  }, []);
+
+  const handleAsideDrop = useCallback(
+    (e: DragEvent<HTMLElement>) => {
+      setDragOverImage(false);
+      const file = e.dataTransfer?.files?.[0];
+      if (file && file.type.startsWith("image/")) {
+        e.preventDefault();
+        e.stopPropagation();
+        void stageImageSource(file);
+      }
+    },
+    [stageImageSource],
+  );
+
+  useEffect(() => {
+    if (!chatOpen || !atBottom || messages.length === 0) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    const latest = [...messages].reverse().find((m) => m.kind === "message");
+    if (latest) {
+      notifyPartyChatSeen(latest.id);
+    }
+  }, [atBottom, chatOpen, messages]);
+
+  const seenPeersByMsgId = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    const myLower = effectiveUsername.trim().toLowerCase();
+    for (const entry of Object.values(seenByPeer)) {
+      if (!entry || typeof entry.username !== "string" || !entry.lastMsgId) continue;
+      if (entry.username.trim().toLowerCase() === myLower) continue;
+      if (!map[entry.lastMsgId]) map[entry.lastMsgId] = [];
+      map[entry.lastMsgId].push(entry.username);
+    }
+    return map;
+  }, [effectiveUsername, seenByPeer]);
+
   const handleSend = useCallback(
     (overrideText?: string) => {
       if (editingMsgId && overrideText === undefined) {
@@ -368,6 +610,38 @@ export const ChatSidebar = memo(function ChatSidebar({
         setEmojiOpen(false);
         setEmojiQuery("");
         notifyPartyChatTyping(false);
+        requestAnimationFrame(() => {
+          textareaRef.current?.focus({ preventScroll: true });
+        });
+        return;
+      }
+
+      if (pendingImage && overrideText === undefined) {
+        const staged = pendingImage;
+        clearPendingImage(false);
+        setDraft("");
+        setEmojiOpen(false);
+        setEmojiQuery("");
+        void sendPartyChatImage({
+          caption: draft,
+          spoiler: staged.spoiler,
+          width: staged.width,
+          height: staged.height,
+          byteLen: staged.byteLen,
+          dataB64: staged.dataB64,
+          objectUrl: staged.objectUrl,
+          replyToId,
+        }).catch((err) => {
+          setImageError(err instanceof Error ? err.message : "Could not send photo.");
+        });
+        setSendRecoil(true);
+        if (sendRecoilTimerRef.current !== null) {
+          window.clearTimeout(sendRecoilTimerRef.current);
+        }
+        sendRecoilTimerRef.current = window.setTimeout(() => {
+          sendRecoilTimerRef.current = null;
+          setSendRecoil(false);
+        }, 240);
         requestAnimationFrame(() => {
           textareaRef.current?.focus({ preventScroll: true });
         });
@@ -473,6 +747,12 @@ export const ChatSidebar = memo(function ChatSidebar({
     }
 
     if (e.key === "Escape") {
+      if (attachMenuOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setAttachMenuOpen(false);
+        return;
+      }
       if (optionsOpen) {
         e.preventDefault();
         e.stopPropagation();
@@ -526,8 +806,51 @@ export const ChatSidebar = memo(function ChatSidebar({
     return () => {
       resizeCleanupRef.current?.();
       resizeCleanupRef.current = null;
+      if (roomCopyTimerRef.current !== null) {
+        window.clearTimeout(roomCopyTimerRef.current);
+      }
+      if (roomLinkCopyTimerRef.current !== null) {
+        window.clearTimeout(roomLinkCopyTimerRef.current);
+      }
     };
   }, []);
+
+  const handleCopyRoomCode = async () => {
+    if (!roomCode) return;
+    try {
+      const text = formatRoomCodeClipboardText(roomCode, literalRoom);
+      await navigator.clipboard.writeText(text);
+      setRoomCodeCopied(true);
+      const p = usePlayerStore.getState();
+      playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
+      if (roomCopyTimerRef.current !== null) window.clearTimeout(roomCopyTimerRef.current);
+      roomCopyTimerRef.current = window.setTimeout(() => {
+        roomCopyTimerRef.current = null;
+        setRoomCodeCopied(false);
+      }, 1600);
+    } catch {
+      // Clipboard restricted
+    }
+  };
+
+  const handleCopyRoomLink = async () => {
+    if (!roomCode) return;
+    try {
+      const link = formatInviteLink(roomCode, literalRoom, serverEndpoint);
+      if (!link) return;
+      await navigator.clipboard.writeText(link);
+      setRoomLinkCopied(true);
+      const p = usePlayerStore.getState();
+      playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
+      if (roomLinkCopyTimerRef.current !== null) window.clearTimeout(roomLinkCopyTimerRef.current);
+      roomLinkCopyTimerRef.current = window.setTimeout(() => {
+        roomLinkCopyTimerRef.current = null;
+        setRoomLinkCopied(false);
+      }, 1600);
+    } catch {
+      // Clipboard restricted
+    }
+  };
 
   const handleResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -584,9 +907,18 @@ export const ChatSidebar = memo(function ChatSidebar({
       .map((item) => item.emoji);
   }, [emojiQuery, recentEmojis, reactionPresets]);
 
-  const remotePeerCount = Math.max(0, participants.length - 1);
   const trimmedDraftLen = Array.from(draft).length;
-  const canSend = draft.trim().length > 0 && syncStatus.state === "connected";
+  const canSend =
+    (draft.trim().length > 0 || Boolean(pendingImage)) &&
+    syncStatus.state === "connected";
+
+  const localSprite = useMemo(
+    () =>
+      seekbarThumbnails && selectedFilePath
+        ? getCachedSeekbarThumbnails(selectedFilePath, durationSecs)
+        : null,
+    [durationSecs, seekbarThumbnails, selectedFilePath],
+  );
 
   const renderMessageContent = (msg: ChatMessage) => {
     const tokens = parseChatTokens(msg.text);
@@ -647,11 +979,16 @@ export const ChatSidebar = memo(function ChatSidebar({
 
   const asideEl = (
     <aside
-      aria-label="Party Chat"
+      aria-label="Party Lounge"
       data-docked-sidebar={docked ? "true" : undefined}
       data-sidebar-surface="true"
+      onDragOver={handleAsideDragOver}
+      onDragLeave={() => setDragOverImage(false)}
+      onDrop={handleAsideDrop}
       style={{ width: `${resolvedSidebarWidth}px` }}
       className={`ep-chat-sidebar relative h-full flex flex-col shrink-0 select-none ${
+        dragOverImage ? "ring-2 ring-inset ring-accent-soft/60" : ""
+      } ${
         docked
           ? `ep-chat-dock-panel ${exiting ? "pointer-events-none" : ""}`
           : `fixed top-0 right-0 bottom-0 z-[42] ${
@@ -678,52 +1015,48 @@ export const ChatSidebar = memo(function ChatSidebar({
 
       {/* Minimal, Clean Header (zero tech jargon, zero separating strokes) */}
       <div
-        className={`ep-chat-header-zone px-4 pb-2 flex items-center justify-between gap-2 shrink-0 transition-[padding-top] duration-200 ease-out ${
+        className={`ep-chat-header-zone relative z-30 px-5 pb-2.5 flex items-center justify-between gap-2 shrink-0 transition-[padding-top] duration-200 ease-out ${
           topChromeOffset ? "pt-[48px]" : "pt-3.5"
         }`}
       >
-        <div className="min-w-0">
-          <h2 className="text-[14px] font-semibold tracking-tight text-white leading-tight">
-            Party Chat
+        <div className="flex items-center gap-2 min-w-0">
+          <WatchPartyIcon bare size={15} className="shrink-0" />
+          <h2 className="text-[14px] font-semibold tracking-tight text-white leading-tight truncate">
+            Party Lounge
           </h2>
-          <div className="flex items-center gap-1.5 mt-1 leading-none">
-            <span
-              className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                syncStatus.state === "connected" ? "bg-ok" : "bg-warn"
-              }`}
-            />
-            {syncStatus.state === "connected" &&
-              !hideParticipants &&
-              !partySidebarOpen &&
-              remotePeerCount > 0 && (
-                <div className="flex items-center -space-x-1 shrink-0">
-                  {participants
-                    .filter(
-                      (p) =>
-                        p.username.trim().toLowerCase() !== effectiveUsername.trim().toLowerCase(),
-                    )
-                    .slice(0, 3)
-                    .map((p) => (
-                      <ProfileAvatar
-                        key={p.username}
-                        avatarId={resolvePeerAvatarId(p.username, effectiveUsername)}
-                        size={15}
-                        className="ring-1 ring-[#08080d]"
-                      />
-                    ))}
-                </div>
-              )}
-            <p className="text-[11px] text-secondary/80 truncate">
-              {syncStatus.state !== "connected"
-                ? "Connecting…"
-                : remotePeerCount === 0
-                  ? "Just you"
-                  : `${participants.length} watching`}
-            </p>
-          </div>
         </div>
 
-        <div ref={optionsMenuRef} className="relative flex items-center gap-1 shrink-0">
+        <div ref={optionsMenuRef} className="relative flex items-center gap-1.5 shrink-0">
+          {syncStatus.state !== "connected" ? (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/[0.04] text-[10.5px] font-medium text-warn">
+              <span className="h-1.5 w-1.5 rounded-full bg-warn shrink-0" />
+              <span>Connecting…</span>
+            </span>
+          ) : voiceEnabled && voiceJoined && voiceExpanded ? (
+            <button
+              type="button"
+              onClick={() => setVoiceExpanded(false)}
+              title="Collapse Voice Lounge"
+              aria-label="Collapse Voice Lounge"
+              className="ep-press h-6.5 px-2.5 rounded-full bg-white/[0.055] hover:bg-white/[0.10] inline-flex items-center gap-1.5 text-[11px] font-medium text-white/90 cursor-pointer"
+            >
+              <AppVoiceIcon active size={12} className="text-ok shrink-0" />
+              <span className="num">
+                {Math.max(
+                  1,
+                  participants.filter((p) => {
+                    const key = p.username.trim().toLowerCase();
+                    return (
+                      key === effectiveUsername.trim().toLowerCase() ||
+                      voiceRoster.some((r) => r.username.trim().toLowerCase() === key)
+                    );
+                  }).length,
+                )}
+              </span>
+              <AppChevronIcon direction="up" size={10} className="text-muted/80 shrink-0" />
+            </button>
+          ) : null}
+
           <button
             type="button"
             onClick={() => setOptionsOpen((v) => !v)}
@@ -737,60 +1070,159 @@ export const ChatSidebar = memo(function ChatSidebar({
             <PlayerMoreIcon size={16} />
           </button>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Hide chat panel"
-            title="Hide chat (C / Esc)"
-            className="ep-bar-icon-btn h-7 w-7 rounded-full bg-white/[0.06] hover:bg-white/[0.12] flex items-center justify-center text-secondary hover:text-white cursor-pointer"
-          >
-            <PlayerCollapseRightIcon size={15} />
-          </button>
-
           {optionsPresence.mounted && (
             <div
-              className={`ep-glass-submenu absolute right-0 top-8.5 z-30 w-52 rounded-2xl p-2 space-y-2.5 ${
+              className={`ep-glass-submenu !bg-[#0c0c14]/[0.97] absolute right-0 top-8.5 z-30 w-58 rounded-2xl p-2.5 space-y-2.5 ${
                 optionsPresence.exiting
                   ? "anim-pop-out pointer-events-none"
                   : "anim-pop-in"
               }`}
             >
-              <div className="px-1.5 pt-0.5 space-y-1.5">
-                <div className="text-[10.5px] font-medium text-muted">Chat button</div>
-                <SegmentedTabs<"playbar" | "edge">
-                  ariaLabel="Chat button placement"
-                  size="sm"
-                  fullWidth
-                  value={chatTriggerPlacement}
-                  onChange={setChatTriggerPlacement}
-                  items={[
-                    { value: "playbar", label: "Play Bar" },
-                    { value: "edge", label: "Right Edge" },
-                  ]}
-                />
-              </div>
+              {roomCode && (
+                <div className="w-full px-2.5 py-2 rounded-xl bg-white/[0.04] flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-medium text-secondary/80 leading-none whitespace-nowrap">
+                      Invite code
+                    </div>
+                    <div className="text-[12.5px] font-semibold tracking-wider text-white num mt-1 leading-none whitespace-nowrap">
+                      {literalRoom ? roomCode : formatRoomCodeDisplay(roomCode)}
+                    </div>
+                  </div>
+                  <div className="inline-flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyRoomCode()}
+                      aria-label="Copy room code"
+                      title={roomCodeCopied ? "Code copied" : "Copy 6-digit code"}
+                      className={`ep-press h-7 w-7 rounded-lg inline-flex items-center justify-center cursor-pointer ${
+                        roomCodeCopied
+                          ? "bg-ok/16 text-ok"
+                          : "bg-white/[0.07] text-secondary hover:text-white hover:bg-white/[0.12]"
+                      }`}
+                    >
+                      <PartyCopyIcon copied={roomCodeCopied} size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyRoomLink()}
+                      aria-label="Copy invite link"
+                      title={roomLinkCopied ? "Link copied" : "Copy invite link"}
+                      className={`ep-press h-7 w-7 rounded-lg inline-flex items-center justify-center cursor-pointer ${
+                        roomLinkCopied
+                          ? "bg-ok/16 text-ok"
+                          : "bg-white/[0.07] text-secondary hover:text-white hover:bg-white/[0.12]"
+                      }`}
+                    >
+                      <PartyLinkIcon copied={roomLinkCopied} size={12} />
+                    </button>
+                  </div>
+                </div>
+              )}
 
-              <button
-                type="button"
-                role="switch"
-                aria-checked={chatPeeksEnabled}
-                onClick={() => setChatPeeksEnabled(!chatPeeksEnabled)}
-                className="ep-menu-row ep-press w-full px-2 py-1.5 rounded-xl flex items-center justify-between gap-2 text-[11.5px] text-secondary hover:text-white cursor-pointer"
-              >
-                <span>Corner peeks</span>
-                <GlassSwitchTrack checked={chatPeeksEnabled} size="sm" />
-              </button>
+              <div className="space-y-3">
+                <div className="px-1 space-y-1.5">
+                  <div className="flex items-center gap-2 text-[11.5px] font-medium text-white/88 leading-none">
+                    <MenuChatTriggerIcon size={14} className="shrink-0" />
+                    <span>Chat button</span>
+                  </div>
+                  <SegmentedTabs<"playbar" | "edge">
+                    ariaLabel="Chat button placement"
+                    size="sm"
+                    fullWidth
+                    value={chatTriggerPlacement}
+                    onChange={setChatTriggerPlacement}
+                    items={[
+                      { value: "playbar", label: "Play Bar" },
+                      { value: "edge", label: "Right Edge" },
+                    ]}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={chatPeeksEnabled}
+                  onClick={() => setChatPeeksEnabled(!chatPeeksEnabled)}
+                  className="ep-menu-row ep-press w-full px-1.5 py-1.5 -mx-0.5 rounded-xl flex items-center justify-between gap-2 text-[11.5px] font-medium text-white/88 hover:text-white cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <MenuCornerPeekIcon size={14} className="shrink-0" />
+                    <span>Corner peeks</span>
+                  </span>
+                  <GlassSwitchTrack checked={chatPeeksEnabled} size="sm" />
+                </button>
+
+                <div className="px-1 space-y-1.5">
+                  <div className="flex items-center gap-2 text-[11.5px] font-medium text-white/88 leading-none">
+                    <MenuChatPhotosIcon size={14} className="shrink-0" />
+                    <span>Chat photos</span>
+                  </div>
+                  <SegmentedTabs<"auto" | "tap" | "off">
+                    ariaLabel="Chat photos mode"
+                    size="sm"
+                    fullWidth
+                    value={chatImageMode}
+                    onChange={setChatImageMode}
+                    items={[
+                      { value: "auto", label: "Auto" },
+                      { value: "tap", label: "Tap" },
+                      { value: "off", label: "Off" },
+                    ]}
+                  />
+                </div>
+
+                {chatImageMode !== "off" && (
+                  <div className="px-1 space-y-1.5">
+                    <div className="flex items-center gap-2 text-[11.5px] font-medium text-white/88 leading-none">
+                      <MenuPhotoRetentionIcon size={14} className="shrink-0" />
+                      <span>Keep photos</span>
+                    </div>
+                    <SegmentedTabs<"30m" | "session">
+                      ariaLabel="Chat photo retention"
+                      size="sm"
+                      fullWidth
+                      value={chatImageRetention}
+                      onChange={setChatImageRetention}
+                      items={[
+                        { value: "30m", label: "30m" },
+                        { value: "session", label: "Session" },
+                      ]}
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOptionsOpen(false);
+                    onClose();
+                  }}
+                  aria-label="Hide Party Lounge"
+                  className="ep-menu-row ep-press w-full px-1.5 py-1.5 -mx-0.5 rounded-xl flex items-center justify-between gap-2 text-[11.5px] font-medium text-white/88 hover:text-white cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <PlayerCollapseRightIcon size={14} className="shrink-0" />
+                    <span>Hide lounge</span>
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded-md bg-white/[0.06] text-[10px] font-medium text-secondary/80 leading-none">
+                    C
+                  </span>
+                </button>
+              </div>
             </div>
           )}
         </div>
       </div>
+
+      {/* Expandable Voice Lounge Strip */}
+      <ChatVoiceStrip expanded={voiceExpanded} onExpandedChange={setVoiceExpanded} />
 
       {/* Messages Feed */}
       <div className="relative flex-1 min-h-0 flex flex-col">
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="ep-menu-scroll ep-chat-feed-mask flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3.5 pt-4 pb-4 space-y-1"
+          className="ep-menu-scroll ep-chat-feed-mask flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-5 pt-2.5 pb-4 space-y-1"
         >
           {messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center px-4 py-8">
@@ -949,10 +1381,10 @@ export const ChatSidebar = memo(function ChatSidebar({
                         msg.isSelf ? "items-end" : "items-start"
                       }`}
                     >
-                      {/* Floating corner action pill (zero layout shift on hover) */}
+                      {/* Floating corner action pill (anchored away from sender header) */}
                       <div
-                        className={`ep-chat-hover-pill w-max absolute -top-3.5 z-20 rounded-full px-1 py-0.5 flex items-center gap-0.5 opacity-0 scale-95 pointer-events-none group-hover/msg:opacity-100 group-hover/msg:scale-100 group-hover/msg:pointer-events-auto group-focus-within/msg:opacity-100 group-focus-within/msg:scale-100 group-focus-within/msg:pointer-events-auto ${
-                          msg.isSelf ? "right-1 flex-row-reverse" : "left-1 flex-row"
+                        className={`ep-chat-hover-pill w-max absolute -top-3 z-20 rounded-full p-0.5 flex items-center gap-0.5 opacity-0 scale-95 translate-y-0.5 pointer-events-none group-hover/msg:opacity-100 group-hover/msg:scale-100 group-hover/msg:translate-y-0 group-hover/msg:pointer-events-auto group-focus-within/msg:opacity-100 group-focus-within/msg:scale-100 group-focus-within/msg:translate-y-0 group-focus-within/msg:pointer-events-auto ${
+                          msg.isSelf ? "left-1 flex-row-reverse" : "right-1 flex-row"
                         }`}
                       >
                         <button
@@ -1016,13 +1448,138 @@ export const ChatSidebar = memo(function ChatSidebar({
                               }`
                         }`}
                       >
-                        <div dir="auto">
-                          {renderMessageContent(msg)}
-                          {msg.editedAtMs && (
-                            <span className="ml-1.5 text-[10px] text-white/50 select-none">
-                              edited
-                            </span>
+                        <div dir="auto" className="space-y-1.5">
+                          {msg.image && (
+                            <div className="relative overflow-hidden rounded-xl">
+                              {msg.image.status === "ready" && msg.image.objectUrl ? (
+                                <div className="relative inline-block max-w-full overflow-hidden rounded-xl bg-black/30">
+                                  <img
+                                    src={msg.image.objectUrl}
+                                    alt={msg.text || "Shared photo"}
+                                    onClick={() => {
+                                      if (msg.image?.spoiler && !msg.image.revealed) {
+                                        revealImageSpoiler(msg.image.id);
+                                      } else if (msg.image?.objectUrl) {
+                                        setLightboxImage({
+                                          objectUrl: msg.image.objectUrl,
+                                          caption: msg.text || undefined,
+                                        });
+                                      }
+                                    }}
+                                    className={`max-h-56 w-auto max-w-full rounded-xl object-contain cursor-pointer transition-[filter,transform] duration-200 ${
+                                      msg.image.spoiler && !msg.image.revealed
+                                        ? "blur-xl scale-105 brightness-75"
+                                        : ""
+                                    }`}
+                                  />
+                                  {msg.image.spoiler && !msg.image.revealed && (
+                                    <button
+                                      type="button"
+                                      onClick={() => revealImageSpoiler(msg.image!.id)}
+                                      className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/30 text-white cursor-pointer"
+                                    >
+                                      <span className="px-2.5 py-1 rounded-full bg-black/60 border border-white/20 text-[11px] font-semibold tracking-wide">
+                                        Spoiler · Tap to reveal
+                                      </span>
+                                    </button>
+                                  )}
+                                  {msg.image.expiresAtMs !== null && (
+                                    <div
+                                      title={`Ephemeral photo · expires in ${Math.max(
+                                        1,
+                                        Math.ceil((msg.image.expiresAtMs - Date.now()) / 60000),
+                                      )}m`}
+                                      className="absolute top-1.5 right-1.5 h-6 w-6 rounded-full bg-black/55 border border-white/15 flex items-center justify-center pointer-events-auto"
+                                    >
+                                      <EphemeralTimerRing
+                                        size={16}
+                                        receivedAtMs={msg.image.receivedAtMs}
+                                        expiresAtMs={msg.image.expiresAtMs}
+                                        paused={!chatOpen}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              ) : msg.image.status === "pending-tap" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => requestPartyChatImage(msg.image!.id, msg.sender)}
+                                  className="ep-press px-2.5 py-2 rounded-xl bg-white/[0.07] hover:bg-white/[0.12] border border-white/12 flex items-center gap-2 text-[11.5px] text-white/90 cursor-pointer"
+                                >
+                                  <PlayerImageIcon size={15} active />
+                                  <span>
+                                    Photo ({formatBytesCompact(msg.image.byteLen)}) · Tap to load
+                                  </span>
+                                </button>
+                              ) : msg.image.status === "loading" ? (
+                                <div className="px-2.5 py-1.5 rounded-xl bg-white/[0.06] inline-flex items-center gap-2 text-[11.5px] text-secondary">
+                                  <PlayerImageIcon size={14} />
+                                  <span>Loading photo…</span>
+                                </div>
+                              ) : msg.image.status === "disabled" ? (
+                                <div className="px-2.5 py-1.5 rounded-xl bg-white/[0.05] inline-flex items-center gap-1.5 text-[11px] text-muted">
+                                  <PlayerImageIcon size={13} />
+                                  <span>Sent a photo (disabled in your settings)</span>
+                                </div>
+                              ) : msg.image.status === "expired" ? (
+                                <div className="px-2.5 py-1.5 rounded-xl bg-white/[0.04] border border-white/[0.07] inline-flex items-center gap-1.5 text-[11px] text-muted">
+                                  <PlayerImageIcon size={13} />
+                                  <span>Ephemeral photo expired</span>
+                                </div>
+                              ) : (
+                                <div className="px-2.5 py-1.5 rounded-xl bg-bad/15 inline-flex items-center gap-1.5 text-[11px] text-bad">
+                                  <PlayerImageIcon size={13} />
+                                  <span>Photo unavailable</span>
+                                </div>
+                              )}
+                            </div>
                           )}
+
+                          {msg.text && (
+                            <div>
+                              {renderMessageContent(msg)}
+                              {msg.editedAtMs && (
+                                <span className="ml-1.5 text-[10px] text-white/50 select-none">
+                                  edited
+                                </span>
+                              )}
+                            </div>
+                          )}
+
+                          {!msg.image &&
+                            localSprite &&
+                            (() => {
+                              const tsTok = parseChatTokens(msg.text).find(
+                                (t): t is Extract<ReturnType<typeof parseChatTokens>[number], { type: "timestamp" }> =>
+                                  t.type === "timestamp",
+                              );
+                              if (!tsTok) return null;
+                              const frameStyle = getThumbnailFrameStyle(localSprite, tsTok.secs);
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => onSeekToTimestamp(tsTok.secs)}
+                                  title={`Jump to ${tsTok.label}`}
+                                  className="ep-press mt-1 group/scene relative overflow-hidden rounded-xl border border-white/15 bg-black/40 flex items-center gap-2 pr-2.5 hover:border-white/30 cursor-pointer"
+                                >
+                                  <span
+                                    aria-hidden="true"
+                                    className="block shrink-0"
+                                    style={{
+                                      ...frameStyle,
+                                      transform: "scale(0.56)",
+                                      transformOrigin: "top left",
+                                      marginRight: `${Math.round(localSprite.frameW * 0.56 - localSprite.frameW)}px`,
+                                      marginBottom: `${Math.round(localSprite.frameH * 0.56 - localSprite.frameH)}px`,
+                                    }}
+                                  />
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-medium text-white/90 num">
+                                    <PlayerPlayIcon size={10} />
+                                    <span>{tsTok.label}</span>
+                                  </span>
+                                </button>
+                              );
+                            })()}
                         </div>
                       </div>
 
@@ -1057,6 +1614,39 @@ export const ChatSidebar = memo(function ChatSidebar({
                           })}
                         </div>
                       )}
+
+                      {/* Compact "Seen by" avatars under the latest message each peer read */}
+                      {seenPeersByMsgId[msg.id]?.length ? (
+                        <div
+                          className={`mt-1 flex items-center gap-1 px-0.5 ${
+                            msg.isSelf ? "justify-end" : "justify-start"
+                          }`}
+                        >
+                          <GlassHoverTip
+                            label={
+                              hideParticipants
+                                ? `Seen by ${seenPeersByMsgId[msg.id].length}`
+                                : `Seen by ${seenPeersByMsgId[msg.id].join(", ")}`
+                            }
+                          >
+                            <span className="inline-flex items-center -space-x-1">
+                              {seenPeersByMsgId[msg.id].slice(0, 4).map((peerName) => (
+                                <ProfileAvatar
+                                  key={peerName}
+                                  avatarId={resolvePeerAvatarId(peerName, effectiveUsername)}
+                                  size={13}
+                                  className="ring-1 ring-[#08080d]"
+                                />
+                              ))}
+                              {seenPeersByMsgId[msg.id].length > 4 && (
+                                <span className="pl-1.5 text-[9.5px] text-muted num">
+                                  +{seenPeersByMsgId[msg.id].length - 4}
+                                </span>
+                              )}
+                            </span>
+                          </GlassHoverTip>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -1156,7 +1746,7 @@ export const ChatSidebar = memo(function ChatSidebar({
       <AnimatedCollapse
         open={mentionCandidates.length > 0}
         className="shrink-0"
-        innerClassName="px-3 pb-1.5 flex items-center gap-1.5 flex-wrap"
+        innerClassName="px-4 pb-1.5 flex items-center gap-1.5 flex-wrap"
       >
         {mentionCandidates.map((name, i) => (
           <button
@@ -1175,7 +1765,7 @@ export const ChatSidebar = memo(function ChatSidebar({
       </AnimatedCollapse>
 
       {/* Comfortable, Cushioned Single-Surface Composer + Separate Send Button */}
-      <div className="ep-chat-composer-zone px-3 pb-5 pt-2 shrink-0">
+      <div className="ep-chat-composer-zone px-4 pb-5 pt-2 shrink-0">
         <AnimatedCollapse open={Boolean(composerBannerPayload)} innerClassName="pb-1.5">
           {composerBanner.value && (
             <div className="px-2.5 py-1 rounded-xl bg-white/[0.04] flex items-center justify-between gap-2 text-[11px]">
@@ -1215,18 +1805,91 @@ export const ChatSidebar = memo(function ChatSidebar({
           )}
         </AnimatedCollapse>
 
+        <AnimatedCollapse open={Boolean(pendingImage || imageError)} innerClassName="pb-1.5">
+          {imageError && (
+            <div className="mb-1 px-2.5 py-1 rounded-xl bg-bad/15 text-[11px] text-bad flex items-center justify-between gap-2">
+              <span className="truncate">{imageError}</span>
+              <button
+                type="button"
+                onClick={() => setImageError(null)}
+                aria-label="Dismiss image error"
+                className="text-bad/80 hover:text-white cursor-pointer shrink-0"
+              >
+                <AppCloseIcon size={11} />
+              </button>
+            </div>
+          )}
+          {pendingImage && (
+            <div className="px-2.5 py-1.5 rounded-xl bg-white/[0.05] border border-white/10 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <img
+                  src={pendingImage.objectUrl}
+                  alt="Pending upload"
+                  className={`h-10 w-14 rounded-lg object-cover bg-black/30 shrink-0 ${
+                    pendingImage.spoiler ? "blur-sm" : ""
+                  }`}
+                />
+                <div className="min-w-0 text-[11px]">
+                  <div className="text-white/90 font-medium truncate">
+                    {pendingImage.width}×{pendingImage.height} · {formatBytesCompact(pendingImage.byteLen)}
+                  </div>
+                  <div className="text-muted text-[10px]">
+                    {chatImageRetention === "30m" ? "Auto-deletes in 30m" : "Stays for this session"}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPendingImage((prev) => (prev ? { ...prev, spoiler: !prev.spoiler } : null))
+                  }
+                  className={`ep-press px-2 py-1 rounded-full text-[10.5px] font-medium cursor-pointer ${
+                    pendingImage.spoiler
+                      ? "bg-accent/40 text-white"
+                      : "bg-white/[0.06] text-secondary hover:text-white"
+                  }`}
+                >
+                  Spoiler
+                </button>
+                <button
+                  type="button"
+                  onClick={() => clearPendingImage(true)}
+                  aria-label="Remove staged photo"
+                  className="ep-press h-6 w-6 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                >
+                  <AppCloseIcon size={11} />
+                </button>
+              </div>
+            </div>
+          )}
+        </AnimatedCollapse>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (file) void stageImageSource(file);
+          }}
+        />
+
         <div className="flex items-end gap-2">
           <div
-            data-expanded={composerExpanded || Boolean(replyTarget) || Boolean(editTarget) ? "true" : "false"}
-            className="ep-chat-composer-surface flex-1 min-w-0 flex items-end gap-1 px-2 py-1.5"
+            data-expanded={composerExpanded || Boolean(replyTarget) || Boolean(editTarget) || Boolean(pendingImage) ? "true" : "false"}
+            className="ep-chat-composer-surface flex-1 min-w-0 flex items-end gap-1 p-1.5"
           >
             <button
               type="button"
+              disabled={syncStatus.state !== "connected"}
               onClick={() => setEmojiOpen((v) => !v)}
               aria-label="Insert emoji"
               aria-pressed={emojiOpen}
               title="Emoji"
-              className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 cursor-pointer ${
+              className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 disabled:opacity-30 disabled:pointer-events-none cursor-pointer ${
                 emojiOpen
                   ? "text-accent-soft bg-white/[0.09]"
                   : "text-muted hover:text-white hover:bg-white/[0.06]"
@@ -1242,18 +1905,25 @@ export const ChatSidebar = memo(function ChatSidebar({
               value={draft}
               disabled={syncStatus.state !== "connected"}
               maxLength={MAX_CHAT_MESSAGE_CHARS + 40}
-              placeholder={syncStatus.state === "connected" ? "Message…" : "Connecting…"}
+              placeholder={
+                syncStatus.state !== "connected"
+                  ? "Connecting…"
+                  : pendingImage
+                    ? "Add a caption…"
+                    : "Message…"
+              }
               onChange={(e) => {
                 const val = e.target.value;
                 setDraft(val);
                 notifyPartyChatTyping(val.trim().length > 0);
               }}
+              onPaste={handleComposerPaste}
               onBlur={() => notifyPartyChatTyping(false)}
               onKeyDown={handleComposerKeyDown}
               className="flex-1 min-w-0 bg-transparent resize-none text-[13.5px] leading-[1.45] py-1 px-0.5 text-primary placeholder:text-muted/65 focus:outline-none max-h-[112px] ep-menu-scroll select-text disabled:opacity-50"
             />
 
-            <div className="flex items-center gap-0.5 shrink-0">
+            <div className="relative flex items-center gap-0.5 shrink-0" ref={attachMenuRef}>
               {trimmedDraftLen >= 380 && (
                 <span
                   className={`text-[10px] num mr-1 ${
@@ -1266,17 +1936,79 @@ export const ChatSidebar = memo(function ChatSidebar({
 
               <button
                 type="button"
-                disabled={!mediaLoaded}
-                onClick={() => {
-                  const pos = usePlayerStore.getState().positionSecs;
-                  insertAtCursor(`${formatMediaTimestamp(pos)} `);
-                }}
-                aria-label="Tag current video timestamp"
-                title={mediaLoaded ? "Tag current scene time" : "Load a video to tag time"}
-                className="h-8 w-8 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.06] disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
+                disabled={syncStatus.state !== "connected"}
+                onClick={() => setAttachMenuOpen((v) => !v)}
+                aria-label="More message actions"
+                aria-expanded={attachMenuOpen}
+                title="Attach photo, snap frame, or tag time"
+                className={`h-8 w-8 rounded-full flex items-center justify-center focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-soft/60 disabled:opacity-30 disabled:pointer-events-none cursor-pointer ${
+                  attachMenuOpen || pendingImage
+                    ? "text-accent-soft bg-white/[0.09]"
+                    : "text-muted hover:text-white hover:bg-white/[0.06]"
+                }`}
               >
-                <PlayerClockIcon size={15} />
+                <AppPlusIcon
+                  size={15}
+                  className={`transition-transform duration-200 ${attachMenuOpen ? "rotate-45" : ""}`}
+                />
               </button>
+
+              {attachMenuPresence.mounted && (
+                <div
+                  role="menu"
+                  aria-label="Message attachments"
+                  className={`ep-glass-submenu absolute right-0 bottom-10 z-30 w-48 rounded-2xl p-1.5 space-y-0.5 ${
+                    attachMenuPresence.exiting
+                      ? "anim-pop-out pointer-events-none"
+                      : "anim-pop-in"
+                  }`}
+                >
+                  {!editingMsgId && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={syncStatus.state !== "connected" || imageBusy}
+                      onClick={() => {
+                        setAttachMenuOpen(false);
+                        fileInputRef.current?.click();
+                      }}
+                      className="ep-menu-row ep-press w-full px-2.5 py-2 rounded-xl flex items-center gap-2.5 text-left text-[12px] text-secondary hover:text-white disabled:opacity-40 cursor-pointer"
+                    >
+                      <PlayerImageIcon size={15} active={Boolean(pendingImage)} />
+                      <span>Send Photo…</span>
+                    </button>
+                  )}
+                  {mediaLoaded && !editingMsgId && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={syncStatus.state !== "connected" || imageBusy}
+                      onClick={() => {
+                        setAttachMenuOpen(false);
+                        void handleSnapVideoFrame();
+                      }}
+                      className="ep-menu-row ep-press w-full px-2.5 py-2 rounded-xl flex items-center gap-2.5 text-left text-[12px] text-secondary hover:text-white disabled:opacity-40 cursor-pointer"
+                    >
+                      <PlayerCameraSnapIcon size={15} />
+                      <span>Snap Current Frame</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!mediaLoaded}
+                    onClick={() => {
+                      setAttachMenuOpen(false);
+                      const pos = usePlayerStore.getState().positionSecs;
+                      insertAtCursor(`${formatMediaTimestamp(pos)} `);
+                    }}
+                    className="ep-menu-row ep-press w-full px-2.5 py-2 rounded-xl flex items-center gap-2.5 text-left text-[12px] text-secondary hover:text-white disabled:opacity-40 cursor-pointer"
+                  >
+                    <PlayerClockIcon size={15} />
+                    <span>Insert Scene Time</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1302,23 +2034,62 @@ export const ChatSidebar = memo(function ChatSidebar({
     </aside>
   );
 
+  const lightboxPortal =
+    lightboxImage && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            role="dialog"
+            aria-label="Photo preview"
+            onClick={() => setLightboxImage(null)}
+            className="fixed inset-0 z-[90] bg-black/82 flex flex-col items-center justify-center p-6 gap-3 anim-pop-in"
+          >
+            <button
+              type="button"
+              onClick={() => setLightboxImage(null)}
+              aria-label="Close photo preview"
+              className="absolute top-4 right-4 h-9 w-9 rounded-full bg-white/[0.12] hover:bg-white/[0.22] flex items-center justify-center text-white cursor-pointer"
+            >
+              <AppCloseIcon size={16} />
+            </button>
+            <img
+              src={lightboxImage.objectUrl}
+              alt={lightboxImage.caption || "Shared photo"}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[82vh] max-w-[88vw] rounded-2xl object-contain shadow-[0_24px_60px_rgba(0,0,0,0.75)]"
+            />
+            {lightboxImage.caption && (
+              <p className="text-xs text-white/85 max-w-lg text-center">{lightboxImage.caption}</p>
+            )}
+          </div>,
+          document.body,
+        )
+      : null;
+
   if (!docked) {
-    return asideEl;
+    return (
+      <>
+        {asideEl}
+        {lightboxPortal}
+      </>
+    );
   }
 
   return (
-    <div
-      data-open={dockExpanded ? "true" : "false"}
-      data-resizing={resizing ? "true" : undefined}
-      style={{ width: dockExpanded ? `${resolvedSidebarWidth}px` : "0px" }}
-      onTransitionEnd={(e) => {
-        if (!resizing && e.target === e.currentTarget && e.propertyName === "width") {
-          onDockTransitionEnd?.();
-        }
-      }}
-      className={`ep-chat-dock-slot ${exiting ? "pointer-events-none" : ""}`}
-    >
-      {asideEl}
-    </div>
+    <>
+      <div
+        data-open={dockExpanded ? "true" : "false"}
+        data-resizing={resizing ? "true" : undefined}
+        style={{ width: dockExpanded ? `${resolvedSidebarWidth}px` : "0px" }}
+        onTransitionEnd={(e) => {
+          if (!resizing && e.target === e.currentTarget && e.propertyName === "width") {
+            onDockTransitionEnd?.();
+          }
+        }}
+        className={`ep-chat-dock-slot ${exiting ? "pointer-events-none" : ""}`}
+      >
+        {asideEl}
+      </div>
+      {lightboxPortal}
+    </>
   );
 });

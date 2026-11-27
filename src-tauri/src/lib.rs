@@ -208,8 +208,7 @@ mod windows_app {
         set_mute_cmd, set_pause_cmd, set_secondary_sub_delay_cmd, set_secondary_sub_pos_cmd,
         set_secondary_sub_track_cmd, set_sid_cmd, set_speed_cmd, set_sub_delay_cmd,
         set_sub_style_cmds_with_bold, set_video_margin_left_cmd, set_video_margin_right_cmd,
-        set_volume_cmd,
-        show_osd_text_cmd, sub_add_cmd_with_title, sub_remove_cmd,
+        set_volume_cmd, show_osd_text_cmd, sub_add_cmd_with_title, sub_remove_cmd,
     };
     use epilod_core::p2p::{
         sanitize_chat_id, sanitize_shared_subtitle_ext, sanitize_shared_subtitle_name,
@@ -431,6 +430,45 @@ mod windows_app {
                     .unwrap_or("video")
             ),
         );
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn mpv_load_stream_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+        let valid_url =
+            epilod_core::validation::validate_stream_url(&url).map_err(|e| e.to_string())?;
+        {
+            let mut rg = state
+                .rate_guard
+                .lock()
+                .map_err(|_| "Rate guard poisoned".to_string())?;
+            if rg.is_duplicate_within(
+                "mpv_load_stream",
+                &valid_url,
+                Duration::from_millis(500),
+                Instant::now(),
+            ) {
+                return Ok(());
+            }
+        }
+        state.autosync.cancel();
+        state.intro_detect.cancel();
+        state.mpv.prepare_for_load();
+        state.mpv.set_media_loaded(false);
+        let pause_req = state.mpv.next_request_id();
+        let _ = state.mpv.send_command(set_pause_cmd(pause_req, true));
+
+        let req = state.mpv.next_request_id();
+        if let Err(e) = state.mpv.send_command(loadfile_cmd(req, &valid_url)) {
+            state.mpv.set_media_loaded(false);
+            state.mpv.clear_loading_flag();
+            if let Ok(mut rg) = state.rate_guard.lock() {
+                rg.clear_dedup_if_matches("mpv_load_stream", &valid_url);
+            }
+            return Err(e);
+        }
+        state.sync.reset_for_new_file();
+        state.sync.set_local_media_path(None);
         Ok(())
     }
 
@@ -1398,6 +1436,20 @@ mod windows_app {
     }
 
     #[tauri::command]
+    async fn sync_send_avatar_presence(
+        state: State<'_, AppState>,
+        avatar_id: String,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_avatar_presence", 12, Duration::from_secs(5))?;
+        let clean_avatar = epilod_core::p2p::sanitize_avatar_id(&avatar_id);
+        if clean_avatar.is_empty() {
+            return Ok(());
+        }
+        state.sync.send_avatar_presence(clean_avatar);
+        Ok(())
+    }
+
+    #[tauri::command]
     async fn sync_send_reaction(
         state: State<'_, AppState>,
         emoji: String,
@@ -1484,6 +1536,127 @@ mod windows_app {
         let clean_emoji = epilod_core::p2p::sanitize_reaction_emoji(&emoji)
             .ok_or_else(|| "Unsupported reaction emoji.".to_string())?;
         state.sync.send_chat_react(clean_id, clean_emoji);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_chat_seen(
+        state: State<'_, AppState>,
+        last_msg_id: String,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat_seen", 20, Duration::from_secs(5))?;
+        let clean_id = epilod_core::p2p::sanitize_chat_id(&last_msg_id);
+        if clean_id.is_empty() {
+            return Err("Invalid chat message id.".to_string());
+        }
+        state.sync.send_chat_seen(clean_id);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_send_intro_skip_vote(
+        state: State<'_, AppState>,
+        seg_key: String,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_intro_skip_vote", 12, Duration::from_secs(5))?;
+        let clean_key: String = seg_key
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(128)
+            .collect();
+        if clean_key.is_empty() {
+            return Err("Invalid intro segment key.".to_string());
+        }
+        state.sync.send_intro_skip_vote(clean_key);
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_set_chat_image_mode(
+        state: State<'_, AppState>,
+        mode: String,
+    ) -> Result<(), String> {
+        let code = match mode.trim().to_ascii_lowercase().as_str() {
+            "auto" => 0u8,
+            "tap" => 1u8,
+            "off" => 2u8,
+            _ => return Err("Invalid chat image mode.".to_string()),
+        };
+        state.sync.set_chat_image_mode(code);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[tauri::command]
+    async fn sync_send_chat_image(
+        state: State<'_, AppState>,
+        id: String,
+        avatar_id: Option<String>,
+        caption: Option<String>,
+        spoiler: bool,
+        width: u16,
+        height: u16,
+        data_b64: String,
+        reply_to_id: Option<String>,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat_image", 4, Duration::from_secs(10))?;
+        let clean_id = epilod_core::p2p::sanitize_chat_id(&id);
+        if clean_id.is_empty() {
+            return Err("Invalid chat image id.".to_string());
+        }
+        if width == 0 || height == 0 || width > 2048 || height > 2048 {
+            return Err("Invalid chat image dimensions.".to_string());
+        }
+        let max_b64 = epilod_core::p2p::MAX_CHAT_IMAGE_BYTES * 4 / 3 + 16;
+        if data_b64.is_empty() || data_b64.len() > max_b64 {
+            return Err("Compressed image exceeds 200 KB limit.".to_string());
+        }
+        let clean_avatar = avatar_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(32).collect::<String>())
+            .unwrap_or_default();
+        let clean_caption = caption
+            .as_deref()
+            .and_then(epilod_core::p2p::sanitize_chat_text)
+            .map(|s| {
+                s.chars()
+                    .take(epilod_core::p2p::MAX_CHAT_IMAGE_CAPTION_CHARS)
+                    .collect::<String>()
+            });
+        let clean_reply = reply_to_id
+            .as_deref()
+            .map(epilod_core::p2p::sanitize_chat_id)
+            .filter(|s| !s.is_empty());
+        if !state.sync.send_chat_image(
+            clean_id,
+            clean_avatar,
+            clean_caption,
+            spoiler,
+            width,
+            height,
+            data_b64,
+            clean_reply,
+        ) {
+            return Err("Not connected to a Watch Party room.".to_string());
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn sync_request_chat_image(
+        state: State<'_, AppState>,
+        id: String,
+        sender: String,
+    ) -> Result<(), String> {
+        check_rate(&state, "sync_chat_img_req", 12, Duration::from_secs(5))?;
+        let clean_id = epilod_core::p2p::sanitize_chat_id(&id);
+        if clean_id.is_empty() {
+            return Err("Invalid chat image id.".to_string());
+        }
+        state.sync.request_chat_image(clean_id, sender);
         Ok(())
     }
 
@@ -2678,6 +2851,7 @@ mod windows_app {
                 mpv_backdrop_frame,
                 mpv_capture_freeze_frame,
                 mpv_load,
+                mpv_load_stream_url,
                 mpv_set_pause,
                 mpv_seek,
                 mpv_stop,
@@ -2731,9 +2905,15 @@ mod windows_app {
                 sync_run_p2p_auto_align,
                 sync_send_reaction,
                 sync_send_rating_vote,
+                sync_send_avatar_presence,
                 sync_send_chat,
                 sync_send_chat_edit,
                 sync_send_chat_react,
+                sync_send_chat_seen,
+                sync_send_intro_skip_vote,
+                sync_set_chat_image_mode,
+                sync_send_chat_image,
+                sync_request_chat_image,
                 sync_send_chat_typing,
                 sync_share_subtitle,
                 apply_shared_subtitle,

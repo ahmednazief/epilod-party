@@ -14,6 +14,7 @@ import {
 import { MenuMediaDiscIcon } from "./ui/MenuIcons";
 import {
   PartyCopyIcon,
+  PartyLinkIcon,
   PartyHostIcon,
   PartyPasteIcon,
   PlayerEpisodesIcon,
@@ -29,6 +30,8 @@ import {
 } from "../lib/continueWatching";
 import {
   formatInviteClipboardText,
+  formatInviteLink,
+  formatRoomCodeClipboardText,
   parseInviteLink,
 } from "../lib/inviteLinks";
 import {
@@ -123,6 +126,8 @@ export function HomeScreen() {
   const setServerEndpoint = useAppStore((s) => s.setServerEndpoint);
   const openSettings = useAppStore((s) => s.openSettings);
   const openShortcuts = useAppStore((s) => s.openShortcuts);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const shortcutsOpen = useAppStore((s) => s.shortcutsOpen);
   const enterRoom = useAppStore((s) => s.enterRoom);
   const setSelectedFile = useAppStore((s) => s.setSelectedFile);
 
@@ -132,12 +137,14 @@ export function HomeScreen() {
   const [lobbyView, setLobbyView] = useState<"entry" | "party">("entry");
   const [draftRoomCode, setDraftRoomCode] = useState(() => generateRoomCode());
   const [copiedDraft, setCopiedDraft] = useState(false);
+  const [copiedDraftLink, setCopiedDraftLink] = useState(false);
   const [joinInput, setJoinInput] = useState("");
   const [verifyingJoin, setVerifyingJoin] = useState(false);
   const [standardRoomName, setStandardRoomName] = useState(literalRoomStored);
   const [hostOnlyCreate, setHostOnlyCreate] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
   const [editingName, setEditingName] = useState(false);
+  const [avatarStudioOpen, setAvatarStudioOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openingMedia, setOpeningMedia] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
@@ -156,6 +163,7 @@ export function HomeScreen() {
   const verifyTimerRef = useRef<number | null>(null);
   const focusTimerRef = useRef<number | null>(null);
   const draftCopyTimerRef = useRef<number | null>(null);
+  const draftLinkCopyTimerRef = useRef<number | null>(null);
   const roomCopyTimerRef = useRef<number | null>(null);
   const joiningMediaRef = useRef(false);
   const profileRef = useRef<HTMLDivElement | null>(null);
@@ -177,7 +185,7 @@ export function HomeScreen() {
 
   const pinnedRooms = recentRooms.filter((r) => r.pinned);
   const unpinnedRooms = recentRooms.filter((r) => !r.pinned);
-  const continueItems = buildContinueWatchingItems(seriesMap, resumeEntries, recentRooms, 4);
+  const continueItems = buildContinueWatchingItems(seriesMap, resumeEntries, recentRooms, 1);
   const profilePopover = useAnimatedPresence(editingName, 170);
   const dragBanner = useAnimatedPresence(isDragActive, 170);
 
@@ -280,6 +288,13 @@ export function HomeScreen() {
   }, [pendingDeepLinkPasswordRoomId, recentRooms, setPendingDeepLinkPasswordRoomId, setServerEndpoint]);
 
   useEffect(() => {
+    if (settingsOpen || shortcutsOpen) {
+      setEditingName(false);
+      setAvatarStudioOpen(false);
+    }
+  }, [settingsOpen, shortcutsOpen]);
+
+  useEffect(() => {
     if (!editingName) return;
     const onPointerDown = (e: MouseEvent) => {
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
@@ -309,6 +324,9 @@ export function HomeScreen() {
       }
       if (draftCopyTimerRef.current !== null) {
         window.clearTimeout(draftCopyTimerRef.current);
+      }
+      if (draftLinkCopyTimerRef.current !== null) {
+        window.clearTimeout(draftLinkCopyTimerRef.current);
       }
       if (roomCopyTimerRef.current !== null) {
         window.clearTimeout(roomCopyTimerRef.current);
@@ -626,7 +644,7 @@ export function HomeScreen() {
 
   const handleCopyDraft = async () => {
     try {
-      const text = formatInviteClipboardText(draftRoomCode, false, serverEndpoint);
+      const text = formatRoomCodeClipboardText(draftRoomCode, false);
       await navigator.clipboard.writeText(text);
       setCopiedDraft(true);
       playSoundCue("codeCopied");
@@ -636,6 +654,25 @@ export function HomeScreen() {
       draftCopyTimerRef.current = window.setTimeout(() => {
         draftCopyTimerRef.current = null;
         setCopiedDraft(false);
+      }, 1600);
+    } catch {
+      // Clipboard may be restricted outside secure focus
+    }
+  };
+
+  const handleCopyDraftLink = async () => {
+    try {
+      const link = formatInviteLink(draftRoomCode, false, serverEndpoint);
+      if (!link) return;
+      await navigator.clipboard.writeText(link);
+      setCopiedDraftLink(true);
+      playSoundCue("codeCopied");
+      if (draftLinkCopyTimerRef.current !== null) {
+        window.clearTimeout(draftLinkCopyTimerRef.current);
+      }
+      draftLinkCopyTimerRef.current = window.setTimeout(() => {
+        draftLinkCopyTimerRef.current = null;
+        setCopiedDraftLink(false);
       }, 1600);
     } catch {
       // Clipboard may be restricted outside secure focus
@@ -1003,7 +1040,7 @@ export function HomeScreen() {
                 editingName ? "ring-1 ring-accent/65" : ""
               }`}
             >
-              <ProfileAvatar avatarId={avatarId} size={24} className="ring-1 ring-white/20" />
+              <ProfileAvatar avatarId={avatarId} size={24} />
               <span className="text-xs font-medium text-primary max-w-[140px] truncate">
                 {username || "Viewer"}
               </span>
@@ -1013,7 +1050,11 @@ export function HomeScreen() {
           rightActions={
             <button
               type="button"
-              onClick={() => openSettings("prefs")}
+              onClick={() => {
+                setEditingName(false);
+                setAvatarStudioOpen(false);
+                openSettings("prefs");
+              }}
               aria-label="Preferences"
               className="ep-glass-pill ep-press inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium text-secondary hover:text-white cursor-pointer"
             >
@@ -1029,62 +1070,86 @@ export function HomeScreen() {
             aria-label="Edit profile and avatar"
             className={`ep-glass-sheet ${
               profilePopover.exiting ? "anim-pop-out pointer-events-none" : "anim-pop-in"
-            } absolute left-4 top-12 z-50 w-[368px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-4rem)] overflow-hidden rounded-[24px] py-4 flex flex-col`}
+            } absolute left-4 top-12 z-50 ${
+              avatarStudioOpen ? "w-[416px]" : "w-[368px]"
+            } transition-[width] duration-250 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-4rem)] overflow-hidden rounded-[24px] py-4 flex flex-col`}
           >
-            <div className="ep-menu-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 space-y-3.5">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <ProfileAvatar
-                    avatarId={avatarId}
-                    size={38}
-                    className="shrink-0 ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
-                  />
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-white truncate">
-                      {username || "Viewer"}
-                    </div>
-                    <div className="text-[11px] text-secondary truncate">
-                      Customize how friends see you
+            <div
+              className={`ep-menu-scroll flex-1 min-h-0 px-4 ${
+                avatarStudioOpen
+                  ? "overflow-hidden flex flex-col"
+                  : "overflow-y-auto overflow-x-hidden space-y-3.5"
+              }`}
+            >
+              <AnimatedCollapse
+                open={!avatarStudioOpen}
+                durationMs={220}
+                className="-mx-2"
+                innerClassName="px-2 pt-0.5 pb-1 space-y-3.5"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <ProfileAvatar
+                      avatarId={avatarId}
+                      size={38}
+                      className="shrink-0 ring-2 ring-accent/60 shadow-[0_6px_18px_rgba(124,58,237,0.35)]"
+                    />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-white truncate">
+                        {username || "Viewer"}
+                      </div>
+                      <div className="text-[11px] text-secondary truncate">
+                        Customize how friends see you
+                      </div>
                     </div>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setEditingName(false)}
-                  className="ep-glass-pill-active ep-press shrink-0 h-7 px-3 rounded-full text-[11px] font-semibold text-white cursor-pointer"
-                >
-                  Done
-                </button>
-              </div>
-
-              <label className="block space-y-1.5">
-                <span className="text-[11px] font-medium text-secondary">
-                  Display Name
-                </span>
-                <input
-                  id="profile-display-name"
-                  name="displayName"
-                  type="text"
-                  autoFocus
-                  value={username}
-                  maxLength={32}
-                  placeholder="Enter your name..."
-                  aria-label="Your display name"
-                  onChange={(e) => {
-                    setUsername(e.target.value);
-                    if (error) setError(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === "Escape") {
-                      e.preventDefault();
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAvatarStudioOpen(false);
                       setEditingName(false);
-                    }
-                  }}
-                  className="ep-glass-input w-full h-9 px-3 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
-                />
-              </label>
+                    }}
+                    className="ep-glass-pill-active ep-press shrink-0 h-7 px-3 rounded-full text-[11px] font-semibold text-white cursor-pointer"
+                  >
+                    Done
+                  </button>
+                </div>
 
-              <AvatarPicker value={avatarId} onChange={setAvatarId} compact />
+                <label className="block space-y-1.5">
+                  <span className="text-[11px] font-medium text-secondary">
+                    Display Name
+                  </span>
+                  <input
+                    id="profile-display-name"
+                    name="displayName"
+                    type="text"
+                    autoFocus
+                    value={username}
+                    maxLength={32}
+                    placeholder="Enter your name..."
+                    aria-label="Your display name"
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      if (error) setError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === "Escape") {
+                        e.preventDefault();
+                        setAvatarStudioOpen(false);
+                        setEditingName(false);
+                      }
+                    }}
+                    className="ep-glass-input w-full h-9 px-3 rounded-xl text-xs text-primary placeholder:text-muted focus:outline-none"
+                  />
+                </label>
+              </AnimatedCollapse>
+
+              <AvatarPicker
+                value={avatarId}
+                onChange={setAvatarId}
+                compact
+                onStudioModeChange={setAvatarStudioOpen}
+              />
             </div>
           </div>
         )}
@@ -1200,7 +1265,13 @@ export function HomeScreen() {
                                 title="Remove"
                                 onClick={() => {
                                   if (item.kind === "series" && item.seriesEntry) {
-                                    removeSeries(item.seriesEntry.seriesKey);
+                                    const keys =
+                                      item.relatedSeriesKeys && item.relatedSeriesKeys.length > 0
+                                        ? item.relatedSeriesKeys
+                                        : [item.seriesEntry.seriesKey];
+                                    for (const key of keys) {
+                                      removeSeries(key);
+                                    }
                                   } else if (item.resumeKey) {
                                     removeResumePosition(item.resumeKey);
                                   }
@@ -1388,6 +1459,15 @@ export function HomeScreen() {
                     >
                       <PartyCopyIcon copied={copiedDraft} size={13} />
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyDraftLink()}
+                      aria-label="Copy invite link"
+                      title="Copy invite link"
+                      className="ep-press h-7 w-7 rounded-lg flex items-center justify-center text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                    >
+                      <PartyLinkIcon copied={copiedDraftLink} size={13} />
+                    </button>
                   </div>
                 </div>
 
@@ -1444,7 +1524,7 @@ export function HomeScreen() {
                     <button
                       type="button"
                       onClick={() => void handlePasteJoin()}
-                      className="ep-press -mr-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0"
+                      className="ep-press inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0"
                     >
                       <PartyPasteIcon size={13} />
                       <span>Paste Code</span>
@@ -1508,13 +1588,14 @@ export function HomeScreen() {
                     <span>{showOptions ? "Hide room options" : "Room password & options"}</span>
                   </span>
                   <AppChevronIcon
-                    direction="right"
+                    direction={showOptions ? "down" : "right"}
                     size={12}
-                    className={`transition-transform duration-150 ${showOptions ? "rotate-90 text-secondary" : ""}`}
+                    className={showOptions ? "text-secondary" : ""}
                   />
                 </button>
 
-                <AnimatedCollapse open={showOptions} className="-mx-2.5" innerClassName="pt-2.5 pb-0.5 space-y-2">
+                {showOptions && (
+                <div className="-mx-2.5 pt-2.5 pb-0.5 space-y-2 anim-pop-in">
                   <form onSubmit={handleJoinRoom} className="px-2.5 flex items-center gap-2">
                     <input
                       ref={passwordInputRef}
@@ -1575,7 +1656,8 @@ export function HomeScreen() {
                     <span>Use exact Syncplay room name</span>
                     <GlassSwitchTrack checked={standardRoomName} size="sm" />
                   </button>
-                </AnimatedCollapse>
+                </div>
+                )}
               </div>
 
               {recentRooms.length > 0 && (

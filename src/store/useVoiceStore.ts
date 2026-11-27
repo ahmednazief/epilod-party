@@ -5,10 +5,12 @@ import {
   voiceSetDeafen,
   voiceSetMute,
   voiceSetPeerVolume,
+  type DiagnosticCaptureResultDto,
   type VoiceCalibrationPayload,
   type VoiceConfigDto,
   type VoiceDeviceListDto,
   type VoiceDuckingMode,
+  type VoiceEngineMode,
   type VoiceHotkeyScope,
   type VoiceInputMode,
   type VoiceNoiseMode,
@@ -126,6 +128,11 @@ const initialHotkeyScope = ((): VoiceHotkeyScope => {
   return raw === "focused" ? "focused" : "global";
 })();
 
+const initialEngineMode = ((): VoiceEngineMode => {
+  const raw = readStorage("ep.voice.engineMode", "aura");
+  return raw === "classic" ? "classic" : "aura";
+})();
+
 interface VoiceState {
   // Persisted audio config
   voiceEnabled: boolean;
@@ -148,6 +155,8 @@ interface VoiceState {
   spatialPan: boolean;
   echoGuardEnabled: boolean;
   aecEnabled: boolean;
+  engineMode: VoiceEngineMode;
+  useWindowsCommAec: boolean;
   allowRelayForOthers: boolean;
   allowRelayedVoice: boolean;
   masterVolume: number;
@@ -176,6 +185,8 @@ interface VoiceState {
   roster: VoicePeerRosterDto[];
   devices: VoiceDeviceListDto | null;
   micCue: MicCueBadge | null;
+  diagCaptureRecording: boolean;
+  diagCaptureResult: DiagnosticCaptureResultDto | null;
 
   // Actions
   setJoined: (joined: boolean) => void;
@@ -192,6 +203,8 @@ interface VoiceState {
   setSpeakingPeers: (speakers: string[]) => void;
   setRoster: (roster: VoicePeerRosterDto[]) => void;
   setDevices: (devices: VoiceDeviceListDto | null) => void;
+  setDiagCaptureRecording: (recording: boolean) => void;
+  setDiagCaptureResult: (result: DiagnosticCaptureResultDto | null) => void;
   updateConfig: (patch: Partial<VoiceConfigDto>) => void;
   setPeerVolume: (username: string, volume: number, muted: boolean) => void;
   toConfigDto: () => VoiceConfigDto;
@@ -221,6 +234,8 @@ function buildConfigDto(s: VoiceState): VoiceConfigDto {
     spatialPan: s.spatialPan,
     echoGuardEnabled: s.echoGuardEnabled,
     aecEnabled: s.aecEnabled,
+    engineMode: s.engineMode,
+    useWindowsCommAec: s.useWindowsCommAec,
     allowRelayForOthers: s.allowRelayForOthers,
     allowRelayedVoice: s.allowRelayedVoice,
     masterVolume: s.masterVolume,
@@ -248,6 +263,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   spatialPan: readStorage("ep.voice.spatialPan", "false") === "true",
   echoGuardEnabled: readStorage("ep.voice.echoGuard", "true") !== "false",
   aecEnabled: readStorage("ep.voice.aecEnabled", "false") === "true",
+  engineMode: initialEngineMode,
+  useWindowsCommAec: readStorage("ep.voice.useWindowsCommAec", "false") === "true",
   allowRelayForOthers: readStorage("ep.voice.allowRelayForOthers", "true") !== "false",
   allowRelayedVoice: readStorage("ep.voice.allowRelayedVoice", "true") !== "false",
   masterVolume: clampMasterVolume(readNum("ep.voice.masterVolume", 1.0, 0.0, 2.0)),
@@ -275,6 +292,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   roster: [],
   devices: null,
   micCue: null,
+  diagCaptureRecording: false,
+  diagCaptureResult: null,
 
   setJoined: (joined) => set({ joined, joining: false }),
   setJoining: (joining) => set({ joining }),
@@ -356,6 +375,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   setSpeakingPeers: (speakingPeers) => set({ speakingPeers }),
   setRoster: (roster) => set({ roster }),
   setDevices: (devices) => set({ devices }),
+  setDiagCaptureRecording: (diagCaptureRecording) => set({ diagCaptureRecording }),
+  setDiagCaptureResult: (diagCaptureResult) => set({ diagCaptureResult }),
 
   updateConfig: (patch) => {
     const wasEnabled = get().voiceEnabled;
@@ -387,6 +408,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       writeStorage("ep.voice.spatialPan", next.spatialPan ? "true" : "false");
       writeStorage("ep.voice.echoGuard", next.echoGuardEnabled ? "true" : "false");
       writeStorage("ep.voice.aecEnabled", next.aecEnabled ? "true" : "false");
+      writeStorage("ep.voice.engineMode", next.engineMode);
+      writeStorage("ep.voice.useWindowsCommAec", next.useWindowsCommAec ? "true" : "false");
       writeStorage("ep.voice.allowRelayForOthers", next.allowRelayForOthers ? "true" : "false");
       writeStorage("ep.voice.allowRelayedVoice", next.allowRelayedVoice ? "true" : "false");
       writeStorage("ep.voice.masterVolume", String(next.masterVolume));

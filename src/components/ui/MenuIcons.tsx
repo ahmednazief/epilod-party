@@ -487,3 +487,123 @@ export function MenuDownloadIcon({ size = 14, className = "" }: MenuIconProps) {
     </svg>
   );
 }
+
+/**
+ * Custom screen bezel with docked chat trigger pill for Chat Button placement.
+ */
+export function MenuChatTriggerIcon({ size = 14, className = "" }: MenuIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <rect
+        x="3.2"
+        y="4.8"
+        width="17.6"
+        height="14.4"
+        rx="3"
+        fill="currentColor"
+        fillOpacity="0.10"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <rect
+        x="7.2"
+        y="14.6"
+        width="9.6"
+        height="2.1"
+        rx="1.05"
+        fill="currentColor"
+      />
+      <circle cx="17.2" cy="9.5" r="1.45" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * Custom viewport corner with floating message toast for Corner Peeks.
+ */
+export function MenuCornerPeekIcon({ size = 14, className = "" }: MenuIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M4 15.5V7.5C4 5.84 5.34 4.5 7 4.5H11"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+      <path
+        d="M20 13.5V16.5C20 18.16 18.66 19.5 17 19.5H8.5"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+      <rect
+        x="10.2"
+        y="5.2"
+        width="10.3"
+        height="6.4"
+        rx="2.2"
+        fill="currentColor"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <path d="M12.8 8.4H17.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * Custom photo frame with mountain silhouette and sun for Chat Photos.
+ */
+export function MenuChatPhotosIcon({ size = 14, className = "" }: MenuIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <rect
+        x="3.5"
+        y="4.5"
+        width="17"
+        height="15"
+        rx="3.2"
+        fill="currentColor"
+        fillOpacity="0.10"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <circle cx="9" cy="9.4" r="1.55" fill="currentColor" />
+      <path
+        d="M5.2 17.6L10.1 12.8L13.5 15.9L16 13.5L19 17.6"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Custom ephemeral timer dial for Keep Photos retention.
+ */
+export function MenuPhotoRetentionIcon({ size = 14, className = "" }: MenuIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      <circle
+        cx="12"
+        cy="12.5"
+        r="7.8"
+        fill="currentColor"
+        fillOpacity="0.10"
+        stroke="currentColor"
+        strokeWidth="1.65"
+      />
+      <path d="M9.8 2.8H14.2" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" />
+      <path
+        d="M12 8.6V12.6L14.8 14.3"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

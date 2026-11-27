@@ -67,7 +67,7 @@ export function GlassHoverTip({
     clearTimer();
     openTimerRef.current = window.setTimeout(() => {
       setOpen(true);
-    }, 90);
+    }, 180);
   }, [clearTimer, disabled]);
 
   const hideNow = useCallback(() => {
@@ -107,8 +107,8 @@ export function GlassHoverTip({
         anchorX: r.left + r.width / 2,
         resolvedPlacement,
         ...(resolvedPlacement === "top"
-          ? { bottom: Math.max(8, vh - r.top + 8) }
-          : { top: Math.min(vh - 8, r.bottom + 8) }),
+          ? { bottom: Math.max(12, vh - r.top + 14) }
+          : { top: Math.min(vh - 12, r.bottom + 14) }),
       });
     };
 

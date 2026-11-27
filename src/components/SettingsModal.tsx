@@ -46,11 +46,7 @@ import {
   type StorageStats,
 } from "../lib/storageBridge";
 import { clearThumbnailCache } from "../lib/thumbnails";
-import {
-  CLOUD_ENDPOINT,
-  DEFAULT_ENDPOINT,
-  SYNCPLAY_ENDPOINT,
-} from "../lib/syncStatusDisplay";
+import { CLOUD_ENDPOINT } from "../lib/syncStatusDisplay";
 import { playSoundCue } from "../lib/soundEffects";
 import { createLeadingTrailingThrottle } from "../lib/throttle";
 import {
@@ -58,13 +54,14 @@ import {
   formatTransferSpeed,
   parseReleaseNotes,
 } from "../lib/updater";
-import { validateServerEndpointInput } from "../lib/webviewHardening";
 import {
+  DEFAULT_PLAY_BAR_OPACITY,
   useAppStore,
   type AutoFetchSubtitleMode,
+  type ChatImageMode,
+  type ChatImageRetention,
   type ChatTriggerPlacement,
   type OutroNextMode,
-  type PartyDisplayMode,
   type SettingsTab,
   type SkipIntroMode,
 } from "../store/useAppStore";
@@ -87,6 +84,7 @@ import {
   formatVoiceHotkey,
   onVoiceCalibration,
   onVoiceDevicesChanged,
+  onVoiceDiagnosticCaptureFinished,
   onVoiceLevel,
   releaseMicMonitorSurface,
   validateVoiceHotkey,
@@ -94,10 +92,13 @@ import {
   voiceGetReport,
   voiceListDevices,
   voiceStartCalibration,
+  voiceStartDiagnosticCapture,
   voiceStartMicMonitor,
+  voiceStopDiagnosticCapture,
   voiceStopMicMonitor,
   type VoiceDiagnosticsDto,
   type VoiceDuckingMode,
+  type VoiceEngineMode,
   type VoiceInputMode,
   type VoiceNoiseMode,
 } from "../lib/voice";
@@ -117,12 +118,6 @@ interface SettingsModalProps {
   onClose: () => void;
   onApplyServerConfig?: (endpoint: string, password: string) => void;
 }
-
-const isCloudEndpoint = (endpoint: string): boolean =>
-  endpoint.trim().toLowerCase() === CLOUD_ENDPOINT.toLowerCase();
-
-const normalizePresetEndpoint = (endpoint: string): string =>
-  isCloudEndpoint(endpoint) ? CLOUD_ENDPOINT : SYNCPLAY_ENDPOINT;
 
 const PRIMARY_NAV: ReadonlyArray<{ value: SettingsTab; label: string }> = [
   { value: "profile", label: "Profile" },
@@ -294,7 +289,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const reactionsEnabled = useAppStore((s) => s.reactionsEnabled);
   const chatPeeksEnabled = useAppStore((s) => s.chatPeeksEnabled);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
-  const partyDisplayMode = useAppStore((s) => s.partyDisplayMode);
+  const chatImageMode = useAppStore((s) => s.chatImageMode);
+  const chatImageRetention = useAppStore((s) => s.chatImageRetention);
   const fullWidthPlayBar = useAppStore((s) => s.fullWidthPlayBar);
   const playBarOpacity = useAppStore((s) => s.playBarOpacity);
   const autoCheckUpdates = useAppStore((s) => s.autoCheckUpdates);
@@ -302,6 +298,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   const setUsername = useAppStore((s) => s.setUsername);
   const setAvatarId = useAppStore((s) => s.setAvatarId);
+  const [avatarStudioOpen, setAvatarStudioOpen] = useState(false);
   const setServerEndpoint = useAppStore((s) => s.setServerEndpoint);
   const setServerPassword = useAppStore((s) => s.setServerPassword);
   const setStoreAllowShares = useAppStore((s) => s.setAllowNetworkShares);
@@ -328,7 +325,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const setReactionsEnabled = useAppStore((s) => s.setReactionsEnabled);
   const setChatPeeksEnabled = useAppStore((s) => s.setChatPeeksEnabled);
   const setChatTriggerPlacement = useAppStore((s) => s.setChatTriggerPlacement);
-  const setPartyDisplayMode = useAppStore((s) => s.setPartyDisplayMode);
+  const setChatImageMode = useAppStore((s) => s.setChatImageMode);
+  const setChatImageRetention = useAppStore((s) => s.setChatImageRetention);
   const setFullWidthPlayBar = useAppStore((s) => s.setFullWidthPlayBar);
   const setPlayBarOpacity = useAppStore((s) => s.setPlayBarOpacity);
   const setAutoCheckUpdates = useAppStore((s) => s.setAutoCheckUpdates);
@@ -370,9 +368,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const cancelUpdateDownload = useUpdaterStore((s) => s.cancelDownload);
   const applyAndRestartUpdate = useUpdaterStore((s) => s.applyAndRestart);
 
-  const [endpointDraft, setEndpointDraft] = useState(() =>
-    normalizePresetEndpoint(serverEndpoint),
-  );
   const [passwordDraft, setPasswordDraft] = useState(serverPassword);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [playbackAdvancedOpen, setPlaybackAdvancedOpen] = useState(false);
@@ -407,7 +402,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const voiceNoiseMode = useVoiceStore((s) => s.noiseMode);
   const voiceDuckingMode = useVoiceStore((s) => s.duckingMode);
   const voiceEchoGuard = useVoiceStore((s) => s.echoGuardEnabled);
-  const voiceAecEnabled = useVoiceStore((s) => s.aecEnabled);
+  const voiceEngineMode = useVoiceStore((s) => s.engineMode);
+  const voiceUseWindowsCommAec = useVoiceStore((s) => s.useWindowsCommAec);
   const voiceAllowRelayForOthers = useVoiceStore((s) => s.allowRelayForOthers);
   const voiceAllowRelayedVoice = useVoiceStore((s) => s.allowRelayedVoice);
   const voiceMasterVolume = useVoiceStore((s) => s.masterVolume);
@@ -423,6 +419,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
   const updateVoiceConfig = useVoiceStore((s) => s.updateConfig);
   const setVoiceDevices = useVoiceStore((s) => s.setDevices);
   const setVoiceMicTestActive = useVoiceStore((s) => s.setMicTestActive);
+  const voiceDiagRecording = useVoiceStore((s) => s.diagCaptureRecording);
+  const voiceDiagResult = useVoiceStore((s) => s.diagCaptureResult);
+  const setVoiceDiagRecording = useVoiceStore((s) => s.setDiagCaptureRecording);
+  const setVoiceDiagResult = useVoiceStore((s) => s.setDiagCaptureResult);
+  const [diagBusy, setDiagBusy] = useState(false);
   const [capturingBind, setCapturingBind] = useState<"ptt" | "mute" | "deafen" | null>(null);
   const [hotkeyMessage, setHotkeyMessage] = useState<{ kind: "error" | "warn"; text: string } | null>(
     null,
@@ -516,7 +517,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   useEffect(() => {
     if (open) {
-      setEndpointDraft(normalizePresetEndpoint(serverEndpoint));
       setPasswordDraft(serverPassword);
       if (tab === "server" || tab === "logs") {
         setAdvancedOpen(true);
@@ -537,6 +537,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
       let unlistenLevel: (() => void) | null = null;
       let unlistenCal: (() => void) | null = null;
       let unlistenDev: (() => void) | null = null;
+      let unlistenDiagCap: (() => void) | null = null;
       void onVoiceLevel((lvl) => {
         if (active) {
           useVoiceStore.getState().setLocalLevel(lvl.db, lvl.speechProb, lvl.gateOpen);
@@ -571,6 +572,14 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
         if (active) unlistenCal = fn;
         else fn();
       });
+      void onVoiceDiagnosticCaptureFinished((res) => {
+        if (!active) return;
+        setVoiceDiagRecording(false);
+        setVoiceDiagResult(res);
+      }).then((fn) => {
+        if (active) unlistenDiagCap = fn;
+        else fn();
+      });
       void voiceListDevices(voiceInputDevice, voiceOutputDevice)
         .then((d) => {
           if (active) setVoiceDevices(d);
@@ -584,6 +593,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
         unlistenLevel?.();
         unlistenCal?.();
         unlistenDev?.();
+        unlistenDiagCap?.();
       };
     } else if (wasVoiceTabOpenRef.current) {
       wasVoiceTabOpenRef.current = false;
@@ -605,6 +615,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
     voiceOutputDevice,
     setVoiceDevices,
     setVoiceMicTestActive,
+    setVoiceDiagRecording,
+    setVoiceDiagResult,
     setVoiceCalibration,
     updateVoiceConfig,
     pushNote,
@@ -735,20 +747,11 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
   if (!mounted) return null;
 
-  const selectedBackend: "syncplay" | "cloud" = isCloudEndpoint(endpointDraft)
-    ? "cloud"
-    : "syncplay";
-
   const handleSaveServer = () => {
-    const check = validateServerEndpointInput(endpointDraft);
-    if (!check.ok || !check.endpoint) {
-      pushNote("error", check.reason ?? "Invalid server address.");
-      return;
-    }
-    setServerEndpoint(check.endpoint);
+    setServerEndpoint(CLOUD_ENDPOINT);
     setServerPassword(passwordDraft);
-    onApplyServerConfig?.(check.endpoint, passwordDraft);
-    pushNote("success", `Connection updated to ${check.endpoint}.`);
+    onApplyServerConfig?.(CLOUD_ENDPOINT, passwordDraft);
+    pushNote("success", "Room password updated.");
     onClose();
   };
 
@@ -927,30 +930,43 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
             </button>
           </div>
 
-          <div className="ep-settings-scroll flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden pl-6 pr-[18px] mr-1.5 mt-1 mb-4 pt-2 pb-2">
+          <div
+            className={`ep-settings-scroll flex-1 min-h-0 min-w-0 pl-6 pr-[18px] mr-1.5 mt-1 mb-4 pb-2 ${
+              tab === "profile" && avatarStudioOpen
+                ? "pt-0 overflow-hidden flex flex-col"
+                : "pt-2 overflow-y-auto overflow-x-hidden"
+            }`}
+          >
             {tab === "profile" && (
-              <div className="anim-tab-in px-3 py-1 space-y-4">
-                <div className="flex items-end gap-3">
-                  <ProfileAvatar
-                    avatarId={avatarId}
-                    size={40}
-                    className="ring-2 ring-accent/55 shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <TextField
-                      label="Display Name"
-                      value={username}
-                      maxLength={32}
-                      placeholder="Viewer"
-                      onChange={(e) => setUsername(e.target.value)}
+              <div
+                className={`anim-tab-in px-3 ${
+                  avatarStudioOpen ? "flex-1 min-h-0 flex flex-col" : "py-1 space-y-4"
+                }`}
+              >
+                <AnimatedCollapse open={!avatarStudioOpen} durationMs={220} className="-mx-2" innerClassName="px-2 pt-0.5 pb-1">
+                  <div className="flex items-end gap-3">
+                    <ProfileAvatar
+                      avatarId={avatarId}
+                      size={40}
+                      className="ring-2 ring-accent/55 shadow-[0_6px_18px_rgba(124,58,237,0.3)]"
                     />
+                    <div className="flex-1 min-w-0">
+                      <TextField
+                        label="Display Name"
+                        value={username}
+                        maxLength={32}
+                        placeholder="Viewer"
+                        onChange={(e) => setUsername(e.target.value)}
+                      />
+                    </div>
                   </div>
-                </div>
+                </AnimatedCollapse>
 
                 <AvatarPicker
                   value={avatarId}
                   onChange={setAvatarId}
                   compact
+                  onStudioModeChange={setAvatarStudioOpen}
                 />
               </div>
             )}
@@ -970,8 +986,8 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     fullWidth
                     value={fullWidthPlayBar ? "full-width" : "floating"}
                     items={[
-                      { value: "floating", label: "Floating Capsule" },
                       { value: "full-width", label: "Full-Width Bar" },
+                      { value: "floating", label: "Floating Capsule" },
                     ]}
                     onChange={(mode) => setFullWidthPlayBar(mode === "full-width")}
                   />
@@ -983,10 +999,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       Play Bar Opacity
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {playBarOpacity !== 60 && (
+                      {playBarOpacity !== DEFAULT_PLAY_BAR_OPACITY && (
                         <button
                           type="button"
-                          onClick={() => setPlayBarOpacity(60)}
+                          onClick={() => setPlayBarOpacity(DEFAULT_PLAY_BAR_OPACITY)}
                           className="ep-press text-[11px] font-medium text-accent-soft hover:text-white cursor-pointer"
                         >
                           Reset
@@ -1320,21 +1336,6 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                 />
 
                 <div className="px-3 py-3 space-y-2.5">
-                  <div className="text-[13px] font-medium text-white">Party Lounge Layout</div>
-                  <SegmentedTabs<PartyDisplayMode>
-                    ariaLabel="Party Lounge Layout"
-                    size="sm"
-                    fullWidth
-                    value={partyDisplayMode}
-                    onChange={setPartyDisplayMode}
-                    items={[
-                      { value: "popover", label: "Play Bar Popover" },
-                      { value: "sidebar", label: "Left Sidebar" },
-                    ]}
-                  />
-                </div>
-
-                <div className="px-3 py-3 space-y-2.5">
                   <div className="text-[13px] font-medium text-white">Chat Button Placement</div>
                   <SegmentedTabs<ChatTriggerPlacement>
                     ariaLabel="Chat Button Placement"
@@ -1348,6 +1349,49 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                     ]}
                   />
                 </div>
+
+                <div className="px-3 py-3 space-y-2.5">
+                  <div className="space-y-0.5">
+                    <div className="text-[13px] font-medium text-white">Ephemeral Chat Photos</div>
+                    <div className="text-[11px] text-muted">
+                      Tap to Load saves bandwidth &amp; RAM; Off disables receiving photos
+                    </div>
+                  </div>
+                  <SegmentedTabs<ChatImageMode>
+                    ariaLabel="Ephemeral Chat Photos"
+                    size="sm"
+                    fullWidth
+                    value={chatImageMode}
+                    onChange={setChatImageMode}
+                    items={[
+                      { value: "auto", label: "Auto" },
+                      { value: "tap", label: "Tap to Load" },
+                      { value: "off", label: "Off" },
+                    ]}
+                  />
+                </div>
+
+                {chatImageMode !== "off" && (
+                  <div className="px-3 py-3 space-y-2.5">
+                    <div className="space-y-0.5">
+                      <div className="text-[13px] font-medium text-white">Photo Retention</div>
+                      <div className="text-[11px] text-muted">
+                        Auto-clears after 30 minutes with a countdown ring, or stays until you leave
+                      </div>
+                    </div>
+                    <SegmentedTabs<ChatImageRetention>
+                      ariaLabel="Photo Retention"
+                      size="sm"
+                      fullWidth
+                      value={chatImageRetention}
+                      onChange={setChatImageRetention}
+                      items={[
+                        { value: "30m", label: "30 Minutes" },
+                        { value: "session", label: "Entire Session" },
+                      ]}
+                    />
+                  </div>
+                )}
 
                 <ComfortSwitchRow
                   title="Subtle Party Sound Cues"
@@ -1755,11 +1799,36 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   </button>
 
                   <AnimatedCollapse open={voiceAdvancedOpen} innerClassName="pt-2 space-y-2.5">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <div className="text-[12.5px] font-medium text-white">Voice Engine</div>
+                        <InfoTipDot tip="Epilod Aura uses our custom neural denoiser, WPE dereverberation, and Discord-like VAD. Classic restores legacy behavior." />
+                      </div>
+                      <SegmentedTabs<VoiceEngineMode>
+                        ariaLabel="Voice Engine"
+                        size="sm"
+                        fullWidth
+                        value={voiceEngineMode}
+                        onChange={(m) => updateVoiceConfig({ engineMode: m })}
+                        items={[
+                          { value: "aura", label: "Epilod Aura (Recommended)" },
+                          { value: "classic", label: "Classic" },
+                        ]}
+                      />
+                    </div>
+
                     <ComfortSwitchRow
                       title="Echo Protection"
-                      tip="Prevents speaker playback from leaking back into your mic"
-                      checked={voiceEchoGuard || voiceAecEnabled}
-                      onChange={(v) => updateVoiceConfig({ echoGuardEnabled: v, aecEnabled: v })}
+                      tip="Detects speaker-to-mic leak and applies echo cancellation when speakers are active"
+                      checked={voiceEchoGuard}
+                      onChange={(v) => updateVoiceConfig({ echoGuardEnabled: v })}
+                    />
+
+                    <ComfortSwitchRow
+                      title="Windows Hardware AEC (Communications)"
+                      tip="Uses Windows Communications capture mode (may trigger OEM mic processing on some laptops)"
+                      checked={voiceUseWindowsCommAec}
+                      onChange={(v) => updateVoiceConfig({ useWindowsCommAec: v })}
                     />
 
                     <ComfortSwitchRow
@@ -1790,13 +1859,21 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                       {voiceDiag ? (
                         <div className="space-y-1.5">
                           <div className="text-secondary num">
-                            NAT: {voiceDiag.natMode} · Stream: {voiceDiag.streamStatus} · AEC:{" "}
-                            {voiceDiag.aecBackend} · Bitrate: {voiceDiag.bitrateKbps} kbps · Relays:{" "}
+                            NAT: {voiceDiag.natMode} · Stream: {voiceDiag.streamStatus} · Capture:{" "}
+                            {voiceDiag.captureBackend} · AEC: {voiceDiag.aecBackend} · Bitrate:{" "}
+                            {voiceDiag.bitrateKbps} kbps · Relays:{" "}
                             {voiceDiag.activeRelayStreams}/{voiceDiag.relayCapacityStreams}
                           </div>
                           <div className="text-secondary num">
                             Targets: {voiceDiag.txTargetCount} · Avg Loss: {voiceDiag.avgLossPct.toFixed(1)}% ·
                             Jitter: {voiceDiag.avgJitterMs} ms · Duck: {Math.round(voiceDiag.duckFactor * 100)}%
+                          </div>
+                          <div className="text-secondary num">
+                            DSP: {voiceDiag.dspAvgFrameUs} µs avg / {voiceDiag.dspMaxFrameUs} µs max (
+                            {voiceDiag.dspOverrunFrames} overruns) · TX drops:{" "}
+                            {voiceDiag.txFifoDroppedFrames} · Gate toggles:{" "}
+                            {voiceDiag.gateTransitions} · RX underruns: {voiceDiag.rxJitterUnderruns} ·
+                            Rate drops: {voiceDiag.rxRateLimitedDrops}
                           </div>
                           {voiceDiag.streamError && (
                             <div className="text-bad">{voiceDiag.streamError}</div>
@@ -1837,6 +1914,69 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                           Voice diagnostics ready once connected or mic monitor starts.
                         </div>
                       )}
+                      <div className="pt-1.5 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-muted">
+                            Local only — never uploaded. Records up to 60s before &amp; after DSP.
+                          </span>
+                          {voiceDiagRecording ? (
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              disabled={diagBusy}
+                              onClick={() => {
+                                setDiagBusy(true);
+                                void voiceStopDiagnosticCapture()
+                                  .then((res) => {
+                                    setVoiceDiagRecording(false);
+                                    if (res) {
+                                      setVoiceDiagResult(res);
+                                      pushNote(
+                                        "success",
+                                        `Saved ${res.durationSec.toFixed(1)}s local voice diagnostic.`,
+                                      );
+                                    }
+                                  })
+                                  .catch((err) => {
+                                    setVoiceDiagRecording(false);
+                                    pushNote("error", String(err));
+                                  })
+                                  .finally(() => setDiagBusy(false));
+                              }}
+                            >
+                              Stop &amp; Save Recording
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              disabled={diagBusy || !isDesktop() || !voiceEnabled}
+                              onClick={() => {
+                                setDiagBusy(true);
+                                void voiceStartDiagnosticCapture(60)
+                                  .then(() => {
+                                    setVoiceDiagRecording(true);
+                                    setVoiceDiagResult(null);
+                                  })
+                                  .catch((err) => pushNote("error", String(err)))
+                                  .finally(() => setDiagBusy(false));
+                              }}
+                            >
+                              Record Local Voice Diagnostic (Raw vs Processed)
+                            </Button>
+                          )}
+                        </div>
+                        {voiceDiagResult && (
+                          <div className="rounded-lg bg-white/[0.04] px-2.5 py-1.5 space-y-0.5 text-[10.5px] text-secondary break-words num">
+                            <div className="text-white font-medium">
+                              Saved {voiceDiagResult.durationSec.toFixed(1)}s @{" "}
+                              {voiceDiagResult.sampleRate} Hz:
+                            </div>
+                            <div>Raw: {voiceDiagResult.rawPath}</div>
+                            <div>Processed: {voiceDiagResult.processedPath}</div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </AnimatedCollapse>
                 </div>
@@ -2498,7 +2638,7 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
                 <div className="px-3 py-2 space-y-2.5">
                   <div className="flex items-center gap-1.5">
-                    <div className="text-[13px] font-medium text-white">App Updates</div>
+                    <div className="text-[13px] font-medium text-white">Update Behavior</div>
                     <InfoTipDot tip="Auto installs updates in the background; Notify checks and lets you download manually" />
                   </div>
                   <SegmentedTabs<"auto" | "notify" | "manual">
@@ -2530,41 +2670,19 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
 
             {tab === "server" && (
               <div className="anim-tab-in space-y-4">
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <div className="flex items-center gap-1.5">
-                    <div className="text-xs font-medium text-white">Sync Backend</div>
-                    <InfoTipDot tip="Friends in the same room must use the same server." />
+                    <div className="text-xs font-medium text-white">Sync Server</div>
+                    <InfoTipDot tip="Everyone uses Epilod Cloud so 6-digit room codes always match." />
                   </div>
-                  <SegmentedTabs<"syncplay" | "cloud">
-                    ariaLabel="Sync Backend"
-                    size="sm"
-                    fullWidth
-                    value={selectedBackend}
-                    items={[
-                      {
-                        value: "syncplay",
-                        label: "Syncplay Public",
-                        title: "Default · syncplay.pl:8999",
-                      },
-                      {
-                        value: "cloud",
-                        label: "Epilod Cloud",
-                        title: "Cloudflare Edge · TLS",
-                      },
-                    ]}
-                    onChange={(mode) => {
-                      setEndpointDraft(mode === "cloud" ? CLOUD_ENDPOINT : SYNCPLAY_ENDPOINT);
-                    }}
-                  />
-                  <div className="text-[11px] text-secondary px-1">
-                    {selectedBackend === "cloud"
-                      ? "Cloudflare Edge · TLS"
-                      : "Default · syncplay.pl:8999"}
+                  <div className="ep-glass-input rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-white">Epilod Cloud</span>
+                    <span className="text-[11px] text-secondary">Cloudflare Edge · TLS</span>
                   </div>
                 </div>
 
                 <TextField
-                  label="Server / Room Password (Optional)"
+                  label="Room Password (Optional)"
                   type="password"
                   value={passwordDraft}
                   maxLength={128}
@@ -2573,20 +2691,10 @@ export function SettingsModal({ open, onClose, onApplyServerConfig }: SettingsMo
                   hint="Never saved to disk."
                 />
 
-                <div className="flex items-center justify-between pt-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setEndpointDraft(DEFAULT_ENDPOINT);
-                    }}
-                  >
-                    <AppResetIcon size={13} />
-                    Reset Default
-                  </Button>
+                <div className="flex items-center justify-end pt-1">
                   <Button variant="primary" size="sm" onClick={handleSaveServer}>
                     <AppCheckIcon size={13} />
-                    Save Connection
+                    Save Password
                   </Button>
                 </div>
 

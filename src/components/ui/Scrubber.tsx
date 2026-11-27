@@ -18,6 +18,7 @@ interface ScrubberProps {
   onChange: (val: number, meta?: ScrubberChangeMeta) => void;
   onCommit?: (val: number) => void;
   highlightRange?: { start: number; end: number } | null;
+  hotspots?: Array<{ secs: number; total: number; topEmoji: string }>;
   alwaysShowThumb?: boolean;
   className?: string;
 }
@@ -42,6 +43,7 @@ export function Scrubber({
   onChange,
   onCommit,
   highlightRange = null,
+  hotspots,
   alwaysShowThumb = false,
   className = "",
 }: ScrubberProps) {
@@ -277,6 +279,20 @@ export function Scrubber({
             }}
           />
         )}
+        {hotspots &&
+          hotspots.length > 0 &&
+          max > min &&
+          hotspots.map((spot) => {
+            const pct = clamp(((spot.secs - min) / (max - min)) * 100, 1, 99);
+            return (
+              <span
+                key={spot.secs}
+                aria-hidden="true"
+                className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-1.5 w-1.5 rounded-full bg-amber-300/85 shadow-[0_0_6px_rgba(251,191,36,0.8)]"
+                style={{ left: `${pct}%` }}
+              />
+            );
+          })}
       </div>
       <div
         className="pointer-events-none absolute inset-y-0 -inset-x-2 overflow-x-clip"

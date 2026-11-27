@@ -9,10 +9,14 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 pub const EP2_CHAT_PREFIX: &str = "~EP2:";
+pub const EP2_AVATAR_PREFIX: &str = "~EP2:AV:";
 pub const EP_REACTION_CHAT_PREFIX: &str = "~EPR:";
 pub const EP_RATING_CHAT_PREFIX: &str = "~EPV:";
 pub const EP_CHAT_TEXT_PREFIX: &str = "~EPT:";
 pub const EP_CHAT_REACT_PREFIX: &str = "~EPCR:";
+pub const EP_CHAT_SEEN_PREFIX: &str = "~EPCS:";
+pub const MAX_CHAT_IMAGE_BYTES: usize = 200 * 1024;
+pub const MAX_CHAT_IMAGE_CAPTION_CHARS: usize = 220;
 pub const MAX_CHAT_BEACON_CHARS: usize = 144;
 pub const MAX_CHAT_REACTION_CHARS: usize = 144;
 pub const MAX_CHAT_FALLBACK_LINE_CHARS: usize = 144;
@@ -335,6 +339,25 @@ pub fn sanitize_avatar_id(raw: &str) -> String {
         .collect()
 }
 
+pub fn encode_ep2_avatar(avatar_id: &str) -> Option<String> {
+    let clean = sanitize_avatar_id(avatar_id);
+    if clean.is_empty() {
+        None
+    } else {
+        Some(format!("{EP2_AVATAR_PREFIX}{clean}"))
+    }
+}
+
+pub fn decode_ep2_avatar(raw: &str) -> Option<String> {
+    let body = raw.trim().strip_prefix(EP2_AVATAR_PREFIX)?;
+    let clean = sanitize_avatar_id(body);
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionFallbackPacket {
     pub avatar_id: String,
@@ -630,6 +653,34 @@ pub fn decode_epcr_chat_react(message: &str) -> Option<ChatReactFallbackPacket> 
     let raw_emoji = std::str::from_utf8(&bytes).ok()?;
     let emoji = sanitize_reaction_emoji(raw_emoji)?;
     Some(ChatReactFallbackPacket { msg_id, emoji })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatSeenFallbackPacket {
+    pub last_msg_id: String,
+}
+
+pub fn encode_epcs_chat_seen(last_msg_id: &str) -> Option<String> {
+    let msg_id = sanitize_chat_id(last_msg_id);
+    if msg_id.is_empty() {
+        return None;
+    }
+    let short_id: String = msg_id.chars().take(16).collect();
+    let encoded = format!("{EP_CHAT_SEEN_PREFIX}{short_id}");
+    if encoded.len() > MAX_CHAT_FALLBACK_LINE_CHARS {
+        None
+    } else {
+        Some(encoded)
+    }
+}
+
+pub fn decode_epcs_chat_seen(message: &str) -> Option<ChatSeenFallbackPacket> {
+    let body = message.trim().strip_prefix(EP_CHAT_SEEN_PREFIX)?;
+    let last_msg_id = sanitize_chat_id(body);
+    if last_msg_id.is_empty() {
+        return None;
+    }
+    Some(ChatSeenFallbackPacket { last_msg_id })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2239,6 +2290,18 @@ mod tests {
     }
 
     #[test]
+    fn ep2_avatar_presence_roundtrip_and_beacon_isolation() {
+        let custom_id = "c1-0123456789abcde";
+        assert_eq!(sanitize_avatar_id(custom_id), custom_id);
+
+        let encoded = encode_ep2_avatar(custom_id).expect("encode custom avatar");
+        assert_eq!(encoded, "~EP2:AV:c1-0123456789abcde");
+        assert_eq!(decode_ep2_avatar(&encoded), Some(custom_id.to_string()));
+        assert_eq!(decode_ep2_avatar("~EP2:AV:"), None);
+        assert!(decode_ep2_beacon(&encoded).is_none());
+    }
+
+    #[test]
     fn ept_chat_single_and_multichunk_roundtrip_including_arabic_and_emoji() {
         let short = ChatFallbackPacket {
             msg_id: "m1234567890".to_string(),
@@ -2278,6 +2341,16 @@ mod tests {
         let react_wire = encode_epcr_chat_react(&react_pkt).expect("encode epcr");
         assert!(react_wire.len() <= MAX_CHAT_FALLBACK_LINE_CHARS);
         assert_eq!(decode_epcr_chat_react(&react_wire), Some(react_pkt));
+
+        let seen_wire = encode_epcs_chat_seen("m1234567890").expect("encode epcs");
+        assert_eq!(seen_wire, "~EPCS:m1234567890");
+        assert_eq!(
+            decode_epcs_chat_seen(&seen_wire),
+            Some(ChatSeenFallbackPacket {
+                last_msg_id: "m1234567890".to_string()
+            })
+        );
+        assert_eq!(decode_epcs_chat_seen("~EPCS:"), None);
 
         let long_text = "Hold on!! ".repeat(45);
         let long = ChatFallbackPacket {

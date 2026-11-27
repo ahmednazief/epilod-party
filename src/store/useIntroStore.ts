@@ -57,6 +57,13 @@ export function buildIntroSegmentKey(
   )}`;
 }
 
+/** Path-free key for network skip-vote sync so local folder paths are never leaked or mismatched. */
+export function buildIntroVoteKey(
+  seg: Pick<DetectedIntro, "kind" | "startSecs">
+): string {
+  return `${seg.kind}:${Math.round(seg.startSecs / 10)}`;
+}
+
 export function getEffectiveIntroSegments(
   segments: DetectedIntro[],
   manualIntro: ManualIntroBounds | null
@@ -172,6 +179,9 @@ interface IntroState {
   autoSkippedKeys: string[];
   dismissedOutroKeys: string[];
   autoAdvancedOutroKeys: string[];
+  skipVotesBySegKey: Record<string, string[]>;
+  recordSkipVote: (segKey: string, username: string) => void;
+  clearSkipVotes: () => void;
 
   resetForVideo: (videoPath?: string | null) => void;
   setChapters: (chapters: MpvChapter[]) => void;
@@ -211,6 +221,7 @@ export const useIntroStore = create<IntroState>((set, get) => ({
       autoSkippedKeys: [],
       dismissedOutroKeys: [],
       autoAdvancedOutroKeys: [],
+      skipVotesBySegKey: {},
     });
   },
 
@@ -284,4 +295,24 @@ export const useIntroStore = create<IntroState>((set, get) => ({
         ? s
         : { autoAdvancedOutroKeys: [...s.autoAdvancedOutroKeys, outroKey] }
     ),
+
+  skipVotesBySegKey: {},
+
+  recordSkipVote: (segKey, username) =>
+    set((s) => {
+      const cleanUser = username.trim();
+      if (!segKey || !cleanUser) return s;
+      const existing = s.skipVotesBySegKey[segKey] ?? [];
+      if (existing.some((u) => u.toLowerCase() === cleanUser.toLowerCase())) {
+        return s;
+      }
+      return {
+        skipVotesBySegKey: {
+          ...s.skipVotesBySegKey,
+          [segKey]: [...existing, cleanUser],
+        },
+      };
+    }),
+
+  clearSkipVotes: () => set({ skipVotesBySegKey: {} }),
 }));

@@ -9,10 +9,11 @@ use crate::syncplay::{
 use crate::voice::VoiceController;
 use epilod_core::cloud_sync::{
     build_cloud_http_base, build_cloud_peek_path_with_proofs, build_cloud_ws_url,
-    compute_playback_action, decode_http_response_body, default_peek_secret, hash_room_password,
-    peek_proof_for_room, sha256_hex, should_apply_welcome_state, ClockSyncEstimator,
-    CloudClientMsg, CloudParticipant, CloudPeekResponse, CloudPlaybackState, CloudResumeHint,
-    CloudRoomControl, CloudServerMsg, DriftAction, DriftController,
+    compute_echo_suppression_ms, compute_playback_action, compute_welcome_playback_action,
+    decode_http_response_body, default_peek_secret, hash_room_password, peek_proof_for_room,
+    sha256_hex, should_apply_welcome_state, ClockSyncEstimator, CloudClientMsg, CloudParticipant,
+    CloudPeekResponse, CloudPlaybackState, CloudResumeHint, CloudRoomControl, CloudServerMsg,
+    DriftAction, DriftController,
 };
 use epilod_core::matching::analyze_files;
 use epilod_core::mpv_ipc::{set_pause_cmd, set_speed_cmd};
@@ -39,10 +40,12 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const MAX_CLAIM_REROLLS: u8 = 5;
-const ECHO_SUPPRESSION_MS: u64 = 1200;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
-const PONG_DEADLINE: Duration = Duration::from_secs(6);
+const PING_RETRY_AFTER: Duration = Duration::from_secs(8);
+const PONG_DEADLINE: Duration = Duration::from_secs(16);
+const FAST_CLOCK_CALIBRATION_INTERVAL: Duration = Duration::from_secs(15);
 const CLOCK_RESYNC_INTERVAL: Duration = Duration::from_secs(180);
 const HEALTH_EMIT_INTERVAL: Duration = Duration::from_secs(5);
 const STATUS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -101,6 +104,7 @@ impl CloudOutbox {
             c @ (SyncCommand::SendChat { .. }
             | SyncCommand::SendChatEdit { .. }
             | SyncCommand::SendChatReact { .. }
+            | SyncCommand::SendChatSeen { .. }
             | SyncCommand::SendReaction { .. }
             | SyncCommand::SendRatingVote { .. }
             | SyncCommand::SendSubtitleShare { .. }) => {
@@ -229,7 +233,7 @@ async fn connect_ws_nodelay(
                 }
                 if status == 429 || status == 503 {
                     return Err(CloudSessionExit::QuotaExceeded {
-                        message: "Epilod Cloud is currently at capacity or rate-limited. You can switch to Syncplay (syncplay.pl:8999) in Settings.".to_string(),
+                        message: "Epilod Cloud is currently at capacity or rate-limited. Please retry in a moment.".to_string(),
                     });
                 }
                 Err(CloudSessionExit::Error {
@@ -249,6 +253,17 @@ async fn connect_ws_nodelay(
             message: "Connection timed out".to_string(),
             was_connected: false,
         }),
+    }
+}
+
+async fn send_ws_bounded<S>(ws_tx: &mut S, frame: Message) -> Result<(), String>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(WS_SEND_TIMEOUT, ws_tx.send(frame)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("WebSocket send timed out".to_string()),
     }
 }
 
@@ -385,6 +400,7 @@ pub async fn run_cloud_sync_loop(
     let mut rerolled_code_to_emit: Option<String> = None;
     let mut persisted_host_token: Option<String> = None;
     let mut last_known_room_state: Option<(f64, bool)> = None;
+    let mut clock = ClockSyncEstimator::new();
     let mut outbox = CloudOutbox::default();
     let mut reconnects: u32 = 0;
 
@@ -444,6 +460,7 @@ pub async fn run_cloud_sync_loop(
             host_only,
             &mut persisted_host_token,
             &mut last_known_room_state,
+            &mut clock,
             &mut outbox,
             reconnects,
             &mut rx,
@@ -640,7 +657,7 @@ pub async fn run_cloud_sync_loop(
                         cmd = rx.recv() => {
                             match cmd {
                                 None => { should_exit = true; break; }
-                                Some(SyncCommand::ManualRetry) => {
+                                Some(SyncCommand::ManualRetry | SyncCommand::ForceResync) => {
                                     policy.manual_retry();
                                     break;
                                 }
@@ -677,6 +694,7 @@ async fn run_single_cloud_session(
     host_only: bool,
     persisted_host_token: &mut Option<String>,
     last_known_room_state: &mut Option<(f64, bool)>,
+    clock: &mut ClockSyncEstimator,
     outbox: &mut CloudOutbox,
     reconnects: u32,
     rx: &mut mpsc::Receiver<SyncCommand>,
@@ -744,9 +762,9 @@ async fn run_single_cloud_session(
         client_ms: Some(hello_sent_at_ms),
     };
     if let Some(frame) = send_msg(&hello) {
-        if let Err(e) = ws_tx.send(frame).await {
+        if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
             return CloudSessionExit::Error {
-                message: e.to_string(),
+                message,
                 was_connected: false,
             };
         }
@@ -756,15 +774,10 @@ async fn run_single_cloud_session(
     if let Some(frame) = send_msg(&CloudClientMsg::Ping {
         client_ms: now_epoch_ms(),
     }) {
-        let _ = ws_tx.send(frame).await;
+        let _ = send_ws_bounded(&mut ws_tx, frame).await;
     }
 
-    let mut clock = ClockSyncEstimator::new();
-    let drift_ctrl = DriftController {
-        min_deadband_secs: 0.08,
-        min_seek_threshold_secs: 2.50,
-        max_seek_threshold_secs: 3.50,
-    };
+    let drift_ctrl = DriftController::cloud_resilient();
     let mut active_username = username.to_string();
     let mut was_connected = false;
     let mut needs_initial_media_sync = false;
@@ -784,11 +797,15 @@ async fn run_single_cloud_session(
     let mut last_speed: f64 = 1.0;
     let mut last_applied_mpv_speed: f64 = 1.0;
     let mut last_local_action_at: Option<Instant> = None;
+    let mut awaiting_self_echo = false;
     let mut last_seek_dispatched_at: Option<Instant> = None;
     let mut pause_mismatch_ticks: u8 = 0;
+    let mut drift_breach_ticks: u8 = 0;
+    let mut seek_breach_ticks: u8 = 0;
     let mut force_snap_next_state = false;
     let mut extra_pings_left: u8 = 2;
     let mut awaiting_pong_since: Option<Instant> = None;
+    let mut sent_ping_retry = false;
     let mut last_ping_sent_at: Option<Instant> = None;
     let mut last_buffering_sent = mpv.is_buffering();
     let mut unparseable_count: u32 = 0;
@@ -830,6 +847,11 @@ async fn run_single_cloud_session(
     let mut keepalive_tick = tokio::time::interval(KEEPALIVE_INTERVAL);
     keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     keepalive_tick.tick().await;
+
+    // Fast 15s clock calibration while only high-RTT / cold-start samples are available.
+    let mut fast_clock_tick = tokio::time::interval(FAST_CLOCK_CALIBRATION_INTERVAL);
+    fast_clock_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    fast_clock_tick.tick().await;
 
     // Periodic JSON ping every 3 min to keep ClockSyncEstimator calibrated across route changes.
     let mut clock_resync_tick = tokio::time::interval(CLOCK_RESYNC_INTERVAL);
@@ -880,15 +902,16 @@ async fn run_single_cloud_session(
             _ = seek_sleep => {
                 pending_seek_deadline = None;
                 if let Some(local_pos) = pending_seek_pos.take() {
+                    awaiting_self_echo = true;
                     last_local_action_at = Some(Instant::now());
                     let hint_room = last_state
                         .as_ref()
                         .map(|s| s.projected_position(clock.estimated_server_ms(now_epoch_ms())));
-                    if let Some(frame) = build_seek_frame(local_pos, &clock, hint_room) {
+                    if let Some(frame) = build_seek_frame(local_pos, clock, hint_room) {
                         last_seek_sent_at = Some(Instant::now());
-                        if let Err(e) = ws_tx.send(frame).await {
+                        if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
                             break CloudSessionExit::Error {
-                                message: e.to_string(),
+                                message,
                                 was_connected,
                             };
                         }
@@ -897,11 +920,26 @@ async fn run_single_cloud_session(
             }
 
             _ = local_drift_tick.tick() => {
-                if awaiting_pong_since.is_some_and(|t| t.elapsed() >= PONG_DEADLINE) {
-                    break CloudSessionExit::Error {
-                        message: "Connection stalled (keepalive timeout)".to_string(),
-                        was_connected,
-                    };
+                if let Some(since) = awaiting_pong_since {
+                    let elapsed = since.elapsed();
+                    if elapsed >= PONG_DEADLINE {
+                        break CloudSessionExit::Error {
+                            message: "Connection stalled (keepalive timeout)".to_string(),
+                            was_connected,
+                        };
+                    }
+                    if elapsed >= PING_RETRY_AFTER && !sent_ping_retry {
+                        sent_ping_retry = true;
+                        last_ping_sent_at = Some(Instant::now());
+                        if let Err(message) =
+                            send_ws_bounded(&mut ws_tx, Message::Text("ping".to_string())).await
+                        {
+                            break CloudSessionExit::Error {
+                                message,
+                                was_connected,
+                            };
+                        }
+                    }
                 }
                 if is_scrubbing || mpv.is_loading_media() || mpv.is_seeking() {
                     continue;
@@ -919,25 +957,30 @@ async fn run_single_cloud_session(
                 );
                 if needs_initial_media_sync && local_file.lock().ok().is_some_and(|g| g.is_some()) {
                     needs_initial_media_sync = false;
-                    let did_seek = apply_remote_playback_state(
+                    let did_seek = apply_welcome_playback_state(
                         app,
                         mpv,
                         st,
-                        &clock,
-                        &drift_ctrl,
+                        clock,
                         timeline_transform,
                         timeline_segments,
+                        reconnects > 0,
                     );
                     if did_seek {
                         last_seek_dispatched_at = Some(Instant::now());
                     }
                     continue;
                 }
+                let echo_ms = compute_echo_suppression_ms(
+                    clock.last_rtt_ms().or_else(|| clock.best_rtt_ms()),
+                    awaiting_self_echo,
+                );
                 let in_echo = last_local_action_at
-                    .is_some_and(|t| t.elapsed() < Duration::from_millis(ECHO_SUPPRESSION_MS));
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(echo_ms));
                 if in_echo {
                     continue;
                 }
+                awaiting_self_echo = false;
                 let tx = timeline_transform.lock().ok().map(|g| *g).unwrap_or_default();
                 let segs = timeline_segments.lock().ok().map(|g| g.clone()).unwrap_or_default();
                 let target_local = map_room_to_local_piecewise(room_pos, tx, &segs);
@@ -969,6 +1012,8 @@ async fn run_single_cloud_session(
                     .is_some_and(|t| t.elapsed() < POST_SEEK_SETTLE);
 
                 if st.paused {
+                    seek_breach_ticks = 0;
+                    drift_breach_ticks = 0;
                     let base_speed = tx.effective_speed(1.0);
                     if soft_speed_active || (last_applied_mpv_speed - base_speed).abs() > 0.0005 {
                         soft_speed_active = false;
@@ -987,30 +1032,43 @@ async fn run_single_cloud_session(
                 let jitter_secs = clock.jitter_ms() / 1000.0;
                 match drift_ctrl.decide(drift, jitter_secs, soft_speed_active, last_speed) {
                     DriftAction::Seek => {
-                        let base_speed = tx.effective_speed(1.0);
-                        if soft_speed_active || (last_applied_mpv_speed - base_speed).abs() > 0.0005 {
-                            soft_speed_active = false;
-                            last_speed = 1.0;
-                            last_applied_mpv_speed = base_speed;
-                            let req = mpv.next_request_id();
-                            let _ = mpv.send_command(set_speed_cmd(req, base_speed));
-                        }
-                        if !seek_on_cooldown {
-                            last_seek_dispatched_at = Some(Instant::now());
-                            let lead = mpv.seek_lead_secs();
-                            let _ = mpv.dispatch_seek((target_local + lead).max(0.0), false, None);
+                        seek_breach_ticks = seek_breach_ticks.saturating_add(1);
+                        drift_breach_ticks = 0;
+                        if seek_breach_ticks >= 2 {
+                            seek_breach_ticks = 0;
+                            let base_speed = tx.effective_speed(1.0);
+                            if soft_speed_active || (last_applied_mpv_speed - base_speed).abs() > 0.0005 {
+                                soft_speed_active = false;
+                                last_speed = 1.0;
+                                last_applied_mpv_speed = base_speed;
+                                let req = mpv.next_request_id();
+                                let _ = mpv.send_command(set_speed_cmd(req, base_speed));
+                            }
+                            if !seek_on_cooldown {
+                                last_seek_dispatched_at = Some(Instant::now());
+                                let lead = mpv.seek_lead_secs();
+                                let _ = mpv.dispatch_seek((target_local + lead).max(0.0), false, None);
+                            }
                         }
                     }
                     DriftAction::SetSpeed(speed) if !in_post_seek_settle => {
-                        soft_speed_active = true;
-                        last_speed = speed;
-                        let effective_speed = tx.effective_speed(speed);
-                        last_applied_mpv_speed = effective_speed;
-                        let req = mpv.next_request_id();
-                        let _ = mpv.send_command(set_speed_cmd(req, effective_speed));
+                        seek_breach_ticks = 0;
+                        drift_breach_ticks = drift_breach_ticks.saturating_add(1);
+                        if soft_speed_active || drift_breach_ticks >= 2 {
+                            soft_speed_active = true;
+                            last_speed = speed;
+                            let effective_speed = tx.effective_speed(speed);
+                            last_applied_mpv_speed = effective_speed;
+                            let req = mpv.next_request_id();
+                            let _ = mpv.send_command(set_speed_cmd(req, effective_speed));
+                        }
                     }
-                    DriftAction::SetSpeed(_) => {}
+                    DriftAction::SetSpeed(_) => {
+                        seek_breach_ticks = 0;
+                    }
                     DriftAction::ResetSpeed => {
+                        seek_breach_ticks = 0;
+                        drift_breach_ticks = 0;
                         soft_speed_active = false;
                         last_speed = 1.0;
                         let base_speed = tx.effective_speed(1.0);
@@ -1019,7 +1077,9 @@ async fn run_single_cloud_session(
                         let _ = mpv.send_command(set_speed_cmd(req, base_speed));
                     }
                     DriftAction::None => {
+                        seek_breach_ticks = 0;
                         if !soft_speed_active {
+                            drift_breach_ticks = 0;
                             let base_speed = tx.effective_speed(1.0);
                             if (last_applied_mpv_speed - base_speed).abs() > 0.0005 {
                                 last_applied_mpv_speed = base_speed;
@@ -1042,7 +1102,7 @@ async fn run_single_cloud_session(
                         position: mapped_pos,
                         buffering: cur_buf,
                     }) {
-                        let _ = ws_tx.send(frame).await;
+                        let _ = send_ws_bounded(&mut ws_tx, frame).await;
                     }
                 }
             }
@@ -1051,9 +1111,24 @@ async fn run_single_cloud_session(
                 // Zero-compute edge auto-response ("ping" -> "pong") keeps NAT/TLS alive & detects dead sockets.
                 let now_inst = Instant::now();
                 last_ping_sent_at = Some(now_inst);
-                awaiting_pong_since = Some(now_inst);
-                if let Err(e) = ws_tx.send(Message::Text("ping".to_string())).await {
-                    break CloudSessionExit::Error { message: e.to_string(), was_connected };
+                if awaiting_pong_since.is_none() {
+                    awaiting_pong_since = Some(now_inst);
+                    sent_ping_retry = false;
+                }
+                if let Err(message) =
+                    send_ws_bounded(&mut ws_tx, Message::Text("ping".to_string())).await
+                {
+                    break CloudSessionExit::Error { message, was_connected };
+                }
+            }
+
+            _ = fast_clock_tick.tick() => {
+                if was_connected && clock.needs_fast_calibration() {
+                    if let Some(frame) = send_msg(&CloudClientMsg::Ping {
+                        client_ms: now_epoch_ms(),
+                    }) {
+                        let _ = send_ws_bounded(&mut ws_tx, frame).await;
+                    }
                 }
             }
 
@@ -1062,7 +1137,7 @@ async fn run_single_cloud_session(
                     if let Some(frame) = send_msg(&CloudClientMsg::Ping {
                         client_ms: now_epoch_ms(),
                     }) {
-                        let _ = ws_tx.send(frame).await;
+                        let _ = send_ws_bounded(&mut ws_tx, frame).await;
                     }
                 }
             }
@@ -1246,6 +1321,7 @@ async fn run_single_cloud_session(
                     }
                     Some(Ok(Message::Text(text))) => {
                         awaiting_pong_since = None;
+                        sent_ping_retry = false;
                         if text == "pong" {
                             if let Some(sent_at) = last_ping_sent_at.take() {
                                 clock.record_rtt_only(sent_at.elapsed().as_secs_f64() * 1000.0);
@@ -1347,18 +1423,26 @@ async fn run_single_cloud_session(
                                     participants.iter().map(CloudParticipant::to_room_participant).collect(),
                                 ));
 
-                                // T2.6 + T1.1: Reconcile on Welcome when retained, multi-peer, or non-zero seq.
-                                if should_apply_welcome_state(retained, state.seq, participants.len()) {
+                                // T2.6 + T1.1: Reconcile on Welcome when retained, multi-peer, or non-zero seq,
+                                // unless we have a queued offline playback command that we are allowed to push right below.
+                                let can_control_welcome = !current_control.host_control_active
+                                    || current_control.local_is_host
+                                    || current_control.local_is_admin;
+                                let has_queued_playback =
+                                    can_control_welcome && (outbox.playback.is_some() || outbox.latest_seek.is_some());
+                                if !has_queued_playback
+                                    && should_apply_welcome_state(retained, state.seq, participants.len())
+                                {
                                     let has_media = local_file.lock().ok().is_some_and(|g| g.is_some());
                                     if has_media && !mpv.is_loading_media() {
-                                        if apply_remote_playback_state(
+                                        if apply_welcome_playback_state(
                                             app,
                                             mpv,
                                             &state,
-                                            &clock,
-                                            &drift_ctrl,
+                                            clock,
                                             timeline_transform,
                                             timeline_segments,
+                                            reconnects > 0,
                                         ) {
                                             last_seek_dispatched_at = Some(Instant::now());
                                         }
@@ -1369,6 +1453,7 @@ async fn run_single_cloud_session(
                                     let snap = mpv.snapshot();
                                     let has_media = local_file.lock().ok().is_some_and(|g| g.is_some());
                                     if has_media && !snap.paused {
+                                        awaiting_self_echo = true;
                                         last_local_action_at = Some(Instant::now());
                                         let tx = timeline_transform
                                             .lock()
@@ -1388,7 +1473,7 @@ async fn run_single_cloud_session(
                                                 clock.estimated_server_ms(now_epoch_ms()),
                                             ),
                                         }) {
-                                            let _ = ws_tx.send(frame).await;
+                                            let _ = send_ws_bounded(&mut ws_tx, frame).await;
                                         }
                                     }
                                 }
@@ -1439,6 +1524,9 @@ async fn run_single_cloud_session(
                                             SyncCommand::SendChatReact { target_msg_id, emoji } => {
                                                 p2p.try_send(P2pControlCmd::SendChatReact { target_msg_id, emoji });
                                             }
+                                            SyncCommand::SendChatSeen { last_msg_id } => {
+                                                p2p.try_send(P2pControlCmd::SendChatSeen { last_msg_id });
+                                            }
                                             SyncCommand::SendSubtitleShare { id, file_name, ext, lang, content } => {
                                                 p2p.try_send(P2pControlCmd::SendSubtitleShare {
                                                     id,
@@ -1456,6 +1544,10 @@ async fn run_single_cloud_session(
                                         || current_control.local_is_admin;
                                     let seek_override = outbox.latest_seek.take();
                                     let pb = outbox.playback.take();
+                                    if can_control && (seek_override.is_some() || pb.is_some()) {
+                                        awaiting_self_echo = true;
+                                        last_local_action_at = Some(Instant::now());
+                                    }
                                     if can_control {
                                         let tx = timeline_transform.lock().ok().map(|g| *g).unwrap_or_default();
                                         let segs = timeline_segments.lock().ok().map(|g| g.clone()).unwrap_or_default();
@@ -1545,7 +1637,39 @@ async fn run_single_cloud_session(
                                 );
 
                                 let in_align_mode = align_mode.lock().ok().map(|g| *g).unwrap_or(false);
-                                if !is_self || forced_snap || seq_skipped {
+                                if is_self {
+                                    awaiting_self_echo = false;
+                                } else {
+                                    awaiting_self_echo = false;
+                                    last_local_action_at = None;
+                                }
+                                let self_desynced = if is_self
+                                    && !is_scrubbing
+                                    && !in_align_mode
+                                    && !mpv.is_loading_media()
+                                    && pending_seek_pos.is_none()
+                                {
+                                    let server_now = clock.estimated_server_ms(now_epoch_ms());
+                                    let room_pos = next_state.projected_position(server_now);
+                                    let tx = timeline_transform
+                                        .lock()
+                                        .ok()
+                                        .map(|g| *g)
+                                        .unwrap_or_default();
+                                    let segs = timeline_segments
+                                        .lock()
+                                        .ok()
+                                        .map(|g| g.clone())
+                                        .unwrap_or_default();
+                                    let target_local =
+                                        map_room_to_local_piecewise(room_pos, tx, &segs);
+                                    let snap = mpv.snapshot();
+                                    snap.paused != paused || (target_local - snap.position).abs() >= 1.25
+                                } else {
+                                    false
+                                };
+
+                                if !is_self || forced_snap || seq_skipped || self_desynced {
                                     if do_seek && !is_self {
                                         if let Some(ref actor) = set_by {
                                             let _ = app.emit(
@@ -1562,6 +1686,7 @@ async fn run_single_cloud_session(
                                         || forced_snap
                                     {
                                         let coalesce_remote_seek = do_seek
+                                            && !is_self
                                             && !forced_snap
                                             && last_remote_seek_applied_at
                                                 .is_some_and(|t| t.elapsed() < REMOTE_SEEK_COALESCE);
@@ -1578,7 +1703,7 @@ async fn run_single_cloud_session(
                                                 app,
                                                 mpv,
                                                 &next_state,
-                                                &clock,
+                                                clock,
                                                 &drift_ctrl,
                                                 timeline_transform,
                                                 timeline_segments,
@@ -1594,6 +1719,7 @@ async fn run_single_cloud_session(
                                 }
                             }
                             CloudServerMsg::PlayBlocked { usernames } => {
+                                awaiting_self_echo = false;
                                 force_snap_next_state = true;
                                 last_local_action_at = None;
                                 if !mpv.note_paused(true) {
@@ -1607,6 +1733,7 @@ async fn run_single_cloud_session(
                                 );
                             }
                             CloudServerMsg::RateLimited { bucket: _, retry_after_ms: _ } => {
+                                awaiting_self_echo = false;
                                 force_snap_next_state = true;
                                 last_local_action_at = None;
                             }
@@ -1636,6 +1763,7 @@ async fn run_single_cloud_session(
                                 );
                                 if let Some(n) = notice {
                                     if n.kind == "guestBlocked" {
+                                        awaiting_self_echo = false;
                                         force_snap_next_state = true;
                                         last_local_action_at = None;
                                         let _ = app.emit(
@@ -1664,10 +1792,22 @@ async fn run_single_cloud_session(
                                 );
                             }
                             CloudServerMsg::P2pSignal { username: sender, payload } => {
-                                p2p.try_send(P2pControlCmd::RemoteBeacon {
-                                    username: sender,
-                                    raw_message: payload,
-                                });
+                                if let Some(av) = epilod_core::p2p::decode_ep2_avatar(&payload) {
+                                    if !sender.eq_ignore_ascii_case(&active_username) {
+                                        let _ = app.emit(
+                                            "sync://peer-avatar",
+                                            serde_json::json!({
+                                                "username": sender,
+                                                "avatarId": av,
+                                            }),
+                                        );
+                                    }
+                                } else {
+                                    p2p.try_send(P2pControlCmd::RemoteBeacon {
+                                        username: sender,
+                                        raw_message: payload,
+                                    });
+                                }
                             }
                             CloudServerMsg::Chat {
                                 id,
@@ -1731,6 +1871,32 @@ async fn run_single_cloud_session(
                                     }),
                                 );
                             }
+                            CloudServerMsg::ChatSeen {
+                                username: sender,
+                                last_msg_id,
+                            } => {
+                                let _ = app.emit(
+                                    "sync://chat-seen",
+                                    serde_json::json!({
+                                        "username": sender,
+                                        "lastMsgId": last_msg_id,
+                                        "via": "syncplay",
+                                    }),
+                                );
+                            }
+                            CloudServerMsg::IntroSkipVote {
+                                username: sender,
+                                seg_key,
+                            } => {
+                                let _ = app.emit(
+                                    "sync://intro-skip-vote",
+                                    serde_json::json!({
+                                        "username": sender,
+                                        "segKey": seg_key,
+                                        "via": "p2pRelay",
+                                    }),
+                                );
+                            }
                             CloudServerMsg::Reaction {
                                 username: sender,
                                 avatar_id,
@@ -1764,11 +1930,16 @@ async fn run_single_cloud_session(
                                 if code == "BAD_PASSWORD" || code == "RATE_LIMITED" {
                                     break CloudSessionExit::FatalAuth { message };
                                 }
-                                let _ = app.emit("sync://error", serde_json::json!({ "message": message }));
+                                if code != "UNSUPPORTED" {
+                                    let _ = app.emit("sync://error", serde_json::json!({ "message": message }));
+                                }
                             }
                         }
                     }
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => {
+                        awaiting_pong_since = None;
+                        sent_ping_retry = false;
+                    }
                 }
             }
 
@@ -1847,6 +2018,7 @@ async fn run_single_cloud_session(
                             let _ = mpv.send_command(set_pause_cmd(req, false));
                             let _ = app.emit("mpv://paused", serde_json::json!({ "paused": false }));
                         }
+                        awaiting_self_echo = true;
                         last_local_action_at = Some(Instant::now());
                         pending_seek_pos = None;
                         pending_seek_deadline = None;
@@ -1861,9 +2033,9 @@ async fn run_single_cloud_session(
                             position: room_pos,
                             client_server_ms: Some(clock.estimated_server_ms(now_epoch_ms())),
                         }) {
-                            if let Err(e) = ws_tx.send(frame).await {
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
                                 break CloudSessionExit::Error {
-                                    message: e.to_string(),
+                                    message,
                                     was_connected,
                                 };
                             }
@@ -1872,9 +2044,9 @@ async fn run_single_cloud_session(
                             is_ready: true,
                             manual: true,
                         }) {
-                            if let Err(e) = ws_tx.send(frame).await {
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
                                 break CloudSessionExit::Error {
-                                    message: e.to_string(),
+                                    message,
                                     was_connected,
                                 };
                             }
@@ -1890,7 +2062,7 @@ async fn run_single_cloud_session(
                                     app,
                                     mpv,
                                     st,
-                                    &clock,
+                                    clock,
                                     &drift_ctrl,
                                     timeline_transform,
                                     timeline_segments,
@@ -1905,6 +2077,7 @@ async fn run_single_cloud_session(
                             let _ = mpv.send_command(set_pause_cmd(req, true));
                             let _ = app.emit("mpv://paused", serde_json::json!({ "paused": true }));
                         }
+                        awaiting_self_echo = true;
                         last_local_action_at = Some(Instant::now());
                         pending_seek_pos = None;
                         pending_seek_deadline = None;
@@ -1918,9 +2091,9 @@ async fn run_single_cloud_session(
                             position: room_pos,
                             client_server_ms: Some(clock.estimated_server_ms(now_epoch_ms())),
                         }) {
-                            if let Err(e) = ws_tx.send(frame).await {
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
                                 break CloudSessionExit::Error {
-                                    message: e.to_string(),
+                                    message,
                                     was_connected,
                                 };
                             }
@@ -1936,7 +2109,7 @@ async fn run_single_cloud_session(
                                     app,
                                     mpv,
                                     st,
-                                    &clock,
+                                    clock,
                                     &drift_ctrl,
                                     timeline_transform,
                                     timeline_segments,
@@ -1946,6 +2119,7 @@ async fn run_single_cloud_session(
                             }
                             continue;
                         }
+                        awaiting_self_echo = true;
                         last_local_action_at = Some(Instant::now());
                         let leading_edge = !is_scrubbing
                             && last_seek_sent_at
@@ -1956,11 +2130,11 @@ async fn run_single_cloud_session(
                             let hint_room = last_state
                                 .as_ref()
                                 .map(|s| s.projected_position(clock.estimated_server_ms(now_epoch_ms())));
-                            if let Some(frame) = build_seek_frame(local_pos, &clock, hint_room) {
+                            if let Some(frame) = build_seek_frame(local_pos, clock, hint_room) {
                                 last_seek_sent_at = Some(Instant::now());
-                                if let Err(e) = ws_tx.send(frame).await {
+                                if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
                                     break CloudSessionExit::Error {
-                                        message: e.to_string(),
+                                        message,
                                         was_connected,
                                     };
                                 }
@@ -2273,6 +2447,56 @@ async fn run_single_cloud_session(
                             let _ = ws_tx.send(frame).await;
                         }
                     }
+                    SyncCommand::SendChatSeen { last_msg_id } => {
+                        p2p.try_send(P2pControlCmd::SendChatSeen {
+                            last_msg_id: last_msg_id.clone(),
+                        });
+                        if let Some(frame) = send_msg(&CloudClientMsg::ChatSeen { last_msg_id }) {
+                            let _ = ws_tx.send(frame).await;
+                        }
+                    }
+                    SyncCommand::SendIntroSkipVote { seg_key } => {
+                        p2p.try_send(P2pControlCmd::SendIntroSkipVote {
+                            seg_key: seg_key.clone(),
+                        });
+                        if let Some(frame) = send_msg(&CloudClientMsg::IntroSkipVote { seg_key }) {
+                            let _ = ws_tx.send(frame).await;
+                        }
+                    }
+                    SyncCommand::SendAvatarPresence { avatar_id } => {
+                        if let Some(payload) = epilod_core::p2p::encode_ep2_avatar(&avatar_id) {
+                            if let Some(frame) = send_msg(&CloudClientMsg::P2pSignal { payload }) {
+                                let _ = ws_tx.send(frame).await;
+                            }
+                        }
+                    }
+                    SyncCommand::SetChatImageMode { mode } => {
+                        p2p.try_send(P2pControlCmd::SetChatImageMode { mode });
+                    }
+                    SyncCommand::SendChatImage {
+                        id,
+                        avatar_id,
+                        caption,
+                        spoiler,
+                        width,
+                        height,
+                        data_b64,
+                        reply_to_id,
+                    } => {
+                        p2p.try_send(P2pControlCmd::SendChatImage {
+                            id,
+                            avatar_id,
+                            caption,
+                            spoiler,
+                            width,
+                            height,
+                            data_b64,
+                            reply_to_id,
+                        });
+                    }
+                    SyncCommand::RequestChatImage { id, sender } => {
+                        p2p.try_send(P2pControlCmd::RequestChatImage { id, sender });
+                    }
                     SyncCommand::SendSubtitleShare {
                         id,
                         file_name,
@@ -2324,6 +2548,58 @@ fn apply_remote_playback_state(
     let snap = mpv.snapshot();
     let seek_thr = drift_ctrl.seek_threshold_secs(clock.jitter_ms() / 1000.0);
     let action = compute_playback_action(state, target_local, snap.position, snap.paused, seek_thr);
+
+    if let Some(paused) = action.set_pause {
+        if !mpv.note_paused(paused) {
+            let req = mpv.next_request_id();
+            let _ = mpv.send_command(set_pause_cmd(req, paused));
+            let _ = app.emit("mpv://paused", serde_json::json!({ "paused": paused }));
+        }
+    }
+
+    if let Some(seek_base) = action.seek_to {
+        let lead = if state.paused {
+            0.0
+        } else {
+            mpv.seek_lead_secs()
+        };
+        let _ = mpv.dispatch_seek((seek_base + lead).max(0.0), false, None);
+        return true;
+    }
+    false
+}
+
+fn apply_welcome_playback_state(
+    app: &AppHandle,
+    mpv: &Arc<MpvController>,
+    state: &CloudPlaybackState,
+    clock: &ClockSyncEstimator,
+    timeline_transform: &Arc<Mutex<TimelineTransform>>,
+    timeline_segments: &Arc<Mutex<Vec<TimelineSegment>>>,
+    is_reconnect: bool,
+) -> bool {
+    let server_now = clock.estimated_server_ms(now_epoch_ms());
+    let room_pos = state.projected_position(server_now);
+    let tx = timeline_transform
+        .lock()
+        .ok()
+        .map(|g| *g)
+        .unwrap_or_default();
+    let segs = timeline_segments
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let target_local = map_room_to_local_piecewise(room_pos, tx, &segs);
+
+    let snap = mpv.snapshot();
+    let action = compute_welcome_playback_action(
+        state,
+        target_local,
+        snap.position,
+        snap.paused,
+        is_reconnect,
+    );
 
     if let Some(paused) = action.set_pause {
         if !mpv.note_paused(paused) {

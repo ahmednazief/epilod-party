@@ -266,3 +266,68 @@ test("useChatStore tracks unread/mentions, edits, micro-reactions, sidebar width
   assert.equal(snap.messages.length, 0);
   assert.equal(snap.chatOpen, false);
 });
+
+test("useChatStore tracks seenByPeer and manages ephemeral image modes and 30m/session retention", async () => {
+  setupMockLocalStorage();
+  const { chatStore } = await loadBundledChatModules();
+  const store = chatStore.useChatStore;
+  store.getState().clearChat();
+
+  // Seen-by updates per peer
+  store.getState().recordPeerSeen("Maya", "m1", 1000);
+  store.getState().recordPeerSeen("Maya", "m2", 2000);
+  assert.equal(store.getState().seenByPeer.maya?.lastMsgId, "m2");
+
+  // Off mode drops image data cleanly
+  store.getState().receiveRemoteImageMeta(
+    {
+      id: "imgOff",
+      sender: "Maya",
+      avatarId: "maya",
+      spoiler: false,
+      width: 640,
+      height: 360,
+      byteLen: 45000,
+      via: "p2p",
+      timestampMs: 1000,
+    },
+    { mode: "off", retention: "30m" },
+  );
+  assert.equal(store.getState().messages[0]?.image?.status, "disabled");
+
+  // Tap mode waits for explicit request, then becomes ready with 30m expiry
+  store.getState().receiveRemoteImageMeta(
+    {
+      id: "imgTap",
+      sender: "Maya",
+      avatarId: "maya",
+      spoiler: true,
+      width: 800,
+      height: 450,
+      byteLen: 82000,
+      via: "p2p",
+      timestampMs: 2000,
+    },
+    { mode: "tap", retention: "30m" },
+  );
+  const tapMsg = store.getState().messages.find((m) => m.id === "imgTap");
+  assert.equal(tapMsg?.image?.status, "pending-tap");
+  assert.equal(tapMsg?.image?.revealed, false);
+
+  store.getState().receiveRemoteImageData("imgTap", "blob:mock-1", "30m", 5000);
+  const readyMsg = store.getState().messages.find((m) => m.id === "imgTap");
+  assert.equal(readyMsg?.image?.status, "ready");
+  assert.equal(readyMsg?.image?.expiresAtMs, 5000 + chatStore.CHAT_IMAGE_30M_MS);
+
+  store.getState().revealImageSpoiler("imgTap");
+  assert.equal(store.getState().messages.find((m) => m.id === "imgTap")?.image?.revealed, true);
+
+  // In session mode, pruneExpiredImages does not expire at 30m
+  store.getState().pruneExpiredImages("session", 5000 + chatStore.CHAT_IMAGE_30M_MS + 1000);
+  assert.equal(store.getState().messages.find((m) => m.id === "imgTap")?.image?.status, "ready");
+
+  // In 30m mode, pruneExpiredImages expires it cleanly
+  store.getState().pruneExpiredImages("30m", 5000 + chatStore.CHAT_IMAGE_30M_MS + 1);
+  assert.equal(store.getState().messages.find((m) => m.id === "imgTap")?.image?.status, "expired");
+  assert.equal(store.getState().messages.find((m) => m.id === "imgTap")?.image?.objectUrl, null);
+});

@@ -35,6 +35,7 @@ import {
   PlayerFullscreenIcon,
   PlayerPauseIcon,
   PlayerPlayIcon,
+  PlayerRatingStarIcon,
   PlayerReactionsIcon,
   PlayerReadyIcon,
   PlayerSkipIntroIcon,
@@ -60,17 +61,25 @@ import { isDesktop, safeInvoke } from "../lib/bridge";
 import { formatUserError } from "../lib/errors";
 import { getFileDisplayName, splitDroppedFiles } from "../lib/fileDrop";
 import { OPEN_FILE_EVENT } from "../lib/openFile";
-import { buildRatingKey, onSyncRatingVote } from "../lib/ratings";
+import { base64ToObjectUrl } from "../lib/chatImages";
+import {
+  buildEpisodeRatingId,
+  buildRatingKey,
+  onSyncRatingVote,
+  syncSendRatingVote,
+} from "../lib/ratings";
 import { resolveFullscreenChromeState } from "../lib/fullscreenUi";
 import { logFrontendEvent } from "../lib/logger";
 import {
   captureCleanFrozenFrame,
+  deriveStreamDisplayName,
   enqueueMpvLifecycle,
   getLastCleanFreezeFrame,
   isMpvNotRunningError,
   mpvAddSubtitle,
   mpvGetSurfaceState,
   mpvLoad,
+  mpvLoadStreamUrl,
   mpvResize,
   mpvSeek,
   mpvSetAudioTrack,
@@ -210,8 +219,13 @@ import {
   onSyncReaction,
   onSyncChat,
   onSyncChatEdit,
+  onSyncChatImageData,
+  onSyncChatImageMeta,
   onSyncChatReact,
+  onSyncChatSeen,
   onSyncChatTyping,
+  onSyncIntroSkipVote,
+  onSyncPeerAvatar,
   onSyncSubtitleShared,
   onSyncRoomControl,
   onSyncRoomRerolled,
@@ -223,15 +237,15 @@ import {
   syncConnect,
   syncDisconnect,
   syncForceResync,
+  syncSendAvatarPresence,
   syncSetFile,
+  syncSetChatImageMode,
   syncSetReady,
   syncSetTimelineTransform,
-  syncSwitchBackup,
   syncUserPause,
   syncUserPlay,
   syncUserSeek,
 } from "../lib/syncplay";
-import { isCloudEndpoint, SYNCPLAY_ENDPOINT } from "../lib/syncStatusDisplay";
 import {
   applyTimelineTransform,
   captureSceneAnchor,
@@ -310,7 +324,6 @@ import { computeMpvMarginRatios, resolveDualSidebarLayout } from "../lib/partyLa
 import { getActiveShowcaseConfig } from "../lib/showcaseMode";
 import { ChatSidebar } from "./ChatSidebar";
 import { EpisodesPanel } from "./EpisodesPanel";
-import { PartySidebar } from "./PartySidebar";
 import { FloatingChatPeeks } from "./FloatingChatPeeks";
 import { FloatingReactionsOverlay } from "./FloatingReactionsOverlay";
 import { SkipIntroOverlay } from "./SkipIntroOverlay";
@@ -567,21 +580,19 @@ export function WatchRoom() {
   const [recoveryTick, setRecoveryTick] = useState(0);
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [streamModalOpen, setStreamModalOpen] = useState(false);
+  const [streamUrlInput, setStreamUrlInput] = useState("");
+  const [streamUrlError, setStreamUrlError] = useState<string | null>(null);
+  const [streamLoading, setStreamLoading] = useState(false);
   const [popoverPos, setPopoverPos] = useState<CapsulePopoverLayout | null>(null);
   const [windowWidth, setWindowWidth] = useState<number>(() =>
     typeof window !== "undefined" ? window.innerWidth : 1280,
   );
   const [chatResizing, setChatResizing] = useState(false);
   const [chatLayoutTransitioning, setChatLayoutTransitioning] = useState(false);
-  const [partyResizing, setPartyResizing] = useState(false);
-  const [partyLayoutTransitioning, setPartyLayoutTransitioning] = useState(false);
-  const [pinLeftExiting, setPinLeftExiting] = useState(false);
   const [surfaceHoldPending, setSurfaceHoldPending] = useState(false);
   const chatTransitionTimerRef = useRef<number | null>(null);
   const chatTransitionSeqRef = useRef(0);
-  const partyTransitionTimerRef = useRef<number | null>(null);
-  const partyTransitionSeqRef = useRef(0);
-  const partyUnpinBloomTimerRef = useRef<number | null>(null);
   const surfaceHoldTimerRef = useRef<number | null>(null);
   const surfaceRestoreSeqRef = useRef(0);
 
@@ -589,11 +600,6 @@ export function WatchRoom() {
   const chatSidebarWidth = useChatStore((s) => s.sidebarWidth);
   const unreadChatCount = useChatStore((s) => s.unreadCount);
   const setChatOpen = useChatStore((s) => s.setChatOpen);
-  const partyDisplayMode = useAppStore((s) => s.partyDisplayMode);
-  const partySidebarOpen = useAppStore((s) => s.partySidebarOpen);
-  const partySidebarWidth = useAppStore((s) => s.partySidebarWidth);
-  const setPartyDisplayMode = useAppStore((s) => s.setPartyDisplayMode);
-  const setPartySidebarOpen = useAppStore((s) => s.setPartySidebarOpen);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const chatTriggerPlacement = useAppStore((s) => s.chatTriggerPlacement);
   const voiceEnabled = useVoiceStore((s) => s.voiceEnabled);
@@ -606,6 +612,17 @@ export function WatchRoom() {
   const voicePeerOverrides = useVoiceStore((s) => s.peerOverrides);
   const micCue = useVoiceStore((s) => s.micCue);
   const avatarId = useAppStore((s) => s.avatarId);
+  const peerAvatars = useAppStore((s) => s.peerAvatars);
+  const syncPhase = useSyncStore((s) => s.status.state);
+  const participantCount = useSyncStore((s) => s.participants.length);
+
+  useEffect(() => {
+    if (!roomCode || syncPhase !== "connected" || participantCount <= 1) return;
+    const timer = window.setTimeout(() => {
+      void syncSendAvatarPresence(avatarId).catch(() => undefined);
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [roomCode, syncPhase, participantCount, avatarId]);
   const voiceCaptureHealthy =
     voiceStreamStatus !== "micBusy" &&
     voiceStreamStatus !== "reconnecting" &&
@@ -621,24 +638,18 @@ export function WatchRoom() {
     voiceLeftAtRef.current.clear();
     lastVoiceInviteToastAtRef.current = 0;
   }, [roomCode]);
-  const effectivePartySidebarOpen =
-    Boolean(roomCode) && partyDisplayMode === "sidebar" && partySidebarOpen && !miniMode;
   const effectiveChatSidebarOpen = Boolean(roomCode) && chatSidebarOpen && !miniMode;
-  const partySidebarPresence = useAnimatedPresence(effectivePartySidebarOpen, 280);
   const chatSidebarPresence = useAnimatedPresence(effectiveChatSidebarOpen, 280);
   const {
-    partyDocked,
     chatDocked,
-    effectivePartyWidth,
     effectiveChatWidth,
   } = resolveDualSidebarLayout({
     windowWidth,
-    partyOpen: effectivePartySidebarOpen || partySidebarPresence.mounted,
-    partyPreferredWidth: partySidebarWidth,
+    partyOpen: false,
+    partyPreferredWidth: 0,
     chatOpen: effectiveChatSidebarOpen || chatSidebarPresence.mounted,
     chatPreferredWidth: chatSidebarWidth,
   });
-  const partyDockedOffsetPx = partyDocked && effectivePartySidebarOpen ? effectivePartyWidth : 0;
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -658,7 +669,6 @@ export function WatchRoom() {
   const loadInFlightRef = useRef(false);
   const roomSessionStartedRef = useRef(false);
   const activeBackendRoomRef = useRef<string | null>(null);
-  const autoCloudFallbackRoomRef = useRef<string | null>(null);
   const panelOpenRef = useRef(false);
   const sideTabRef = useRef<SideTab>(sideTab);
   const contextMenuOpenRef = useRef(false);
@@ -949,7 +959,7 @@ export function WatchRoom() {
       }
 
       const playerNow = usePlayerStore.getState();
-      const chatDockedNow = chatDocked || windowWidth >= (effectivePartySidebarOpen ? 1080 : 860);
+      const chatDockedNow = chatDocked || windowWidth >= 860;
       const liveMarginAnimate =
         !reducedMotion &&
         isDesktop() &&
@@ -969,7 +979,6 @@ export function WatchRoom() {
     },
     [
       chatDocked,
-      effectivePartySidebarOpen,
       finishChatLayoutTransition,
       reducedMotion,
       setChatOpen,
@@ -977,120 +986,20 @@ export function WatchRoom() {
     ],
   );
 
-  const finishPartyLayoutTransition = useCallback(
-    (expectedSeq?: number) => {
-      if (expectedSeq !== undefined && partyTransitionSeqRef.current !== expectedSeq) return;
-      if (partyTransitionTimerRef.current !== null) {
-        window.clearTimeout(partyTransitionTimerRef.current);
-        partyTransitionTimerRef.current = null;
-      }
-      requestAnimationFrame(() => {
-        syncMpvRightMarginNow(true);
-      });
-      setPartyLayoutTransitioning(false);
-    },
-    [syncMpvRightMarginNow],
-  );
-
-  const setPartySidebarOpenSmooth = useCallback(
-    (nextOpen: boolean) => {
-      if (useAppStore.getState().partySidebarOpen === nextOpen && partyTransitionTimerRef.current === null) {
-        return;
-      }
-      const seq = ++partyTransitionSeqRef.current;
-      if (partyTransitionTimerRef.current !== null) {
-        window.clearTimeout(partyTransitionTimerRef.current);
-        partyTransitionTimerRef.current = null;
-      }
-
-      const playerNow = usePlayerStore.getState();
-      const partyDockedNow = windowWidth >= 860;
-      const liveMarginAnimate =
-        !reducedMotion &&
-        isDesktop() &&
-        mpvStartedRef.current &&
-        partyDockedNow &&
-        playerNow.loaded &&
-        !playerNow.playerError;
-
-      setPartySidebarOpen(nextOpen);
-      if (!liveMarginAnimate) {
-        requestAnimationFrame(() => syncMpvRightMarginNow(true));
-        return;
-      }
-
-      setPartyLayoutTransitioning(true);
-      partyTransitionTimerRef.current = window.setTimeout(() => {
-        partyTransitionTimerRef.current = null;
-        finishPartyLayoutTransition(seq);
-      }, nextOpen ? 400 : 310);
-    },
-    [finishPartyLayoutTransition, reducedMotion, setPartySidebarOpen, syncMpvRightMarginNow, windowWidth],
-  );
-
-  const handleDockPartyLeft = useCallback(() => {
-    wakeChrome();
-    if (partyUnpinBloomTimerRef.current !== null) {
-      window.clearTimeout(partyUnpinBloomTimerRef.current);
-      partyUnpinBloomTimerRef.current = null;
-    }
-    setPinLeftExiting(true);
-    setPanelOpen(false);
-    setPartyDisplayMode("sidebar");
-    setPartySidebarOpenSmooth(true);
-    window.setTimeout(() => {
-      setPinLeftExiting(false);
-    }, 220);
-  }, [setPartyDisplayMode, setPartySidebarOpenSmooth, wakeChrome]);
-
-  const handleUnpinPartyToPopover = useCallback(() => {
-    wakeChrome();
-    if (partyUnpinBloomTimerRef.current !== null) {
-      window.clearTimeout(partyUnpinBloomTimerRef.current);
-      partyUnpinBloomTimerRef.current = null;
-    }
-    setPartySidebarOpenSmooth(false);
-    const delayMs = reducedMotion ? 0 : 140;
-    partyUnpinBloomTimerRef.current = window.setTimeout(() => {
-      partyUnpinBloomTimerRef.current = null;
-      setPartyDisplayMode("popover");
-      setSideTab("room");
-      setPanelOpen(true);
-    }, delayMs);
-  }, [reducedMotion, setPartyDisplayMode, setPartySidebarOpenSmooth, wakeChrome]);
-
   const toggleOrFocusPartyLounge = useCallback(() => {
     wakeChrome();
-    const appNow = useAppStore.getState();
-    if (!appNow.roomCode) {
-      if (panelOpenRef.current && sideTabRef.current === "room") {
-        setPanelOpen(false);
-      } else {
-        setSideTab("room");
-        setPanelOpen(true);
-      }
-      return;
-    }
-    if (appNow.partyDisplayMode !== "sidebar") {
-      if (panelOpenRef.current && sideTabRef.current === "room") {
-        handleDockPartyLeft();
-      } else {
-        if (panelOpenRef.current) setPanelOpen(false);
-        setPartyDisplayMode("sidebar");
-        setPartySidebarOpenSmooth(true);
-      }
-      return;
-    }
-    if (panelOpenRef.current) {
+    if (panelOpenRef.current && sideTabRef.current === "room") {
       setPanelOpen(false);
+    } else {
+      setSideTab("room");
+      setPanelOpen(true);
     }
-    setPartySidebarOpenSmooth(!appNow.partySidebarOpen);
-  }, [handleDockPartyLeft, setPartyDisplayMode, setPartySidebarOpenSmooth, wakeChrome]);
+  }, [wakeChrome]);
 
-  // Pump live video-margin-ratio-left & right updates on every frame during dock springs / handle drags
+  // Pump live video-margin-ratio-right updates on every frame during dock springs / handle drags
   useEffect(() => {
     if (!isDesktop() || !mpvStartedRef.current) return;
-    if (!chatLayoutTransitioning && !chatResizing && !partyLayoutTransitioning && !partyResizing) {
+    if (!chatLayoutTransitioning && !chatResizing) {
       return;
     }
 
@@ -1104,18 +1013,13 @@ export function WatchRoom() {
   }, [
     chatLayoutTransitioning,
     chatResizing,
-    partyLayoutTransitioning,
-    partyResizing,
     syncMpvRightMarginNow,
   ]);
 
-  // Keep settled GPU left & right margins synced immediately on drag, open/close, breakpoint, or media load
+  // Keep settled GPU right margin synced immediately on drag, open/close, breakpoint, or media load
   useLayoutEffect(() => {
     syncMpvRightMarginNow();
   }, [
-    effectivePartySidebarOpen,
-    partyDocked,
-    effectivePartyWidth,
     effectiveChatSidebarOpen,
     chatDocked,
     effectiveChatWidth,
@@ -1127,12 +1031,6 @@ export function WatchRoom() {
 
   const setChatSidebarOpenSmoothRef = useRef(setChatSidebarOpenSmooth);
   setChatSidebarOpenSmoothRef.current = setChatSidebarOpenSmooth;
-  const setPartySidebarOpenSmoothRef = useRef(setPartySidebarOpenSmooth);
-  setPartySidebarOpenSmoothRef.current = setPartySidebarOpenSmooth;
-  const partyDockedRef = useRef(partyDocked);
-  partyDockedRef.current = partyDocked;
-  const effectivePartyOpenRef = useRef(effectivePartySidebarOpen);
-  effectivePartyOpenRef.current = effectivePartySidebarOpen;
 
   const toggleChatSidebar = useCallback(() => {
     wakeChrome();
@@ -1148,14 +1046,6 @@ export function WatchRoom() {
         window.clearTimeout(chatTransitionTimerRef.current);
         chatTransitionTimerRef.current = null;
       }
-      if (partyTransitionTimerRef.current !== null) {
-        window.clearTimeout(partyTransitionTimerRef.current);
-        partyTransitionTimerRef.current = null;
-      }
-      if (partyUnpinBloomTimerRef.current !== null) {
-        window.clearTimeout(partyUnpinBloomTimerRef.current);
-        partyUnpinBloomTimerRef.current = null;
-      }
       if (surfaceHoldTimerRef.current !== null) {
         window.clearTimeout(surfaceHoldTimerRef.current);
         surfaceHoldTimerRef.current = null;
@@ -1164,18 +1054,16 @@ export function WatchRoom() {
   }, []);
 
   const prevDualDockedRef = useRef(
-    `${Boolean(roomCode)}:${effectiveChatSidebarOpen && chatDocked}:${effectivePartySidebarOpen && partyDocked}`,
+    `${Boolean(roomCode)}:${effectiveChatSidebarOpen && chatDocked}`,
   );
   useEffect(() => {
-    const sig = `${Boolean(roomCode)}:${effectiveChatSidebarOpen && chatDocked}:${effectivePartySidebarOpen && partyDocked}`;
+    const sig = `${Boolean(roomCode)}:${effectiveChatSidebarOpen && chatDocked}`;
     if (sig === prevDualDockedRef.current) return;
     prevDualDockedRef.current = sig;
     syncMpvRightMarginNow(true);
   }, [
     effectiveChatSidebarOpen,
     chatDocked,
-    effectivePartySidebarOpen,
-    partyDocked,
     roomCode,
     syncMpvRightMarginNow,
   ]);
@@ -1221,8 +1109,7 @@ export function WatchRoom() {
       () =>
         panelOpenRef.current ||
         contextMenuOpenRef.current ||
-        useChatStore.getState().chatOpen ||
-        (effectivePartyOpenRef.current && !partyDockedRef.current),
+        useChatStore.getState().chatOpen,
       [],
     ),
     onToggleReactions: toggleReactionsPopover,
@@ -2106,7 +1993,6 @@ export function WatchRoom() {
       }
       roomSessionStartedRef.current = false;
       activeBackendRoomRef.current = null;
-      autoCloudFallbackRoomRef.current = null;
       void enqueueSyncLifecycle(async () => {
         await syncDisconnect();
       });
@@ -2461,33 +2347,6 @@ export function WatchRoom() {
               status,
               Boolean(useAppStore.getState().roomCode),
             );
-            const appNow = useAppStore.getState();
-            if (
-              status.state === "error" &&
-              status.suggestBackup &&
-              status.endpoint &&
-              isCloudEndpoint(status.endpoint) &&
-              status.message?.includes("capacity or rate-limited") &&
-              appNow.roomCode &&
-              autoCloudFallbackRoomRef.current !== appNow.roomCode
-            ) {
-              autoCloudFallbackRoomRef.current = appNow.roomCode;
-              void enqueueSyncLifecycle(async () => {
-                try {
-                  await syncSwitchBackup({
-                    username: appNow.username,
-                    roomCode: appNow.roomCode,
-                    literalRoom: appNow.literalRoom,
-                    password: appNow.serverPassword || null,
-                    hostOnly: appNow.hostOnlyRoom,
-                    targetEndpoint: SYNCPLAY_ENDPOINT,
-                  });
-                  pushNote("info", "Epilod Cloud is at capacity — switched to Syncplay fallback.");
-                } catch {
-                  // Manual Retry / Backup buttons remain available in RoomPanel.
-                }
-              });
-            }
           }),
           onSyncRoomRerolled(({ roomCode: nextCode }) => {
             if (!active || !nextCode) return;
@@ -2679,14 +2538,24 @@ export function WatchRoom() {
           }),
           onSyncRatingVote((vote) => {
             if (!active) return;
+            if (vote.avatarId) {
+              useAppStore.getState().setPeerAvatar(vote.username, vote.avatarId);
+            }
             const rStore = useRatingStore.getState();
-            rStore.receivePeerVote(vote.key, vote.username, vote.avatarId, vote.score);
+            const currentFileName = useAppStore.getState().selectedFileName;
             const localKey =
               rStore.activeKey ??
               buildRatingKey(
-                useAppStore.getState().selectedFileName,
+                currentFileName,
                 usePlayerStore.getState().durationSecs,
               );
+            rStore.receivePeerVote(
+              vote.key,
+              vote.username,
+              vote.avatarId,
+              vote.score,
+              localKey === vote.key ? currentFileName : null,
+            );
             if (localKey && localKey !== vote.key) {
               const peer = useSyncStore
                 .getState()
@@ -2694,12 +2563,21 @@ export function WatchRoom() {
                   (p) => p.username.trim().toLowerCase() === vote.username.trim().toLowerCase(),
                 );
               if (!peer || peer.sourceRelation !== "differentMedia") {
-                rStore.receivePeerVote(localKey, vote.username, vote.avatarId, vote.score);
+                rStore.receivePeerVote(
+                  localKey,
+                  vote.username,
+                  vote.avatarId,
+                  vote.score,
+                  currentFileName,
+                );
               }
             }
           }),
           onSyncReaction((reaction) => {
             if (!active) return;
+            if (reaction.avatarId) {
+              useAppStore.getState().setPeerAvatar(reaction.username, reaction.avatarId);
+            }
             if (!useAppStore.getState().reactionsEnabled) return;
             enqueueReactionBurst({
               username: reaction.username,
@@ -2707,10 +2585,14 @@ export function WatchRoom() {
               emoji: reaction.emoji,
               count: reaction.count,
               isSelf: false,
+              positionSecs: usePlayerStore.getState().positionSecs,
             });
           }),
           onSyncChat((chatMsg) => {
             if (!active) return;
+            if (chatMsg.avatarId) {
+              useAppStore.getState().setPeerAvatar(chatMsg.username, chatMsg.avatarId);
+            }
             const chatStore = useChatStore.getState();
             const appState = useAppStore.getState();
             const syncState = useSyncStore.getState();
@@ -2748,6 +2630,63 @@ export function WatchRoom() {
           onSyncChatTyping((typing) => {
             if (!active) return;
             useChatStore.getState().setPeerTyping(typing.username, typing.isTyping);
+          }),
+          onSyncChatSeen((seen) => {
+            if (!active) return;
+            useChatStore.getState().recordPeerSeen(seen.username, seen.lastMsgId);
+          }),
+          onSyncIntroSkipVote((vote) => {
+            if (!active) return;
+            useIntroStore.getState().recordSkipVote(vote.segKey, vote.username);
+          }),
+          onSyncPeerAvatar((peerAv) => {
+            if (!active) return;
+            useAppStore.getState().setPeerAvatar(peerAv.username, peerAv.avatarId);
+          }),
+          onSyncChatImageMeta((meta) => {
+            if (!active) return;
+            const chatStore = useChatStore.getState();
+            const appState = useAppStore.getState();
+            const syncState = useSyncStore.getState();
+            const localUsername = resolveEffectiveUsername(syncState.status, appState.username);
+            const added = chatStore.receiveRemoteImageMeta(
+              {
+                id: meta.id,
+                sender: meta.sender,
+                avatarId: meta.avatarId,
+                caption: meta.caption ?? null,
+                spoiler: meta.spoiler,
+                width: meta.width,
+                height: meta.height,
+                byteLen: meta.byteLen,
+                replyToId: meta.replyToId ?? null,
+                via: meta.via,
+              },
+              {
+                mode: appState.chatImageMode,
+                retention: appState.chatImageRetention,
+                allowPeek: appState.chatPeeksEnabled,
+                localUsername,
+              },
+            );
+            if (added && !chatStore.chatOpen) {
+              playSoundCue("chatMessage", {
+                moviePlaying: !usePlayerStore.getState().paused,
+              });
+            }
+          }),
+          onSyncChatImageData((imgData) => {
+            if (!active) return;
+            const appState = useAppStore.getState();
+            if (appState.chatImageMode === "off") return;
+            try {
+              const { objectUrl } = base64ToObjectUrl(imgData.dataB64, "image/webp");
+              useChatStore
+                .getState()
+                .receiveRemoteImageData(imgData.id, objectUrl, appState.chatImageRetention);
+            } catch {
+              useChatStore.getState().markImageFailed(imgData.id);
+            }
           }),
           onSyncSubtitleShared((payload) => {
             if (!active) return;
@@ -3184,8 +3123,6 @@ export function WatchRoom() {
       ) {
         if (panelOpenRef.current) {
           setPanelOpen(false);
-        } else if (effectivePartyOpenRef.current && !partyDockedRef.current) {
-          setPartySidebarOpenSmoothRef.current(false);
         } else if (useChatStore.getState().chatOpen) {
           setChatSidebarOpenSmoothRef.current(false);
         }
@@ -3473,9 +3410,6 @@ export function WatchRoom() {
     syncStatus.state,
     isFullscreen,
     fullWidthPlayBar,
-    effectivePartySidebarOpen,
-    effectivePartyWidth,
-    partyDocked,
     effectiveChatSidebarOpen,
     effectiveChatWidth,
     chatDocked,
@@ -3511,6 +3445,37 @@ export function WatchRoom() {
       void safeInvoke("set_global_shortcuts_enabled", { enabled: false }).catch(() => undefined);
     };
   }, []);
+
+  const chatImageMode = useAppStore((s) => s.chatImageMode);
+  const chatImageRetention = useAppStore((s) => s.chatImageRetention);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    void syncSetChatImageMode(chatImageMode).catch(() => undefined);
+  }, [chatImageMode, syncStatus.state]);
+
+  useEffect(() => {
+    useChatStore.getState().pruneExpiredImages(chatImageRetention);
+    if (chatImageRetention !== "30m") return;
+    const timer = window.setInterval(() => {
+      useChatStore.getState().pruneExpiredImages("30m");
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [chatImageRetention]);
+
+  const prevRatingPeerCountRef = useRef(participants.length);
+  useEffect(() => {
+    const prev = prevRatingPeerCountRef.current;
+    prevRatingPeerCountRef.current = participants.length;
+    if (participants.length <= prev || syncStatus.state !== "connected" || !loaded) return;
+    const key = buildRatingKey(selectedFileName, durationSecs);
+    if (!key) return;
+    const rState = useRatingStore.getState();
+    const myScore = rState.myScoreByKey[key];
+    if (myScore != null) {
+      void syncSendRatingVote(key, myScore, useAppStore.getState().avatarId).catch(() => undefined);
+    }
+  }, [durationSecs, loaded, participants.length, selectedFileName, syncStatus.state]);
 
   const wasAllReadyRef = useRef<boolean>(false);
   const allReadyTimerRef = useRef<number | null>(null);
@@ -3820,7 +3785,6 @@ export function WatchRoom() {
   }, [loaded, durationSecs, selectedFileName, tracks, syncStatus.state]);
   const visibleFileMismatch =
     !panelOpen &&
-    !effectivePartySidebarOpen &&
     !alignMode &&
     !settingsOpen &&
     !shortcutsOpen &&
@@ -3838,6 +3802,13 @@ export function WatchRoom() {
       (sideTab === "episodes" && hasFolderEpisodes))
       ? { tab: sideTab, pos: popoverPos }
       : null;
+
+  // Auto-close the duplicate bottom Watch Party popover when Party Lounge opens
+  useEffect(() => {
+    if (chatSidebarOpen && panelOpen && sideTab === "room") {
+      setPanelOpen(false);
+    }
+  }, [chatSidebarOpen, panelOpen, sideTab]);
   const popover = usePresencePayload(activePopover, 200);
   const seekCuePresence = usePresencePayload(seekCue, 240);
   const micCuePresence = usePresencePayload(micCue, 220);
@@ -3928,7 +3899,6 @@ export function WatchRoom() {
     lastPeerFileRef.current = null;
     announcedFileKeyRef.current = null;
     autoReadyMarkedRef.current = false;
-    autoCloudFallbackRoomRef.current = null;
     if (usePlayerStore.getState().isFullscreen) {
       void windowSetFullscreen(false).catch(() => undefined);
     }
@@ -4137,12 +4107,70 @@ export function WatchRoom() {
     },
   ];
 
+  useEffect(() => {
+    if (!streamModalOpen) return;
+    if (loaded) {
+      safeMpvCall(mpvSetVisible(false), "streamModal:hideMpv");
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setStreamModalOpen(false);
+        setStreamUrlError(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (
+        loaded &&
+        !useAppStore.getState().settingsOpen &&
+        !useAppStore.getState().shortcutsOpen
+      ) {
+        safeMpvCall(mpvSetVisible(true), "streamModal:showMpv");
+      }
+    };
+  }, [loaded, streamModalOpen]);
+
+  const handleLoadStreamUrl = async () => {
+    const raw = streamUrlInput.trim();
+    if (!raw || streamLoading) return;
+    setStreamLoading(true);
+    setStreamUrlError(null);
+    try {
+      await ensureMpvStarted();
+      const displayName = deriveStreamDisplayName(raw);
+      await mpvLoadStreamUrl(raw);
+      usePlayerStore.getState().setLoaded(true);
+      setSelectedFile(raw, displayName);
+      if (syncStatus.state === "connected") {
+        void syncSetFile({ name: displayName, sizeBytes: 0, durationSecs: 0 }).catch(
+          () => undefined,
+        );
+      }
+      setStreamModalOpen(false);
+      setStreamUrlInput("");
+    } catch (err) {
+      setStreamUrlError(formatUserError(err, "Could not load stream URL."));
+    } finally {
+      setStreamLoading(false);
+    }
+  };
+
   const mediaOpenSubmenuEntries: ContextMenuEntry[] = [
     {
       id: "open-file",
       label: "Open Video File(s)…",
       icon: <OpenMediaIcon bare size={14} />,
       onSelect: () => void handleChooseFile(),
+    },
+    {
+      id: "open-stream-url",
+      label: "Open Stream URL…",
+      icon: <PlayerPlayIcon size={14} />,
+      onSelect: () => {
+        setStreamUrlError(null);
+        setStreamModalOpen(true);
+      },
     },
     {
       id: "open-folder",
@@ -4464,6 +4492,41 @@ export function WatchRoom() {
           },
         ] satisfies ContextMenuEntry[])),
 
+    ...(loaded && selectedFileName
+      ? (() => {
+          const ratingKey = buildRatingKey(selectedFileName, durationSecs);
+          if (!ratingKey) return [] as ContextMenuEntry[];
+          const mediaId = buildEpisodeRatingId(selectedFileName);
+          const rState = useRatingStore.getState();
+          const currentScore =
+            rState.myScoreByKey[ratingKey] ??
+            (mediaId ? rState.personalByMediaId[mediaId]?.score ?? null : null);
+          return [
+            {
+              id: "rate-current-watch",
+              label: hasFolderEpisodes ? "Rate Episode…" : "Rate This Video…",
+              badge: currentScore !== null ? `★ ${currentScore}` : undefined,
+              icon: (
+                <PlayerRatingStarIcon
+                  size={14}
+                  active={currentScore !== null}
+                  tone={currentScore !== null ? "personal" : "gold"}
+                />
+              ),
+              onSelect: () => {
+                const displayTitle = selectedFileName.replace(/\.[^.]+$/, "");
+                const syncState = useSyncStore.getState();
+                const appState = useAppStore.getState();
+                useRatingStore.getState().reopenForKey(ratingKey, displayTitle, selectedFileName, {
+                  username: resolveEffectiveUsername(syncState.status, appState.username),
+                  avatarId: appState.avatarId,
+                });
+              },
+            },
+          ] satisfies ContextMenuEntry[];
+        })()
+      : []),
+
     { type: "divider", id: "div-app" },
     {
       type: "label",
@@ -4529,30 +4592,9 @@ export function WatchRoom() {
         showVideoBackdrop ? "bg-transparent" : "bg-canvas"
       }`}
     >
-      {roomCode && partySidebarPresence.mounted && (
-        <PartySidebar
-          docked={partyDocked}
-          exiting={partySidebarPresence.exiting}
-          width={effectivePartyWidth}
-          topChromeOffset={!isFullscreen}
-          onClose={() => setPartySidebarOpenSmooth(false)}
-          onUnpin={handleUnpinPartyToPopover}
-          onChooseFile={() => void handleChooseFile()}
-          onChooseFolder={() => void handleChooseSeasonFolder()}
-          onSwitchEpisode={(idx) => void switchToPartyEpisode(idx)}
-          onOpenLocalMatch={(cand) => void handleOpenLocalMatch(cand)}
-          onResizingChange={setPartyResizing}
-          onDockTransitionEnd={() => finishPartyLayoutTransition()}
-        />
-      )}
-
       <div
         aria-hidden={!showWindowBar}
-        style={{
-          left: `${partyDockedOffsetPx}px`,
-          transition: partyResizing ? "none" : undefined,
-        }}
-        className={`ep-top-scrim absolute top-0 right-0 z-[46] ep-chrome-transition origin-top transition-[left,opacity,transform] ${
+        className={`ep-top-scrim absolute top-0 left-0 right-0 z-[46] ep-chrome-transition origin-top transition-[opacity,transform] ${
           showWindowBar
             ? "opacity-100 translate-y-0 scale-100"
             : "opacity-0 -translate-y-3 scale-[0.988] pointer-events-none"
@@ -4563,14 +4605,11 @@ export function WatchRoom() {
             <div
               className="inline-flex items-center gap-2 min-w-0 max-w-[60vw] pl-1"
               style={
-                roomCode && (partyDockedOffsetPx > 0 || (effectiveChatSidebarOpen && chatDocked))
+                roomCode && effectiveChatSidebarOpen && chatDocked
                   ? {
                       maxWidth: `${Math.max(
                         180,
-                        windowWidth -
-                          partyDockedOffsetPx -
-                          (effectiveChatSidebarOpen && chatDocked ? effectiveChatWidth : 0) -
-                          28,
+                        windowWidth - effectiveChatWidth - 28,
                       )}px`,
                     }
                   : undefined
@@ -4593,7 +4632,7 @@ export function WatchRoom() {
                   {activePlaylistItem.episodeBadge}
                 </span>
               )}
-              {roomCode && !effectivePartySidebarOpen && (
+              {roomCode && (
                 <button
                   type="button"
                   onClick={toggleOrFocusPartyLounge}
@@ -4627,13 +4666,12 @@ export function WatchRoom() {
           onMouseEnter={wakeChrome}
           onMouseMove={wakeChrome}
           onClick={wakeChrome}
-          style={{ left: `${partyDockedOffsetPx}px` }}
           title="Move mouse here to show window controls"
-          className="absolute top-0 right-0 h-2.5 z-[46] cursor-pointer"
+          className="absolute top-0 left-0 right-0 h-2.5 z-[46] cursor-pointer"
         />
       )}
 
-      {/* Main video stage: shrinks smoothly when Left Party Lounge or Right ChatSidebar is docked */}
+      {/* Main video stage: shrinks smoothly when Right Party Lounge is docked */}
       <div
         data-stage-container="true"
         className="relative flex-1 min-w-0 h-full overflow-hidden"
@@ -4644,8 +4682,8 @@ export function WatchRoom() {
           visible={backdropPresence.mounted}
           playing={!paused}
           viewportRef={stageRef}
-          layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${micCuePresence.mounted}:${micCuePresence.exiting}:${micCuePresence.value?.id ?? 0}:${ratingBarActive}:${activeOutroWindow}:${unreadChatCount}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${chatPeeksCount}:${effectivePartySidebarOpen}:${effectivePartyWidth}:${partyDocked}:${effectiveChatSidebarOpen}:${effectiveChatWidth}:${chatDocked}:${viewportTick}`}
-          pausedRefreshKey={`${pausedPosHalf}:${seekSettledTick}:${effectivePartySidebarOpen}:${effectivePartyWidth}:${partyDocked}:${viewportTick}`}
+          layoutKey={`${showFloatingCapsule}:${showWindowBar}:${fullWidthPlayBar}:${popover.mounted}:${popover.exiting}:${popover.value?.tab ?? sideTab}:${popover.value?.pos.left ?? 0}:${popover.value?.pos.bottom ?? 0}:${popover.value?.pos.width ?? 0}:${Boolean(contextMenu)}:${contextMenu?.x ?? 0}:${contextMenu?.y ?? 0}:${Boolean(visibleFileMismatch)}:${visibleFileMismatch?.signature ?? ""}:${alignMode}:${notificationCount}:${feedback?.id ?? 0}:${seekCuePresence.mounted}:${seekCuePresence.exiting}:${seekCuePresence.value?.id ?? 0}:${micCuePresence.mounted}:${micCuePresence.exiting}:${micCuePresence.value?.id ?? 0}:${ratingBarActive}:${activeOutroWindow}:${unreadChatCount}:${Boolean(activeContextIntro)}:${Boolean(activeFloatingIntro)}:${chatPeeksCount}:${effectiveChatSidebarOpen}:${effectiveChatWidth}:${chatDocked}:${viewportTick}`}
+          pausedRefreshKey={`${pausedPosHalf}:${seekSettledTick}:${viewportTick}`}
         />
         {seekCuePresence.mounted && seekCuePresence.value && (
           <div
@@ -4788,7 +4826,7 @@ export function WatchRoom() {
           onAlignScene={() => void setSceneAlignMode(true)}
           onDismiss={fileMismatch.dismiss}
         />
-        {syncStatus.state === "connected" && alignMode && !panelOpen && !effectivePartySidebarOpen && (
+        {syncStatus.state === "connected" && alignMode && !panelOpen && (
           <AlignModePill timelineScale={timelineScale} />
         )}
       </div>
@@ -4889,7 +4927,7 @@ export function WatchRoom() {
             left: popover.value.pos.left,
             bottom: popover.value.pos.bottom,
             width: popover.value.pos.width,
-            maxHeight: `max(110px, min(460px, calc(100vh - ${
+            maxHeight: `max(110px, min(540px, calc(100vh - ${
               popover.value.pos.bottom + (showWindowBar ? 56 : 14)
             }px)))`,
           }}
@@ -4899,9 +4937,7 @@ export function WatchRoom() {
               : "ep-glass-capsule ep-capsule-morph fixed z-40 select-none"
           } ${
             popover.exiting
-              ? pinLeftExiting && popover.value.tab === "room"
-                ? "ep-popover-pin-left-out pointer-events-none"
-                : "ep-popover-bloom-out pointer-events-none"
+              ? "ep-popover-bloom-out pointer-events-none"
               : "ep-popover-bloom"
           } ${
             popover.value.tab === "room" || popover.value.tab === "episodes"
@@ -4932,7 +4968,6 @@ export function WatchRoom() {
               {popover.value.tab === "room" && (
                 <RoomPanel
                   onClose={() => setPanelOpen(false)}
-                  onDockLeft={handleDockPartyLeft}
                   onChooseFile={() => void handleChooseFile()}
                   onChooseFolder={() => void handleChooseSeasonFolder()}
                   onSwitchEpisode={(idx) => void switchToPartyEpisode(idx)}
@@ -4971,13 +5006,11 @@ export function WatchRoom() {
       />
 
       <SkipIntroOverlay
-        chromeVisible={showFloatingCapsule}
         popoverOpen={popover.mounted}
         lockedForLocalUser={introLockedNow}
       />
 
       <NextEpisodeOverlay
-        chromeVisible={showFloatingCapsule}
         popoverOpen={popover.mounted}
         lockedForLocalUser={introLockedNow}
         onNextEpisode={handleOutroNextEpisode}
@@ -4990,7 +5023,7 @@ export function WatchRoom() {
           Boolean(roomCode) &&
           voiceEnabled &&
           voiceJoined &&
-          !effectivePartySidebarOpen &&
+          !effectiveChatSidebarOpen &&
           !(panelOpen && sideTab === "room") &&
           (isFullscreen || chromeIdle)
         }
@@ -4999,6 +5032,7 @@ export function WatchRoom() {
         )}
         localUsername={effectiveUserNow}
         localAvatarId={avatarId}
+        peerAvatars={peerAvatars}
         localSpeaking={localVoiceSpeaking}
         localMuted={voiceMuted}
         localDeafened={voiceDeafened}
@@ -5016,20 +5050,27 @@ export function WatchRoom() {
               wakeChrome();
               setChatSidebarOpenSmooth(true);
             }}
-            aria-label="Open Party Chat"
-            title="Open Party Chat (C)"
+            aria-label="Open Party Lounge"
+            title="Open Party Lounge (C)"
             className={`ep-chat-edge-rail absolute right-0 top-1/2 -translate-y-1/2 z-[36] rounded-l-2xl py-3 px-1.5 flex flex-col items-center gap-1.5 cursor-pointer ${
-              showFloatingCapsule || unreadChatCount > 0
+              showFloatingCapsule || unreadChatCount > 0 || voiceJoined
                 ? "opacity-100"
                 : "opacity-0 hover:opacity-100 focus-visible:opacity-100"
             }`}
           >
             <PlayerChatIcon size={16} className="text-white/85" />
-            {unreadChatCount > 0 && (
+            {unreadChatCount > 0 ? (
               <span className="min-w-[16px] h-4 px-1 rounded-full bg-accent text-[9.5px] font-semibold text-white flex items-center justify-center num leading-none">
                 {unreadChatCount > 9 ? "9+" : unreadChatCount}
               </span>
-            )}
+            ) : voiceJoined ? (
+              <span
+                aria-hidden="true"
+                className={`h-2 w-2 rounded-full ${
+                  voiceSpeakingPeers.length > 0 || localVoiceSpeaking ? "bg-ok" : "bg-accent-soft"
+                }`}
+              />
+            ) : null}
           </button>
         )}
 
@@ -5046,7 +5087,6 @@ export function WatchRoom() {
           onToggleFullscreen={toggleFullscreen}
           onPrevEpisode={handlePrevEpisode}
           onNextEpisode={handleNextEpisode}
-          onTogglePartySidebar={toggleOrFocusPartyLounge}
           onBarHoverChange={handleBarHoverChange}
           drawerTabs={null}
           expandedDrawer={null}
@@ -5071,7 +5111,6 @@ export function WatchRoom() {
           exiting={chatSidebarPresence.exiting}
           width={effectiveChatWidth}
           topChromeOffset={!isFullscreen}
-          partySidebarOpen={effectivePartySidebarOpen}
           onClose={() => setChatSidebarOpenSmooth(false)}
           onSeekToTimestamp={handleSeekToChatTimestamp}
           onResizingChange={setChatResizing}
@@ -5098,6 +5137,67 @@ export function WatchRoom() {
         <Suspense fallback={null}>
           <ShortcutsModal open={shortcutsOpen} onClose={closeShortcuts} />
         </Suspense>
+      )}
+      {streamModalOpen && (
+        <div
+          role="dialog"
+          aria-label="Open Stream URL"
+          onClick={() => setStreamModalOpen(false)}
+          className="fixed inset-0 z-[85] bg-black/68 flex items-center justify-center p-4 anim-pop-in"
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleLoadStreamUrl();
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="ep-glass-sheet w-full max-w-md rounded-2xl p-4 space-y-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-white">Open Stream URL</h2>
+                <p className="text-[11.5px] text-muted mt-0.5">
+                  Paste a public https:// video or HLS (.m3u8) stream link.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStreamModalOpen(false)}
+                aria-label="Close stream dialog"
+                className="h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.08] cursor-pointer"
+              >
+                <span className="text-xs">✕</span>
+              </button>
+            </div>
+            <input
+              type="url"
+              autoFocus
+              value={streamUrlInput}
+              onChange={(e) => setStreamUrlInput(e.target.value)}
+              placeholder="https://cdn.example.com/video.mp4"
+              className="w-full px-3 py-2 rounded-xl bg-black/35 border border-white/15 text-xs text-white placeholder:text-muted/65 focus:outline-none focus:border-accent-soft/60"
+            />
+            {streamUrlError && (
+              <p className="text-[11px] text-bad leading-snug">{streamUrlError}</p>
+            )}
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setStreamModalOpen(false)}
+                className="ep-press px-3 py-1.5 rounded-full text-xs text-secondary hover:text-white hover:bg-white/[0.08] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!streamUrlInput.trim() || streamLoading}
+                className="ep-press px-4 py-1.5 rounded-full bg-accent hover:bg-accent-soft text-xs font-semibold text-white disabled:opacity-45 cursor-pointer"
+              >
+                {streamLoading ? "Loading…" : "Load Stream"}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
     </div>
   );

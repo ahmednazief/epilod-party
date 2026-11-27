@@ -1,7 +1,13 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
-use dfn3_rs::Denoiser as Dfn3Denoiser;
+use dfn3_rs::{Denoiser as Dfn3Denoiser, Model as Dfn3Model, WEIGHTS_SIZE as DFN3_WEIGHTS_SIZE};
+
+#[repr(C, align(64))]
+struct AlignedAuraWeights([u8; DFN3_WEIGHTS_SIZE]);
+
+static EPILOD_AURA_WEIGHTS: AlignedAuraWeights =
+    AlignedAuraWeights(*include_bytes!("../weights/epilod_aura.bin"));
 use sonora::config::{
     AdaptiveDigital as SonoraAdaptiveDigitalConfig, EchoCanceller as SonoraEchoCancellerConfig,
     FixedDigital as SonoraFixedDigitalConfig, GainController2 as SonoraGainController2Config,
@@ -350,8 +356,46 @@ impl EchoCanceller for WebRtcAec3Canceller {
 ///
 /// Lifts quiet/distant laptop microphones up to +32 dB during speech while refusing to amplify
 /// background noise (`max_output_noise_level_dbfs = -52 dBFS`) and smoothly taming close-up peaks.
+#[derive(Debug, Clone, Copy)]
+pub struct WebRtcAgc2Params {
+    pub headroom_db: f32,
+    pub max_gain_db: f32,
+    pub initial_gain_db: f32,
+    pub max_gain_change_db_per_second: f32,
+    pub max_output_noise_level_dbfs: f32,
+    pub fixed_gain_db: f32,
+}
+
+impl Default for WebRtcAgc2Params {
+    fn default() -> Self {
+        Self {
+            headroom_db: 4.0,
+            max_gain_db: 34.0,
+            initial_gain_db: 15.0,
+            max_gain_change_db_per_second: 12.0,
+            max_output_noise_level_dbfs: -52.0,
+            fixed_gain_db: 4.0,
+        }
+    }
+}
+
+impl WebRtcAgc2Params {
+    /// Aura preset: gentle startup gain (+6 dB, 0 dB fixed), 12 dB/s response, and -58 dBFS noise floor cap.
+    pub fn aura() -> Self {
+        Self {
+            headroom_db: 5.0,
+            max_gain_db: 34.0,
+            initial_gain_db: 6.0,
+            max_gain_change_db_per_second: 12.0,
+            max_output_noise_level_dbfs: -58.0,
+            fixed_gain_db: 0.0,
+        }
+    }
+}
+
 pub struct WebRtcAgc2Leveler {
     apm: AudioProcessing,
+    params: WebRtcAgc2Params,
     in_scratch: [f32; VOICE_FRAME_10MS],
 }
 
@@ -362,7 +406,7 @@ impl Default for WebRtcAgc2Leveler {
 }
 
 impl WebRtcAgc2Leveler {
-    fn build_apm() -> AudioProcessing {
+    fn build_apm(params: WebRtcAgc2Params) -> AudioProcessing {
         let cfg = SonoraConfig {
             pipeline: SonoraPipelineConfig {
                 maximum_internal_processing_rate: SonoraMaxProcessingRate::Rate48kHz,
@@ -373,13 +417,15 @@ impl WebRtcAgc2Leveler {
             gain_controller2: Some(SonoraGainController2Config {
                 input_volume_controller: false,
                 adaptive_digital: Some(SonoraAdaptiveDigitalConfig {
-                    headroom_db: 4.0,
-                    max_gain_db: 34.0,
-                    initial_gain_db: 15.0,
-                    max_gain_change_db_per_second: 12.0,
-                    max_output_noise_level_dbfs: -52.0,
+                    headroom_db: params.headroom_db,
+                    max_gain_db: params.max_gain_db,
+                    initial_gain_db: params.initial_gain_db,
+                    max_gain_change_db_per_second: params.max_gain_change_db_per_second,
+                    max_output_noise_level_dbfs: params.max_output_noise_level_dbfs,
                 }),
-                fixed_digital: SonoraFixedDigitalConfig { gain_db: 4.0 },
+                fixed_digital: SonoraFixedDigitalConfig {
+                    gain_db: params.fixed_gain_db,
+                },
             }),
             ..Default::default()
         };
@@ -392,14 +438,19 @@ impl WebRtcAgc2Leveler {
     }
 
     pub fn new() -> Self {
+        Self::with_params(WebRtcAgc2Params::default())
+    }
+
+    pub fn with_params(params: WebRtcAgc2Params) -> Self {
         Self {
-            apm: Self::build_apm(),
+            apm: Self::build_apm(params),
+            params,
             in_scratch: [0.0; VOICE_FRAME_10MS],
         }
     }
 
     pub fn reset(&mut self) {
-        self.apm = Self::build_apm();
+        self.apm = Self::build_apm(self.params);
         self.in_scratch.fill(0.0);
     }
 
@@ -620,6 +671,33 @@ impl VoiceCalibrator {
     }
 }
 
+/// Ablation toggles for isolating VoiceDenoiser wrapper stages in `epilod_voice_lab`.
+/// All stages default to `true` so live runtime behavior is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceDenoiserOptions {
+    pub stage_a: bool,
+    pub pre_gain: bool,
+    pub stage_c: bool,
+}
+
+impl Default for VoiceDenoiserOptions {
+    fn default() -> Self {
+        Self {
+            stage_a: true,
+            pre_gain: true,
+            stage_c: true,
+        }
+    }
+}
+
+impl VoiceDenoiserOptions {
+    pub const BARE: Self = Self {
+        stage_a: false,
+        pre_gain: false,
+        stage_c: false,
+    };
+}
+
 /// Local DeepFilterNet3 + WebRTC 24 kHz RNN-VAD wrapper:
 /// - Stage A: 2.5 ms sub-frame transient de-clicker (rejects sharp keyboard/mouse clicks pre-denoiser)
 /// - Stage B: Quiet-mic pre-leveled 48 kHz DeepFilterNet3 neural core (32 dB Balanced / 60 dB Strong)
@@ -627,6 +705,8 @@ impl VoiceCalibrator {
 pub struct VoiceDenoiser {
     dfn: Dfn3Denoiser,
     rnn_vad: VoiceActivityDetectorWrapper,
+    options: VoiceDenoiserOptions,
+    aura_mode: bool,
     last_mode: NoiseSuppressionMode,
     stage_a_buf: [f32; VOICE_FRAME_10MS],
     in_scaled: [f32; VOICE_FRAME_10MS],
@@ -653,10 +733,38 @@ impl VoiceDenoiser {
     const SUBFRAME_LEN: usize = 120; // 2.5 ms @ 48 kHz
     const BALANCED_ATTEN_LIMIT_DB: f32 = 28.0;
     const STRONG_ATTEN_LIMIT_DB: f32 = 45.0; // Deep Krisp-class neural suppression while preserving low-SNR speech
+    const AURA_BALANCED_ATTEN_LIMIT_DB: f32 = 38.0;
+    const AURA_STRONG_ATTEN_LIMIT_DB: f32 = 52.0;
 
     pub fn new() -> Self {
-        let mut dfn = Dfn3Denoiser::new();
-        dfn.set_attenuation_limit(Self::BALANCED_ATTEN_LIMIT_DB);
+        Self::with_options(VoiceDenoiserOptions::default())
+    }
+
+    pub fn new_aura() -> Self {
+        Self::with_options_and_aura(VoiceDenoiserOptions::default(), true)
+    }
+
+    pub fn with_options(options: VoiceDenoiserOptions) -> Self {
+        Self::with_options_and_aura(options, false)
+    }
+
+    pub fn with_options_and_aura(options: VoiceDenoiserOptions, use_aura_weights: bool) -> Self {
+        let mut dfn = if use_aura_weights {
+            let mut d = match Dfn3Model::from_bytes(&EPILOD_AURA_WEIGHTS.0) {
+                Ok(model) => Dfn3Denoiser::with_model(model),
+                Err(_) => Dfn3Denoiser::new(),
+            };
+            // Disable LSNR-based stage skipping so Aura never leaks raw noise at low SNR or quiet mics
+            d.set_thresholds(-100.0, 100.0, 100.0);
+            d
+        } else {
+            Dfn3Denoiser::new()
+        };
+        dfn.set_attenuation_limit(if use_aura_weights {
+            Self::AURA_BALANCED_ATTEN_LIMIT_DB
+        } else {
+            Self::BALANCED_ATTEN_LIMIT_DB
+        });
         let rnn_vad = VoiceActivityDetectorWrapper::new(
             sonora_simd::detect_backend(),
             VOICE_SAMPLE_RATE as i32,
@@ -664,6 +772,8 @@ impl VoiceDenoiser {
         Self {
             dfn,
             rnn_vad,
+            options,
+            aura_mode: use_aura_weights,
             last_mode: NoiseSuppressionMode::Balanced,
             stage_a_buf: [0.0; VOICE_FRAME_10MS],
             in_scaled: [0.0; VOICE_FRAME_10MS],
@@ -713,70 +823,77 @@ impl VoiceDenoiser {
         // Mechanical switches and mouse clicks spike sharply for 1 sub-window and either decay
         // immediately or stay ultra-HF, whereas vocal plosives/fricatives transition into sustained speech.
         self.stage_a_buf.copy_from_slice(dry);
-        let spike_mult = match mode {
-            NoiseSuppressionMode::Strong => 3.4,
-            _ => 4.4,
-        };
-        const NUM_SUB: usize = VOICE_FRAME_10MS / VoiceDenoiser::SUBFRAME_LEN;
-        let mut sub_rms_arr = [0.0f32; NUM_SUB];
-        let mut hf_ratio_arr = [0.0f32; NUM_SUB];
-        for w in 0..NUM_SUB {
-            let start = w * Self::SUBFRAME_LEN;
-            let win = &self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
-            let mut sum_sq = 0.0f32;
-            let mut diff_sum = 0.0f32;
-            let mut prev_s = win[0];
-            for &s in win.iter() {
-                sum_sq += s * s;
-                diff_sum += (s - prev_s).abs();
-                prev_s = s;
-            }
-            let sub_rms = (sum_sq / Self::SUBFRAME_LEN as f32).sqrt();
-            sub_rms_arr[w] = sub_rms;
-            hf_ratio_arr[w] = if sub_rms > 1e-5 {
-                (diff_sum / Self::SUBFRAME_LEN as f32) / sub_rms
-            } else {
-                0.0
-            };
-        }
-
         let mut had_click_transient = false;
-        for w in 0..NUM_SUB {
-            let sub_rms = sub_rms_arr[w];
-            let hf_ratio = hf_ratio_arr[w];
-            let looks_sustained_speech = if w + 1 < NUM_SUB {
-                sub_rms_arr[w + 1] >= sub_rms * 0.68 && hf_ratio_arr[w + 1] < 0.40
-            } else {
-                hf_ratio < 0.48
+        if self.options.stage_a {
+            let spike_mult = match mode {
+                NoiseSuppressionMode::Strong => 3.4,
+                _ => 4.4,
             };
-            let is_click_transient = self.hangover_frames == 0
-                && sub_rms > (self.prev_sub_rms * spike_mult).max(0.015)
-                && hf_ratio > 0.36
-                && !looks_sustained_speech;
-            if is_click_transient {
-                had_click_transient = true;
+            const NUM_SUB: usize = VOICE_FRAME_10MS / VoiceDenoiser::SUBFRAME_LEN;
+            let mut sub_rms_arr = [0.0f32; NUM_SUB];
+            let mut hf_ratio_arr = [0.0f32; NUM_SUB];
+            for w in 0..NUM_SUB {
                 let start = w * Self::SUBFRAME_LEN;
-                let win = &mut self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
-                let target_rms = (self.prev_sub_rms * 1.4).max(0.004);
-                let atten = (target_rms / sub_rms.max(1e-5)).clamp(0.08, 0.45);
-                for s in win.iter_mut() {
-                    *s *= atten;
+                let win = &self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
+                let mut sum_sq = 0.0f32;
+                let mut diff_sum = 0.0f32;
+                let mut prev_s = win[0];
+                for &s in win.iter() {
+                    sum_sq += s * s;
+                    diff_sum += (s - prev_s).abs();
+                    prev_s = s;
                 }
-            } else {
-                let alpha = if sub_rms > self.prev_sub_rms {
-                    0.12
+                let sub_rms = (sum_sq / Self::SUBFRAME_LEN as f32).sqrt();
+                sub_rms_arr[w] = sub_rms;
+                hf_ratio_arr[w] = if sub_rms > 1e-5 {
+                    (diff_sum / Self::SUBFRAME_LEN as f32) / sub_rms
                 } else {
-                    0.25
+                    0.0
                 };
-                self.prev_sub_rms += alpha * (sub_rms - self.prev_sub_rms);
+            }
+
+            for w in 0..NUM_SUB {
+                let sub_rms = sub_rms_arr[w];
+                let hf_ratio = hf_ratio_arr[w];
+                let looks_sustained_speech = if w + 1 < NUM_SUB {
+                    sub_rms_arr[w + 1] >= sub_rms * 0.68 && hf_ratio_arr[w + 1] < 0.40
+                } else {
+                    hf_ratio < 0.48
+                };
+                let is_click_transient = self.hangover_frames == 0
+                    && sub_rms > (self.prev_sub_rms * spike_mult).max(0.015)
+                    && hf_ratio > 0.36
+                    && !looks_sustained_speech;
+                if is_click_transient {
+                    had_click_transient = true;
+                    let start = w * Self::SUBFRAME_LEN;
+                    let win = &mut self.stage_a_buf[start..start + Self::SUBFRAME_LEN];
+                    let target_rms = (self.prev_sub_rms * 1.4).max(0.004);
+                    let atten = (target_rms / sub_rms.max(1e-5)).clamp(0.08, 0.45);
+                    for s in win.iter_mut() {
+                        *s *= atten;
+                    }
+                } else {
+                    let alpha = if sub_rms > self.prev_sub_rms {
+                        0.12
+                    } else {
+                        0.25
+                    };
+                    self.prev_sub_rms += alpha * (sub_rms - self.prev_sub_rms);
+                }
             }
         }
 
-        // Stage B: SNR-guarded pre-gain so quiet mics enter DeepFilterNet3 near -24 dBFS without boosting loud fans.
+        // Stage B: SNR-guarded pre-gain so quiet mics enter Classic DeepFilterNet3 near -24 dBFS without boosting loud fans.
+        // Aura weights are trained directly across -42..-13 dBFS whispers + reverb, so DFN3 receives unity level while RNN-VAD still gets pre-leveled audio.
         if mode != self.last_mode {
-            let limit_db = match mode {
-                NoiseSuppressionMode::Strong => Self::STRONG_ATTEN_LIMIT_DB,
-                NoiseSuppressionMode::Balanced | NoiseSuppressionMode::Off => {
+            let limit_db = match (self.aura_mode, mode) {
+                (true, NoiseSuppressionMode::Strong) => Self::AURA_STRONG_ATTEN_LIMIT_DB,
+                (true, NoiseSuppressionMode::Balanced | NoiseSuppressionMode::Off) => {
+                    Self::AURA_BALANCED_ATTEN_LIMIT_DB
+                }
+                (false, NoiseSuppressionMode::Strong) => Self::STRONG_ATTEN_LIMIT_DB,
+                (false, NoiseSuppressionMode::Balanced | NoiseSuppressionMode::Off) => {
                     Self::BALANCED_ATTEN_LIMIT_DB
                 }
             };
@@ -792,16 +909,21 @@ impl VoiceDenoiser {
         } else {
             Self::MAX_PRE_GAIN
         };
-        let pre_gain = if self.speech_rms_env > 1e-4 {
+        let vad_pre_gain = if self.speech_rms_env > 1e-4 {
             (Self::TARGET_INPUT_RMS / self.speech_rms_env)
                 .clamp(1.0, Self::MAX_PRE_GAIN)
                 .min(noise_cap_gain)
         } else {
             1.0
         };
+        let dfn_pre_gain = if !self.options.pre_gain || self.aura_mode {
+            1.0
+        } else {
+            vad_pre_gain
+        };
         for (dst, &src) in self.in_scaled.iter_mut().zip(self.stage_a_buf.iter()) {
             *dst = if src.is_finite() {
-                (src * pre_gain).clamp(-1.0, 1.0)
+                (src * dfn_pre_gain).clamp(-1.0, 1.0)
             } else {
                 0.0
             };
@@ -814,13 +936,24 @@ impl VoiceDenoiser {
             0.0
         };
 
-        // Run Google WebRTC 24 kHz Neural RNN-VAD on the pre-leveled denoised frame (WebRTC int16 float scale).
-        for (dst, &s) in self.vad_pcm_buf.iter_mut().zip(self.out_scaled.iter()) {
-            *dst = if s.is_finite() {
-                (s * 32768.0).clamp(-32768.0, 32767.0)
-            } else {
-                0.0
-            };
+        // In Aura mode, run WebRTC 24 kHz RNN-VAD on the leveled post-denoiser frame so steady
+        // fans/clicks are already suppressed before VAD while soft whispers get pre-leveled lift.
+        if self.aura_mode {
+            for (dst, &src) in self.vad_pcm_buf.iter_mut().zip(self.out_scaled.iter()) {
+                *dst = if src.is_finite() {
+                    (src * vad_pre_gain * 32768.0).clamp(-32768.0, 32767.0)
+                } else {
+                    0.0
+                };
+            }
+        } else {
+            for (dst, &s) in self.vad_pcm_buf.iter_mut().zip(self.out_scaled.iter()) {
+                *dst = if s.is_finite() {
+                    (s * 32768.0).clamp(-32768.0, 32767.0)
+                } else {
+                    0.0
+                };
+            }
         }
         let rnn_prob = self.rnn_vad.analyze(&self.vad_pcm_buf).clamp(0.0, 1.0);
         let raw_prob = if had_click_transient && rnn_prob < 0.25 {
@@ -831,6 +964,8 @@ impl VoiceDenoiser {
             (rnn_prob * 0.70 + lsnr_prob * 0.30).min(0.18)
         } else if rnn_prob < 0.12 && lsnr_prob < 0.72 {
             (rnn_prob * 0.65 + lsnr_prob * 0.35).min(0.24)
+        } else if self.aura_mode && rnn_prob < 0.25 {
+            (rnn_prob * 0.70 + lsnr_prob * 0.30).min(0.24)
         } else {
             (rnn_prob * 0.60 + lsnr_prob * 0.40).clamp(0.0, 1.0)
         };
@@ -854,20 +989,21 @@ impl VoiceDenoiser {
         }
 
         // Stage C: Gentle silence-only residual floor smoother (no HF muffling low-pass;
-        // keeps soft speech >= 0.20 at full unity gain so VoiceGate & AGC2 never starve).
+        // keeps soft speech & whispers >= 0.12 at full unity gain so VoiceGate & AGC2 never starve).
         let floor_gain = match mode {
             NoiseSuppressionMode::Off => 1.0,
-            NoiseSuppressionMode::Balanced => 0.22,
+            NoiseSuppressionMode::Balanced => if self.aura_mode { 0.16 } else { 0.22 },
             NoiseSuppressionMode::Strong => 0.08,
         };
-        let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= 0.20 {
+        let unity_thresh = if self.aura_mode { 0.12 } else { 0.20 };
+        let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= unity_thresh {
             1.0
         } else {
-            let t = (self.prob_smooth / 0.20).clamp(0.0, 1.0);
+            let t = (self.prob_smooth / unity_thresh).clamp(0.0, 1.0);
             floor_gain + (1.0 - floor_gain) * (t * t)
         };
 
-        let inv_pre_gain = 1.0 / pre_gain;
+        let inv_pre_gain = 1.0 / dfn_pre_gain;
         let post_coeff = if target_post_gain > self.post_gain_smooth {
             0.045
         } else {
@@ -877,7 +1013,11 @@ impl VoiceDenoiser {
         for (dst, &clean_s) in out.iter_mut().zip(self.out_scaled.iter()) {
             self.post_gain_smooth += post_coeff * (target_post_gain - self.post_gain_smooth);
             let clean = (clean_s * inv_pre_gain).clamp(-1.0, 1.0);
-            *dst = clean * self.post_gain_smooth;
+            *dst = if self.options.stage_c {
+                clean * self.post_gain_smooth
+            } else {
+                clean
+            };
         }
 
         raw_prob.max(self.prob_smooth)
@@ -916,8 +1056,10 @@ impl Default for VoiceGate {
 }
 
 impl VoiceGate {
-    const HANGOVER_TARGET_FRAMES: usize = 20; // 20 * 10 ms = 200 ms snappy release without clipping word endings
+    const HANGOVER_TARGET_FRAMES: usize = 20; // 20 * 10 ms = 200 ms snappy release (Classic)
+    const AURA_HANGOVER_TARGET_FRAMES: usize = 42; // 42 * 10 ms = 420 ms natural Discord-like pause hold
     const RAMP_SAMPLES: usize = 384; // 8 ms @ 48 kHz smooth S-curve ramp inside 10 ms frame
+    const AURA_RELEASE_RAMP_SAMPLES: usize = 1200; // 25 ms @ 48 kHz soft fade-out without abrupt cut
 
     pub fn new() -> Self {
         Self {
@@ -944,8 +1086,13 @@ impl VoiceGate {
         self.is_open || self.current_gain > 0.001
     }
 
-    fn apply_ramp(&mut self, frame: &mut [f32; VOICE_FRAME_10MS], target_gain: f32) {
-        let step = 1.0 / (Self::RAMP_SAMPLES as f32);
+    fn apply_ramp(
+        &mut self,
+        frame: &mut [f32; VOICE_FRAME_10MS],
+        target_gain: f32,
+        ramp_samples: usize,
+    ) {
+        let step = 1.0 / (ramp_samples.max(1) as f32);
         for s in frame.iter_mut() {
             if (self.current_gain - target_gain).abs() <= step {
                 self.current_gain = target_gain;
@@ -961,8 +1108,7 @@ impl VoiceGate {
         }
     }
 
-    /// Processes one 10 ms denoised frame. Writes 0..=3 output frames into `out_frames` and returns count.
-    /// Zero heap allocations.
+    /// Processes one 10 ms denoised frame in Classic mode.
     #[allow(clippy::too_many_arguments)]
     pub fn process_10ms(
         &mut self,
@@ -974,7 +1120,62 @@ impl VoiceGate {
         muted: bool,
         out_frames: &mut [[f32; VOICE_FRAME_10MS]; 3],
     ) -> (usize, bool, f32) {
+        self.process_10ms_with_mode(
+            frame,
+            speech_prob,
+            threshold_db,
+            vad_assisted,
+            ptt_active,
+            muted,
+            false,
+            out_frames,
+        )
+    }
+
+    /// Processes one 10 ms denoised frame in Aura mode (Discord-like neural-VAD sensitivity + 420 ms hangover + 25 ms soft release).
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_10ms_aura(
+        &mut self,
+        frame: &[f32; VOICE_FRAME_10MS],
+        speech_prob: f32,
+        threshold_db: f32,
+        vad_assisted: bool,
+        ptt_active: Option<bool>,
+        muted: bool,
+        out_frames: &mut [[f32; VOICE_FRAME_10MS]; 3],
+    ) -> (usize, bool, f32) {
+        self.process_10ms_with_mode(
+            frame,
+            speech_prob,
+            threshold_db,
+            vad_assisted,
+            ptt_active,
+            muted,
+            true,
+            out_frames,
+        )
+    }
+
+    /// Processes one 10 ms denoised frame. Writes 0..=3 output frames into `out_frames` and returns count.
+    /// Zero heap allocations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_10ms_with_mode(
+        &mut self,
+        frame: &[f32; VOICE_FRAME_10MS],
+        speech_prob: f32,
+        threshold_db: f32,
+        vad_assisted: bool,
+        ptt_active: Option<bool>,
+        muted: bool,
+        aura_mode: bool,
+        out_frames: &mut [[f32; VOICE_FRAME_10MS]; 3],
+    ) -> (usize, bool, f32) {
         let db = frame_dbfs(frame);
+        let hangover_target = if aura_mode {
+            Self::AURA_HANGOVER_TARGET_FRAMES
+        } else {
+            Self::HANGOVER_TARGET_FRAMES
+        };
         let wants_open = if muted {
             self.speech_streak = 0;
             false
@@ -983,7 +1184,12 @@ impl VoiceGate {
             ptt
         } else if self.is_open {
             self.speech_streak = 0;
-            let hold_ok = if vad_assisted {
+            let hold_ok = if aura_mode && vad_assisted {
+                // Keep open on neural speech activity (even soft whispers down to -62 dBFS),
+                // but never hold open on pure non-speech fan/room noise when speech_prob < 0.14.
+                (speech_prob >= 0.22 && db >= -62.0)
+                    || (speech_prob >= 0.14 && db >= (threshold_db - 4.0))
+            } else if vad_assisted {
                 (speech_prob >= 0.35 && db >= (threshold_db - 4.0))
                     || (speech_prob >= 0.20 && db >= (threshold_db + 2.0))
                     || (speech_prob >= 0.58 && db >= (threshold_db - 9.5))
@@ -991,7 +1197,7 @@ impl VoiceGate {
                 db >= (threshold_db - 4.0)
             };
             if hold_ok {
-                self.hangover_frames = Self::HANGOVER_TARGET_FRAMES;
+                self.hangover_frames = hangover_target;
                 true
             } else if self.hangover_frames > 0 {
                 self.hangover_frames -= 1;
@@ -1002,6 +1208,29 @@ impl VoiceGate {
         } else if !vad_assisted {
             self.speech_streak = 0;
             db >= threshold_db
+        } else if aura_mode {
+            // Discord-style Auto-Sensitivity: neural VAD opens immediately for confident speech even on whispers,
+            // rescues soft speech resuming during the 25 ms release fade, or opens after 20 ms confirmation for softer onsets
+            // while rejecting single-frame 10 ms keyboard/mouse clicks.
+            if (speech_prob >= 0.62 && db >= -60.0)
+                || (self.current_gain > 0.05 && speech_prob >= 0.28 && db >= -60.0)
+            {
+                self.speech_streak = 0;
+                true
+            } else if (speech_prob >= 0.30 && db >= -62.0)
+                || (speech_prob >= 0.24 && db >= threshold_db)
+            {
+                self.speech_streak = self.speech_streak.saturating_add(1);
+                if self.speech_streak >= 2 {
+                    self.speech_streak = 0;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                self.speech_streak = 0;
+                false
+            }
         } else if (speech_prob >= 0.65 && db >= (threshold_db + 2.0))
             || (speech_prob >= 0.76 && db >= (threshold_db - 1.5))
         {
@@ -1030,7 +1259,7 @@ impl VoiceGate {
                 self.is_open = false;
                 self.hangover_frames = 0;
                 out_frames[0].copy_from_slice(frame);
-                self.apply_ramp(&mut out_frames[0], 0.0);
+                self.apply_ramp(&mut out_frames[0], 0.0, Self::RAMP_SAMPLES);
                 out_count = 1;
             }
             self.pre_roll_len = 0;
@@ -1042,7 +1271,7 @@ impl VoiceGate {
             self.hangover_frames = if ptt_active.is_some() {
                 0
             } else {
-                Self::HANGOVER_TARGET_FRAMES
+                hangover_target
             };
             // Flush pre-roll frames on VAD open so consonant onsets aren't clipped
             if ptt_active.is_none() && self.pre_roll_len > 0 {
@@ -1050,24 +1279,30 @@ impl VoiceGate {
                 for i in 0..self.pre_roll_len {
                     let idx = (start + i) % 2;
                     out_frames[out_count].copy_from_slice(&self.pre_roll[idx]);
-                    self.apply_ramp(&mut out_frames[out_count], 1.0);
+                    self.apply_ramp(&mut out_frames[out_count], 1.0, Self::RAMP_SAMPLES);
                     out_count += 1;
                 }
                 self.pre_roll_len = 0;
             }
             out_frames[out_count].copy_from_slice(frame);
-            self.apply_ramp(&mut out_frames[out_count], 1.0);
+            self.apply_ramp(&mut out_frames[out_count], 1.0, Self::RAMP_SAMPLES);
             out_count += 1;
         } else if wants_open && self.is_open {
             out_frames[0].copy_from_slice(frame);
-            self.apply_ramp(&mut out_frames[0], 1.0);
+            self.apply_ramp(&mut out_frames[0], 1.0, Self::RAMP_SAMPLES);
             out_count = 1;
         } else if !wants_open && (self.is_open || self.current_gain > 0.0) {
             self.is_open = false;
             out_frames[0].copy_from_slice(frame);
-            self.apply_ramp(&mut out_frames[0], 0.0);
+            let rel_ramp = if aura_mode {
+                Self::AURA_RELEASE_RAMP_SAMPLES
+            } else {
+                Self::RAMP_SAMPLES
+            };
+            self.apply_ramp(&mut out_frames[0], 0.0, rel_ramp);
             out_count = 1;
-            self.push_pre_roll(frame);
+            // Frame was already emitted in `out_frames[0]`; never push it into pre-roll or re-opening would duplicate 10 ms!
+            self.pre_roll_len = 0;
         } else {
             self.push_pre_roll(frame);
         }
@@ -1146,6 +1381,53 @@ impl VoiceCompressor {
         self.process_with_speech_prob(samples, 1.0, enabled);
     }
 
+    /// Transparent -1 dBFS safety limiter without additional AGC, EQ, or compression (used in Aura mode when AGC2 handles leveling).
+    pub fn process_limiter_only(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            *s = soft_limit(*s, Self::LIMITER_CEILING);
+        }
+    }
+
+    /// Transparent Aura broadcast dynamics: 2.0:1 soft-knee crest compressor (-15 dBFS, 8 dB knee,
+    /// 10 ms attack / 150 ms release) + -1 dBFS soft-limiter, without coloring EQ/de-esser.
+    /// Freezes envelope updates during non-speech (`speech_prob < 0.35`) so reverb tails are never pumped.
+    pub fn process_aura_broadcast(&mut self, samples: &mut [f32], speech_prob: f32) {
+        if samples.is_empty() {
+            return;
+        }
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        let frame_rms = (sum_sq / samples.len() as f32).sqrt();
+        if speech_prob >= 0.35 && frame_rms > 0.002 {
+            // 20 ms step: ~10 ms attack (alpha ~0.85), ~150 ms release (alpha ~0.12)
+            let alpha = if frame_rms > self.env_rms { 0.85 } else { 0.12 };
+            self.env_rms = (1.0 - alpha) * self.env_rms + alpha * frame_rms;
+        }
+        let env_db = if self.env_rms <= 1e-5 {
+            -70.0
+        } else {
+            20.0 * self.env_rms.log10()
+        };
+        const AURA_THRESH_DB: f32 = -15.0;
+        const AURA_RATIO: f32 = 2.0;
+        const AURA_KNEE_DB: f32 = 8.0;
+        let over = env_db - AURA_THRESH_DB;
+        let half_knee = AURA_KNEE_DB * 0.5;
+        let comp_db = if over <= -half_knee {
+            0.0
+        } else if over >= half_knee {
+            (AURA_THRESH_DB + over / AURA_RATIO) - env_db
+        } else {
+            let t = over + half_knee;
+            ((1.0 / AURA_RATIO) - 1.0) * (t * t) / (2.0 * AURA_KNEE_DB)
+        };
+        let target_gain = 10.0f32.powf(comp_db / 20.0);
+        let gain_step = (target_gain - self.gain_smooth) / (samples.len() as f32);
+        for s in samples.iter_mut() {
+            self.gain_smooth += gain_step;
+            *s = soft_limit(*s * self.gain_smooth, Self::LIMITER_CEILING);
+        }
+    }
+
     pub fn process_with_speech_prob(
         &mut self,
         samples: &mut [f32],
@@ -1216,7 +1498,9 @@ impl VoiceCompressor {
             let leveled = *s * self.gain_smooth;
 
             // Subtle studio EQ: clean 360 Hz plastic/room mud + 3.0 kHz vocal articulation
-            let mut x = self.presence_eq.process_sample(self.mud_eq.process_sample(leveled));
+            let mut x = self
+                .presence_eq
+                .process_sample(self.mud_eq.process_sample(leveled));
 
             // Split-band >5.5 kHz dynamic sibilance de-esser (engages only when harsh 'S'/'SH' exceeds vocal body)
             self.deess_lp += 0.52 * (x - self.deess_lp);
@@ -1276,7 +1560,22 @@ impl PeerRxLeveler {
     }
 
     pub fn process_in_place(&mut self, samples: &mut [f32]) {
+        self.process_in_place_with_plc(samples, false, false);
+    }
+
+    pub fn process_in_place_with_plc(
+        &mut self,
+        samples: &mut [f32],
+        is_plc: bool,
+        aura_mode: bool,
+    ) {
         if samples.is_empty() {
+            return;
+        }
+        if is_plc {
+            for s in samples.iter_mut() {
+                *s = (*s * self.gain_smooth).clamp(-1.0, 1.0);
+            }
             return;
         }
         let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
@@ -1286,8 +1585,13 @@ impl PeerRxLeveler {
             let alpha = if frame_rms > self.env_rms { 0.08 } else { 0.03 };
             self.env_rms += alpha * (frame_rms - self.env_rms);
         }
+        let (min_gain, max_gain) = if aura_mode {
+            (0.70, 1.60)
+        } else {
+            (Self::MIN_GAIN, Self::MAX_GAIN)
+        };
         let target_gain = if self.env_rms > 1e-4 {
-            (Self::TARGET_RMS / self.env_rms).clamp(Self::MIN_GAIN, Self::MAX_GAIN)
+            (Self::TARGET_RMS / self.env_rms).clamp(min_gain, max_gain)
         } else {
             1.0
         };
@@ -1333,7 +1637,7 @@ impl PeerTokenBucket {
     }
 
     pub fn new_voice_default(now_ms: u64) -> Self {
-        Self::new(12.0, 60.0, now_ms)
+        Self::new(24.0, 65.0, now_ms)
     }
 
     /// Per-hop outer bucket allowing 1 direct talker + up to 4 relayed voice streams concurrently.
@@ -1383,6 +1687,7 @@ pub struct PeerJitterBuffer {
     in_talkspurt: bool,
     last_eot_seen: bool,
     target_frames: usize,
+    min_target_frames: usize,
     stall_cushion_frames: usize,
     frames: BTreeMap<u64, JitterPacket>,
     interarrival_jitter_ms: f64,
@@ -1415,6 +1720,7 @@ impl PeerJitterBuffer {
             in_talkspurt: false,
             last_eot_seen: false,
             target_frames: 2, // 40 ms initial cushion prevents micro-cutoffs on talkspurt start
+            min_target_frames: 1,
             stall_cushion_frames: 0,
             frames: BTreeMap::new(),
             interarrival_jitter_ms: 0.0,
@@ -1448,8 +1754,12 @@ impl PeerJitterBuffer {
         self.frames.len() * 20
     }
 
+    pub fn set_min_target_frames(&mut self, min_frames: usize) {
+        self.min_target_frames = min_frames.clamp(1, 4);
+    }
+
     pub fn target_delay_ms(&self) -> usize {
-        (self.target_frames + self.stall_cushion_frames).min(6) * 20
+        self.effective_target_frames() * 20
     }
 
     pub fn interarrival_jitter_ms(&self) -> f64 {
@@ -1479,7 +1789,8 @@ impl PeerJitterBuffer {
     }
 
     fn effective_target_frames(&self) -> usize {
-        (self.target_frames + self.stall_cushion_frames).clamp(1, 6)
+        (self.target_frames.max(self.min_target_frames) + self.stall_cushion_frames)
+            .clamp(self.min_target_frames, 6)
     }
 
     fn unwrap_seq(reference: u64, seq_u16: u16) -> u64 {
@@ -2071,11 +2382,11 @@ mod tests {
     #[test]
     fn token_bucket_enforces_burst_and_refill() {
         let mut tb = PeerTokenBucket::new_voice_default(0);
-        for _ in 0..12 {
+        for _ in 0..24 {
             assert!(tb.allow(0));
         }
         assert!(!tb.allow(0));
-        assert!(tb.allow(20)); // +1.2 tokens
+        assert!(tb.allow(20)); // +1.3 tokens @ 65 pps
 
         let mut relay_tb = PeerTokenBucket::new_relay_hop(0);
         for _ in 0..48 {
@@ -2083,6 +2394,38 @@ mod tests {
         }
         assert!(!relay_tb.allow(0));
         assert!(relay_tb.allow(20)); // +6 tokens @ 300 pps
+    }
+
+    #[test]
+    fn peer_rx_leveler_ignores_plc_and_jitter_buffer_respects_min_target_frames() {
+        let mut lvl = PeerRxLeveler::new();
+        let mut loud = [0.4f32; VOICE_FRAME_20MS];
+        lvl.process_in_place_with_plc(&mut loud, false, true);
+        let gain_before_plc = lvl.gain_smooth;
+        let env_before_plc = lvl.env_rms;
+
+        let mut plc_frame = [0.0001f32; VOICE_FRAME_20MS];
+        for _ in 0..10 {
+            lvl.process_in_place_with_plc(&mut plc_frame, true, true);
+        }
+        assert!((lvl.gain_smooth - gain_before_plc).abs() < 1e-6);
+        assert!((lvl.env_rms - env_before_plc).abs() < 1e-6);
+
+        let mut jb = PeerJitterBuffer::new();
+        jb.set_min_target_frames(2);
+        for seq in 0u16..10 {
+            jb.push(
+                JitterPacket {
+                    seq,
+                    epoch: 1,
+                    ts_48k: (seq as u32) * 960,
+                    end_of_talk: false,
+                    opus: vec![1, 2, 3],
+                },
+                (seq as u64) * 20, // 0 ms jitter -> raw target_frames=1, clamped to min_target_frames=2
+            );
+        }
+        assert_eq!(jb.target_delay_ms(), 40);
     }
 
     #[test]
@@ -2817,11 +3160,17 @@ mod tests {
         }
 
         // Deterministic colored laptop fan + room hum noise generator.
-        fn synth_fan_noise_frame(seed: &mut u64, lp: &mut f32, target_rms: f32) -> [f32; VOICE_FRAME_10MS] {
+        fn synth_fan_noise_frame(
+            seed: &mut u64,
+            lp: &mut f32,
+            target_rms: f32,
+        ) -> [f32; VOICE_FRAME_10MS] {
             let mut out = [0.0f32; VOICE_FRAME_10MS];
             let mut sq = 0.0f32;
             for s in out.iter_mut() {
-                *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                *seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let u = (((*seed >> 33) as u32) as f32 / (u32::MAX as f32)) * 2.0 - 1.0;
                 *lp = *lp * 0.72 + u * 0.28;
                 *s = *lp;
@@ -2835,55 +3184,63 @@ mod tests {
             out
         }
 
-        let run_chain = |frames: &[[f32; VOICE_FRAME_10MS]], mode: NoiseSuppressionMode, threshold_db: f32| {
-            let mut hpf = BiquadHighPass::new_80hz_48k();
-            let mut denoiser = VoiceDenoiser::new();
-            let mut agc2 = WebRtcAgc2Leveler::new();
-            let mut gate = VoiceGate::new();
-            let mut comp = VoiceCompressor::new();
-            let mut ns_out = [0.0f32; VOICE_FRAME_10MS];
-            let mut leveled = [0.0f32; VOICE_FRAME_10MS];
-            let mut gate_out = [[0.0f32; VOICE_FRAME_10MS]; 3];
+        let run_chain =
+            |frames: &[[f32; VOICE_FRAME_10MS]], mode: NoiseSuppressionMode, threshold_db: f32| {
+                let mut hpf = BiquadHighPass::new_80hz_48k();
+                let mut denoiser = VoiceDenoiser::new();
+                let mut agc2 = WebRtcAgc2Leveler::new();
+                let mut gate = VoiceGate::new();
+                let mut comp = VoiceCompressor::new();
+                let mut ns_out = [0.0f32; VOICE_FRAME_10MS];
+                let mut leveled = [0.0f32; VOICE_FRAME_10MS];
+                let mut gate_out = [[0.0f32; VOICE_FRAME_10MS]; 3];
 
-            let start = Instant::now();
-            let mut open_frames = 0usize;
-            let mut peak_abs = 0.0f32;
-            let mut db_sum = 0.0f32;
-            let mut db_count = 0usize;
-            let mut prob_sum = 0.0f32;
-            let warmup = frames.len() / 3;
+                let start = Instant::now();
+                let mut open_frames = 0usize;
+                let mut peak_abs = 0.0f32;
+                let mut db_sum = 0.0f32;
+                let mut db_count = 0usize;
+                let mut prob_sum = 0.0f32;
+                let warmup = frames.len() / 3;
 
-            for (idx, raw) in frames.iter().enumerate() {
-                let mut f = *raw;
-                hpf.process_in_place(&mut f);
-                let prob = denoiser.process_10ms(mode, &f, &mut ns_out);
-                agc2.process_10ms(&ns_out, &mut leveled, true);
-                let (cnt, is_open, _) =
-                    gate.process_10ms(&leveled, prob, threshold_db, true, None, false, &mut gate_out);
-                if idx >= warmup {
-                    prob_sum += prob;
-                    if is_open {
-                        open_frames += 1;
+                for (idx, raw) in frames.iter().enumerate() {
+                    let mut f = *raw;
+                    hpf.process_in_place(&mut f);
+                    let prob = denoiser.process_10ms(mode, &f, &mut ns_out);
+                    agc2.process_10ms(&ns_out, &mut leveled, true);
+                    let (cnt, is_open, _) = gate.process_10ms(
+                        &leveled,
+                        prob,
+                        threshold_db,
+                        true,
+                        None,
+                        false,
+                        &mut gate_out,
+                    );
+                    if idx >= warmup {
+                        prob_sum += prob;
+                        if is_open {
+                            open_frames += 1;
+                        }
+                        let mut final_frame = leveled;
+                        if cnt > 0 {
+                            final_frame = gate_out[cnt - 1];
+                            comp.process_with_speech_prob(&mut final_frame, prob, true);
+                        }
+                        for &s in &final_frame {
+                            peak_abs = peak_abs.max(s.abs());
+                        }
+                        db_sum += frame_dbfs(&final_frame);
+                        db_count += 1;
                     }
-                    let mut final_frame = leveled;
-                    if cnt > 0 {
-                        final_frame = gate_out[cnt - 1];
-                        comp.process_with_speech_prob(&mut final_frame, prob, true);
-                    }
-                    for &s in &final_frame {
-                        peak_abs = peak_abs.max(s.abs());
-                    }
-                    db_sum += frame_dbfs(&final_frame);
-                    db_count += 1;
                 }
-            }
-            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let avg_db = db_sum / (db_count.max(1) as f32);
-            let open_pct = (open_frames as f32) * 100.0 / (db_count.max(1) as f32);
-            let avg_prob = prob_sum / (db_count.max(1) as f32);
-            let ms_per_frame = elapsed_ms / (frames.len() as f64);
-            (avg_db, open_pct, avg_prob, peak_abs, ms_per_frame)
-        };
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let avg_db = db_sum / (db_count.max(1) as f32);
+                let open_pct = (open_frames as f32) * 100.0 / (db_count.max(1) as f32);
+                let avg_prob = prob_sum / (db_count.max(1) as f32);
+                let ms_per_frame = elapsed_ms / (frames.len() as f64);
+                (avg_db, open_pct, avg_prob, peak_abs, ms_per_frame)
+            };
 
         let mut seed = 0xCAFE_BABE_1234_5678u64;
         let mut lp = 0.0f32;
@@ -2909,8 +3266,10 @@ mod tests {
         // Scenario 2: Distance swing — Close-up loud (-6 dBFS ~ 0.50) vs Far quiet (-38 dBFS ~ 0.0126)
         let s2_close: Vec<_> = (0..150).map(|i| synth_speech_frame(i, 0.45)).collect();
         let s2_far: Vec<_> = (0..150).map(|i| synth_speech_frame(i, 0.0126)).collect();
-        let (c_db, c_open, _, c_peak, _) = run_chain(&s2_close, NoiseSuppressionMode::Balanced, -42.0);
-        let (f_db, f_open, _, f_peak, _) = run_chain(&s2_far, NoiseSuppressionMode::Balanced, -42.0);
+        let (c_db, c_open, _, c_peak, _) =
+            run_chain(&s2_close, NoiseSuppressionMode::Balanced, -42.0);
+        let (f_db, f_open, _, f_peak, _) =
+            run_chain(&s2_far, NoiseSuppressionMode::Balanced, -42.0);
         let swing_diff = (c_db - f_db).abs();
         println!(
             "[S2 Distance Swing 31dB input delta] close={c_db:.1} dBFS ({c_open:.0}% open, peak={c_peak:.3}) | far={f_db:.1} dBFS ({f_open:.0}% open, peak={f_peak:.3}) | out_delta={swing_diff:.1} dB"
@@ -2940,11 +3299,202 @@ mod tests {
             "[S4 Pure Fan -24dB + Keyboard Clicks] out={s4_db:.1} dBFS false_open={s4_open:.1}% prob={s4_prob:.2}"
         );
 
-        assert!(s1_open >= 70.0, "Distant speech in loud fan must open gate reliably; got {s1_open:.1}%");
-        assert!(swing_diff <= 14.0, "31 dB distance swing should compress to <= 14 dB output delta; got {swing_diff:.1} dB");
-        assert!(c_peak <= 0.99, "Close-up speech must never clip; got peak={c_peak}");
-        assert!(s3_open >= 80.0, "Soft -45 dBFS speech should open gate reliably; got {s3_open:.1}%");
-        assert!(s4_open <= 5.0, "Pure heavy fan + keyboard clicks must not false-trigger gate; got {s4_open:.1}%");
-        assert!(s4_db <= -45.0, "Pure heavy noise floor must be suppressed deeply; got {s4_db:.1} dBFS");
+        assert!(
+            s1_open >= 70.0,
+            "Distant speech in loud fan must open gate reliably; got {s1_open:.1}%"
+        );
+        assert!(
+            swing_diff <= 14.0,
+            "31 dB distance swing should compress to <= 14 dB output delta; got {swing_diff:.1} dB"
+        );
+        assert!(
+            c_peak <= 0.99,
+            "Close-up speech must never clip; got peak={c_peak}"
+        );
+        assert!(
+            s3_open >= 80.0,
+            "Soft -45 dBFS speech should open gate reliably; got {s3_open:.1}%"
+        );
+        assert!(
+            s4_open <= 5.0,
+            "Pure heavy fan + keyboard clicks must not false-trigger gate; got {s4_open:.1}%"
+        );
+        assert!(
+            s4_db <= -45.0,
+            "Pure heavy noise floor must be suppressed deeply; got {s4_db:.1} dBFS"
+        );
+    }
+
+    #[test]
+    fn aura_weights_load_and_denoise_cleanly() {
+        let mut aura = VoiceDenoiser::new_aura();
+        let mut seed = 0x9E37_79B9u32;
+        let mut lp = 0.0f32;
+        let mut out = [0.0f32; VOICE_FRAME_10MS];
+        let mut max_out_db = -120.0f32;
+        for i in 0..80 {
+            let mut nz = [0.0f32; VOICE_FRAME_10MS];
+            for s in &mut nz {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let white = ((seed >> 9) as f32 / ((1u32 << 23) as f32)) * 2.0 - 1.0;
+                lp = lp * 0.85 + white * 0.15;
+                *s = lp * 0.04;
+            }
+            let _ = aura.process_10ms(NoiseSuppressionMode::Balanced, &nz, &mut out);
+            if i >= 40 {
+                max_out_db = max_out_db.max(frame_dbfs(&out));
+            }
+        }
+        assert!(
+            max_out_db < -35.0,
+            "Aura-trained model should suppress stationary fan noise cleanly, got {max_out_db:.1} dBFS"
+        );
+    }
+
+    #[test]
+    fn aura_rust_vs_pytorch_parity_diagnostic() {
+        let noisy_path =
+            std::path::Path::new("C:/epilod-aura-lab/ablation_pairs/dry_n573_snr0.wav");
+        let clean_path =
+            std::path::Path::new("C:/epilod-aura-lab/samples/clean_freesound_33711.wav");
+        if !noisy_path.exists() || !clean_path.exists() {
+            return;
+        }
+        let (_, noisy) = crate::wav_io::read_wav_mono_f32(noisy_path).unwrap();
+        let (_, clean) = crate::wav_io::read_wav_mono_f32(clean_path).unwrap();
+        let si_sdr = |est: &[f32], ref_s: &[f32]| -> f32 {
+            let n = est.len().min(ref_s.len());
+            let me = est[..n].iter().sum::<f32>() / n as f32;
+            let mr = ref_s[..n].iter().sum::<f32>() / n as f32;
+            let mut dot = 0.0f64;
+            let mut re = 0.0f64;
+            for i in 0..n {
+                let e = (est[i] - me) as f64;
+                let r = (ref_s[i] - mr) as f64;
+                dot += e * r;
+                re += r * r;
+            }
+            let scale = dot / (re + 1e-10);
+            let mut s_en = 0.0f64;
+            let mut n_en = 0.0f64;
+            for i in 0..n {
+                let e = (est[i] - me) as f64;
+                let r = (ref_s[i] - mr) as f64;
+                let st = scale * r;
+                let en = e - st;
+                s_en += st * st;
+                n_en += en * en;
+            }
+            (10.0 * ((s_en + 1e-10) / (n_en + 1e-10)).log10()) as f32
+        };
+
+        for (label, use_aura, no_thresh) in [
+            ("Classic default-thresh", false, false),
+            ("Classic no-thresh(-100,100,100)", false, true),
+            ("Aura default-thresh", true, false),
+            ("Aura no-thresh(-100,100,100)", true, true),
+        ] {
+            let mut d = if use_aura {
+                Dfn3Denoiser::with_model(Dfn3Model::from_bytes(&EPILOD_AURA_WEIGHTS.0).unwrap())
+            } else {
+                Dfn3Denoiser::new()
+            };
+            d.set_attenuation_limit(100.0);
+            if no_thresh {
+                d.set_thresholds(-100.0, 100.0, 100.0);
+            }
+            let mut out = Vec::with_capacity(noisy.len());
+            let mut frame_out = [0.0f32; VOICE_FRAME_10MS];
+            for chunk in noisy.chunks_exact(VOICE_FRAME_10MS) {
+                d.process(chunk.try_into().unwrap(), &mut frame_out);
+                out.extend_from_slice(&frame_out);
+            }
+            let sdr = si_sdr(&out[1440..], &clean[..out.len() - 1440]);
+            println!("[PARITY] {label:32}: SI-SDR = {sdr:.2} dB");
+        }
+    }
+
+    #[test]
+    fn aura_gate_holds_through_420ms_pause_and_opens_on_whisper() {
+        let mut gate = VoiceGate::new();
+        let mut out = [[0.0f32; VOICE_FRAME_10MS]; 3];
+        // Soft whisper at -55 dBFS (~0.00178 RMS) with 20 ms neural VAD confirmation (rejects 10 ms clicks)
+        let whisper = [0.00178f32; VOICE_FRAME_10MS];
+        let _ = gate.process_10ms_aura(&whisper, 0.55, -42.0, true, None, false, &mut out);
+        let (cnt, is_open, _) =
+            gate.process_10ms_aura(&whisper, 0.55, -42.0, true, None, false, &mut out);
+        assert!(
+            is_open && cnt >= 1,
+            "Aura gate must open on 20 ms -55 dBFS whisper"
+        );
+
+        // 300 ms mid-sentence pause (30 frames of silence) must stay open (< 420 ms hangover)
+        let silence = [0.0f32; VOICE_FRAME_10MS];
+        for _ in 0..30 {
+            let (_, open_now, _) =
+                gate.process_10ms_aura(&silence, 0.05, -42.0, true, None, false, &mut out);
+            assert!(
+                open_now,
+                "Aura gate must not chop during 300 ms mid-sentence pause"
+            );
+        }
+    }
+
+    #[test]
+    fn aura_broadcast_compressor_freezes_on_silence_and_limits_peaks() {
+        let mut comp = VoiceCompressor::new();
+        let mut quiet_tail = [0.005f32; VOICE_FRAME_20MS];
+        let before = frame_dbfs(&quiet_tail);
+        // Non-speech (speech_prob = 0.1): must NOT boost/pump tail
+        comp.process_aura_broadcast(&mut quiet_tail, 0.1);
+        let after = frame_dbfs(&quiet_tail);
+        assert!(
+            after <= before + 0.5,
+            "Aura broadcast compressor must not pump reverb/noise tails: {before:.2} -> {after:.2}"
+        );
+
+        let mut loud = [0.95f32; VOICE_FRAME_20MS];
+        for _ in 0..5 {
+            comp.process_aura_broadcast(&mut loud, 0.9);
+        }
+        let peak = loud.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!(
+            peak <= 0.90,
+            "Aura broadcast compressor must soft-limit peaks <= -1 dBFS, got {peak}"
+        );
+    }
+
+    #[test]
+    fn gate_release_never_duplicates_emitted_frames_on_immediate_reopen() {
+        let mut gate = VoiceGate::new();
+        let mut out = [[0.0f32; VOICE_FRAME_10MS]; 3];
+        let speech = [0.05f32; VOICE_FRAME_10MS];
+        let silence = [0.0f32; VOICE_FRAME_10MS];
+
+        let (cnt, open, _) =
+            gate.process_10ms_aura(&speech, 0.85, -42.0, true, None, false, &mut out);
+        assert!(open && cnt == 1);
+
+        // Drain the 42-frame hangover so the next silent frame enters release fade-out (`out_cnt == 1`)
+        for _ in 0..42 {
+            let (c, _, _) =
+                gate.process_10ms_aura(&silence, 0.01, -42.0, true, None, false, &mut out);
+            assert_eq!(c, 1);
+        }
+        // Frame 43: `wants_open == false`, emits 1 release-ramp frame
+        let release_marker = [0.0001f32; VOICE_FRAME_10MS];
+        let (rel_cnt, _, _) =
+            gate.process_10ms_aura(&release_marker, 0.01, -42.0, true, None, false, &mut out);
+        assert_eq!(rel_cnt, 1, "Release ramp frame is emitted once");
+
+        // Immediately resume speech on the very next frame: must emit ONLY the new speech frame (`cnt == 1`),
+        // NOT re-emit `release_marker` from pre-roll!
+        let (reopen_cnt, reopen, _) =
+            gate.process_10ms_aura(&speech, 0.85, -42.0, true, None, false, &mut out);
+        assert!(reopen);
+        assert_eq!(
+            reopen_cnt, 1,
+            "Re-opening right after an emitted release frame must never duplicate the release frame via pre-roll"
+        );
     }
 }

@@ -15,10 +15,10 @@ use epilod_core::p2p::{
     sanitize_reaction_emoji, sanitize_shared_subtitle_ext, sanitize_shared_subtitle_name,
     ChatFallbackPacket, ChatReactFallbackPacket, P2pBeacon, P2pCandidate, P2pCandidateKind,
     P2pCryptoSession, P2pIdentity, P2pWireFrame, ReactionFallbackPacket, ReliableChannel,
-    VoiceRxCrypto, VoiceTxCrypto, MAX_P2P_DATAGRAM_BYTES, MAX_REACTION_BURST_COUNT,
-    MAX_RELIABLE_MSG_BYTES, MAX_SHARED_SUBTITLE_BYTES, MAX_VOICE_OPUS_BYTES, NATPMP_PCP_PORT,
-    P2P_CHUNK_PAYLOAD_BYTES, SSDP_MULTICAST_ADDR, STUN_SERVERS, VOICE_FLAG_END_OF_TALK,
-    VOICE_FLAG_RELAYED,
+    VoiceRxCrypto, VoiceTxCrypto, MAX_CHAT_IMAGE_BYTES, MAX_CHAT_IMAGE_CAPTION_CHARS,
+    MAX_P2P_DATAGRAM_BYTES, MAX_REACTION_BURST_COUNT, MAX_RELIABLE_MSG_BYTES,
+    MAX_SHARED_SUBTITLE_BYTES, MAX_VOICE_OPUS_BYTES, NATPMP_PCP_PORT, P2P_CHUNK_PAYLOAD_BYTES,
+    SSDP_MULTICAST_ADDR, STUN_SERVERS, VOICE_FLAG_END_OF_TALK, VOICE_FLAG_RELAYED,
 };
 use epilod_core::syncplay::{
     RoomParticipantUpdate, TimelineSegment, TimelineTransform, WireFileInfo,
@@ -142,6 +142,7 @@ pub struct VoiceTransportHandle {
     pub local_loss_pct_x10: AtomicU16,
     pub last_voice_tx_rx_ms: AtomicU64,
     pub udp_would_block_events: AtomicU32,
+    pub rx_rate_limited_drops: AtomicU64,
     rx_tx: std::sync::mpsc::SyncSender<VoiceRxPacket>,
     rx_rx: std::sync::Mutex<std::sync::mpsc::Receiver<VoiceRxPacket>>,
     rx_notify: (std::sync::Mutex<u64>, std::sync::Condvar),
@@ -177,6 +178,7 @@ impl VoiceTransportHandle {
             local_loss_pct_x10: AtomicU16::new(0),
             last_voice_tx_rx_ms: AtomicU64::new(0),
             udp_would_block_events: AtomicU32::new(0),
+            rx_rate_limited_drops: AtomicU64::new(0),
             rx_tx,
             rx_rx: std::sync::Mutex::new(rx_rx),
             rx_notify: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
@@ -433,6 +435,29 @@ pub enum P2pControlCmd {
     SendTyping {
         is_typing: bool,
     },
+    SendChatSeen {
+        last_msg_id: String,
+    },
+    SendIntroSkipVote {
+        seg_key: String,
+    },
+    SetChatImageMode {
+        mode: u8,
+    },
+    SendChatImage {
+        id: String,
+        avatar_id: String,
+        caption: Option<String>,
+        spoiler: bool,
+        width: u16,
+        height: u16,
+        data_b64: String,
+        reply_to_id: Option<String>,
+    },
+    RequestChatImage {
+        id: String,
+        sender: String,
+    },
     SendSubtitleShare {
         id: String,
         file_name: String,
@@ -472,6 +497,48 @@ enum P2pDatagramMessage {
     RelayUnavailable {
         targets: Vec<String>,
     },
+}
+
+#[derive(Default)]
+struct ChatImageState {
+    mode: u8, // 0 = auto, 1 = tap, 2 = off
+    requested_ids: HashSet<String>,
+    sent_cache: VecDeque<(String, String)>,
+    seen_meta_ids: VecDeque<String>,
+}
+
+impl ChatImageState {
+    fn remember_sent(&mut self, id: String, data_b64: String) {
+        if self.sent_cache.len() >= 8 {
+            self.sent_cache.pop_front();
+        }
+        self.sent_cache.push_back((id, data_b64));
+    }
+
+    fn get_sent(&self, id: &str) -> Option<&str> {
+        self.sent_cache
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn mark_requested(&mut self, id: String) {
+        if self.requested_ids.len() >= 64 {
+            self.requested_ids.clear();
+        }
+        self.requested_ids.insert(id);
+    }
+
+    fn seen_meta(&mut self, id: &str) -> bool {
+        if self.seen_meta_ids.iter().any(|k| k == id) {
+            return true;
+        }
+        if self.seen_meta_ids.len() >= 64 {
+            self.seen_meta_ids.pop_front();
+        }
+        self.seen_meta_ids.push_back(id.to_string());
+        false
+    }
 }
 
 enum UdpPacketEvent {
@@ -522,6 +589,58 @@ enum P2pAppMessage {
         target_msg_id: String,
         sender: String,
         emoji: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    ChatSeen {
+        last_msg_id: String,
+        sender: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    IntroSkipVote {
+        seg_key: String,
+        sender: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    ChatImageMeta {
+        id: String,
+        sender: String,
+        avatar_id: String,
+        #[serde(default)]
+        caption: Option<String>,
+        #[serde(default)]
+        spoiler: bool,
+        width: u16,
+        height: u16,
+        byte_len: usize,
+        #[serde(default)]
+        reply_to_id: Option<String>,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    ChatImageData {
+        id: String,
+        sender: String,
+        data_b64: String,
+        #[serde(default)]
+        relay_targets: Vec<String>,
+        #[serde(default)]
+        ttl: u8,
+    },
+    ChatImageRequest {
+        id: String,
+        requester: String,
+        target_sender: String,
         #[serde(default)]
         relay_targets: Vec<String>,
         #[serde(default)]
@@ -1547,6 +1666,9 @@ fn try_handle_voice_udp(
     };
     let now_ms = epoch_ms(start_instant);
     if !rx_state.token_bucket.allow(now_ms) {
+        voice_handle
+            .rx_rate_limited_drops
+            .fetch_add(1, Ordering::Relaxed);
         return true; // Hop rate limit exceeded
     }
     let P2pWireFrame::Voice {
@@ -1566,6 +1688,9 @@ fn try_handle_voice_udp(
         .or_insert_with(|| PeerTokenBucket::new_voice_default(now_ms))
         .allow(now_ms);
     if !origin_allowed {
+        voice_handle
+            .rx_rate_limited_drops
+            .fetch_add(1, Ordering::Relaxed);
         return true; // Per-speaker stream rate limit exceeded
     }
     if rx_state.per_voice_buckets.len() > 16 {
@@ -1927,6 +2052,7 @@ async fn run_p2p_actor(
     let mut seen_reactions: VecDeque<((String, u32), Instant)> = VecDeque::new();
     let mut seen_chat_msgs: VecDeque<((String, String), Instant)> = VecDeque::new();
     let mut seen_shared_subs: VecDeque<String> = VecDeque::new();
+    let mut chat_image_state = ChatImageState::default();
 
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1980,6 +2106,7 @@ async fn run_p2p_actor(
                         &mut seen_reactions,
                         &mut seen_chat_msgs,
                         &mut seen_shared_subs,
+                        &mut chat_image_state,
                         &nat_mode,
                     ).await;
                 }
@@ -2033,6 +2160,7 @@ async fn run_p2p_actor(
                             &mut seen_reactions,
                             &mut seen_chat_msgs,
                             &mut seen_shared_subs,
+                            &mut chat_image_state,
                             &nat_mode,
                         ).await;
                     }
@@ -2661,6 +2789,204 @@ async fn run_p2p_actor(
                                         &dmsg,
                                         &sock_v4,
                                         sock_v6.as_ref(),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                    P2pControlCmd::SendIntroSkipVote { seg_key } => {
+                        let clean_key: String = seg_key
+                            .trim()
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(128)
+                            .collect();
+                        if clean_key.is_empty() {
+                            continue;
+                        }
+                        let (direct_keys, relay_targets, _) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if !direct_keys.is_empty() {
+                            let app_msg = P2pAppMessage::IntroSkipVote {
+                                seg_key: clean_key,
+                                sender: local_username.clone(),
+                                relay_targets,
+                                ttl: 1,
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&app_msg) {
+                                let now_ms = epoch_ms(start_instant);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload(
+                                            peer,
+                                            &payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    P2pControlCmd::SendChatSeen { last_msg_id } => {
+                        let clean_id = sanitize_chat_id(&last_msg_id);
+                        if clean_id.is_empty() {
+                            continue;
+                        }
+                        let (direct_keys, relay_targets, _) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if !direct_keys.is_empty() {
+                            let app_msg = P2pAppMessage::ChatSeen {
+                                last_msg_id: clean_id,
+                                sender: local_username.clone(),
+                                relay_targets,
+                                ttl: 1,
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&app_msg) {
+                                let now_ms = epoch_ms(start_instant);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload(
+                                            peer,
+                                            &payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    P2pControlCmd::SetChatImageMode { mode } => {
+                        chat_image_state.mode = mode.min(2);
+                    }
+                    P2pControlCmd::SendChatImage {
+                        id,
+                        avatar_id,
+                        caption,
+                        spoiler,
+                        width,
+                        height,
+                        data_b64,
+                        reply_to_id,
+                    } => {
+                        let clean_id = sanitize_chat_id(&id);
+                        if clean_id.is_empty()
+                            || data_b64.is_empty()
+                            || data_b64.len() > MAX_CHAT_IMAGE_BYTES * 4 / 3 + 16
+                            || width == 0
+                            || height == 0
+                            || width > 2048
+                            || height > 2048
+                        {
+                            continue;
+                        }
+                        let clean_caption = caption
+                            .as_deref()
+                            .and_then(sanitize_chat_text)
+                            .map(|s| s.chars().take(MAX_CHAT_IMAGE_CAPTION_CHARS).collect::<String>());
+                        let clean_reply = reply_to_id
+                            .as_deref()
+                            .map(sanitize_chat_id)
+                            .filter(|s| !s.is_empty());
+                        let approx_bytes = (data_b64.len() * 3) / 4;
+                        if approx_bytes > MAX_CHAT_IMAGE_BYTES {
+                            continue;
+                        }
+                        chat_image_state.remember_sent(clean_id.clone(), data_b64.clone());
+                        let (direct_keys, relay_targets, _) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if direct_keys.is_empty() {
+                            continue;
+                        }
+                        let meta_msg = P2pAppMessage::ChatImageMeta {
+                            id: clean_id.clone(),
+                            sender: local_username.clone(),
+                            avatar_id,
+                            caption: clean_caption,
+                            spoiler,
+                            width,
+                            height,
+                            byte_len: approx_bytes,
+                            reply_to_id: clean_reply,
+                            relay_targets: relay_targets.clone(),
+                            ttl: 1,
+                        };
+                        if let Ok(meta_payload) = serde_json::to_vec(&meta_msg) {
+                            let now_ms = epoch_ms(start_instant);
+                            for dk in &direct_keys {
+                                if let Some(peer) = peers.get_mut(dk) {
+                                    let _ = send_reliable_payload(
+                                        peer,
+                                        &meta_payload,
+                                        &sock_v4,
+                                        sock_v6.as_ref(),
+                                        now_ms,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        let data_msg = P2pAppMessage::ChatImageData {
+                            id: clean_id,
+                            sender: local_username.clone(),
+                            data_b64,
+                            relay_targets,
+                            ttl: 1,
+                        };
+                        if let Ok(data_payload) = serde_json::to_vec(&data_msg) {
+                            if data_payload.len() <= MAX_RELIABLE_MSG_BYTES {
+                                let now_ms = epoch_ms(start_instant);
+                                let voice_busy = voice_handle.in_voice.load(Ordering::Relaxed);
+                                for dk in &direct_keys {
+                                    if let Some(peer) = peers.get_mut(dk) {
+                                        let _ = send_reliable_payload_paced(
+                                            peer,
+                                            &data_payload,
+                                            &sock_v4,
+                                            sock_v6.as_ref(),
+                                            now_ms,
+                                            voice_busy,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    P2pControlCmd::RequestChatImage { id, sender } => {
+                        let clean_id = sanitize_chat_id(&id);
+                        if clean_id.is_empty() {
+                            continue;
+                        }
+                        chat_image_state.mark_requested(clean_id.clone());
+                        let (direct_keys, relay_targets, _) =
+                            compute_chat_routing(&peers, &participants, &local_username);
+                        if direct_keys.is_empty() {
+                            continue;
+                        }
+                        let req_msg = P2pAppMessage::ChatImageRequest {
+                            id: clean_id,
+                            requester: local_username.clone(),
+                            target_sender: sender,
+                            relay_targets,
+                            ttl: 1,
+                        };
+                        if let Ok(payload) = serde_json::to_vec(&req_msg) {
+                            let now_ms = epoch_ms(start_instant);
+                            for dk in &direct_keys {
+                                if let Some(peer) = peers.get_mut(dk) {
+                                    let _ = send_reliable_payload(
+                                        peer,
+                                        &payload,
+                                        &sock_v4,
+                                        sock_v6.as_ref(),
+                                        now_ms,
                                     )
                                     .await;
                                 }
@@ -3541,6 +3867,7 @@ async fn dispatch_udp_event(
     seen_reactions: &mut VecDeque<((String, u32), Instant)>,
     seen_chat_msgs: &mut VecDeque<((String, String), Instant)>,
     seen_shared_subs: &mut VecDeque<String>,
+    chat_image_state: &mut ChatImageState,
     nat_mode: &str,
 ) {
     match evt {
@@ -3568,6 +3895,7 @@ async fn dispatch_udp_event(
                 std::mem::take(force_realign_pending),
                 seen_chat_msgs,
                 seen_shared_subs,
+                chat_image_state,
             )
             .await;
             emit_p2p_status(app, nat_mode, peers, align_job.as_ref());
@@ -4215,6 +4543,7 @@ async fn handle_peer_app_msg(
     force_bypass_user_align: bool,
     seen_chat_msgs: &mut VecDeque<((String, String), Instant)>,
     seen_shared_subs: &mut VecDeque<String>,
+    chat_image_state: &mut ChatImageState,
 ) {
     if let P2pAppMessage::VoiceState {
         username,
@@ -4688,6 +5017,368 @@ async fn handle_peer_app_msg(
         return;
     }
 
+    if let P2pAppMessage::IntroSkipVote {
+        seg_key,
+        sender,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_key: String = seg_key
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(128)
+            .collect();
+        if clean_key.is_empty() {
+            return;
+        }
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
+            return;
+        }
+        emit_opt(
+            app,
+            "sync://intro-skip-vote",
+            serde_json::json!({
+                "segKey": clean_key,
+                "username": sender_display,
+                "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+            }),
+        );
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::IntroSkipVote {
+                seg_key: clean_key,
+                sender: sender_display,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::ChatSeen {
+        last_msg_id,
+        sender,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&last_msg_id);
+        if clean_id.is_empty() {
+            return;
+        }
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
+            return;
+        }
+        emit_opt(
+            app,
+            "sync://chat-seen",
+            serde_json::json!({
+                "username": sender_display,
+                "lastMsgId": clean_id,
+                "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+            }),
+        );
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::ChatSeen {
+                last_msg_id: clean_id,
+                sender: sender_display,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::ChatImageMeta {
+        id,
+        sender,
+        avatar_id,
+        caption,
+        spoiler,
+        width,
+        height,
+        byte_len,
+        reply_to_id,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&id);
+        if clean_id.is_empty() || byte_len == 0 || byte_len > MAX_CHAT_IMAGE_BYTES {
+            return;
+        }
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
+            return;
+        }
+        if !chat_image_state.seen_meta(&clean_id) {
+            let allowed = peers
+                .get_mut(peer_key)
+                .is_some_and(PeerSession::allow_inbound_chat);
+            if !allowed {
+                return;
+            }
+            let clean_caption = caption.as_deref().and_then(sanitize_chat_text).map(|s| {
+                s.chars()
+                    .take(MAX_CHAT_IMAGE_CAPTION_CHARS)
+                    .collect::<String>()
+            });
+            let clean_reply = reply_to_id
+                .as_deref()
+                .map(sanitize_chat_id)
+                .filter(|s| !s.is_empty());
+            emit_opt(
+                app,
+                "sync://chat-image-meta",
+                serde_json::json!({
+                    "id": clean_id,
+                    "sender": sender_display,
+                    "avatarId": sanitize_avatar_id(&avatar_id),
+                    "caption": clean_caption,
+                    "spoiler": spoiler,
+                    "width": width,
+                    "height": height,
+                    "byteLen": byte_len,
+                    "replyToId": clean_reply,
+                    "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+                }),
+            );
+        }
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::ChatImageMeta {
+                id: clean_id,
+                sender: sender_display,
+                avatar_id,
+                caption,
+                spoiler,
+                width,
+                height,
+                byte_len,
+                reply_to_id,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::ChatImageData {
+        id,
+        sender,
+        data_b64,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&id);
+        if clean_id.is_empty()
+            || data_b64.is_empty()
+            || data_b64.len() > MAX_CHAT_IMAGE_BYTES * 4 / 3 + 16
+        {
+            return;
+        }
+        let sender_display: String = if sender.trim().is_empty() {
+            peers
+                .get(peer_key)
+                .map(|p| p.username.clone())
+                .unwrap_or_else(|| peer_key.to_string())
+        } else {
+            sender.trim().chars().take(32).collect()
+        };
+        let sender_key = sender_display.to_ascii_lowercase();
+        if !validate_p2p_sender(
+            ttl,
+            &sender_display,
+            peer_key,
+            local_username,
+            participants,
+            peers,
+        ) {
+            return;
+        }
+        // Respect local receiver mode immediately in Rust before allocating/emitting to WebView.
+        let accept_local = match chat_image_state.mode {
+            0 => true,
+            1 => chat_image_state.requested_ids.contains(&clean_id),
+            _ => false,
+        };
+        if accept_local {
+            emit_opt(
+                app,
+                "sync://chat-image-data",
+                serde_json::json!({
+                    "id": clean_id,
+                    "sender": sender_display,
+                    "dataB64": data_b64,
+                    "via": if ttl == 0 { "p2pRelay" } else { "p2p" },
+                }),
+            );
+        }
+        if ttl > 0 && !relay_targets.is_empty() {
+            let fwd = P2pAppMessage::ChatImageData {
+                id: clean_id,
+                sender: sender_display,
+                data_b64,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &sender_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if let P2pAppMessage::ChatImageRequest {
+        id,
+        requester,
+        target_sender,
+        relay_targets,
+        ttl,
+    } = msg
+    {
+        let clean_id = sanitize_chat_id(&id);
+        if clean_id.is_empty() {
+            return;
+        }
+        if target_sender.eq_ignore_ascii_case(local_username) {
+            if let Some(cached_b64) = chat_image_state.get_sent(&clean_id).map(str::to_string) {
+                let data_msg = P2pAppMessage::ChatImageData {
+                    id: clean_id,
+                    sender: local_username.to_string(),
+                    data_b64: cached_b64,
+                    relay_targets: Vec::new(),
+                    ttl: 1,
+                };
+                if let Ok(payload) = serde_json::to_vec(&data_msg) {
+                    if let Some(peer) = peers.get_mut(peer_key) {
+                        let now_ms = epoch_ms(start_instant);
+                        let voice_busy = voice_handle.in_voice.load(Ordering::Relaxed);
+                        let _ = send_reliable_payload_paced(
+                            peer, &payload, sock_v4, sock_v6, now_ms, voice_busy,
+                        )
+                        .await;
+                    }
+                }
+            }
+        } else if ttl > 0 && !relay_targets.is_empty() {
+            let req_key = requester.trim().to_ascii_lowercase();
+            let fwd = P2pAppMessage::ChatImageRequest {
+                id: clean_id,
+                requester,
+                target_sender,
+                relay_targets: Vec::new(),
+                ttl: ttl - 1,
+            };
+            forward_chat_relay(
+                peers,
+                relay_targets,
+                peer_key,
+                &req_key,
+                local_username,
+                &fwd,
+                sock_v4,
+                sock_v6,
+                start_instant,
+            )
+            .await;
+        }
+        return;
+    }
+
     let Some(lm) = local_media else {
         return;
     };
@@ -4713,6 +5404,11 @@ async fn handle_peer_app_msg(
         | P2pAppMessage::ChatEdit { .. }
         | P2pAppMessage::ChatReact { .. }
         | P2pAppMessage::SubtitleShare { .. }
+        | P2pAppMessage::ChatSeen { .. }
+        | P2pAppMessage::IntroSkipVote { .. }
+        | P2pAppMessage::ChatImageMeta { .. }
+        | P2pAppMessage::ChatImageData { .. }
+        | P2pAppMessage::ChatImageRequest { .. }
         | P2pAppMessage::VoiceState { .. }
         | P2pAppMessage::VoiceRosterRequest => {}
         P2pAppMessage::OfferRequest => {

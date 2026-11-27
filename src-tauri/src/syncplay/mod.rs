@@ -6,11 +6,12 @@ use crate::voice::VoiceController;
 use epilod_core::matching::{analyze_files, FileIdentity, FileMatchStatus, SourceRelation};
 use epilod_core::mpv_ipc::{set_pause_cmd, set_speed_cmd};
 use epilod_core::p2p::{
-    decode_epcr_chat_react, decode_epr_reaction, decode_ept_chat_chunk, decode_epv_rating,
-    encode_epcr_chat_react, encode_epr_reaction, encode_ept_chat_chunks, encode_epv_rating,
-    ChatFallbackPacket, ChatReactFallbackPacket, EptChatReassembler, RatingVotePacket,
-    ReactionFallbackPacket, EP2_CHAT_PREFIX, EP_CHAT_REACT_PREFIX, EP_CHAT_TEXT_PREFIX,
-    EP_RATING_CHAT_PREFIX, EP_REACTION_CHAT_PREFIX, MAX_REACTION_BURST_COUNT,
+    decode_ep2_avatar, decode_epcr_chat_react, decode_epr_reaction, decode_ept_chat_chunk,
+    decode_epv_rating, encode_ep2_avatar, encode_epcr_chat_react, encode_epr_reaction,
+    encode_ept_chat_chunks, encode_epv_rating, ChatFallbackPacket, ChatReactFallbackPacket,
+    EptChatReassembler, RatingVotePacket, ReactionFallbackPacket, EP2_AVATAR_PREFIX,
+    EP2_CHAT_PREFIX, EP_CHAT_REACT_PREFIX, EP_CHAT_TEXT_PREFIX, EP_RATING_CHAT_PREFIX,
+    EP_REACTION_CHAT_PREFIX, MAX_REACTION_BURST_COUNT,
 };
 use epilod_core::room_code::{
     generate as generate_room_code, is_six_digit_code, normalize as normalize_room_code,
@@ -129,6 +130,32 @@ pub enum SyncCommand {
     },
     SendTyping {
         is_typing: bool,
+    },
+    SendChatSeen {
+        last_msg_id: String,
+    },
+    SendIntroSkipVote {
+        seg_key: String,
+    },
+    SendAvatarPresence {
+        avatar_id: String,
+    },
+    SetChatImageMode {
+        mode: u8,
+    },
+    SendChatImage {
+        id: String,
+        avatar_id: String,
+        caption: Option<String>,
+        spoiler: bool,
+        width: u16,
+        height: u16,
+        data_b64: String,
+        reply_to_id: Option<String>,
+    },
+    RequestChatImage {
+        id: String,
+        sender: String,
     },
     SendSubtitleShare {
         id: String,
@@ -787,6 +814,58 @@ impl SyncController {
 
     pub fn send_typing(&self, is_typing: bool) {
         self.try_send(SyncCommand::SendTyping { is_typing });
+    }
+
+    pub fn send_chat_seen(&self, last_msg_id: String) {
+        self.try_send(SyncCommand::SendChatSeen { last_msg_id });
+    }
+
+    pub fn send_intro_skip_vote(&self, seg_key: String) {
+        self.try_send(SyncCommand::SendIntroSkipVote { seg_key });
+    }
+
+    pub fn send_avatar_presence(&self, avatar_id: String) {
+        self.try_send(SyncCommand::SendAvatarPresence { avatar_id });
+    }
+
+    pub fn set_chat_image_mode(&self, mode: u8) {
+        self.try_send(SyncCommand::SetChatImageMode { mode });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_chat_image(
+        &self,
+        id: String,
+        avatar_id: String,
+        caption: Option<String>,
+        spoiler: bool,
+        width: u16,
+        height: u16,
+        data_b64: String,
+        reply_to_id: Option<String>,
+    ) -> bool {
+        if let Ok(guard) = self.runtime.lock() {
+            if let Some(ref rt) = *guard {
+                return rt
+                    .tx
+                    .try_send(SyncCommand::SendChatImage {
+                        id,
+                        avatar_id,
+                        caption,
+                        spoiler,
+                        width,
+                        height,
+                        data_b64,
+                        reply_to_id,
+                    })
+                    .is_ok();
+            }
+        }
+        false
+    }
+
+    pub fn request_chat_image(&self, id: String, sender: String) {
+        self.try_send(SyncCommand::RequestChatImage { id, sender });
     }
 
     pub fn send_subtitle_share(
@@ -2120,10 +2199,22 @@ where
                         }
                         let trimmed = message.trim();
                         if trimmed.starts_with(EP2_CHAT_PREFIX) {
-                            p2p.try_send(P2pControlCmd::RemoteBeacon {
-                                username: sender,
-                                raw_message: message,
-                            });
+                            if let Some(av) = decode_ep2_avatar(trimmed) {
+                                if !sender.eq_ignore_ascii_case(&active_username) {
+                                    let _ = app.emit(
+                                        "sync://peer-avatar",
+                                        serde_json::json!({
+                                            "username": sender,
+                                            "avatarId": av,
+                                        }),
+                                    );
+                                }
+                            } else {
+                                p2p.try_send(P2pControlCmd::RemoteBeacon {
+                                    username: sender,
+                                    raw_message: message,
+                                });
+                            }
                         } else if trimmed.starts_with(EP_REACTION_CHAT_PREFIX)
                             && !sender.eq_ignore_ascii_case(&active_username)
                         {
@@ -2988,6 +3079,70 @@ where
                             .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
                         if connected_emitted && has_other_peer {
                             p2p.try_send(P2pControlCmd::SendTyping { is_typing });
+                        }
+                    }
+                    SyncCommand::SendChatSeen { last_msg_id } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendChatSeen { last_msg_id });
+                        }
+                    }
+                    SyncCommand::SendIntroSkipVote { seg_key } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendIntroSkipVote { seg_key });
+                        }
+                    }
+                    SyncCommand::SendAvatarPresence { avatar_id } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            if let Some(line) = encode_ep2_avatar(&avatar_id) {
+                                pending_ept_lines
+                                    .retain(|item| !item.starts_with(EP2_AVATAR_PREFIX));
+                                if pending_ept_lines.len() < 48 {
+                                    pending_ept_lines.push_back(line);
+                                }
+                            }
+                        }
+                    }
+                    SyncCommand::SetChatImageMode { mode } => {
+                        p2p.try_send(P2pControlCmd::SetChatImageMode { mode });
+                    }
+                    SyncCommand::SendChatImage {
+                        id,
+                        avatar_id,
+                        caption,
+                        spoiler,
+                        width,
+                        height,
+                        data_b64,
+                        reply_to_id,
+                    } => {
+                        let has_other_peer = participants
+                            .values()
+                            .any(|p| !p.username.eq_ignore_ascii_case(&active_username));
+                        if connected_emitted && has_other_peer {
+                            p2p.try_send(P2pControlCmd::SendChatImage {
+                                id,
+                                avatar_id,
+                                caption,
+                                spoiler,
+                                width,
+                                height,
+                                data_b64,
+                                reply_to_id,
+                            });
+                        }
+                    }
+                    SyncCommand::RequestChatImage { id, sender } => {
+                        if connected_emitted {
+                            p2p.try_send(P2pControlCmd::RequestChatImage { id, sender });
                         }
                     }
                     SyncCommand::SendSubtitleShare {

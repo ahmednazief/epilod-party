@@ -5,6 +5,7 @@ export type VoiceInputMode = "vad" | "ptt";
 export type VoiceNoiseMode = "off" | "balanced" | "strong";
 export type VoiceDuckingMode = "off" | "subtle" | "strong";
 export type VoiceHotkeyScope = "global" | "focused";
+export type VoiceEngineMode = "aura" | "classic";
 
 export const VOICE_MOD_CTRL = 1;
 export const VOICE_MOD_ALT = 2;
@@ -31,6 +32,8 @@ export interface VoiceConfigDto {
   spatialPan: boolean;
   echoGuardEnabled: boolean;
   aecEnabled: boolean;
+  engineMode: VoiceEngineMode;
+  useWindowsCommAec: boolean;
   allowRelayForOthers: boolean;
   allowRelayedVoice: boolean;
   masterVolume: number;
@@ -94,6 +97,7 @@ export interface VoiceDiagnosticsDto {
   bluetoothHfpDropped: boolean;
   windowsCommAecActive: boolean;
   aecBackend: string;
+  captureBackend: string;
   speakerLeakDetected: boolean;
   lowBandwidthWarning: boolean;
   natMode: string;
@@ -109,6 +113,20 @@ export interface VoiceDiagnosticsDto {
   permissionDenied: boolean;
   streamError: string | null;
   peers: VoicePeerRosterDto[];
+  txFifoDroppedFrames: number;
+  dspOverrunFrames: number;
+  dspAvgFrameUs: number;
+  dspMaxFrameUs: number;
+  gateTransitions: number;
+  rxJitterUnderruns: number;
+  rxRateLimitedDrops: number;
+}
+
+export interface DiagnosticCaptureResultDto {
+  rawPath: string;
+  processedPath: string;
+  durationSec: number;
+  sampleRate: number;
 }
 
 export interface VoiceLevelPayload {
@@ -249,6 +267,16 @@ export async function voiceGetReport(): Promise<string> {
   return safeInvoke<string>("voice_get_report");
 }
 
+export async function voiceStartDiagnosticCapture(maxSeconds = 60): Promise<void> {
+  if (!isDesktop()) return;
+  await safeInvoke("voice_start_diagnostic_capture", { maxSeconds });
+}
+
+export async function voiceStopDiagnosticCapture(): Promise<DiagnosticCaptureResultDto | null> {
+  if (!isDesktop()) return null;
+  return safeInvoke<DiagnosticCaptureResultDto>("voice_stop_diagnostic_capture");
+}
+
 export function onVoiceRoster(cb: (roster: VoicePeerRosterDto[]) => void): Promise<UnlistenFn> {
   if (!isDesktop()) return Promise.resolve(() => {});
   return listen<VoicePeerRosterDto[]>("voice://roster", (e) => cb(e.payload));
@@ -286,6 +314,15 @@ export function onVoiceCalibration(
 export function onVoiceDevicesChanged(cb: () => void): Promise<UnlistenFn> {
   if (!isDesktop()) return Promise.resolve(() => {});
   return listen("voice://devices-changed", () => cb());
+}
+
+export function onVoiceDiagnosticCaptureFinished(
+  cb: (result: DiagnosticCaptureResultDto) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return Promise.resolve(() => {});
+  return listen<DiagnosticCaptureResultDto>("voice://diagnostic-capture-finished", (e) =>
+    cb(e.payload),
+  );
 }
 
 export function formatVkLabel(vk: number): string {

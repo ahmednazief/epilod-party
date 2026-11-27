@@ -19,7 +19,7 @@ import { AppMicIcon, AppSpeakerVolumeIcon } from "./ui/AppIcons";
 import { GlassHoverTip } from "./ui/GlassHoverTip";
 import { PartyAdminIcon, PartyAlignSceneIcon, PartyFpsMatchIcon } from "./ui/PlayerIcons";
 import { PresenceAvatar } from "./ui/PresenceAvatar";
-import { resolvePeerAvatarId } from "./ui/ProfileAvatar";
+import { resolvePeerAvatarId, type AvatarId } from "./ui/ProfileAvatar";
 import { Scrubber } from "./ui/Scrubber";
 
 export function voiceTransportLabel(transport: string | undefined): string {
@@ -69,7 +69,7 @@ export const ParticipantDriftBadge = memo(function ParticipantDriftBadge({
     >
       <span
         aria-label={`${driftInfo.label}: ${driftInfo.detail}`}
-        className="inline-flex items-center justify-center h-4 px-1 rounded-full bg-white/[0.06] cursor-default shrink-0"
+        className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-white/[0.06] cursor-default shrink-0"
       >
         <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
       </span>
@@ -295,6 +295,7 @@ export function MemberActionMenuPortal({
   exiting,
   effectiveUsername,
   avatarId,
+  peerAvatars,
   voiceEnabled,
   busyAdminUser,
   onTogglePeerAdmin,
@@ -309,6 +310,7 @@ export function MemberActionMenuPortal({
   exiting: boolean;
   effectiveUsername: string;
   avatarId: string;
+  peerAvatars?: Record<string, AvatarId>;
   voiceEnabled: boolean;
   busyAdminUser: string | null;
   onTogglePeerAdmin: (username: string, grant: boolean) => void;
@@ -346,7 +348,7 @@ export function MemberActionMenuPortal({
       <div className="px-2 py-1 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <PresenceAvatar
-            avatarId={resolvePeerAvatarId(menuPeer.username, effectiveUsername, avatarId)}
+            avatarId={resolvePeerAvatarId(menuPeer.username, effectiveUsername, avatarId, peerAvatars)}
             size={18}
             speaking={menuMeta.peerSpeaking && !menuMeta.peerLocallyMuted}
             avatarClassName="ring-1 ring-white/20"

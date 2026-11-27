@@ -80,43 +80,63 @@ export function PlayerSeekIcon({
   const isBack = direction === "back";
 
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      shapeRendering="geometricPrecision"
+      aria-hidden="true"
+      className={className}
+    >
       {isBack ? (
         <>
           <path
-            d="M5.52 9.33A7.15 7.15 0 1 0 11.75 5.20"
+            d="M3.80 11.14A8.25 8.25 0 1 0 5.87 6.48"
             stroke="currentColor"
-            strokeWidth="1.65"
+            strokeWidth="1.55"
             strokeLinecap="round"
           />
-          <path d="M8.55 5.20L11.85 3.05V7.35Z" fill="currentColor" />
+          <path
+            d="M5.74 4.03L5.87 6.48L8.32 6.35"
+            stroke="currentColor"
+            strokeWidth="1.55"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </>
       ) : (
         <>
           <path
-            d="M18.48 9.33A7.15 7.15 0 1 1 12.25 5.20"
+            d="M20.20 11.14A8.25 8.25 0 1 1 18.13 6.48"
             stroke="currentColor"
-            strokeWidth="1.65"
+            strokeWidth="1.55"
             strokeLinecap="round"
           />
-          <path d="M15.45 5.20L12.15 3.05V7.35Z" fill="currentColor" />
+          <path
+            d="M18.26 4.03L18.13 6.48L15.68 6.35"
+            stroke="currentColor"
+            strokeWidth="1.55"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </>
       )}
       <path
-        d="M8.2 10.85L9.65 9.65V15.15"
+        d="M8.5 10.6L9.65 9.5V14.5"
         stroke="currentColor"
-        strokeWidth="1.55"
+        strokeWidth="1.35"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <rect
-        x="11.95"
-        y="9.65"
-        width="3.5"
-        height="5.5"
-        rx="1.75"
+        x="11.9"
+        y="9.5"
+        width="3.45"
+        height="5.0"
+        rx="1.725"
         stroke="currentColor"
-        strokeWidth="1.55"
+        strokeWidth="1.35"
       />
     </svg>
   );
@@ -135,27 +155,35 @@ export function PlayerSkipEpisodeIcon({
   const clipId = `ep-skip-clip-${uid}`;
   const isPrev = direction === "prev";
 
-  const barX = isPrev ? 5.5 : 16.3;
+  const barX = isPrev ? 5.1 : 16.8;
   const triPath = isPrev
-    ? "M18.5 7.1Q18.5 6 17.55 6.6L9.9 11.4Q9.05 12 9.9 12.6L17.55 17.4Q18.5 18 18.5 16.9V7.1Z"
-    : "M5.5 7.1Q5.5 6 6.45 6.6L14.1 11.4Q14.95 12 14.1 12.6L6.45 17.4Q5.5 18 5.5 16.9V7.1Z";
+    ? "M17.9 7.2Q17.9 6.15 17.0 6.72L9.5 11.42Q8.65 12 9.5 12.58L17.0 17.28Q17.9 17.85 17.9 16.8V7.2Z"
+    : "M6.1 7.2Q6.1 6.15 7.0 6.72L14.5 11.42Q15.35 12 14.5 12.58L7.0 17.28Q6.1 17.85 6.1 16.8V7.2Z";
 
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      shapeRendering="geometricPrecision"
+      aria-hidden="true"
+      className={className}
+    >
       <defs>
-        <linearGradient id={sheenId} x1="5.5" y1="6" x2="18.5" y2="18" gradientUnits="userSpaceOnUse">
+        <linearGradient id={sheenId} x1="5" y1="6" x2="19" y2="18" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
-          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.03" />
+          <stop offset="100%" stopColor="#7C3AED" stopOpacity="0.02" />
         </linearGradient>
         <clipPath id={clipId}>
-          <rect x={barX} y="6" width="2.2" height="12" rx="1.1" />
+          <rect x={barX} y="6.2" width="2.1" height="11.6" rx="1.05" />
           <path d={triPath} />
         </clipPath>
       </defs>
-      <rect x={barX} y="6" width="2.2" height="12" rx="1.1" fill="currentColor" />
+      <rect x={barX} y="6.2" width="2.1" height="11.6" rx="1.05" fill="currentColor" />
       <path d={triPath} fill="currentColor" />
       <g clipPath={`url(#${clipId})`}>
-        <rect x="5" y="5.5" width="14" height="13" fill={`url(#${sheenId})`} />
+        <rect x="4.5" y="5.5" width="15" height="13" fill={`url(#${sheenId})`} />
       </g>
     </svg>
   );
@@ -624,6 +652,44 @@ export function PartyCopyIcon({
 }
 
 /**
+ * Custom crystal chain-link icon for copying Watch Party deep-link URLs.
+ */
+export function PartyLinkIcon({
+  copied = false,
+  size = 15,
+  className = "",
+}: PlayerIconProps & { copied?: boolean }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
+      {copied ? (
+        <>
+          <circle cx="12" cy="12" r="9" fill="#10B981" fillOpacity="0.18" stroke="#34D399" strokeWidth="1.6" />
+          <path d="M8.3 12.3L10.9 14.9L16 9.5" stroke="#6EE7B7" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+        </>
+      ) : (
+        <>
+          <path
+            d="M10 13.5a4.5 4.5 0 0 0 6.36.5l2.14-2.14a4.5 4.5 0 0 0-6.36-6.36L10.9 6.74"
+            stroke="#C4B5FD"
+            strokeOpacity="0.9"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M14 10.5a4.5 4.5 0 0 0-6.36-.5L5.5 12.14a4.5 4.5 0 0 0 6.36 6.36l1.24-1.24"
+            stroke="#F8FAFC"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
  * Custom Watch Party portal exit icon (inherits hover tone cleanly).
  */
 export function PartyLeaveIcon({ size = 15, className = "" }: PlayerIconProps) {
@@ -787,7 +853,7 @@ export function PlayerSkipIntroIcon({ size = 16, className = "" }: PlayerIconPro
 }
 
 /**
- * High-quality glossy 3D vector laughing emoji (😂) icon for live party reactions.
+ * Sleek Smoked-Amethyst crystal reaction icon matching the monochrome/lavender Play Bar aesthetic.
  */
 export function PlayerReactionsIcon({
   active = false,
@@ -795,14 +861,7 @@ export function PlayerReactionsIcon({
   className = "",
 }: PlayerIconProps & { active?: boolean }) {
   const uid = useId().replace(/:/g, "");
-  const faceGradId = `ep-laugh-face-${uid}`;
-  const glossGradId = `ep-laugh-gloss-${uid}`;
-  const tongueGradId = `ep-laugh-tongue-${uid}`;
-  const tearGradId = `ep-laugh-tear-${uid}`;
-  const mouthClipId = `ep-laugh-mouth-${uid}`;
-
-  const mouthPath =
-    "M6.75 12.45Q12 13.25 17.25 12.45C17.6 12.4 17.8 12.75 17.64 13.28C16.78 16.55 14.68 18.45 12 18.45C9.32 18.45 7.22 16.55 6.36 13.28C6.2 12.75 6.4 12.4 6.75 12.45Z";
+  const gradId = `ep-react-grad-${uid}`;
 
   return (
     <svg
@@ -815,93 +874,42 @@ export function PlayerReactionsIcon({
       className={className}
     >
       <defs>
-        <radialGradient id={faceGradId} cx="0.36" cy="0.28" r="0.72" fx="0.34" fy="0.24">
-          <stop offset="0%" stopColor="#FFF8C5" />
-          <stop offset="32%" stopColor="#FFE04B" />
-          <stop offset="76%" stopColor="#F59E0B" />
-          <stop offset="100%" stopColor="#D97706" />
-        </radialGradient>
-        <linearGradient id={glossGradId} x1="12" y1="2.4" x2="12" y2="10.2" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.62" />
-          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+        <linearGradient id={gradId} x1="4" y1="3" x2="20" y2="21" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor={active ? "#DDD6FE" : "#FFFFFF"} stopOpacity={active ? "0.95" : "0.14"} />
+          <stop offset="100%" stopColor={active ? "#A78BFA" : "#C4B5FD"} stopOpacity={active ? "0.85" : "0.06"} />
         </linearGradient>
-        <linearGradient id={tongueGradId} x1="12" y1="15.1" x2="12" y2="18.8" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FDA4AF" />
-          <stop offset="100%" stopColor="#F43F5E" />
-        </linearGradient>
-        <linearGradient id={tearGradId} x1="0%" y1="0%" x2="85%" y2="100%">
-          <stop offset="0%" stopColor="#F0F9FF" />
-          <stop offset="42%" stopColor="#38BDF8" />
-          <stop offset="100%" stopColor="#0284C7" />
-        </linearGradient>
-        <clipPath id={mouthClipId}>
-          <path d={mouthPath} />
-        </clipPath>
       </defs>
-
-      {/* Main sunlit sphere & crisp glass rim */}
       <circle
         cx="12"
         cy="12"
-        r="9.45"
-        fill={`url(#${faceGradId})`}
-        stroke={active ? "#FEF08A" : "#FDE68A"}
-        strokeOpacity={active ? "0.78" : "0.42"}
-        strokeWidth="0.6"
+        r="8.75"
+        fill={`url(#${gradId})`}
+        stroke={active ? "#C4B5FD" : "currentColor"}
+        strokeOpacity={active ? "0.95" : "0.88"}
+        strokeWidth="1.55"
       />
-      <ellipse cx="12" cy="6.1" rx="6.4" ry="3.2" fill={`url(#${glossGradId})`} />
-
-      {/* Warm cheek blush */}
-      <ellipse cx="7.4" cy="12.75" rx="1.7" ry="0.95" fill="#FB7185" opacity="0.28" />
-      <ellipse cx="16.6" cy="12.75" rx="1.7" ry="0.95" fill="#FB7185" opacity="0.28" />
-
-      {/* Raised happy eyebrows & squinting laughing eyes */}
-      <path d="M5.75 7.45Q7.4 6.05 9.15 6.85" stroke="#6B3410" strokeWidth="1.2" strokeLinecap="round" />
-      <path d="M18.25 7.45Q16.6 6.05 14.85 6.85" stroke="#6B3410" strokeWidth="1.2" strokeLinecap="round" />
-      <path d="M6.25 10.15Q8.05 7.85 9.85 10.15" stroke="#451E07" strokeWidth="1.65" strokeLinecap="round" />
-      <path d="M14.15 10.15Q15.95 7.85 17.75 10.15" stroke="#451E07" strokeWidth="1.65" strokeLinecap="round" />
-
-      {/* Open laughing mouth with upper teeth & rosy tongue */}
-      <path d={mouthPath} fill="#591C13" />
-      <g clipPath={`url(#${mouthClipId})`}>
-        <path d="M6.2 12.1Q12 13.05 17.8 12.1L17.35 14.1Q12 14.65 6.65 14.1Z" fill="#FFFFFF" />
-        <path d="M6.8 14.0Q12 14.55 17.2 14.0" stroke="#E2E8F0" strokeWidth="0.45" />
-        <ellipse cx="12" cy="17.55" rx="3.95" ry="2.25" fill={`url(#${tongueGradId})`} />
-      </g>
-      <path d={mouthPath} stroke="#45190F" strokeOpacity="0.62" strokeWidth="0.6" />
-
-      {/* Luminous crystal tears streaming cleanly from both eye corners */}
-      <path
-        d="M6.45 10.8C5.0 11.45 2.55 12.8 2.18 14.25C1.9 15.32 2.75 16.32 3.85 16.18C4.98 16.03 5.88 14.85 6.15 13.5C6.32 12.48 6.52 11.42 6.45 10.8Z"
-        fill={`url(#${tearGradId})`}
-        stroke="#E0F2FE"
-        strokeOpacity="0.65"
-        strokeWidth="0.4"
+      <circle
+        cx="9"
+        cy="10"
+        r="1.1"
+        fill={active ? "#4C1D95" : "currentColor"}
       />
-      <ellipse
-        cx="3.52"
-        cy="13.95"
-        rx="0.68"
-        ry="1.05"
-        transform="rotate(28 3.52 13.95)"
-        fill="#FFFFFF"
-        opacity="0.88"
+      <circle
+        cx="15"
+        cy="10"
+        r="1.1"
+        fill={active ? "#4C1D95" : "currentColor"}
       />
       <path
-        d="M17.55 10.8C19.0 11.45 21.45 12.8 21.82 14.25C22.1 15.32 21.25 16.32 20.15 16.18C19.02 16.03 18.12 14.85 17.85 13.5C17.68 12.48 17.48 11.42 17.55 10.8Z"
-        fill={`url(#${tearGradId})`}
-        stroke="#E0F2FE"
-        strokeOpacity="0.65"
-        strokeWidth="0.4"
+        d="M8.6 13.7C9.45 15.2 10.65 15.9 12 15.9C13.35 15.9 14.55 15.2 15.4 13.7"
+        stroke={active ? "#4C1D95" : "currentColor"}
+        strokeWidth="1.6"
+        strokeLinecap="round"
       />
-      <ellipse
-        cx="20.48"
-        cy="13.95"
-        rx="0.68"
-        ry="1.05"
-        transform="rotate(-28 20.48 13.95)"
-        fill="#FFFFFF"
-        opacity="0.88"
+      <path
+        d="M18.6 4.2L19.1 5.6L20.5 6.1L19.1 6.6L18.6 8L18.1 6.6L16.7 6.1L18.1 5.6L18.6 4.2Z"
+        fill={active ? "#DDD6FE" : "#C4B5FD"}
+        fillOpacity={active ? "1" : "0.75"}
       />
     </svg>
   );
@@ -1329,32 +1337,32 @@ export function PlayerChatIcon({
   className = "",
 }: PlayerIconProps & { active?: boolean }) {
   const uid = useId().replace(/:/g, "");
-  const gradId = `ep-chat-fill-${uid}`;
-  const sheenId = `ep-chat-sheen-${uid}`;
-
+  const gradId = `ep-chat-grad-${uid}`;
   const bubblePath =
     "M5.1 5.4H18.9C20.06 5.4 21 6.34 21 7.5V14.7C21 15.86 20.06 16.8 18.9 16.8H10.65L6.55 19.85C6.02 20.24 5.28 19.86 5.28 19.2V16.8H5.1C3.94 16.8 3 15.86 3 14.7V7.5C3 6.34 3.94 5.4 5.1 5.4Z";
 
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
-      <defs>
-        <linearGradient id={gradId} x1="4" y1="5" x2="20" y2="19" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.96" />
-          <stop offset="52%" stopColor="#E9D5FF" stopOpacity="0.88" />
-          <stop offset="100%" stopColor="#A78BFA" stopOpacity="0.92" />
-        </linearGradient>
-        <linearGradient id={sheenId} x1="4" y1="5" x2="18" y2="14" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.32" />
-          <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
-        </linearGradient>
-      </defs>
       {active ? (
         <>
-          <path d={bubblePath} fill={`url(#${gradId})`} />
-          <path d={bubblePath} fill={`url(#${sheenId})`} />
-          <circle cx="8.6" cy="11.1" r="1.05" fill="#18122B" />
-          <circle cx="12" cy="11.1" r="1.05" fill="#18122B" />
-          <circle cx="15.4" cy="11.1" r="1.05" fill="#18122B" />
+          <defs>
+            <linearGradient id={gradId} x1="3" y1="5" x2="21" y2="20" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#DDD6FE" stopOpacity="0.95" />
+              <stop offset="100%" stopColor="#A78BFA" stopOpacity="0.85" />
+            </linearGradient>
+          </defs>
+          <path
+            d={bubblePath}
+            fill={`url(#${gradId})`}
+            stroke="#C4B5FD"
+            strokeOpacity="0.95"
+            strokeWidth="1.55"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <circle cx="8" cy="11.1" r="1.05" fill="#4C1D95" />
+          <circle cx="12" cy="11.1" r="1.05" fill="#4C1D95" />
+          <circle cx="16" cy="11.1" r="1.05" fill="#4C1D95" />
         </>
       ) : (
         <>
@@ -1367,9 +1375,9 @@ export function PlayerChatIcon({
             strokeLinecap="round"
             strokeLinejoin="round"
           />
-          <circle cx="8.6" cy="11.1" r="0.95" fill="currentColor" />
+          <circle cx="8" cy="11.1" r="0.95" fill="currentColor" />
           <circle cx="12" cy="11.1" r="0.95" fill="currentColor" />
-          <circle cx="15.4" cy="11.1" r="0.95" fill="currentColor" />
+          <circle cx="16" cy="11.1" r="0.95" fill="currentColor" />
         </>
       )}
     </svg>
@@ -1770,6 +1778,132 @@ export function PlayerWatchedCheckIcon({
           />
         </>
       )}
+    </svg>
+  );
+}
+
+/** Custom crystal photo frame icon for ephemeral chat images. */
+export function PlayerImageIcon({
+  size = 16,
+  active = false,
+  className = "",
+}: PlayerIconProps & { active?: boolean }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <rect
+        x="3.2"
+        y="4.5"
+        width="17.6"
+        height="15"
+        rx="3.4"
+        fill={active ? "rgba(167,139,250,0.20)" : "rgba(255,255,255,0.06)"}
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeOpacity={active ? 0.95 : 0.78}
+      />
+      <circle cx="8.6" cy="9.4" r="1.55" fill="currentColor" fillOpacity={active ? 0.95 : 0.78} />
+      <path
+        d="M5.5 16.5L10.2 12.1L13.3 14.9L15.6 12.8L18.5 16.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeOpacity={active ? 0.95 : 0.82}
+      />
+    </svg>
+  );
+}
+
+/** Custom crystal camera snap icon for capturing the active video frame into chat. */
+export function PlayerCameraSnapIcon({
+  size = 16,
+  className = "",
+}: PlayerIconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <path
+        d="M8.5 5.2H15.5L17.1 7.2H19.4C20.5 7.2 21.4 8.1 21.4 9.2V17.4C21.4 18.5 20.5 19.4 19.4 19.4H4.6C3.5 19.4 2.6 18.5 2.6 17.4V9.2C2.6 8.1 3.5 7.2 4.6 7.2H6.9L8.5 5.2Z"
+        fill="rgba(255,255,255,0.06)"
+        stroke="currentColor"
+        strokeWidth="1.45"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="13.1" r="3.4" stroke="currentColor" strokeWidth="1.45" />
+      <circle cx="12" cy="13.1" r="1.2" fill="currentColor" fillOpacity="0.7" />
+    </svg>
+  );
+}
+
+/**
+ * Pure GPU-animated circular countdown ring (`stroke-dashoffset` CSS animation)
+ * showing remaining ephemeral photo lifetime without React timer re-renders.
+ */
+export function EphemeralTimerRing({
+  size = 18,
+  receivedAtMs,
+  expiresAtMs,
+  paused = false,
+  className = "",
+}: {
+  size?: number;
+  receivedAtMs: number;
+  expiresAtMs: number;
+  paused?: boolean;
+  className?: string;
+}) {
+  const totalMs = Math.max(1000, expiresAtMs - receivedAtMs);
+  const elapsedMs = Math.max(0, Math.min(totalMs, Date.now() - receivedAtMs));
+  const durationSecs = totalMs / 1000;
+  const delaySecs = -(elapsedMs / 1000);
+  const r = 7;
+  const c = 2 * Math.PI * r;
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <circle
+        cx="10"
+        cy="10"
+        r={r}
+        stroke="rgba(255,255,255,0.22)"
+        strokeWidth="2"
+      />
+      <circle
+        cx="10"
+        cy="10"
+        r={r}
+        stroke="#E9D5FF"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={c}
+        transform="rotate(-90 10 10)"
+        className="ep-ephemeral-ring-circle"
+        style={{
+          animationDuration: `${durationSecs}s`,
+          animationDelay: `${delaySecs}s`,
+          animationPlayState: paused ? "paused" : "running",
+        }}
+      />
     </svg>
   );
 }

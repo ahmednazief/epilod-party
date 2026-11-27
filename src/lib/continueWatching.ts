@@ -17,6 +17,8 @@ export interface ContinueWatchingItem {
   timeLeftLabel: string | null;
   updatedAt: number;
   seriesEntry?: SeriesProgressEntry;
+  /** Other season keys belonging to the same show (collapsed into this entry). */
+  relatedSeriesKeys?: string[];
   resumeKey?: string;
   resumeEntry?: ResumeEntry;
   linkedRoom?: RecentRoomEntry;
@@ -75,6 +77,32 @@ function findMatchingResumeForSeries(
   return best;
 }
 
+function deriveShowGroupKey(entry: SeriesProgressEntry): string {
+  const formatted = formatSeasonFolderTitle(entry.folderName);
+  const parentPath = extractParentFolderPath(entry.folderPath);
+  const normParent = parentPath ? normalizeFolderPath(parentPath) : "";
+
+  // Case 1: Nested season folder (e.g. ".../X-Files/Season 1" and ".../X-Files/Season 2")
+  if (
+    normParent &&
+    (/^Season\s+\d+$/i.test(formatted) ||
+      /^(?:season|s|cour|part|series)\s*0*\d+$/i.test(entry.folderName.trim()))
+  ) {
+    return `show-parent:${normParent}`;
+  }
+
+  // Case 2: Flat sibling season folders (e.g. ".../Series/X-Files Season 1" & ".../Series/X-Files Season 2")
+  const strippedShow = formatted
+    .replace(/[\s·._-]+(?:season|s|cour|part)\s*0*\d+$/i, "")
+    .trim()
+    .toLowerCase();
+  if (strippedShow && strippedShow !== formatted.trim().toLowerCase()) {
+    return `show-name:${normParent}::${strippedShow}`;
+  }
+
+  return `series:${entry.seriesKey}`;
+}
+
 export function buildContinueWatchingItems(
   seriesMap: Record<string, SeriesProgressEntry>,
   resumeEntries: Record<string, ResumeEntry>,
@@ -83,6 +111,7 @@ export function buildContinueWatchingItems(
 ): ContinueWatchingItem[] {
   const items: ContinueWatchingItem[] = [];
   const coveredFolders = new Set<string>();
+  const seriesByShowGroup = new Map<string, ContinueWatchingItem>();
 
   for (const entry of Object.values(seriesMap)) {
     const normFolder = normalizeFolderPath(entry.folderPath);
@@ -114,7 +143,7 @@ export function buildContinueWatchingItems(
           : lastEp
         : null;
 
-    items.push({
+    const candidate: ContinueWatchingItem = {
       kind: "series",
       id: `series:${entry.seriesKey}`,
       title: formatSeriesContinueTitle(entry),
@@ -123,8 +152,30 @@ export function buildContinueWatchingItems(
       timeLeftLabel,
       updatedAt: Math.max(entry.updatedAt, activeResume?.entry.updatedAt ?? 0),
       seriesEntry: entry,
+      relatedSeriesKeys: [entry.seriesKey],
       linkedRoom,
-    });
+    };
+
+    const groupKey = deriveShowGroupKey(entry);
+    const existing = seriesByShowGroup.get(groupKey);
+    if (!existing) {
+      seriesByShowGroup.set(groupKey, candidate);
+    } else if (candidate.updatedAt > existing.updatedAt) {
+      candidate.relatedSeriesKeys = [
+        ...(existing.relatedSeriesKeys ?? []),
+        entry.seriesKey,
+      ];
+      seriesByShowGroup.set(groupKey, candidate);
+    } else {
+      existing.relatedSeriesKeys = [
+        ...(existing.relatedSeriesKeys ?? []),
+        entry.seriesKey,
+      ];
+    }
+  }
+
+  for (const groupedItem of seriesByShowGroup.values()) {
+    items.push(groupedItem);
   }
 
   for (const [resumeKey, entry] of Object.entries(resumeEntries)) {

@@ -215,7 +215,12 @@ impl ClockSyncEstimator {
                 self.offset_ms = candidate_offset;
             }
             Some(best) if rtt <= best + 15.0 => {
-                self.offset_ms = self.offset_ms * 0.35 + candidate_offset * 0.65;
+                if best > 250.0 && rtt + 50.0 < best {
+                    // Fast recovery when an earlier cold-start sample was captured during bufferbloat.
+                    self.offset_ms = self.offset_ms * 0.15 + candidate_offset * 0.85;
+                } else {
+                    self.offset_ms = self.offset_ms * 0.35 + candidate_offset * 0.65;
+                }
             }
             Some(_) => {}
         }
@@ -250,10 +255,17 @@ impl ClockSyncEstimator {
             return;
         }
         if let Some(prev) = self.last_rtt_ms {
-            let delta = (rtt_ms - prev).abs();
-            self.jitter_ms = self.jitter_ms * 0.75 + delta * 0.25;
+            let delta = (rtt_ms - prev).abs().min(2_500.0);
+            let alpha = if delta < self.jitter_ms { 0.30 } else { 0.20 };
+            self.jitter_ms = (self.jitter_ms * (1.0 - alpha) + delta * alpha).min(1_500.0);
         }
         self.last_rtt_ms = Some(rtt_ms);
+    }
+
+    /// Returns true when clock sync has too few samples or only high-RTT bufferbloated samples,
+    /// signaling the session loop to run faster background `Ping` calibration until a clean sample arrives.
+    pub fn needs_fast_calibration(&self) -> bool {
+        self.sample_count < 3 || self.best_rtt_ms().unwrap_or(f64::INFINITY) > 220.0
     }
 
     pub fn estimated_server_ms(&self, local_now_ms: f64) -> f64 {
@@ -296,23 +308,42 @@ pub enum DriftAction {
 #[derive(Debug, Clone, Copy)]
 pub struct DriftController {
     pub min_deadband_secs: f64,
+    pub max_deadband_secs: f64,
     pub min_seek_threshold_secs: f64,
     pub max_seek_threshold_secs: f64,
+    pub speed_gain: f64,
+    pub max_speed_delta: f64,
 }
 
 impl Default for DriftController {
     fn default() -> Self {
         Self {
             min_deadband_secs: 0.08,
+            max_deadband_secs: 0.75,
             min_seek_threshold_secs: 0.80,
             max_seek_threshold_secs: 2.00,
+            speed_gain: 0.20,
+            max_speed_delta: 0.08,
         }
     }
 }
 
 impl DriftController {
+    /// Production profile for Epilod Cloud that avoids audible pitch/speed hunting (`±5%` max)
+    /// and guarantees `deadband_secs` never exceeds `seek_threshold_secs` during heavy Wi-Fi jitter.
+    pub const fn cloud_resilient() -> Self {
+        Self {
+            min_deadband_secs: 0.18,
+            max_deadband_secs: 0.65,
+            min_seek_threshold_secs: 2.50,
+            max_seek_threshold_secs: 4.00,
+            speed_gain: 0.12,
+            max_speed_delta: 0.05,
+        }
+    }
+
     pub fn deadband_secs(&self, jitter_secs: f64) -> f64 {
-        (2.0 * jitter_secs.max(0.0)).max(self.min_deadband_secs)
+        (2.0 * jitter_secs.max(0.0)).clamp(self.min_deadband_secs, self.max_deadband_secs)
     }
 
     pub fn seek_threshold_secs(&self, jitter_secs: f64) -> f64 {
@@ -338,7 +369,9 @@ impl DriftController {
             return DriftAction::Seek;
         }
         if abs_drift >= deadband || (soft_active && abs_drift >= deadband * 0.5) {
-            let target_speed = (1.0 + drift_secs * 0.20).clamp(0.92, 1.08);
+            let lo = (1.0 - self.max_speed_delta).clamp(0.85, 1.0);
+            let hi = (1.0 + self.max_speed_delta).clamp(1.0, 1.15);
+            let target_speed = (1.0 + drift_secs * self.speed_gain).clamp(lo, hi);
             if !soft_active || (target_speed - last_speed).abs() >= 0.005 {
                 return DriftAction::SetSpeed(target_speed);
             }
@@ -353,6 +386,20 @@ impl DriftController {
 
 pub fn should_apply_welcome_state(retained: bool, state_seq: u64, participants_len: usize) -> bool {
     retained || participants_len > 1 || state_seq > 0
+}
+
+/// Computes an RTT-adaptive echo suppression window in milliseconds so local Play/Pause/Seek
+/// actions never rubber-band back to stale server state while packets are still in flight on weak links.
+pub fn compute_echo_suppression_ms(rtt_ms: Option<f64>, awaiting_self_echo: bool) -> u64 {
+    let safe_rtt = rtt_ms
+        .filter(|r| r.is_finite() && *r >= 0.0)
+        .unwrap_or(200.0)
+        .min(6_000.0);
+    if awaiting_self_echo {
+        ((safe_rtt * 2.5) as u64 + 2_500).clamp(3_500, 12_000)
+    } else {
+        ((safe_rtt * 1.2) as u64 + 900).clamp(1_200, 3_500)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -378,6 +425,32 @@ pub fn compute_playback_action(
         state.do_seek || abs_drift > 0.08
     } else {
         state.do_seek || abs_drift >= seek_threshold_secs
+    };
+    let seek_to = should_seek.then_some(target_local.max(0.0));
+    PlaybackAction { set_pause, seek_to }
+}
+
+/// Reconciles `Welcome` state without forcing a jarring keyframe hard-seek on reconnect blips
+/// when local `mpv` playback is already aligned within tolerance (gentle speed catch-up handles sub-0.85s drift).
+pub fn compute_welcome_playback_action(
+    state: &CloudPlaybackState,
+    target_local: f64,
+    snap_position: f64,
+    snap_paused: bool,
+    is_reconnect: bool,
+) -> PlaybackAction {
+    let set_pause = if snap_paused != state.paused {
+        Some(state.paused)
+    } else {
+        None
+    };
+    let abs_drift = (target_local - snap_position).abs();
+    let should_seek = if state.paused {
+        abs_drift > if is_reconnect { 0.20 } else { 0.08 }
+    } else if is_reconnect {
+        abs_drift >= 0.85
+    } else {
+        abs_drift >= 0.30
     };
     let seek_to = should_seek.then_some(target_local.max(0.0));
     PlaybackAction { set_pause, seek_to }
@@ -569,6 +642,16 @@ pub enum CloudClientMsg {
         target_msg_id: String,
         emoji: String,
     },
+    #[serde(rename = "chatSeen")]
+    ChatSeen {
+        #[serde(rename = "lastMsgId")]
+        last_msg_id: String,
+    },
+    #[serde(rename = "introSkipVote")]
+    IntroSkipVote {
+        #[serde(rename = "segKey")]
+        seg_key: String,
+    },
     Reaction {
         emoji: String,
         #[serde(rename = "avatarId")]
@@ -669,6 +752,18 @@ pub enum CloudServerMsg {
         target_msg_id: String,
         username: String,
         emoji: String,
+    },
+    #[serde(rename = "chatSeen")]
+    ChatSeen {
+        username: String,
+        #[serde(rename = "lastMsgId")]
+        last_msg_id: String,
+    },
+    #[serde(rename = "introSkipVote")]
+    IntroSkipVote {
+        username: String,
+        #[serde(rename = "segKey")]
+        seg_key: String,
     },
     Reaction {
         username: String,
@@ -1100,5 +1195,59 @@ mod tests {
         clock.record_ntp_sample(1000.0, 1520.0, 1530.0, 1050.0);
         assert!((clock.offset_ms() - 500.0).abs() < 0.01);
         assert!((clock.last_rtt_ms().unwrap() - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cloud_resilient_drift_controller_prevents_deadband_inversion_and_caps_speed() {
+        let ctrl = DriftController::cloud_resilient();
+        // Micro-jitter under 180ms never triggers speed hunting.
+        assert_eq!(ctrl.decide(0.14, 0.02, false, 1.0), DriftAction::None);
+
+        // Even under extreme 2.0s network jitter, deadband stays <= 0.65s (< seek_thr 4.0s).
+        assert!((ctrl.deadband_secs(2.0) - 0.65).abs() < 1e-6);
+        assert!((ctrl.seek_threshold_secs(2.0) - 4.0).abs() < 1e-6);
+        match ctrl.decide(1.20, 2.0, false, 1.0) {
+            DriftAction::SetSpeed(s) => assert!(
+                (0.95..=1.05).contains(&s) && s > 1.0,
+                "expected gentle capped speed, got {s}"
+            ),
+            other => panic!("expected SetSpeed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn welcome_reconnect_skips_jarring_seek_when_already_aligned() {
+        let welcome_state = CloudPlaybackState {
+            position: 100.0,
+            paused: false,
+            seq: 5,
+            server_time_ms: 10_000.0,
+            set_by: Some("Host".into()),
+            do_seek: true, // Server always stamps doSeek=true on Welcome
+        };
+        let aligned = compute_welcome_playback_action(&welcome_state, 100.40, 100.0, false, true);
+        assert_eq!(aligned.set_pause, None);
+        assert_eq!(aligned.seek_to, None);
+
+        let drifted = compute_welcome_playback_action(&welcome_state, 101.20, 100.0, false, true);
+        assert_eq!(drifted.seek_to, Some(101.20));
+    }
+
+    #[test]
+    fn echo_suppression_adapts_to_weak_network_rtt_and_cold_start_calibration() {
+        assert_eq!(compute_echo_suppression_ms(Some(1800.0), true), 7_000);
+        assert_eq!(compute_echo_suppression_ms(Some(50.0), false), 1_200);
+
+        let mut clock = ClockSyncEstimator::new();
+        // Cold start during heavy upload bufferbloat (RTT = 1600ms, skewed offset +1200ms).
+        clock.record_pong(1000.0, 2600.0, 3000.0);
+        assert!(clock.needs_fast_calibration());
+
+        // Subsequent clean 40ms sample (true offset +500ms) snaps 85% toward true offset.
+        clock.record_pong(5000.0, 5040.0, 5520.0);
+        assert!((clock.offset_ms() - 605.0).abs() < 1.0);
+        clock.record_pong(6000.0, 6040.0, 6520.0);
+        assert!(!clock.needs_fast_calibration());
+        assert!((clock.offset_ms() - 536.75).abs() < 1.0);
     }
 }

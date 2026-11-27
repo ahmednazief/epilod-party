@@ -16,7 +16,6 @@ import { PlayerSkipEpisodeIcon } from "./ui/PlayerIcons";
 const AUTO_NEXT_OUTRO_DELAY_MS = 4500;
 
 interface NextEpisodeOverlayProps {
-  chromeVisible: boolean;
   popoverOpen: boolean;
   lockedForLocalUser: boolean;
   onNextEpisode: () => void;
@@ -30,7 +29,6 @@ interface ActiveOutroPayload {
 }
 
 export const NextEpisodeOverlay = memo(function NextEpisodeOverlay({
-  chromeVisible,
   popoverOpen,
   lockedForLocalUser,
   onNextEpisode,
@@ -181,7 +179,7 @@ export const NextEpisodeOverlay = memo(function NextEpisodeOverlay({
     dispatchLayout();
     const settled = window.setTimeout(dispatchLayout, 320);
     return () => window.clearTimeout(settled);
-  }, [presence.mounted, presence.exiting, chromeVisible, fullWidthPlayBar]);
+  }, [presence.mounted, presence.exiting, fullWidthPlayBar]);
 
   if (!presence.mounted || !current) return null;
 
@@ -204,21 +202,11 @@ export const NextEpisodeOverlay = memo(function NextEpisodeOverlay({
 
   return (
     <div
-      style={
-        chromeVisible
-          ? {
-              bottom: `var(--ep-playbar-clearance, ${fullWidthPlayBar ? "124px" : "140px"})`,
-            }
-          : undefined
-      }
-      className={`absolute inset-x-0 z-40 pointer-events-none flex justify-center transition-[bottom] duration-300 ease-out ${
+      style={{
+        bottom: `var(--ep-playbar-clearance, ${fullWidthPlayBar ? "124px" : "140px"})`,
+      }}
+      className={`absolute inset-x-0 z-40 pointer-events-none flex justify-center ${
         fullWidthPlayBar ? "px-4 sm:px-6" : "px-4"
-      } ${
-        chromeVisible
-          ? fullWidthPlayBar
-            ? "bottom-[122px] sm:bottom-[124px]"
-            : "bottom-[138px] sm:bottom-[140px]"
-          : "bottom-7 sm:bottom-8"
       }`}
     >
       <div className={`w-full flex justify-end ${fullWidthPlayBar ? "" : "max-w-[1140px]"}`}>

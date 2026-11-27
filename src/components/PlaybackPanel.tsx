@@ -239,7 +239,7 @@ export const PlaybackPanel = memo(function PlaybackPanel() {
           ariaLabel="Playback speed"
           size="sm"
           fullWidth
-          value={String(SPEED_PRESETS.find((p) => Math.abs(speed - p) < 0.01) ?? 1)}
+          value={loaded ? String(SPEED_PRESETS.find((p) => Math.abs(speed - p) < 0.01) ?? 1) : null}
           items={SPEED_PRESETS.map((preset) => ({
             value: String(preset),
             label: preset === 1 ? "1×" : `${preset}×`,

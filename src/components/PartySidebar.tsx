@@ -12,7 +12,7 @@ import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
 import { useWindowDragHeader } from "../hooks/useWindowDragHeader";
 import { formatUserError } from "../lib/errors";
 import { formatParticipantMatchBadge, formatReadableMediaName } from "../lib/fileMismatch";
-import { formatInviteClipboardText } from "../lib/inviteLinks";
+import { formatInviteLink, formatRoomCodeClipboardText } from "../lib/inviteLinks";
 import type { LocalMatchCandidate } from "../lib/localLibrary";
 import { MAX_PARTY_SIDEBAR_WIDTH, MIN_PARTY_SIDEBAR_WIDTH } from "../lib/partyLayout";
 import { formatDisplayMediaTitle } from "../lib/playlist";
@@ -31,17 +31,12 @@ import {
   NOT_READY_TAG_PREFIX,
   PEER_LEFT_TAG_PREFIX,
 } from "../lib/syncReady";
-import {
-  describeSyncEndpoint,
-  isCloudEndpoint,
-  SYNCPLAY_ENDPOINT,
-} from "../lib/syncStatusDisplay";
+import { describeSyncEndpoint } from "../lib/syncStatusDisplay";
 import {
   enqueueSyncLifecycle,
   onSyncHealth,
   syncReconnect,
   syncSetRoomAdmin,
-  syncSwitchBackup,
   type Participant,
   type SyncHealthPayload,
 } from "../lib/syncplay";
@@ -55,6 +50,8 @@ import {
 import { usePresencePayload } from "../lib/useAnimatedPresence";
 import { formatVoiceHotkey } from "../lib/voice";
 import { isLocalVoiceSpeaking, toggleVoiceSession } from "../lib/voiceActions";
+import { buildEpisodeRatingId, buildRatingKey } from "../lib/ratings";
+import { useRatingStore } from "../store/useRatingStore";
 import { useAppStore } from "../store/useAppStore";
 import { clearPartyChat } from "../store/useChatStore";
 import { useNotificationStore } from "../store/useNotificationStore";
@@ -98,12 +95,13 @@ import {
   PartyFpsMatchIcon,
   PartyHostIcon,
   PartyLeaveIcon,
-  PartyServerIcon,
+  PartyLinkIcon,
   PartyUnpinIcon,
   PartyViewersIcon,
   PlayerCollapseLeftIcon,
   PlayerEyeIcon,
   PlayerPlayIcon,
+  PlayerRatingStarIcon,
   PlayerReadyIcon,
   PlayerResyncIcon,
 } from "./ui/PlayerIcons";
@@ -144,11 +142,10 @@ export const PartySidebar = memo(function PartySidebar({
 }: PartySidebarProps) {
   const roomCode = useAppStore((s) => s.roomCode);
   const literalRoom = useAppStore((s) => s.literalRoom);
-  const hostOnlyRoom = useAppStore((s) => s.hostOnlyRoom);
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
+  const peerAvatars = useAppStore((s) => s.peerAvatars);
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
-  const serverPassword = useAppStore((s) => s.serverPassword);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const selectedFileName = useAppStore((s) => s.selectedFileName);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
@@ -170,7 +167,15 @@ export const PartySidebar = memo(function PartySidebar({
   const p2pStatus = useSyncStore((s) => s.p2pStatus);
 
   const localLoaded = usePlayerStore((s) => s.loaded);
+  const localDurationSecs = usePlayerStore((s) => s.durationSecs);
   const playerError = usePlayerStore((s) => s.playerError);
+  const currentRatingKey = localLoaded ? buildRatingKey(selectedFileName, localDurationSecs) : null;
+  const currentMediaId = buildEpisodeRatingId(selectedFileName);
+  const myCurrentRating = useRatingStore((s) =>
+    (currentRatingKey ? s.myScoreByKey[currentRatingKey] : undefined) ??
+    (currentMediaId ? s.personalByMediaId[currentMediaId]?.score : undefined) ??
+    null,
+  );
   const pushNote = useNotificationStore((s) => s.push);
   const { mismatch, localMatches } = usePartyFileMismatch();
 
@@ -195,6 +200,7 @@ export const PartySidebar = memo(function PartySidebar({
   const { isMaximized, handleMaximizedHeaderMouseDown } = useWindowDragHeader();
 
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [busyAdminUser, setBusyAdminUser] = useState<string | null>(null);
   const [timingOpen, setTimingOpen] = useState(false);
   const [btPreJoinConfirm, setBtPreJoinConfirm] = useState(false);
@@ -223,6 +229,7 @@ export const PartySidebar = memo(function PartySidebar({
   const memberAnchorRefs = useRef<Record<string, HTMLElement | null>>({});
   const memberMenuBoxRef = useRef<HTMLDivElement | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const copyLinkTimerRef = useRef<number | null>(null);
   const healthCopyTimerRef = useRef<number | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
 
@@ -270,6 +277,7 @@ export const PartySidebar = memo(function PartySidebar({
   useEffect(() => {
     return () => {
       if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+      if (copyLinkTimerRef.current !== null) window.clearTimeout(copyLinkTimerRef.current);
       if (healthCopyTimerRef.current !== null) window.clearTimeout(healthCopyTimerRef.current);
       resizeCleanupRef.current?.();
       resizeCleanupRef.current = null;
@@ -487,7 +495,7 @@ export const PartySidebar = memo(function PartySidebar({
 
   const handleCopyRoom = async () => {
     try {
-      const text = formatInviteClipboardText(roomCode, literalRoom, serverEndpoint);
+      const text = formatRoomCodeClipboardText(roomCode, literalRoom);
       await navigator.clipboard.writeText(text);
       setCopied(true);
       const p = usePlayerStore.getState();
@@ -502,38 +510,30 @@ export const PartySidebar = memo(function PartySidebar({
     }
   };
 
+  const handleCopyLink = async () => {
+    try {
+      const link = formatInviteLink(roomCode, literalRoom, serverEndpoint);
+      if (!link) return;
+      await navigator.clipboard.writeText(link);
+      setCopiedLink(true);
+      const p = usePlayerStore.getState();
+      playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
+      if (copyLinkTimerRef.current !== null) window.clearTimeout(copyLinkTimerRef.current);
+      copyLinkTimerRef.current = window.setTimeout(() => {
+        copyLinkTimerRef.current = null;
+        setCopiedLink(false);
+      }, 1800);
+    } catch {
+      pushNote("info", `Room code: ${roomCode}`);
+    }
+  };
+
   const handleRetryConnect = () => {
     void enqueueSyncLifecycle(async () => {
       try {
         await syncReconnect();
       } catch (err) {
         pushNote("error", formatUserError(err, "Could not retry connection."));
-      }
-    });
-  };
-
-  const handleSwitchBackup = () => {
-    const targetEndpoint = isCloudEndpoint(endpointSummary.activeEndpoint)
-      ? SYNCPLAY_ENDPOINT
-      : undefined;
-    void enqueueSyncLifecycle(async () => {
-      try {
-        await syncSwitchBackup({
-          username,
-          roomCode,
-          literalRoom,
-          password: serverPassword || null,
-          hostOnly: hostOnlyRoom,
-          targetEndpoint,
-        });
-        pushNote(
-          "info",
-          targetEndpoint
-            ? "Switching room to Syncplay fallback server."
-            : "Switching room to backup connection route.",
-        );
-      } catch (err) {
-        pushNote("error", formatUserError(err, "Backup route switch failed."));
       }
     });
   };
@@ -777,7 +777,7 @@ export const PartySidebar = memo(function PartySidebar({
         }`}
       >
         <PresenceAvatar
-          avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId)}
+          avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId, peerAvatars)}
           size={26}
           speaking={meta.peerSpeaking && !meta.peerLocallyMuted}
           status={badge.isMismatch ? "mismatch" : "none"}
@@ -1064,6 +1064,36 @@ export const PartySidebar = memo(function PartySidebar({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {currentRatingKey && selectedFileName && (
+            <GlassHoverTip
+              label={myCurrentRating !== null ? `Your rating: ${myCurrentRating}/10` : "Rate this watch"}
+              detail="Click to open rating bar"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  const displayTitle = selectedFileName.replace(/\.[^.]+$/, "");
+                  useRatingStore.getState().reopenForKey(
+                    currentRatingKey,
+                    displayTitle,
+                    selectedFileName,
+                    {
+                      username: resolveEffectiveUsername(status, username),
+                      avatarId,
+                    },
+                  );
+                }}
+                aria-label="Rate current watch"
+                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-muted hover:text-white cursor-pointer"
+              >
+                <PlayerRatingStarIcon
+                  size={14}
+                  active={myCurrentRating !== null}
+                  tone={myCurrentRating !== null ? "personal" : "gold"}
+                />
+              </button>
+            </GlassHoverTip>
+          )}
           <GlassHoverTip label="Unpin to Play Bar" detail="Return to compact popover">
             <button
               type="button"
@@ -1093,7 +1123,7 @@ export const PartySidebar = memo(function PartySidebar({
           <button
             type="button"
             onClick={() => void handleCopyRoom()}
-            title="Click to copy invite code"
+            title="Click to copy room code"
             className="ep-bar-pill ep-press flex-1 min-w-0 h-8 px-3 rounded-full flex items-center justify-between gap-2 text-left cursor-pointer"
           >
             <span className="text-[12.5px] font-semibold tracking-[0.12em] text-white/95 num truncate">
@@ -1108,6 +1138,22 @@ export const PartySidebar = memo(function PartySidebar({
               {copied && <span>Copied</span>}
             </span>
           </button>
+
+          <GlassHoverTip
+            label={copiedLink ? "Link Copied" : "Copy Invite Link"}
+            detail="epilod://join/…"
+          >
+            <button
+              type="button"
+              onClick={() => void handleCopyLink()}
+              aria-label="Copy invite link"
+              className={`ep-bar-pill ep-press h-8 w-8 rounded-full flex items-center justify-center shrink-0 cursor-pointer transition-colors ${
+                copiedLink ? "text-ok" : "text-secondary hover:text-white"
+              }`}
+            >
+              <PartyLinkIcon copied={copiedLink} size={13} />
+            </button>
+          </GlassHoverTip>
 
           <GlassHoverTip
             label="Leave Room"
@@ -1191,16 +1237,6 @@ export const PartySidebar = memo(function PartySidebar({
                 <PlayerResyncIcon tone="warn" size={11} />
                 <span>Retry</span>
               </button>
-              {status.state === "reconnecting" && status.suggestBackup && !endpointSummary.isBackupServer && (
-                <button
-                  type="button"
-                  onClick={handleSwitchBackup}
-                  className="ep-bar-icon-btn h-6 px-2 rounded-full inline-flex items-center gap-1 font-medium text-secondary hover:text-white cursor-pointer"
-                >
-                  <PartyServerIcon size={11} />
-                  <span>Backup</span>
-                </button>
-              )}
             </div>
           </div>
         </AnimatedCollapse>
@@ -1923,6 +1959,7 @@ export const PartySidebar = memo(function PartySidebar({
           exiting={activeMenuPayload.exiting}
           effectiveUsername={effectiveUsername}
           avatarId={avatarId}
+          peerAvatars={peerAvatars}
           voiceEnabled={voiceEnabled}
           busyAdminUser={busyAdminUser}
           onTogglePeerAdmin={(u, grant) => void handleTogglePeerAdmin(u, grant)}

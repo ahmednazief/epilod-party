@@ -569,9 +569,9 @@ export const ReactionPopover = memo(function ReactionPopover() {
           />
 
           <div
-            className={`ep-menu-scroll ${
+            className={`ep-menu-scroll ep-chat-feed-mask ${
               customizing ? "max-h-36" : "max-h-44"
-            } overflow-y-auto overflow-x-hidden pr-1`}
+            } overflow-y-auto overflow-x-hidden pr-1 py-0.5`}
           >
             {filteredCatalog.length > 0 ? (
               <div className="grid grid-cols-7 gap-1 touch-none">
@@ -643,7 +643,7 @@ export const ReactionPopover = memo(function ReactionPopover() {
 
         <div
           data-glass-region="true"
-          className="ep-glass-reaction-dock w-fit rounded-full p-1.5 flex items-center"
+          className="ep-glass-reaction-dock w-fit rounded-full p-1 flex items-center"
         >
           <div
             ref={trackRef}
@@ -713,12 +713,12 @@ export const ReactionPopover = memo(function ReactionPopover() {
                       fireEmoji(item.emoji, false);
                     }
                   }}
-                  className={`relative z-[1] h-10 w-10 rounded-full flex items-center justify-center cursor-pointer focus:outline-none ${
+                  className={`relative z-[1] h-8.5 w-8.5 rounded-full flex items-center justify-center cursor-pointer focus:outline-none ${
                     isSelectedForEdit ? "ring-1.5 ring-accent-soft bg-accent/15" : ""
                   }`}
                 >
                   <span
-                    className={`ep-reaction-emoji-glyph text-[21px] transition-transform duration-150 ease-[var(--spring-fluid)] ${
+                    className={`ep-reaction-emoji-glyph text-[18.5px] transition-transform duration-150 ease-[var(--spring-fluid)] ${
                       isPulsing
                         ? "scale-[1.28]"
                         : isHovered
@@ -740,10 +740,10 @@ export const ReactionPopover = memo(function ReactionPopover() {
             aria-expanded={pickerOpen}
             aria-label={pickerOpen ? "Close full emoji picker" : "Browse all emojis"}
             title={pickerOpen ? "Close emoji picker" : "Browse all emojis"}
-            className="ep-glass-reaction-orb ep-press relative z-[1] ml-1.5 h-10 w-10 rounded-full flex items-center justify-center text-white/90 hover:text-white cursor-pointer shrink-0"
+            className="ep-glass-reaction-orb ep-press relative z-[1] ml-1 h-8.5 w-8.5 rounded-full flex items-center justify-center text-white/90 hover:text-white cursor-pointer shrink-0"
           >
             <PlayerReactionPickerIcon
-              size={15}
+              size={14}
               className={`transition-transform duration-200 ${
                 pickerOpen ? "rotate-45" : "rotate-0"
               }`}

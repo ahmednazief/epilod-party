@@ -1,5 +1,6 @@
 import { useAppStore } from "../store/useAppStore";
 import { useRatingStore, type PersonalEpisodeRating } from "../store/useRatingStore";
+import type { PartyEpisodeRatingSummary } from "./ratings";
 import { useRecentRoomsStore, type RecentRoomEntry } from "../store/useRecentRoomsStore";
 import { useResumeStore } from "../store/useResumeStore";
 import { useSeriesProgressStore } from "../store/useSeriesProgressStore";
@@ -29,6 +30,7 @@ const WEEKLY_SNAPSHOT_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const SETTINGS_STORAGE_KEYS = [
   "ep.username",
   "ep.avatarId",
+  "ep.customAvatars",
   "ep.server",
   "ep.hideViewers",
   "ep.hashFilenames",
@@ -52,6 +54,8 @@ const SETTINGS_STORAGE_KEYS = [
   "ep.reactionsEnabled",
   "ep.chatPeeksEnabled",
   "ep.chatTriggerPlacement",
+  "ep.chatImageMode",
+  "ep.chatImageRetention",
   "ep.recentEmojis",
   "ep.reactionPresets",
   "ep.fullWidthPlayBar",
@@ -93,6 +97,7 @@ export interface BackupDataPayload {
     resume: Record<string, ResumeEntry>;
   };
   ratings: Record<string, PersonalEpisodeRating>;
+  partyRatings?: Record<string, PartyEpisodeRatingSummary>;
   prefs: {
     subtitlePrefs: Record<string, unknown>;
     seriesTrackPrefs: Record<string, unknown>;
@@ -186,12 +191,14 @@ export function collectBackupData(): BackupDataPayload {
   const series = useSeriesProgressStore.getState().series;
   const resume = stripResumeFilePaths(useResumeStore.getState().entries);
   const ratings = useRatingStore.getState().personalByMediaId;
+  const partyRatings = useRatingStore.getState().partyByMediaId;
   const rooms = sanitizeRoomsForBackup(useRecentRoomsStore.getState().rooms);
 
   return {
     settings,
     progress: { series, resume },
     ratings,
+    partyRatings,
     prefs: {
       subtitlePrefs: safeReadLocalJson<Record<string, unknown>>("epilod.v1.subtitlePrefs", {}),
       seriesTrackPrefs: safeReadLocalJson<Record<string, unknown>>("epilod.v1.seriesTrackPrefs", {}),
@@ -392,6 +399,13 @@ export async function applyBackupEnvelope(
       ratingStore.replacePersonalRatings(data.ratings);
     } else {
       ratingStore.mergePersonalRatings(data.ratings);
+    }
+  }
+  if (data.partyRatings && typeof data.partyRatings === "object") {
+    if (mode === "replace") {
+      ratingStore.replacePartyRatings(data.partyRatings);
+    } else {
+      ratingStore.mergePartyRatings(data.partyRatings);
     }
   }
 

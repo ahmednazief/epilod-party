@@ -1,8 +1,11 @@
 import { resolveEffectiveUsername } from "./syncController";
 import {
+  syncRequestChatImage,
   syncSendChat,
   syncSendChatEdit,
+  syncSendChatImage,
   syncSendChatReact,
+  syncSendChatSeen,
   syncSendChatTyping,
 } from "./syncplay";
 import { useAppStore } from "../store/useAppStore";
@@ -127,6 +130,120 @@ export function notifyPartyChatTyping(isTyping: boolean): void {
 export function resetTypingThrottle(): void {
   lastTypingSentAt = 0;
   lastTypingState = false;
+}
+
+let seenSentAtMs = 0;
+let lastSeenSentId = "";
+let seenPendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function notifyPartyChatSeen(lastMsgId: string): void {
+  const cleanId = lastMsgId.trim();
+  if (!cleanId || cleanId === lastSeenSentId) return;
+  const app = useAppStore.getState();
+  const sync = useSyncStore.getState();
+  if (!app.roomCode || sync.status.state !== "connected") return;
+
+  const now = Date.now();
+  const elapsed = now - seenSentAtMs;
+  if (elapsed >= 1500) {
+    lastSeenSentId = cleanId;
+    seenSentAtMs = now;
+    if (seenPendingTimer) {
+      clearTimeout(seenPendingTimer);
+      seenPendingTimer = null;
+    }
+    void syncSendChatSeen(cleanId).catch(() => undefined);
+  } else {
+    if (seenPendingTimer) clearTimeout(seenPendingTimer);
+    seenPendingTimer = setTimeout(() => {
+      seenPendingTimer = null;
+      const appNow = useAppStore.getState();
+      const syncNow = useSyncStore.getState();
+      if (!appNow.roomCode || syncNow.status.state !== "connected") return;
+      if (cleanId !== lastSeenSentId) {
+        lastSeenSentId = cleanId;
+        seenSentAtMs = Date.now();
+        void syncSendChatSeen(cleanId).catch(() => undefined);
+      }
+    }, 1500 - elapsed);
+  }
+}
+
+export function resetSeenThrottle(): void {
+  lastSeenSentId = "";
+  seenSentAtMs = 0;
+  if (seenPendingTimer) {
+    clearTimeout(seenPendingTimer);
+    seenPendingTimer = null;
+  }
+}
+
+export async function sendPartyChatImage(params: {
+  caption?: string;
+  spoiler: boolean;
+  width: number;
+  height: number;
+  byteLen: number;
+  dataB64: string;
+  objectUrl: string;
+  replyToId?: string | null;
+}): Promise<boolean> {
+  const app = useAppStore.getState();
+  if (!app.roomCode) return false;
+  const sync = useSyncStore.getState();
+  const sender = resolveEffectiveUsername(sync.status, app.username);
+  const avatarId = app.avatarId;
+  const id = generateChatMessageId();
+  const cleanCaption = sanitizeChatDraft(params.caption ?? "") ?? "";
+  const cleanReply = params.replyToId ? params.replyToId.trim().slice(0, 24) || null : null;
+
+  useChatStore.getState().appendLocalImageMessage({
+    id,
+    sender,
+    avatarId,
+    caption: cleanCaption,
+    width: params.width,
+    height: params.height,
+    byteLen: params.byteLen,
+    spoiler: params.spoiler,
+    objectUrl: params.objectUrl,
+    retention: app.chatImageRetention,
+    replyToId: cleanReply,
+  });
+
+  if (sync.status.state === "connected") {
+    await syncSendChatImage({
+      id,
+      avatarId,
+      caption: cleanCaption || null,
+      spoiler: params.spoiler,
+      width: params.width,
+      height: params.height,
+      dataB64: params.dataB64,
+      replyToId: cleanReply,
+    });
+    void syncSendChatTyping(false);
+  }
+  return true;
+}
+
+export function requestPartyChatImage(id: string, sender: string): void {
+  useChatStore.getState().markImageLoading(id);
+  const timeoutId =
+    typeof window !== "undefined"
+      ? window.setTimeout(() => {
+          const msg = useChatStore
+            .getState()
+            .messages.find((m) => m.image?.id === id);
+          if (msg?.image?.status === "loading") {
+            useChatStore.getState().markImageFailed(id);
+          }
+        }, 12_000)
+      : null;
+  void syncRequestChatImage(id, sender).catch(() => {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+    useChatStore.getState().markImageFailed(id);
+  });
 }
 
 export type ChatBubblePosition = "solo" | "first" | "middle" | "last";

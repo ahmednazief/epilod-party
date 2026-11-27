@@ -63,6 +63,20 @@ export function formatInviteLink(
     : `${EPILOD_JOIN_URI_PREFIX}${encodedRoom}`;
 }
 
+export function formatRoomCodeClipboardText(
+  roomName: string,
+  literalRoom: boolean,
+): string {
+  const trimmed = roomName.trim();
+  if (!literalRoom) {
+    const compact = trimmed.replace(/[\s-]+/g, "");
+    if (/^\d{6}$/.test(compact)) {
+      return `${compact.slice(0, 3)} ${compact.slice(3, 6)}`;
+    }
+  }
+  return trimmed;
+}
+
 export function formatInviteClipboardText(
   roomName: string,
   literalRoom: boolean,

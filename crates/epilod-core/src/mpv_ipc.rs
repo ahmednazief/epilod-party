@@ -1869,7 +1869,8 @@ mod tests {
         );
 
         let left_margin = set_video_margin_left_cmd(59, 0.21875);
-        let parsed5: Value = serde_json::from_str(left_margin.trim()).expect("valid left margin json");
+        let parsed5: Value =
+            serde_json::from_str(left_margin.trim()).expect("valid left margin json");
         assert_eq!(
             parsed5["command"],
             json!(["set_property", "video-margin-ratio-left", 0.2188])

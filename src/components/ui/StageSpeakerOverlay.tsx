@@ -8,6 +8,7 @@ interface StageSpeakerOverlayProps {
   speakers: readonly string[];
   localUsername: string;
   localAvatarId: AvatarId;
+  peerAvatars?: Record<string, AvatarId>;
   localSpeaking?: boolean;
   localMuted?: boolean;
   localDeafened?: boolean;
@@ -32,6 +33,7 @@ export const StageSpeakerOverlay = memo(function StageSpeakerOverlay({
   speakers,
   localUsername,
   localAvatarId,
+  peerAvatars,
   localSpeaking = false,
   localMuted = false,
   localDeafened = false,
@@ -119,7 +121,7 @@ export const StageSpeakerOverlay = memo(function StageSpeakerOverlay({
     >
       {showSelfChip && (
         <div
-          className={`ep-bar-pill px-2.5 py-1 rounded-full inline-flex items-center gap-1.5 text-xs font-medium anim-pop-in ${
+          className={`ep-bar-pill pl-1 pr-2.5 py-1 rounded-full inline-flex items-center gap-1.5 text-xs font-medium anim-pop-in ${
             !localCaptureHealthy
               ? "text-warn"
               : localDeafened || localMuted
@@ -171,10 +173,10 @@ export const StageSpeakerOverlay = memo(function StageSpeakerOverlay({
           key={speaker.key}
           className={`${
             speaker.exiting ? "anim-pop-out" : "anim-pop-in"
-          } ep-bar-pill px-2.5 py-1 rounded-full inline-flex items-center gap-2 text-xs font-medium text-white`}
+          } ep-bar-pill pl-1 pr-2.5 py-1 rounded-full inline-flex items-center gap-2 text-xs font-medium text-white`}
         >
           <PresenceAvatar
-            avatarId={resolvePeerAvatarId(speaker.name, localUsername, localAvatarId)}
+            avatarId={resolvePeerAvatarId(speaker.name, localUsername, localAvatarId, peerAvatars)}
             size={18}
             speaking={!speaker.exiting}
           />

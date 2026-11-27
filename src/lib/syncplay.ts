@@ -157,6 +157,38 @@ export interface ShareSubtitleResultDto {
   sizeBytes: number;
 }
 
+export interface ChatSeenEventPayload {
+  username: string;
+  lastMsgId: string;
+  via: "p2p" | "p2pRelay" | "syncplay";
+}
+
+export interface IntroSkipVoteEventPayload {
+  segKey: string;
+  username: string;
+  via: "p2p" | "p2pRelay";
+}
+
+export interface ChatImageMetaEventPayload {
+  id: string;
+  sender: string;
+  avatarId: string;
+  caption?: string | null;
+  spoiler: boolean;
+  width: number;
+  height: number;
+  byteLen: number;
+  replyToId?: string | null;
+  via: "p2p" | "p2pRelay";
+}
+
+export interface ChatImageDataEventPayload {
+  id: string;
+  sender: string;
+  dataB64: string;
+  via: "p2p" | "p2pRelay";
+}
+
 export type SyncStatusPayload =
   | { state: "disconnected" }
   | { state: "connecting"; endpoint: string; attempt: number }
@@ -337,6 +369,48 @@ export async function syncSendChatEdit(targetMsgId: string, text: string): Promi
 
 export async function syncSendChatReact(targetMsgId: string, emoji: string): Promise<void> {
   await safeInvoke("sync_send_chat_react", { targetMsgId, emoji });
+}
+
+export async function syncSendChatSeen(lastMsgId: string): Promise<void> {
+  await safeInvoke("sync_send_chat_seen", { lastMsgId });
+}
+
+export async function syncSendAvatarPresence(avatarId: string): Promise<void> {
+  await safeInvoke("sync_send_avatar_presence", { avatarId });
+}
+
+export async function syncSendIntroSkipVote(segKey: string): Promise<void> {
+  await safeInvoke("sync_send_intro_skip_vote", { segKey });
+}
+
+export async function syncSetChatImageMode(mode: "auto" | "tap" | "off"): Promise<void> {
+  await safeInvoke("sync_set_chat_image_mode", { mode });
+}
+
+export async function syncSendChatImage(params: {
+  id: string;
+  avatarId?: string | null;
+  caption?: string | null;
+  spoiler: boolean;
+  width: number;
+  height: number;
+  dataB64: string;
+  replyToId?: string | null;
+}): Promise<void> {
+  await safeInvoke("sync_send_chat_image", {
+    id: params.id,
+    avatarId: params.avatarId ?? null,
+    caption: params.caption ?? null,
+    spoiler: params.spoiler,
+    width: params.width,
+    height: params.height,
+    dataB64: params.dataB64,
+    replyToId: params.replyToId ?? null,
+  });
+}
+
+export async function syncRequestChatImage(id: string, sender: string): Promise<void> {
+  await safeInvoke("sync_request_chat_image", { id, sender });
 }
 
 export async function syncShareSubtitle(params: {
@@ -526,4 +600,46 @@ export async function onSyncSubtitleShared(
 ): Promise<UnlistenFn> {
   if (!isDesktop()) return noopUnlisten();
   return listen<SharedSubtitleEventPayload>("sync://subtitle-shared", (e) => cb(e.payload));
+}
+
+export async function onSyncChatSeen(
+  cb: (payload: ChatSeenEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatSeenEventPayload>("sync://chat-seen", (e) => cb(e.payload));
+}
+
+export async function onSyncIntroSkipVote(
+  cb: (payload: IntroSkipVoteEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<IntroSkipVoteEventPayload>("sync://intro-skip-vote", (e) => cb(e.payload));
+}
+
+export async function onSyncChatImageMeta(
+  cb: (payload: ChatImageMetaEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatImageMetaEventPayload>("sync://chat-image-meta", (e) => cb(e.payload));
+}
+
+export async function onSyncChatImageData(
+  cb: (payload: ChatImageDataEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatImageDataEventPayload>("sync://chat-image-data", (e) => cb(e.payload));
+}
+
+export interface PeerAvatarEventPayload {
+  username: string;
+  avatarId: string;
+}
+
+export async function onSyncPeerAvatar(
+  cb: (payload: PeerAvatarEventPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<PeerAvatarEventPayload>("sync://peer-avatar", (e) => {
+    if (e.payload) cb(e.payload);
+  });
 }

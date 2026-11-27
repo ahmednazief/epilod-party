@@ -18,7 +18,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from "react-dom";
 import { usePartyFileMismatch } from "../hooks/usePartyFileMismatch";
 import { formatUserError } from "../lib/errors";
-import { formatInviteClipboardText } from "../lib/inviteLinks";
+import { formatInviteLink, formatRoomCodeClipboardText } from "../lib/inviteLinks";
 import type { LocalMatchCandidate } from "../lib/localLibrary";
 import {
   formatParticipantMatchBadge,
@@ -41,14 +41,11 @@ import {
   syncPrewarm,
   syncReconnect,
   syncSetRoomAdmin,
-  syncSwitchBackup,
   type SyncHealthPayload,
 } from "../lib/syncplay";
 import {
   DEFAULT_ENDPOINT,
   describeSyncEndpoint,
-  isCloudEndpoint,
-  SYNCPLAY_ENDPOINT,
 } from "../lib/syncStatusDisplay";
 import {
   LOCAL_DISCONNECT_TAG,
@@ -85,13 +82,12 @@ import {
   PartyAdminIcon,
   PartyAlignSceneIcon,
   PartyCopyIcon,
+  PartyLinkIcon,
   PartyCreateIcon,
-  PartyDockLeftIcon,
   PartyFpsMatchIcon,
   PartyHostIcon,
   PartyLeaveIcon,
   PartyPasteIcon,
-  PartyServerIcon,
   PartyViewersIcon,
   PlayerEyeIcon,
   PlayerPlayIcon,
@@ -133,7 +129,6 @@ function voiceTransportLabel(transport: string | undefined): string {
 
 interface RoomPanelProps {
   onClose?: () => void;
-  onDockLeft?: () => void;
   onChooseFile?: () => void;
   onChooseFolder?: () => void;
   onSwitchEpisode?: (index: number) => void;
@@ -167,7 +162,7 @@ const ParticipantDriftBadge = memo(function ParticipantDriftBadge({
     >
       <span
         aria-label={`${driftInfo.label}: ${driftInfo.detail}`}
-        className="inline-flex items-center justify-center h-4 px-1 rounded-full bg-white/[0.06] cursor-default shrink-0"
+        className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-white/[0.06] cursor-default shrink-0"
       >
         <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
       </span>
@@ -247,7 +242,6 @@ const SecondAnchorButton = memo(function SecondAnchorButton({
 
 export const RoomPanel = memo(function RoomPanel({
   onClose,
-  onDockLeft,
   onChooseFile,
   onChooseFolder,
   onSwitchEpisode,
@@ -255,11 +249,10 @@ export const RoomPanel = memo(function RoomPanel({
 }: RoomPanelProps) {
   const roomCode = useAppStore((s) => s.roomCode);
   const literalRoom = useAppStore((s) => s.literalRoom);
-  const hostOnlyRoom = useAppStore((s) => s.hostOnlyRoom);
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
+  const peerAvatars = useAppStore((s) => s.peerAvatars);
   const serverEndpoint = useAppStore((s) => s.serverEndpoint);
-  const serverPassword = useAppStore((s) => s.serverPassword);
   const hideParticipants = useAppStore((s) => s.hideParticipants);
   const selectedFileName = useAppStore((s) => s.selectedFileName);
   const setRoomCode = useAppStore((s) => s.setRoomCode);
@@ -282,6 +275,7 @@ export const RoomPanel = memo(function RoomPanel({
   const { mismatch, localMatches } = usePartyFileMismatch();
 
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   const [hostOnlyMidMovie, setHostOnlyMidMovie] = useState(false);
   const [busyAdminUser, setBusyAdminUser] = useState<string | null>(null);
@@ -306,6 +300,7 @@ export const RoomPanel = memo(function RoomPanel({
   } | null>(null);
   const verifyTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const copyLinkTimerRef = useRef<number | null>(null);
   const healthCopyTimerRef = useRef<number | null>(null);
 
   const openSettings = useAppStore((s) => s.openSettings);
@@ -614,6 +609,9 @@ export const RoomPanel = memo(function RoomPanel({
       if (copyTimerRef.current !== null) {
         window.clearTimeout(copyTimerRef.current);
       }
+      if (copyLinkTimerRef.current !== null) {
+        window.clearTimeout(copyLinkTimerRef.current);
+      }
       if (healthCopyTimerRef.current !== null) {
         window.clearTimeout(healthCopyTimerRef.current);
       }
@@ -630,10 +628,36 @@ export const RoomPanel = memo(function RoomPanel({
     roomControl,
   );
 
-  const handleCopyRoom = async () => {
+  const writeClipboardWithFallback = async (value: string): Promise<boolean> => {
     try {
-      const text = formatInviteClipboardText(roomCode, literalRoom, serverEndpoint);
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = value;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  const handleCopyRoom = async () => {
+    const text = formatRoomCodeClipboardText(roomCode, literalRoom);
+    if (await writeClipboardWithFallback(text)) {
+      if (copyLinkTimerRef.current !== null) {
+        window.clearTimeout(copyLinkTimerRef.current);
+        copyLinkTimerRef.current = null;
+      }
+      setCopiedLink(false);
       setCopied(true);
       const p = usePlayerStore.getState();
       playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
@@ -644,7 +668,31 @@ export const RoomPanel = memo(function RoomPanel({
         copyTimerRef.current = null;
         setCopied(false);
       }, 1800);
-    } catch {
+    } else {
+      pushNote("info", `Room code: ${roomCode}`);
+    }
+  };
+
+  const handleCopyLink = async () => {
+    const link = formatInviteLink(roomCode, literalRoom, serverEndpoint);
+    if (!link) return;
+    if (await writeClipboardWithFallback(link)) {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+      setCopied(false);
+      setCopiedLink(true);
+      const p = usePlayerStore.getState();
+      playSoundCue("codeCopied", { moviePlaying: p.loaded && !p.paused });
+      if (copyLinkTimerRef.current !== null) {
+        window.clearTimeout(copyLinkTimerRef.current);
+      }
+      copyLinkTimerRef.current = window.setTimeout(() => {
+        copyLinkTimerRef.current = null;
+        setCopiedLink(false);
+      }, 1800);
+    } else {
       pushNote("info", `Room code: ${roomCode}`);
     }
   };
@@ -655,32 +703,6 @@ export const RoomPanel = memo(function RoomPanel({
         await syncReconnect();
       } catch (err) {
         pushNote("error", formatUserError(err, "Could not retry connection."));
-      }
-    });
-  };
-
-  const handleSwitchBackup = () => {
-    const targetEndpoint = isCloudEndpoint(endpointSummary.activeEndpoint)
-      ? SYNCPLAY_ENDPOINT
-      : undefined;
-    void enqueueSyncLifecycle(async () => {
-      try {
-        await syncSwitchBackup({
-          username,
-          roomCode,
-          literalRoom,
-          password: serverPassword || null,
-          hostOnly: hostOnlyRoom,
-          targetEndpoint,
-        });
-        pushNote(
-          "info",
-          targetEndpoint
-            ? "Switching room to Syncplay fallback server."
-            : "Switching room to backup connection route.",
-        );
-      } catch (err) {
-        pushNote("error", formatUserError(err, "Backup route switch failed."));
       }
     });
   };
@@ -985,7 +1007,7 @@ export const RoomPanel = memo(function RoomPanel({
       <div className="flex items-center justify-between gap-2 shrink-0 px-2 pt-0.5">
         <div className="flex items-center gap-2 min-w-0">
           <WatchPartyIcon bare size={16} className="shrink-0" />
-          <span className="text-[13px] font-semibold text-white truncate">Watch Party</span>
+          <span className="text-[13px] font-semibold text-white whitespace-nowrap shrink-0">Watch Party</span>
           {roomCode && (
             <GlassHoverTip
               disabled={!syncConnected || !syncHealth}
@@ -1061,18 +1083,6 @@ export const RoomPanel = memo(function RoomPanel({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          {roomCode && onDockLeft && (
-            <GlassHoverTip label="Dock to Left" detail="Keep Party & Voice beside the video">
-              <button
-                type="button"
-                onClick={onDockLeft}
-                aria-label="Dock Party Lounge to left"
-                className="ep-bar-icon-btn h-7 w-7 rounded-full flex items-center justify-center text-secondary hover:text-white cursor-pointer"
-              >
-                <PartyDockLeftIcon size={14} />
-              </button>
-            </GlassHoverTip>
-          )}
           {roomCode && (
             <GlassHoverTip
               label="Leave Watch Party Room"
@@ -1093,7 +1103,7 @@ export const RoomPanel = memo(function RoomPanel({
                 className="ep-bar-icon-btn h-7 px-2 rounded-full inline-flex items-center gap-1 text-[11.5px] font-medium text-secondary hover:text-bad cursor-pointer"
               >
                 <PartyLeaveIcon size={14} className="shrink-0" />
-                <span>Leave Room</span>
+                <span>Leave</span>
               </button>
             </GlassHoverTip>
           )}
@@ -1253,27 +1263,25 @@ export const RoomPanel = memo(function RoomPanel({
                   <PlayerResyncIcon tone="warn" size={12} />
                   <span>Retry</span>
                 </button>
-                {status.suggestBackup && !endpointSummary.isBackupServer && (
-                  <button
-                    type="button"
-                    onClick={handleSwitchBackup}
-                    className="ep-bar-icon-btn h-6 px-2 rounded-full inline-flex items-center gap-1 font-medium text-secondary hover:text-white cursor-pointer"
-                  >
-                    <PartyServerIcon size={12} />
-                    <span>Backup</span>
-                  </button>
-                )}
               </div>
             </div>
           )}
 
-          {/* Direct Click-to-Copy Passcode Row */}
-          <button
-            type="button"
+          {/* Direct Click-to-Copy Passcode & Invite Link Row */}
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => void handleCopyRoom()}
-            className="ep-menu-row ep-press w-full px-2 py-1.5 flex items-center justify-between gap-3 text-left cursor-pointer"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                void handleCopyRoom();
+              }
+            }}
+            title="Copy room code"
+            className="group/share ep-menu-row ep-press has-[button:active]:!scale-100 w-full px-2.5 py-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer"
           >
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 text-[11px] text-secondary">
                 <span>{literalRoom ? "Syncplay Room" : "Share Code"}</span>
                 {ctrlLock.hasControllers && (
@@ -1319,15 +1327,44 @@ export const RoomPanel = memo(function RoomPanel({
               </div>
             </div>
 
-            <span
-              className={`inline-flex items-center gap-1.5 text-[11.5px] font-medium shrink-0 transition-colors ${
-                copied ? "text-ok" : "text-secondary"
-              }`}
-            >
-              <PartyCopyIcon copied={copied} size={15} />
-              <span>{copied ? "Copied" : "Copy"}</span>
-            </span>
-          </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleCopyRoom();
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                title="Copy room code"
+                aria-label="Copy room code"
+                className={`ep-bar-pill ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium shrink-0 cursor-pointer transition-colors ${
+                  copied
+                    ? "text-ok"
+                    : "text-secondary group-hover/share:text-white hover:text-white"
+                }`}
+              >
+                <PartyCopyIcon copied={copied} size={13} />
+                <span>{copied ? "Copied" : "Code"}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleCopyLink();
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                title="Copy invite link"
+                aria-label="Copy invite link"
+                className={`ep-bar-pill ep-press h-7.5 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium shrink-0 cursor-pointer transition-colors ${
+                  copiedLink ? "text-ok" : "text-secondary hover:text-white"
+                }`}
+              >
+                <PartyLinkIcon copied={copiedLink} size={13} />
+                <span>{copiedLink ? "Copied" : "Link"}</span>
+              </button>
+            </div>
+          </div>
 
           {mismatch && (
             <div
@@ -1839,7 +1876,7 @@ export const RoomPanel = memo(function RoomPanel({
                     className="px-2 py-1.5 rounded-xl flex items-start gap-2.5 min-w-0 hover:bg-white/[0.045] transition-colors"
                   >
                     <PresenceAvatar
-                      avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId)}
+                      avatarId={resolvePeerAvatarId(p.username, effectiveUsername, avatarId, peerAvatars)}
                       size={26}
                       speaking={peerSpeaking && !peerLocallyMuted}
                       status={badge.isMismatch ? "mismatch" : "none"}
@@ -2242,7 +2279,7 @@ export const RoomPanel = memo(function RoomPanel({
               <div className="px-2 py-1 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <PresenceAvatar
-                    avatarId={resolvePeerAvatarId(menuPeer.username, effectiveUsername, avatarId)}
+                    avatarId={resolvePeerAvatarId(menuPeer.username, effectiveUsername, avatarId, peerAvatars)}
                     size={18}
                     speaking={menuMeta.peerSpeaking && !menuMeta.peerLocallyMuted}
                     avatarClassName="ring-1 ring-white/20"

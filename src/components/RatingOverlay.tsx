@@ -5,6 +5,8 @@ import { ProfileAvatar, resolvePeerAvatarId } from "./ui/ProfileAvatar";
 import {
   buildRatingKey,
   computeRatingSummary,
+  getRatingTier,
+  RATING_LABELS,
   syncSendRatingVote,
 } from "../lib/ratings";
 import { resolveEffectiveUsername } from "../lib/syncController";
@@ -41,12 +43,16 @@ export const RatingOverlay = memo(function RatingOverlay({
   const participantCount = useSyncStore((s) => s.participants.length);
 
   const open = useRatingStore((s) => s.open);
+  const manualOpen = useRatingStore((s) => s.manualOpen);
   const activeKey = useRatingStore((s) => s.activeKey);
+  const activeTitle = useRatingStore((s) => s.activeTitle);
+  const activeFileName = useRatingStore((s) => s.activeFileName);
   const votesByKey = useRatingStore((s) => s.votesByKey);
   const myScoreByKey = useRatingStore((s) => s.myScoreByKey);
   const openForKey = useRatingStore((s) => s.openForKey);
   const close = useRatingStore((s) => s.close);
   const castLocalVote = useRatingStore((s) => s.castLocalVote);
+  const [hoverScore, setHoverScore] = useState<number | null>(null);
 
   const effectiveUsername = useMemo(
     () => resolveEffectiveUsername(syncStatus, localUsernameRaw),
@@ -70,7 +76,7 @@ export const RatingOverlay = memo(function RatingOverlay({
   useEffect(() => {
     if (inOutroWindow && currentKey) {
       const displayTitle = (selectedFileName ?? "Current video").replace(/\.[^.]+$/, "");
-      openForKey(currentKey, displayTitle);
+      openForKey(currentKey, displayTitle, selectedFileName);
     }
   }, [currentKey, inOutroWindow, openForKey, selectedFileName]);
 
@@ -82,7 +88,7 @@ export const RatingOverlay = memo(function RatingOverlay({
   const summary = useMemo(() => computeRatingSummary(votes), [votes]);
 
   useEffect(() => {
-    if (!open || !activeKey) return;
+    if (!open || !activeKey || manualOpen) return;
     if (currentKey && currentKey !== activeKey) {
       close(false);
       return;
@@ -91,17 +97,23 @@ export const RatingOverlay = memo(function RatingOverlay({
     if (!inOutroWindow && myScore === null) {
       close(false);
     }
-  }, [activeKey, close, currentKey, inOutroWindow, myScore, open]);
+  }, [activeKey, close, currentKey, inOutroWindow, manualOpen, myScore, open]);
 
   const submitScore = (score: number) => {
     if (!activeKey) return;
-    castLocalVote(activeKey, effectiveUsername, localAvatarId, score, selectedFileName);
-    if (syncStatus.state === "connected") {
+    castLocalVote(
+      activeKey,
+      effectiveUsername,
+      localAvatarId,
+      score,
+      activeFileName ?? selectedFileName,
+    );
+    if (syncStatus.state === "connected" && activeKey === currentKey) {
       void syncSendRatingVote(activeKey, score, localAvatarId).catch(() => undefined);
     }
   };
 
-  const modalOrMiniBlocked = popoverOpen || settingsOpen || shortcutsOpen || miniMode;
+  const modalOrMiniBlocked = (popoverOpen && !manualOpen) || settingsOpen || shortcutsOpen || miniMode;
 
   useEffect(() => {
     if (!open || !activeKey || modalOrMiniBlocked) return;
@@ -118,6 +130,8 @@ export const RatingOverlay = memo(function RatingOverlay({
         submitScore(Number(e.key));
       } else if (e.key === "0") {
         submitScore(10);
+      } else if (e.key === "Escape") {
+        close(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -215,11 +229,21 @@ export const RatingOverlay = memo(function RatingOverlay({
             }
           />
           {summary.totalVotes > 0 ? (
-            <span className="text-[14px] font-bold num text-white tracking-tight leading-none">
-              {summary.average.toFixed(1)}
+            <span className="inline-flex items-baseline gap-1">
+              <span className="text-[14px] font-bold num text-white tracking-tight leading-none">
+                {summary.average.toFixed(1)}
+              </span>
+              <span className="text-[9.5px] font-medium text-white/55 uppercase tracking-wider">
+                Avg
+              </span>
             </span>
           ) : (
             <span className="text-[11.5px] font-semibold text-white/85">Rate</span>
+          )}
+          {manualOpen && activeTitle && currentKey !== activeKey && (
+            <span className="hidden md:inline-block max-w-[120px] truncate text-[10.5px] text-white/60">
+              · {activeTitle}
+            </span>
           )}
         </div>
 
@@ -228,9 +252,10 @@ export const RatingOverlay = memo(function RatingOverlay({
         {/* Rounded-square glass tiles with morphing liquid-glass droplet */}
         <div
           ref={trayRef}
+          onMouseLeave={() => setHoverScore(null)}
           className="relative inline-flex items-center gap-1"
         >
-          {indicator.width > 0 && (
+          {indicator.width > 0 && myScore !== null && (
             <span
               aria-hidden="true"
               className="pointer-events-none absolute top-0 bottom-0 left-0 transition-[transform,width] duration-[420ms] ease-[cubic-bezier(0.22,1.30,0.36,1)]"
@@ -241,7 +266,8 @@ export const RatingOverlay = memo(function RatingOverlay({
             >
               <span
                 data-morphing={morphing ? "true" : undefined}
-                className="ep-droplet-indicator ep-droplet-core block h-full w-full rounded-[10px]"
+                data-tier={getRatingTier(myScore)}
+                className="ep-rating-droplet-active ep-droplet-core block h-full w-full rounded-[10px]"
               />
             </span>
           )}
@@ -255,6 +281,7 @@ export const RatingOverlay = memo(function RatingOverlay({
                   btnRefs.current[n] = el;
                 }}
                 type="button"
+                onMouseEnter={() => setHoverScore(n)}
                 onClick={() => {
                   const player = usePlayerStore.getState();
                   playSoundCue("ratingSubmitted", {
@@ -262,12 +289,12 @@ export const RatingOverlay = memo(function RatingOverlay({
                   });
                   submitScore(n);
                 }}
-                className={`ep-press relative z-10 w-7 h-7 rounded-[10px] text-[11.5px] num flex items-center justify-center transition-[transform,color,background-color,border-color] duration-200 ease-[var(--spring-fluid)] hover:scale-108 cursor-pointer ${
+                className={`ep-press relative z-10 w-7 h-7 rounded-[10px] text-[11.5px] num flex items-center justify-center transition-[transform,color,background-color,border-color] duration-200 ease-[var(--spring-fluid)] hover:scale-108 cursor-pointer drop-shadow-[0_1px_3px_rgba(0,0,0,0.65)] ${
                   active
                     ? "text-white font-bold border border-transparent"
                     : isMajority
                       ? "ep-glass-rating-tile text-amber-300 font-semibold hover:text-white"
-                      : "ep-glass-rating-tile text-white/80 font-medium hover:text-white"
+                      : "ep-glass-rating-tile text-white/90 font-medium hover:text-white"
                 }`}
               >
                 {n}
@@ -275,6 +302,12 @@ export const RatingOverlay = memo(function RatingOverlay({
             );
           })}
         </div>
+
+        {(hoverScore ?? myScore) !== null && (
+          <span className="hidden sm:inline-flex items-center justify-center min-w-[116px] px-2 py-0.5 rounded-lg bg-white/[0.08] text-[10.5px] font-medium text-white/90 whitespace-nowrap num">
+            {(hoverScore ?? myScore)!} · {RATING_LABELS[(hoverScore ?? myScore)!]}
+          </span>
+        )}
 
         <button
           type="button"

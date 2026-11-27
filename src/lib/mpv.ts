@@ -266,6 +266,23 @@ export async function mpvLoad(path: string): Promise<void> {
   await safeInvoke("mpv_load", { path });
 }
 
+export async function mpvLoadStreamUrl(url: string): Promise<void> {
+  lastCapturedBackdropFrame = null;
+  lastCleanFreezeFrame = null;
+  await safeInvoke("mpv_load_stream_url", { url });
+}
+
+export function deriveStreamDisplayName(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const seg = parsed.pathname.split("/").filter(Boolean).pop();
+    if (seg) return decodeURIComponent(seg);
+    return parsed.hostname || "Stream";
+  } catch {
+    return "Stream";
+  }
+}
+
 export async function mpvSetPause(paused: boolean): Promise<void> {
   await safeInvoke("mpv_set_pause", { paused });
 }

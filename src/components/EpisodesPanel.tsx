@@ -6,6 +6,7 @@ import {
 import { ContextMenu, type ContextMenuEntry } from "./ui/ContextMenu";
 import { GlassHoverTip } from "./ui/GlassHoverTip";
 import {
+  PartyViewersIcon,
   PlayerAutoNextIcon,
   PlayerCaptionsIcon,
   PlayerFollowIcon,
@@ -13,6 +14,7 @@ import {
   PlayerWatchedCheckIcon,
 } from "./ui/PlayerIcons";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   buildEpisodeBadgeKey,
   deriveShowTitleForRatings,
@@ -20,7 +22,13 @@ import {
   getCachedShowRatings,
   type ShowOfficialRatings,
 } from "../lib/officialRatings";
-import { buildEpisodeRatingId } from "../lib/ratings";
+import {
+  buildEpisodeRatingId,
+  buildRatingKey,
+  computeConsensusBadge,
+  getRatingTier,
+  type PartyEpisodeRatingSummary,
+} from "../lib/ratings";
 import { playSoundCue } from "../lib/soundEffects";
 import { useRatingStore } from "../store/useRatingStore";
 import {
@@ -74,7 +82,9 @@ export const EpisodesPanel = memo(function EpisodesPanel({
   const roomCode = useAppStore((s) => s.roomCode);
   const username = useAppStore((s) => s.username);
   const avatarId = useAppStore((s) => s.avatarId);
+  const hideParticipants = useAppStore((s) => s.hideParticipants);
   const trackWatchedEpisodes = useAppStore((s) => s.trackWatchedEpisodes);
+  const durationSecs = usePlayerStore((s) => s.durationSecs);
   const syncStatus = useSyncStore((s) => s.status);
   const participants = useSyncStore((s) => s.participants);
   const effectiveUsername = resolveEffectiveUsername(syncStatus, username);
@@ -85,6 +95,35 @@ export const EpisodesPanel = memo(function EpisodesPanel({
   const upsertSeries = useSeriesProgressStore((s) => s.upsertSeries);
   const resumeEntries = useResumeStore((s) => s.entries);
   const personalByMediaId = useRatingStore((s) => s.personalByMediaId);
+  const partyByMediaId = useRatingStore((s) => s.partyByMediaId);
+
+  const [breakdownPopover, setBreakdownPopover] = useState<{
+    x: number;
+    y: number;
+    title: string;
+    summary: PartyEpisodeRatingSummary;
+    officialScore: number | null;
+    personalScore: number | null;
+  } | null>(null);
+  const breakdownRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!breakdownPopover) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (breakdownRef.current && !breakdownRef.current.contains(e.target as Node)) {
+        setBreakdownPopover(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setBreakdownPopover(null);
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [breakdownPopover]);
 
   const ratingShowTitle = useMemo(
     () => deriveShowTitleForRatings(folderName, items[0]?.fileName),
@@ -123,7 +162,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
     index: number;
   } | null>(null);
 
-  const activeItemRef = useRef<HTMLButtonElement | null>(null);
+  const activeItemRef = useRef<HTMLDivElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const prevIndexRef = useRef<number>(currentIndex);
   const [indicator, setIndicator] = useState<{ top: number; height: number; visible: boolean }>({
@@ -302,24 +341,36 @@ export const EpisodesPanel = memo(function EpisodesPanel({
               : [];
 
             return (
-              <button
+              <div
                 key={item.path}
                 ref={active ? activeItemRef : undefined}
-                type="button"
+                role="button"
+                tabIndex={0}
                 onClick={() => {
                   if (idx !== currentIndex) {
                     playSoundCue("episodeChanged", { moviePlaying: loaded && !paused });
                   }
                   onSelectEpisode(idx);
                 }}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    if (idx !== currentIndex) {
+                      playSoundCue("episodeChanged", { moviePlaying: loaded && !paused });
+                    }
+                    onSelectEpisode(idx);
+                  }
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   setEpContextMenu({ x: e.clientX, y: e.clientY, index: idx });
                 }}
                 aria-current={active ? "true" : undefined}
                 data-droplet={active && indicator.visible ? "true" : undefined}
                 title={`${item.cleanTitle}${item.subtitlePath ? " (Paired subtitle ready)" : ""}`}
-                className={`group relative z-10 w-full rounded-[14px] px-2.5 py-2 text-left flex items-center gap-2.5 cursor-pointer ep-menu-row ep-press overflow-hidden ${
+                className={`group relative z-10 w-full rounded-[14px] px-2.5 py-2 text-left flex items-center gap-3 cursor-pointer ep-menu-row ep-press overflow-hidden ${
                   active
                     ? "ep-episode-active text-white"
                     : isWatched
@@ -353,7 +404,7 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                 </div>
 
                 {/* Clean centered episode title + compact subtitle & rating badges */}
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 overflow-hidden">
                   <div
                     className={`text-[12.5px] leading-snug truncate ${
                       active ? "text-white font-semibold" : "font-medium text-primary/90 group-hover:text-white"
@@ -371,11 +422,38 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                         : null;
                     const mediaId = buildEpisodeRatingId(item.fileName);
                     const personalScore = mediaId ? personalByMediaId[mediaId]?.score ?? null : null;
+                    const partySummary = mediaId ? partyByMediaId[mediaId] ?? null : null;
+                    const isSoloSelfVote =
+                      Boolean(
+                        partySummary &&
+                          partySummary.totalVotes === 1 &&
+                          partySummary.voters[0]?.username.trim().toLowerCase() ===
+                            effectiveUsername.trim().toLowerCase(),
+                      );
+                    const hasPartyVotes = Boolean(
+                      partySummary && partySummary.totalVotes > 0 && !isSoloSelfVote,
+                    );
+                    const hasAnyUserOrParty = personalScore !== null || hasPartyVotes;
+
+                    const openEpisodeRating = () => {
+                      const key =
+                        (active && durationSecs >= 30
+                          ? buildRatingKey(item.fileName, durationSecs)
+                          : null) ??
+                        buildRatingKey(item.fileName, 1800) ??
+                        mediaId ??
+                        item.fileName;
+                      useRatingStore.getState().reopenForKey(key, epTitle, item.fileName, {
+                        username: effectiveUsername,
+                        avatarId,
+                      });
+                      onClose?.();
+                    };
 
                     if (
                       !item.subtitlePath &&
                       officialScore === null &&
-                      personalScore === null &&
+                      !hasAnyUserOrParty &&
                       progressPct <= 0
                     ) {
                       return null;
@@ -389,43 +467,96 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                             <span>Sub</span>
                           </span>
                         )}
-                        {item.subtitlePath && (officialScore !== null || personalScore !== null) && (
+                        {item.subtitlePath && (officialScore !== null || hasAnyUserOrParty) && (
                           <span aria-hidden="true" className="text-white/25">·</span>
                         )}
-                        {officialScore !== null && personalScore !== null ? (
+                        {hasAnyUserOrParty ? (
                           <span className="inline-flex items-center gap-1.5 shrink-0">
-                            <GlassHoverTip
-                              label="Official rating"
-                              detail={`${officialScore.toFixed(1)} / 10`}
-                              accent="host"
-                            >
-                              <span className="line-through text-white/30 decoration-white/40 num">
-                                {officialScore.toFixed(1)}
-                              </span>
-                            </GlassHoverTip>
-                            <GlassHoverTip
-                              label="Your rating"
-                              detail={`${personalScore} / 10 · Replaced ${officialScore.toFixed(1)}`}
-                              accent="admin"
-                            >
-                              <span className="inline-flex items-center gap-0.5 text-white/95 font-semibold num">
-                                <PlayerRatingStarIcon size={9.5} active tone="personal" />
-                                <span>{personalScore}</span>
-                              </span>
-                            </GlassHoverTip>
-                          </span>
-                        ) : personalScore !== null ? (
-                          <GlassHoverTip
-                            label="Your rating"
-                            detail={`${personalScore} / 10`}
-                            accent="admin"
-                            className="inline-flex items-center shrink-0"
-                          >
-                            <span className="inline-flex items-center gap-0.5 text-white/95 font-semibold num">
-                              <PlayerRatingStarIcon size={9.5} active tone="personal" />
-                              <span>{personalScore}</span>
+                            <span className="inline-flex items-center rounded-full overflow-hidden border border-white/12 bg-white/[0.04]">
+                              <GlassHoverTip
+                                label={personalScore !== null ? "Your rating" : "Add your rating"}
+                                detail={
+                                  personalScore !== null
+                                    ? `${personalScore} / 10 · Click to edit`
+                                    : "Click to rate this episode"
+                                }
+                                accent="admin"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openEpisodeRating();
+                                  }}
+                                  className={`px-1.5 py-0.5 inline-flex items-center gap-0.5 font-semibold num transition-colors cursor-pointer ${
+                                    personalScore !== null
+                                      ? "bg-accent/22 hover:bg-accent/34 text-violet-200"
+                                      : "hover:bg-white/[0.08] text-white/60 hover:text-white"
+                                  }`}
+                                >
+                                  <PlayerRatingStarIcon
+                                    size={9.5}
+                                    active={personalScore !== null}
+                                    tone="personal"
+                                  />
+                                  <span>{personalScore !== null ? personalScore : "+"}</span>
+                                </button>
+                              </GlassHoverTip>
+                              {hasPartyVotes && partySummary && (
+                                <>
+                                  <span aria-hidden="true" className="w-px h-3 bg-white/14" />
+                                  <GlassHoverTip
+                                    label="Party average"
+                                    detail={`${partySummary.average.toFixed(1)} / 10 (${partySummary.totalVotes} ${
+                                      partySummary.totalVotes === 1 ? "vote" : "votes"
+                                    }) · Click for breakdown`}
+                                    accent="host"
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const rect = (
+                                          e.currentTarget as HTMLElement
+                                        ).getBoundingClientRect();
+                                        const panelRect = trackRef.current
+                                          ?.closest('[data-glass-region="true"]')
+                                          ?.getBoundingClientRect();
+                                        const popW = 248;
+                                        const preferredX =
+                                          panelRect && panelRect.left - popW - 10 >= 12
+                                            ? panelRect.left - popW - 10
+                                            : rect.left;
+                                        setBreakdownPopover({
+                                          x: preferredX,
+                                          y: panelRect ? Math.max(panelRect.top, rect.top - 18) : rect.bottom + 6,
+                                          title: epTitle,
+                                          summary: partySummary,
+                                          officialScore,
+                                          personalScore,
+                                        });
+                                      }}
+                                      className="bg-amber-400/14 hover:bg-amber-400/25 px-1.5 py-0.5 inline-flex items-center gap-1 text-amber-200 font-semibold num transition-colors cursor-pointer"
+                                    >
+                                      <PartyViewersIcon size={9.5} />
+                                      <span>{partySummary.average.toFixed(1)}</span>
+                                    </button>
+                                  </GlassHoverTip>
+                                </>
+                              )}
                             </span>
-                          </GlassHoverTip>
+                            {officialScore !== null && (
+                              <GlassHoverTip
+                                label="Official rating"
+                                detail={`${officialScore.toFixed(1)} / 10`}
+                                accent="host"
+                              >
+                                <span className="line-through text-white/30 decoration-white/40 num">
+                                  {officialScore.toFixed(1)}
+                                </span>
+                              </GlassHoverTip>
+                            )}
+                          </span>
                         ) : officialScore !== null ? (
                           <GlassHoverTip
                             label="Official rating"
@@ -440,13 +571,13 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                           </GlassHoverTip>
                         ) : null}
                         {progressPct > 0 &&
-                          (item.subtitlePath || officialScore !== null || personalScore !== null) && (
+                          (item.subtitlePath || officialScore !== null || hasAnyUserOrParty) && (
                             <span aria-hidden="true" className="text-white/25">·</span>
                           )}
                         {progressPct > 0 && (
                           <span
                             title={`${progressPct}% watched`}
-                            className="inline-flex items-center min-w-[44px] flex-1 max-w-[82px]"
+                            className="inline-flex items-center w-8 shrink-0"
                           >
                             <span
                               aria-hidden="true"
@@ -494,9 +625,8 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                     </span>
                   )}
                   {trackWatchedEpisodes && seriesKey && (
-                    <span
-                      role="button"
-                      tabIndex={-1}
+                    <button
+                      type="button"
                       aria-label={isWatched ? "Mark unwatched" : "Mark watched"}
                       title={isWatched ? "Watched (click to unmark)" : "Mark as watched"}
                       onClick={(e) => {
@@ -507,17 +637,17 @@ export const EpisodesPanel = memo(function EpisodesPanel({
                         });
                         markWatched(seriesKey, epKey, !isWatched);
                       }}
-                      className={`w-5 h-5 rounded-full flex items-center justify-center transition-opacity ${
+                      className={`w-5 h-5 rounded-full flex items-center justify-center transition-opacity cursor-pointer ${
                         isWatched
                           ? "opacity-100"
-                          : "text-white/55 hover:text-white opacity-0 group-hover:opacity-100"
+                          : "text-white/55 hover:text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                       }`}
                     >
                       <PlayerWatchedCheckIcon watched={isWatched} size={16} />
-                    </span>
+                    </button>
                   )}
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -531,7 +661,39 @@ export const EpisodesPanel = memo(function EpisodesPanel({
             const targetItem = items[targetIdx];
             const targetKey = buildEpisodeKey(targetItem);
             const targetWatched = watchedSet.has(targetKey);
+            const targetMediaId = buildEpisodeRatingId(targetItem.fileName);
+            const targetPersonalScore = targetMediaId
+              ? personalByMediaId[targetMediaId]?.score ?? null
+              : null;
+            const targetDisplayTitle =
+              formatDisplayMediaTitle(targetItem.fileName).title || targetItem.cleanTitle;
             return [
+              {
+                id: "rate-episode",
+                label: targetPersonalScore !== null ? "Edit Episode Rating…" : "Rate Episode…",
+                badge: targetPersonalScore !== null ? `★ ${targetPersonalScore}` : undefined,
+                icon: (
+                  <PlayerRatingStarIcon
+                    size={14}
+                    active={targetPersonalScore !== null}
+                    tone={targetPersonalScore !== null ? "personal" : "gold"}
+                  />
+                ),
+                onSelect: () => {
+                  const key =
+                    (targetIdx === currentIndex && durationSecs >= 30
+                      ? buildRatingKey(targetItem.fileName, durationSecs)
+                      : null) ??
+                    buildRatingKey(targetItem.fileName, 1800) ??
+                    targetMediaId ??
+                    targetItem.fileName;
+                  useRatingStore.getState().reopenForKey(key, targetDisplayTitle, targetItem.fileName, {
+                    username: effectiveUsername,
+                    avatarId,
+                  });
+                  onClose?.();
+                },
+              },
               {
                 id: "toggle-watched",
                 label: targetWatched ? "Mark as unwatched" : "Mark as watched",
@@ -570,6 +732,118 @@ export const EpisodesPanel = memo(function EpisodesPanel({
           onClose={() => setEpContextMenu(null)}
         />
       )}
+
+      {breakdownPopover &&
+        typeof document !== "undefined" &&
+        createPortal(
+          (() => {
+            const consensus = computeConsensusBadge(breakdownPopover.summary.voters);
+            const vw = typeof window !== "undefined" ? window.innerWidth : 1024;
+            const vh = typeof window !== "undefined" ? window.innerHeight : 768;
+            const popW = 248;
+            const estH = Math.min(300, 110 + breakdownPopover.summary.voters.length * 32);
+            const left = Math.max(12, Math.min(vw - popW - 12, breakdownPopover.x));
+            const top = Math.max(12, Math.min(vh - estH - 116, breakdownPopover.y));
+            return (
+              <div
+                ref={breakdownRef}
+                role="dialog"
+                aria-label="Party rating breakdown"
+                style={{ left: `${left}px`, top: `${top}px`, width: `${popW}px` }}
+                className="ep-glass-submenu anim-pop-in fixed z-[80] rounded-2xl p-3 space-y-2.5 text-xs"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11.5px] font-semibold text-white truncate">
+                      {breakdownPopover.title}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px]">
+                      <span
+                        className={`inline-flex items-center px-1.5 py-0.5 rounded-full font-medium ${
+                          consensus.tone === "consensus"
+                            ? "bg-emerald-400/16 text-emerald-200"
+                            : consensus.tone === "split"
+                              ? "bg-amber-400/18 text-amber-200"
+                              : "bg-white/[0.08] text-secondary"
+                        }`}
+                      >
+                        {consensus.label}
+                      </span>
+                      <span className="text-amber-300 font-bold num">
+                        {breakdownPopover.summary.average.toFixed(1)}/10
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setBreakdownPopover(null)}
+                    aria-label="Close rating breakdown"
+                    className="h-5.5 w-5.5 rounded-full flex items-center justify-center text-muted hover:text-white hover:bg-white/[0.08] shrink-0 cursor-pointer"
+                  >
+                    <AppCloseIcon size={11} />
+                  </button>
+                </div>
+
+                <div className="ep-menu-scroll max-h-48 overflow-y-auto space-y-1.5 pr-0.5">
+                  {breakdownPopover.summary.voters.map((voter, vIdx) => {
+                    const displayName = hideParticipants
+                      ? `Member ${vIdx + 1}`
+                      : voter.username;
+                    const resolvedAvatar = resolvePeerAvatarId(
+                      hideParticipants ? `Member ${vIdx + 1}` : voter.username,
+                      effectiveUsername,
+                      voter.avatarId ?? avatarId,
+                    );
+                    const tier = getRatingTier(voter.score);
+                    const barColor =
+                      tier === "masterpiece"
+                        ? "bg-amber-300"
+                        : tier === "high"
+                          ? "bg-amber-400"
+                          : tier === "mid"
+                            ? "bg-violet-400"
+                            : "bg-rose-400";
+                    return (
+                      <div
+                        key={`${voter.username.toLowerCase()}-${vIdx}`}
+                        className="flex items-center gap-2 py-0.5"
+                      >
+                        <ProfileAvatar avatarId={resolvedAvatar} size={18} className="shrink-0" />
+                        <span className="text-[11px] font-medium text-white/90 truncate flex-1 min-w-0">
+                          {displayName}
+                        </span>
+                        <span className="w-12 h-1.5 rounded-full bg-white/[0.08] overflow-hidden shrink-0">
+                          <span
+                            className={`block h-full rounded-full ${barColor}`}
+                            style={{ width: `${Math.max(10, voter.score * 10)}%` }}
+                          />
+                        </span>
+                        <span className="w-5 text-right text-[11px] font-bold num text-white shrink-0">
+                          {voter.score}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {(breakdownPopover.officialScore !== null ||
+                  breakdownPopover.personalScore !== null) && (
+                  <div className="pt-1.5 flex items-center justify-between text-[10.5px] text-muted num">
+                    {breakdownPopover.personalScore !== null ? (
+                      <span>You: ★ {breakdownPopover.personalScore}</span>
+                    ) : (
+                      <span />
+                    )}
+                    {breakdownPopover.officialScore !== null && (
+                      <span>Official: {breakdownPopover.officialScore.toFixed(1)}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })(),
+          document.body,
+        )}
     </div>
   );
 });

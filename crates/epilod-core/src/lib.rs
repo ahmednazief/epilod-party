@@ -16,3 +16,4 @@ pub mod syncplay;
 pub mod updater;
 pub mod validation;
 pub mod voice_dsp;
+pub mod wav_io;
