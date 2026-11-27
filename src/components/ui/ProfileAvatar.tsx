@@ -1013,7 +1013,7 @@ export function AvatarPicker({
       <div className="flex items-center justify-between gap-1.5 min-w-0">
         <SegmentedTabs
           ariaLabel="Avatar style category"
-          size="sm"
+          size="xs"
           className="min-w-0"
           value={filter}
           items={CATEGORY_TABS}
