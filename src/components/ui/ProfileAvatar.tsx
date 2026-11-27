@@ -1041,9 +1041,9 @@ export function AvatarPicker({
             className="ep-glass-pill-active ep-press h-8 px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11px] font-semibold text-white whitespace-nowrap cursor-pointer"
           >
             {isCustomActive ? (
-              <AppEditIcon size={12} className="text-accent-soft shrink-0" />
+              <AppEditIcon size={12} className="text-white/90 shrink-0" />
             ) : (
-              <AppStudioIcon size={12} className="text-accent-soft shrink-0" />
+              <AppStudioIcon size={13} className="text-white/90 shrink-0" />
             )}
             <span>Custom</span>
           </button>

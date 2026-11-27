@@ -515,23 +515,25 @@ export function AppShuffleIcon({ size = 13, className = "" }: AppIconProps) {
 }
 
 /**
- * Custom dual-tone crystal Studio sparkle emblem.
+ * Custom sculpted character-studio sliders icon (replaces AI-like sparkles).
  */
 export function AppStudioIcon({ size = 13, className = "" }: AppIconProps) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
-      <path
-        d="M11.5 3.8L13.1 8.4L17.7 10L13.1 11.6L11.5 16.2L9.9 11.6L5.3 10L9.9 8.4L11.5 3.8Z"
-        fill="#A78BFA"
-        fillOpacity="0.18"
-        stroke="currentColor"
-        strokeWidth="1.65"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M18.2 14.5L19 16.8L21.3 17.6L19 18.4L18.2 20.7L17.4 18.4L15.1 17.6L17.4 16.8L18.2 14.5Z"
-        fill="#DDD6FE"
-      />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      shapeRendering="geometricPrecision"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M4 8H8.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M13.5 8H20" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <circle cx="11" cy="8" r="2.4" fill="#A78BFA" fillOpacity="0.24" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M4 16H10.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M15.5 16H20" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <circle cx="13" cy="16" r="2.4" fill="#A78BFA" fillOpacity="0.24" stroke="currentColor" strokeWidth="1.8" />
     </svg>
   );
 }
