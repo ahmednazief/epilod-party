@@ -12,7 +12,7 @@ interface SegmentedTabsProps<T extends string> {
   value: T | null;
   onChange: (value: T) => void;
   ariaLabel: string;
-  size?: "sm" | "md";
+  size?: "xs" | "sm" | "md";
   fullWidth?: boolean;
   className?: string;
 }
@@ -73,10 +73,14 @@ export function SegmentedTabs<T extends string>({
     prevValueRef.current = value;
   }, [value]);
 
-  const padClass = "p-1";
-  const insetClass = "top-1 bottom-1";
+  const padClass = size === "xs" ? "p-[3px]" : "p-1";
+  const insetClass = size === "xs" ? "top-[3px] bottom-[3px]" : "top-1 bottom-1";
   const btnSizeClass =
-    size === "sm" ? "h-8 px-2.5 text-[11px]" : "h-8.5 px-3.5 py-1.5 text-xs";
+    size === "xs"
+      ? "h-[26px] px-2.5 text-[11px]"
+      : size === "sm"
+        ? "h-8 px-2.5 text-[11px]"
+        : "h-8.5 px-3.5 py-1.5 text-xs";
 
   return (
     <div

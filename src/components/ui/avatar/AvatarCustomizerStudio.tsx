@@ -382,7 +382,7 @@ export function AvatarCustomizerStudio({
           <div className="w-[116px] justify-self-center">
             <SegmentedTabs
               ariaLabel="Character base style"
-              size="sm"
+              size="xs"
               fullWidth
               value={recipe.base === 1 ? "boy" : "girl"}
               items={[

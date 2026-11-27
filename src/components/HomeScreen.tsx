@@ -1036,7 +1036,7 @@ export function HomeScreen() {
               onClick={() => setEditingName((v) => !v)}
               title="Edit your display name and profile avatar"
               aria-expanded={editingName}
-              className={`ep-glass-pill ep-press h-8 inline-flex items-center gap-2.5 pl-[3px] pr-3 rounded-full cursor-pointer ${
+              className={`ep-glass-pill ep-press h-8 inline-flex items-center gap-2.5 pl-1 pr-3 rounded-full cursor-pointer ${
                 editingName ? "ring-1 ring-accent/65" : ""
               }`}
             >
