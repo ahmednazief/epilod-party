@@ -349,7 +349,7 @@ export function AvatarCustomizerStudio({
       aria-label={label}
       aria-pressed={active}
       title={disabled && disabledTip ? disabledTip : label}
-      className={`ep-press rounded-2xl py-1.5 px-1 flex items-center justify-center transition-all duration-150 ${
+      className={`ep-press rounded-2xl py-1.5 px-1 flex items-center justify-center transition-colors duration-150 ${
         disabled
           ? "opacity-30 cursor-not-allowed bg-white/[0.02]"
           : active
@@ -420,7 +420,7 @@ export function AvatarCustomizerStudio({
             <button
               type="button"
               onClick={onBack}
-              className="ep-glass-pill-active ep-press h-7 px-2.5 rounded-full text-[11px] font-semibold text-white cursor-pointer"
+              className="ep-glass-pill-active ep-press h-8 px-3 rounded-full text-[11px] font-semibold text-white cursor-pointer"
             >
               Done
             </button>
@@ -488,7 +488,7 @@ export function AvatarCustomizerStudio({
       {/* Concise Scrollable Options Area with Smooth Edge Fade */}
       <div
         key={activeTab}
-        className="anim-tab-in flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-1 pt-1.5 pb-2.5 [mask-image:linear-gradient(to_bottom,transparent,black_8px,black_calc(100%-10px),transparent)]"
+        className="anim-tab-in flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-1 pt-2 pb-3 [mask-image:linear-gradient(to_bottom,transparent,black_8px,black_calc(100%-10px),transparent)]"
       >
         {activeTab === "skin" && (
           <div className="space-y-2">
