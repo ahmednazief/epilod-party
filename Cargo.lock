@@ -1005,7 +1005,7 @@ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
 name = "epilod-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chacha20poly1305",
  "dfn3_rs",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "epilod-installer-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "epilod-core",
  "lzma-rust2",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "epilod-party"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "audiopus",
  "cpal",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "epilod-setup"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "epilod-installer-core",
  "serde",
