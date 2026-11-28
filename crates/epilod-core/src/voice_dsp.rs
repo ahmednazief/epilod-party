@@ -3854,4 +3854,36 @@ mod tests {
             "Re-opening right after an emitted release frame must never duplicate the release frame via pre-roll"
         );
     }
+
+    #[test]
+    fn strong_mode_suppresses_stationary_noise_deeper_than_balanced() {
+        let mut bal = VoiceDenoiser::new_aura();
+        let mut str_d = VoiceDenoiser::new_aura();
+        let mut seed = 0x1357_2468u32;
+        let mut lp = 0.0f32;
+        let mut out_b = [0.0f32; VOICE_FRAME_10MS];
+        let mut out_s = [0.0f32; VOICE_FRAME_10MS];
+        let mut pow_b = 0.0f64;
+        let mut pow_s = 0.0f64;
+
+        for i in 0..100 {
+            let mut nz = [0.0f32; VOICE_FRAME_10MS];
+            for s in &mut nz {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let white = ((seed >> 9) as f32 / ((1u32 << 23) as f32)) * 2.0 - 1.0;
+                lp = lp * 0.80 + white * 0.20;
+                *s = lp * 0.06;
+            }
+            let _ = bal.process_10ms(NoiseSuppressionMode::Balanced, &nz, &mut out_b);
+            let _ = str_d.process_10ms(NoiseSuppressionMode::Strong, &nz, &mut out_s);
+            if i >= 50 {
+                pow_b += out_b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>();
+                pow_s += out_s.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>();
+            }
+        }
+        assert!(
+            pow_s < pow_b,
+            "Strong mode must leave lower residual stationary noise than Balanced: strong={pow_s:.6}, balanced={pow_b:.6}"
+        );
+    }
 }

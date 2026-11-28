@@ -4653,4 +4653,137 @@ mod tests {
             "AEC3 must strongly attenuate leaked peer echo: in={echo_in_db:.1} dBFS, out={last_out_db:.1} dBFS"
         );
     }
+
+    #[test]
+    fn webrtc_aec3_realistic_delays_erle() {
+        for &delay_ms in &[20usize, 40, 80, 120, 150] {
+            let mut aec3 = WebRtcAec3Canceller::new();
+            let delay_samples = (delay_ms / 10) * VOICE_FRAME_10MS;
+            let mut delay_ring = vec![0.0f32; delay_samples.max(1)];
+            let mut ring_idx = 0usize;
+            let mut rng = 0x55AA_1234u32;
+            let mut far = [0.0f32; VOICE_FRAME_10MS];
+            let mut mic = [0.0f32; VOICE_FRAME_10MS];
+            let mut out = [0.0f32; VOICE_FRAME_10MS];
+
+            let mut echo_pow = 0.0f64;
+            let mut resid_pow = 0.0f64;
+            let total_frames = 450usize; // 4.5 s speech-like bursts
+            for f_idx in 0..total_frames {
+                // Speech-like syllable envelope (active 600ms, pause 200ms)
+                let active = (f_idx % 80) < 60;
+                for (i, s) in far.iter_mut().enumerate() {
+                    if !active {
+                        *s = 0.0;
+                        continue;
+                    }
+                    rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let noise = (((rng >> 16) as f32 / 32768.0) - 1.0) * 0.14;
+                    let t = ((f_idx * VOICE_FRAME_10MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                    let env = 0.4 + 0.6 * (2.0 * std::f32::consts::PI * 3.5 * t).sin().abs();
+                    let tone = 0.20 * (2.0 * std::f32::consts::PI * 190.0 * t).sin()
+                        + 0.12 * (2.0 * std::f32::consts::PI * 460.0 * t).sin();
+                    *s = (noise + tone) * env;
+                }
+                for i in 0..VOICE_FRAME_10MS {
+                    let delayed = delay_ring[ring_idx];
+                    delay_ring[ring_idx] = far[i];
+                    ring_idx = (ring_idx + 1) % delay_ring.len();
+                    mic[i] = delayed * 0.30;
+                }
+                aec3.process_10ms(&mic, Some(&far), &mut out);
+                if f_idx >= 300 && active {
+                    for (&m, &o) in mic.iter().zip(out.iter()) {
+                        echo_pow += (m as f64) * (m as f64);
+                        resid_pow += (o as f64) * (o as f64);
+                    }
+                }
+            }
+            let erle_db = 10.0 * (echo_pow / resid_pow.max(1e-12)).log10();
+            println!("[AEC3_DELAY] delay={delay_ms}ms -> ERLE={erle_db:.2} dB");
+            let min_erle = if delay_ms <= 80 { 12.0 } else { 8.0 };
+            assert!(
+                erle_db >= min_erle,
+                "AEC3 ERLE at {delay_ms} ms too low: {erle_db:.2} dB (expected >= {min_erle:.1} dB)"
+            );
+        }
+    }
+
+    #[test]
+    fn live_tx_chain_with_aec3_avoids_noise_pumping_and_clipping() {
+        let mut hpf = BiquadHighPass::new_80hz_48k();
+        let mut aec3 = WebRtcAec3Canceller::new();
+        let mut denoiser = VoiceDenoiser::new_aura();
+        let mut agc2 = WebRtcAgc2Leveler::with_params(WebRtcAgc2Params::aura());
+        let mut gate = VoiceGate::new();
+        let mut comp = VoiceCompressor::new();
+
+        let mut ns_out = [0.0f32; VOICE_FRAME_10MS];
+        let mut leveled = [0.0f32; VOICE_FRAME_10MS];
+        let mut aec_out = [0.0f32; VOICE_FRAME_10MS];
+        let mut gate_out = [[0.0f32; VOICE_FRAME_10MS]; 3];
+        let mut encode_accum: Vec<f32> = Vec::new();
+        let mut rng = 0xCAFE_1234u32;
+
+        let mut window_rms_dbs: Vec<f32> = Vec::new();
+        let mut cur_win_sq = 0.0f64;
+        let mut cur_win_n = 0usize;
+        let mut clipped = 0usize;
+
+        for f_idx in 0..250usize {
+            let mut far = [0.0f32; VOICE_FRAME_10MS];
+            let mut mic = [0.0f32; VOICE_FRAME_10MS];
+            for (i, s) in mic.iter_mut().enumerate() {
+                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                let fan = (((rng >> 16) as f32 / 32768.0) - 1.0) * 0.02;
+                let t = ((f_idx * VOICE_FRAME_10MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                let speech = if f_idx >= 50 {
+                    0.08 * (0.6 * (2.0 * std::f32::consts::PI * 160.0 * t).sin()
+                        + 0.4 * (2.0 * std::f32::consts::PI * 420.0 * t).sin())
+                } else {
+                    0.0
+                };
+                far[i] = 0.0;
+                *s = speech + fan;
+            }
+            hpf.process_in_place(&mut mic);
+            aec3.process_10ms(&mic, Some(&far), &mut aec_out);
+            let prob = denoiser.process_10ms(NoiseSuppressionMode::Balanced, &aec_out, &mut ns_out);
+            agc2.process_10ms(&ns_out, &mut leveled, true);
+            let (cnt, _, _) = gate.process_10ms_aura(&leveled, prob, -42.0, true, None, false, &mut gate_out);
+            for g in gate_out.iter().take(cnt) {
+                encode_accum.extend_from_slice(g);
+            }
+            while encode_accum.len() >= VOICE_FRAME_20MS {
+                let mut pcm20 = [0.0f32; VOICE_FRAME_20MS];
+                pcm20.copy_from_slice(&encode_accum[..VOICE_FRAME_20MS]);
+                encode_accum.drain(..VOICE_FRAME_20MS);
+                comp.process_aura_broadcast(&mut pcm20, prob);
+                for &x in &pcm20 {
+                    if x.abs() >= 0.99 {
+                        clipped += 1;
+                    }
+                    if f_idx >= 120 {
+                        cur_win_sq += (x as f64) * (x as f64);
+                        cur_win_n += 1;
+                        if cur_win_n >= VOICE_FRAME_10MS * 10 {
+                            let rms = (cur_win_sq / (cur_win_n as f64)).sqrt().max(1e-6);
+                            window_rms_dbs.push(20.0 * (rms as f32).log10());
+                            cur_win_sq = 0.0;
+                            cur_win_n = 0;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(clipped, 0, "Live TX chain must not clip");
+        let max_step = window_rms_dbs
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_step <= 3.0,
+            "Steady speech 100ms window gain step must stay <= 3.0 dB (no pumping); got {max_step:.2} dB"
+        );
+    }
 }
