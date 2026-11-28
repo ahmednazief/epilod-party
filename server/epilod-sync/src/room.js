@@ -9,8 +9,8 @@ const MAX_STRIKES = 10;
 const STRIKE_DECAY_MS = 60_000;
 const HOST_RECONNECT_GRACE_MS = 60_000;
 const EMPTY_CLEANUP_ALARM_MS = 65_000;
-const LIVENESS_ALARM_MS = 30_000;
-const GHOST_IDLE_TIMEOUT_MS = 90_000;
+const LIVENESS_ALARM_MS = 20_000;
+const GHOST_IDLE_TIMEOUT_MS = 45_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const SERVER_VERSION = "1.1.0";
 const SERVER_CAPS = ["readygate", "clientts", "status", "outbox", "peekproof"];
@@ -696,7 +696,7 @@ export class RoomDO extends DurableObject {
           typeof msg.clientServerMs === "number" &&
           Number.isFinite(msg.clientServerMs)
         ) {
-          const latMs = Math.max(0, Math.min(2500, nowMs - msg.clientServerMs));
+          const latMs = Math.max(0, Math.min(1500, nowMs - msg.clientServerMs));
           if (msg.type === "play") {
             effectiveServerTimeMs = nowMs - latMs;
           } else if (!nextPaused) {
@@ -887,6 +887,7 @@ export class RoomDO extends DurableObject {
           },
           ws
         );
+        this.sendJson(ws, { type: "chatAck", id });
         return;
       }
 

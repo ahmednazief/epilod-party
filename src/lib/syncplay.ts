@@ -602,6 +602,18 @@ export async function onSyncSubtitleShared(
   return listen<SharedSubtitleEventPayload>("sync://subtitle-shared", (e) => cb(e.payload));
 }
 
+export interface ChatDeliveryPayload {
+  id: string;
+  status: "delivered" | "failed";
+}
+
+export async function onChatDelivery(
+  cb: (payload: ChatDeliveryPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return noopUnlisten();
+  return listen<ChatDeliveryPayload>("chat://delivery", (e) => cb(e.payload));
+}
+
 export async function onSyncChatSeen(
   cb: (payload: ChatSeenEventPayload) => void,
 ): Promise<UnlistenFn> {

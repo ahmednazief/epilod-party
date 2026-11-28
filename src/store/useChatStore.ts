@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 export type ChatTransportVia = "local" | "p2p" | "p2pRelay" | "syncplay" | "system";
+export type ChatDeliveryStatus = "sending" | "delivered" | "failed";
 
 export type ChatImageStatus =
   | "pending-tap"
@@ -41,6 +42,7 @@ export interface ChatMessage {
   editedAtMs: number | null;
   reactions: Record<string, string[]>;
   via: ChatTransportVia;
+  deliveryStatus?: ChatDeliveryStatus;
   image?: ChatImageAttachment;
 }
 
@@ -116,6 +118,7 @@ interface ChatState {
   setReplyToId: (id: string | null) => void;
   setEditingMsgId: (id: string | null) => void;
   setSidebarWidth: (width: number) => void;
+  setMessageDeliveryStatus: (id: string, status: ChatDeliveryStatus) => void;
   recordPeerSeen: (username: string, lastMsgId: string, nowMs?: number) => void;
   appendLocalImageMessage: (msg: {
     id: string;
@@ -239,6 +242,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ sidebarWidth: clamped });
   },
 
+  setMessageDeliveryStatus: (id, status) =>
+    set((s) => {
+      const idx = s.messages.findIndex((m) => m.id === id && m.isSelf);
+      if (idx === -1) return s;
+      const target = s.messages[idx];
+      if (target.deliveryStatus === status) return s;
+      const next = [...s.messages];
+      next[idx] = { ...target, deliveryStatus: status };
+      return { messages: next };
+    }),
+
   appendLocalMessage: (msg) =>
     set((s) => {
       if (s.messages.some((m) => m.id === msg.id && m.isSelf)) {
@@ -256,6 +270,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         editedAtMs: null,
         reactions: {},
         via: "local",
+        deliveryStatus: "sending",
       };
       return {
         messages: [...s.messages, nextMsg].slice(-MAX_CHAT_MESSAGES),

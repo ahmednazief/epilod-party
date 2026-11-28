@@ -2051,6 +2051,13 @@ async fn run_p2p_actor(
     let mut reaction_seq: u32 = 1;
     let mut seen_reactions: VecDeque<((String, u32), Instant)> = VecDeque::new();
     let mut seen_chat_msgs: VecDeque<((String, String), Instant)> = VecDeque::new();
+    struct PendingChatDelivery {
+        packet: ChatFallbackPacket,
+        sent_at: Instant,
+        direct_targets: Vec<(String, u32)>,
+        fallback_sent: bool,
+    }
+    let mut pending_chat_deliveries: Vec<PendingChatDelivery> = Vec::new();
     let mut seen_shared_subs: VecDeque<String> = VecDeque::new();
     let mut chat_image_state = ChatImageState::default();
 
@@ -2639,6 +2646,7 @@ async fn run_p2p_actor(
                                     .iter()
                                     .any(|t| !relay_targets.contains(t)));
 
+                        let mut direct_targets: Vec<(String, u32)> = Vec::new();
                         if !direct_keys.is_empty() {
                             let app_msg = P2pAppMessage::ChatMessage {
                                 id: clean_id.clone(),
@@ -2653,14 +2661,18 @@ async fn run_p2p_actor(
                                 let now_ms = epoch_ms(start_instant);
                                 for dk in &direct_keys {
                                     if let Some(peer) = peers.get_mut(dk) {
-                                        let _ = send_reliable_payload(
+                                        if let Some(msg_id) = send_reliable_payload_tracked(
                                             peer,
                                             &payload,
                                             &sock_v4,
                                             sock_v6.as_ref(),
                                             now_ms,
+                                            false,
                                         )
-                                        .await;
+                                        .await
+                                        {
+                                            direct_targets.push((dk.clone(), msg_id));
+                                        }
                                     }
                                 }
                             }
@@ -2673,6 +2685,22 @@ async fn run_p2p_actor(
                                 reply_to_id: clean_reply,
                                 text: clean_text,
                                 is_edit: false,
+                            });
+                        } else if !direct_targets.is_empty() {
+                            if pending_chat_deliveries.len() >= 32 {
+                                pending_chat_deliveries.remove(0);
+                            }
+                            pending_chat_deliveries.push(PendingChatDelivery {
+                                packet: ChatFallbackPacket {
+                                    msg_id: clean_id,
+                                    avatar_id: clean_avatar,
+                                    reply_to_id: clean_reply,
+                                    text: clean_text,
+                                    is_edit: false,
+                                },
+                                sent_at: Instant::now(),
+                                direct_targets,
+                                fallback_sent: false,
                             });
                         }
                     }
@@ -3483,6 +3511,39 @@ async fn run_p2p_actor(
                         status_dirty = true;
                     }
                 }
+                if !pending_chat_deliveries.is_empty() {
+                    let mut idx = 0;
+                    while idx < pending_chat_deliveries.len() {
+                        let entry = &mut pending_chat_deliveries[idx];
+                        entry.direct_targets.retain(|(pk, msg_id)| {
+                            peers.get(pk).is_some_and(|p| p.reliable.is_pending(*msg_id))
+                        });
+                        if entry.direct_targets.is_empty() {
+                            if !entry.fallback_sent {
+                                if let Some(ref handle) = app {
+                                    let _ = handle.emit(
+                                        "chat://delivery",
+                                        serde_json::json!({
+                                            "id": entry.packet.msg_id,
+                                            "status": "delivered",
+                                        }),
+                                    );
+                                }
+                            }
+                            pending_chat_deliveries.remove(idx);
+                            continue;
+                        }
+                        if !entry.fallback_sent
+                            && entry.sent_at.elapsed() >= Duration::from_millis(2500)
+                        {
+                            entry.fallback_sent = true;
+                            let _ = chat_fallback_tx.try_send(entry.packet.clone());
+                            pending_chat_deliveries.remove(idx);
+                            continue;
+                        }
+                        idx += 1;
+                    }
+                }
                 if let Some(ref msg) = local_beacon_str {
                     if beacon_echo_pending
                         && last_beacon_sent_at.is_none_or(|t| t.elapsed() >= BEACON_COOLDOWN)
@@ -4175,12 +4236,21 @@ async fn send_reliable_payload_paced(
     now_ms: u64,
     pace_for_voice: bool,
 ) -> bool {
-    let Some(addr) = peer.active_addr else {
-        return false;
-    };
-    let Some((msg_id, frames)) = peer.reliable.enqueue_message(payload) else {
-        return false;
-    };
+    send_reliable_payload_tracked(peer, payload, sock_v4, sock_v6, now_ms, pace_for_voice)
+        .await
+        .is_some()
+}
+
+async fn send_reliable_payload_tracked(
+    peer: &mut PeerSession,
+    payload: &[u8],
+    sock_v4: &UdpSocket,
+    sock_v6: Option<&Arc<UdpSocket>>,
+    now_ms: u64,
+    pace_for_voice: bool,
+) -> Option<u32> {
+    let addr = peer.active_addr?;
+    let (msg_id, frames) = peer.reliable.enqueue_message(payload)?;
     if pace_for_voice && frames.len() > 8 {
         peer.reliable.mark_sent_prefix(msg_id, 8, now_ms);
         for frame in frames.into_iter().take(8) {
@@ -4196,7 +4266,7 @@ async fn send_reliable_payload_paced(
             }
         }
     }
-    true
+    Some(msg_id)
 }
 
 async fn handle_udp_packet(

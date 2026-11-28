@@ -145,7 +145,7 @@ struct ClockSample {
 }
 
 const CLOCK_WINDOW_MS: f64 = 300_000.0; // 5 minutes
-const CLOCK_MAX_SAMPLES: usize = 8;
+const CLOCK_MAX_SAMPLES: usize = 16;
 
 /// Estimates `server_time_ms - local_time_ms` using a windowed minimum-RTT
 /// filter so transient Wi-Fi spikes are ignored while route changes recover.
@@ -218,6 +218,12 @@ impl ClockSyncEstimator {
                 if best > 250.0 && rtt + 50.0 < best {
                     // Fast recovery when an earlier cold-start sample was captured during bufferbloat.
                     self.offset_ms = self.offset_ms * 0.15 + candidate_offset * 0.85;
+                } else if self.sample_count >= 3
+                    && rtt > 200.0
+                    && (candidate_offset - self.offset_ms).abs() > rtt * 0.6
+                {
+                    // Guard against asymmetric packet-loss spikes on high-RTT links.
+                    self.offset_ms = self.offset_ms * 0.80 + candidate_offset * 0.20;
                 } else {
                     self.offset_ms = self.offset_ms * 0.35 + candidate_offset * 0.65;
                 }
@@ -231,7 +237,17 @@ impl ClockSyncEstimator {
             offset_ms: candidate_offset,
         });
         if self.samples.len() > CLOCK_MAX_SAMPLES {
-            self.samples.remove(0);
+            // Evict the worst-RTT sample (excluding the newly pushed one) so noisy
+            // high-ping/packet-loss probes never push out the cleanest RTT anchor.
+            if let Some((worst_idx, _)) = self.samples[..self.samples.len() - 1]
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.rtt_ms.total_cmp(&b.rtt_ms))
+            {
+                self.samples.remove(worst_idx);
+            } else {
+                self.samples.remove(0);
+            }
         }
 
         // If the minimum RTT in the window shifted up (e.g. VPN/route change),
@@ -243,7 +259,11 @@ impl ClockSyncEstimator {
         {
             if let Some(prev_best) = window_best {
                 if best_sample.rtt_ms > prev_best + 15.0 {
-                    self.offset_ms = best_sample.offset_ms;
+                    if best_sample.rtt_ms <= 250.0 {
+                        self.offset_ms = best_sample.offset_ms;
+                    } else {
+                        self.offset_ms = self.offset_ms * 0.50 + best_sample.offset_ms * 0.50;
+                    }
                 }
             }
         }
@@ -265,7 +285,8 @@ impl ClockSyncEstimator {
     /// Returns true when clock sync has too few samples or only high-RTT bufferbloated samples,
     /// signaling the session loop to run faster background `Ping` calibration until a clean sample arrives.
     pub fn needs_fast_calibration(&self) -> bool {
-        self.sample_count < 3 || self.best_rtt_ms().unwrap_or(f64::INFINITY) > 220.0
+        self.sample_count < 3
+            || (self.sample_count < 8 && self.best_rtt_ms().unwrap_or(f64::INFINITY) > 220.0)
     }
 
     pub fn estimated_server_ms(&self, local_now_ms: f64) -> f64 {
@@ -448,7 +469,7 @@ pub fn compute_welcome_playback_action(
     let should_seek = if state.paused {
         abs_drift > if is_reconnect { 0.20 } else { 0.08 }
     } else if is_reconnect {
-        abs_drift >= 0.85
+        abs_drift >= 0.65
     } else {
         abs_drift >= 0.30
     };
@@ -738,6 +759,10 @@ pub enum CloudServerMsg {
         text: String,
         #[serde(rename = "replyToId")]
         reply_to_id: Option<String>,
+    },
+    #[serde(rename = "chatAck")]
+    ChatAck {
+        id: String,
     },
     #[serde(rename = "chatEdit")]
     ChatEdit {
@@ -1249,5 +1274,26 @@ mod tests {
         clock.record_pong(6000.0, 6040.0, 6520.0);
         assert!(!clock.needs_fast_calibration());
         assert!((clock.offset_ms() - 536.75).abs() < 1.0);
+    }
+
+    #[test]
+    fn clock_sync_resists_packet_loss_burst_and_preserves_best_anchor() {
+        let mut clock = ClockSyncEstimator::new();
+        // Clean 40ms baseline (true offset +500ms)
+        clock.record_pong(1_000.0, 1_040.0, 1_520.0);
+        assert!((clock.offset_ms() - 500.0).abs() < 0.01);
+
+        // 20 noisy high-RTT / asymmetric packet-loss probes within 3 minutes
+        for i in 1..=20 {
+            let t1 = 10_000.0 * (i as f64);
+            let rtt = 350.0 + ((i % 5) as f64) * 180.0;
+            // Skewed asymmetric server timestamp
+            clock.record_pong(t1, t1 + rtt, t1 + rtt * 0.5 + 950.0);
+        }
+
+        // Best anchor (40ms RTT) must not have been evicted by the 20 noisy samples
+        assert!((clock.best_rtt_ms().unwrap() - 40.0).abs() < 0.01);
+        assert!((clock.offset_ms() - 500.0).abs() < 0.01);
+        assert!(!clock.needs_fast_calibration());
     }
 }

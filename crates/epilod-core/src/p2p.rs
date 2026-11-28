@@ -2083,6 +2083,10 @@ impl ReliableChannel {
             }
         }
     }
+
+    pub fn is_pending(&self, msg_id: u32) -> bool {
+        self.outgoing.contains_key(&msg_id)
+    }
 }
 
 #[cfg(test)]

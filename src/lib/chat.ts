@@ -42,6 +42,32 @@ export function sanitizeChatDraft(raw: string): string | null {
   return chars.slice(0, MAX_CHAT_MESSAGE_CHARS).join("").trim() || null;
 }
 
+const DELIVERY_TIMEOUT_MS = 8500;
+const pendingDeliveryTimers = new Map<string, number>();
+
+export function clearChatDeliveryTimer(id: string): void {
+  const existing = pendingDeliveryTimers.get(id);
+  if (existing !== undefined) {
+    if (typeof window !== "undefined") {
+      window.clearTimeout(existing);
+    }
+    pendingDeliveryTimers.delete(id);
+  }
+}
+
+function scheduleDeliveryTimeout(id: string): void {
+  clearChatDeliveryTimer(id);
+  if (typeof window === "undefined") return;
+  const timer = window.setTimeout(() => {
+    pendingDeliveryTimers.delete(id);
+    const msg = useChatStore.getState().messages.find((m) => m.id === id && m.isSelf);
+    if (msg && msg.deliveryStatus === "sending") {
+      useChatStore.getState().setMessageDeliveryStatus(id, "failed");
+    }
+  }, DELIVERY_TIMEOUT_MS);
+  pendingDeliveryTimers.set(id, timer);
+}
+
 export function sendPartyChatMessage(rawText: string, replyToId?: string | null): boolean {
   const cleanText = sanitizeChatDraft(rawText);
   if (!cleanText) return false;
@@ -63,9 +89,43 @@ export function sendPartyChatMessage(rawText: string, replyToId?: string | null)
   });
 
   if (sync.status.state === "connected") {
-    void syncSendChat(id, cleanText, avatarId, cleanReply);
+    const peerCount = sync.participants.filter(
+      (p) => p.username.trim().toLowerCase() !== sender.trim().toLowerCase(),
+    ).length;
+    if (peerCount === 0) {
+      useChatStore.getState().setMessageDeliveryStatus(id, "delivered");
+    } else {
+      scheduleDeliveryTimeout(id);
+    }
+    void syncSendChat(id, cleanText, avatarId, cleanReply).catch(() => {
+      clearChatDeliveryTimer(id);
+      useChatStore.getState().setMessageDeliveryStatus(id, "failed");
+    });
     void syncSendChatTyping(false);
+  } else {
+    useChatStore.getState().setMessageDeliveryStatus(id, "failed");
   }
+  return true;
+}
+
+export function retryPartyChatMessage(id: string): boolean {
+  const app = useAppStore.getState();
+  if (!app.roomCode) return false;
+  const msg = useChatStore.getState().messages.find((m) => m.id === id && m.isSelf);
+  if (!msg || !msg.text) return false;
+
+  const sync = useSyncStore.getState();
+  if (sync.status.state !== "connected") {
+    useChatStore.getState().setMessageDeliveryStatus(id, "failed");
+    return false;
+  }
+
+  useChatStore.getState().setMessageDeliveryStatus(id, "sending");
+  scheduleDeliveryTimeout(id);
+  void syncSendChat(msg.id, msg.text, app.avatarId, msg.replyToId).catch(() => {
+    clearChatDeliveryTimer(msg.id);
+    useChatStore.getState().setMessageDeliveryStatus(msg.id, "failed");
+  });
   return true;
 }
 

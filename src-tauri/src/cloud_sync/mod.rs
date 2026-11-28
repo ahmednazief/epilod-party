@@ -42,9 +42,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 const MAX_CLAIM_REROLLS: u8 = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
-const PING_RETRY_AFTER: Duration = Duration::from_secs(8);
-const PONG_DEADLINE: Duration = Duration::from_secs(16);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(12);
+const PING_RETRY_AFTER: Duration = Duration::from_secs(4);
+const PONG_DEADLINE: Duration = Duration::from_secs(10);
+const STALL_RECOVERY_THRESHOLD: Duration = Duration::from_secs(4);
 const FAST_CLOCK_CALIBRATION_INTERVAL: Duration = Duration::from_secs(15);
 const CLOCK_RESYNC_INTERVAL: Duration = Duration::from_secs(180);
 const HEALTH_EMIT_INTERVAL: Duration = Duration::from_secs(5);
@@ -1090,19 +1091,39 @@ async fn run_single_cloud_session(
                     }
                 }
 
-                // Immediate buffering flip report (T3.7)
+                // Immediate buffering flip report (T3.7) & post-buffering catch-up snap
                 let cur_buf = mpv.is_buffering();
-                if cur_buf != last_buffering_sent && server_caps.contains("status") {
+                if cur_buf != last_buffering_sent {
+                    if !cur_buf && !st.paused && drift.abs() >= 0.80 && !seek_on_cooldown {
+                        soft_speed_active = false;
+                        last_speed = 1.0;
+                        let base_speed = tx.effective_speed(1.0);
+                        if (last_applied_mpv_speed - base_speed).abs() > 0.0005 {
+                            last_applied_mpv_speed = base_speed;
+                            let req = mpv.next_request_id();
+                            let _ = mpv.send_command(set_speed_cmd(req, base_speed));
+                        }
+                        last_seek_dispatched_at = Some(Instant::now());
+                        let lead = mpv.seek_lead_secs();
+                        let _ = mpv.dispatch_seek((target_local + lead).max(0.0), false, None);
+                    }
                     last_buffering_sent = cur_buf;
-                    last_reported_drift_secs = Some(last_drift_secs);
-                    last_status_sent_at = Some(Instant::now());
-                    let mapped_pos =
-                        map_local_to_room_piecewise(snap.position, tx, &segs, Some(room_pos));
-                    if let Some(frame) = send_msg(&CloudClientMsg::Status {
-                        position: mapped_pos,
-                        buffering: cur_buf,
-                    }) {
-                        let _ = send_ws_bounded(&mut ws_tx, frame).await;
+                    if server_caps.contains("status") {
+                        last_reported_drift_secs = Some(last_drift_secs);
+                        last_status_sent_at = Some(Instant::now());
+                        let mapped_pos =
+                            map_local_to_room_piecewise(snap.position, tx, &segs, Some(room_pos));
+                        if let Some(frame) = send_msg(&CloudClientMsg::Status {
+                            position: mapped_pos,
+                            buffering: cur_buf,
+                        }) {
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                break CloudSessionExit::Error {
+                                    message,
+                                    was_connected,
+                                };
+                            }
+                        }
                     }
                 }
             }
@@ -1181,7 +1202,12 @@ async fn run_single_cloud_session(
                                 position: mapped_pos,
                                 buffering: cur_buf,
                             }) {
-                                let _ = ws_tx.send(frame).await;
+                                if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                    break CloudSessionExit::Error {
+                                        message,
+                                        was_connected,
+                                    };
+                                }
                             }
                         }
                     }
@@ -1190,7 +1216,7 @@ async fn run_single_cloud_session(
 
             Some(beacon) = p2p_beacon_rx.recv() => {
                 if let Some(frame) = send_msg(&CloudClientMsg::P2pSignal { payload: beacon }) {
-                    let _ = ws_tx.send(frame).await;
+                    let _ = send_ws_bounded(&mut ws_tx, frame).await;
                 }
             }
 
@@ -1256,26 +1282,40 @@ async fn run_single_cloud_session(
                     avatar_id: pkt.avatar_id,
                     count: pkt.count,
                 }) {
-                    let _ = ws_tx.send(frame).await;
+                    let _ = send_ws_bounded(&mut ws_tx, frame).await;
                 }
             }
 
             Some(pkt) = p2p_chat_fallback_rx.recv() => {
-                let msg = if pkt.is_edit {
+                let is_edit = pkt.is_edit;
+                let msg = if is_edit {
                     CloudClientMsg::ChatEdit {
-                        target_msg_id: pkt.msg_id,
-                        text: pkt.text,
+                        target_msg_id: pkt.msg_id.clone(),
+                        text: pkt.text.clone(),
                     }
                 } else {
                     CloudClientMsg::Chat {
-                        id: pkt.msg_id,
-                        text: pkt.text,
-                        avatar_id: pkt.avatar_id,
-                        reply_to_id: pkt.reply_to_id,
+                        id: pkt.msg_id.clone(),
+                        text: pkt.text.clone(),
+                        avatar_id: pkt.avatar_id.clone(),
+                        reply_to_id: pkt.reply_to_id.clone(),
                     }
                 };
                 if let Some(frame) = send_msg(&msg) {
-                    let _ = ws_tx.send(frame).await;
+                    if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                        if !is_edit {
+                            outbox.push(SyncCommand::SendChat {
+                                id: pkt.msg_id,
+                                text: pkt.text,
+                                avatar_id: pkt.avatar_id,
+                                reply_to_id: pkt.reply_to_id,
+                            });
+                        }
+                        break CloudSessionExit::Error {
+                            message,
+                            was_connected,
+                        };
+                    }
                 }
             }
 
@@ -1284,7 +1324,7 @@ async fn run_single_cloud_session(
                     target_msg_id: pkt.msg_id,
                     emoji: pkt.emoji,
                 }) {
-                    let _ = ws_tx.send(frame).await;
+                    let _ = send_ws_bounded(&mut ws_tx, frame).await;
                 }
             }
 
@@ -1320,8 +1360,23 @@ async fn run_single_cloud_session(
                         };
                     }
                     Some(Ok(Message::Text(text))) => {
+                        let stalled_for = awaiting_pong_since.map(|since| since.elapsed());
                         awaiting_pong_since = None;
                         sent_ping_retry = false;
+                        if stalled_for.is_some_and(|d| d >= STALL_RECOVERY_THRESHOLD) && was_connected
+                        {
+                            // Connection just recovered from a severe packet-loss/ping stall without
+                            // dropping the WebSocket; pull authoritative room state immediately.
+                            force_snap_next_state = true;
+                            if let Some(frame) = send_msg(&CloudClientMsg::Resync) {
+                                if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                    break CloudSessionExit::Error {
+                                        message,
+                                        was_connected,
+                                    };
+                                }
+                            }
+                        }
                         if text == "pong" {
                             if let Some(sent_at) = last_ping_sent_at.take() {
                                 clock.record_rtt_only(sent_at.elapsed().as_secs_f64() * 1000.0);
@@ -1425,6 +1480,12 @@ async fn run_single_cloud_session(
 
                                 // T2.6 + T1.1: Reconcile on Welcome when retained, multi-peer, or non-zero seq,
                                 // unless we have a queued offline playback command that we are allowed to push right below.
+                                // On reconnect into an active multi-peer room, discard stale queued playback intents
+                                // from non-host peers so a reconnecting bad-network client cannot yank the room back.
+                                if reconnects > 0 && participants.len() > 1 && !current_control.local_is_host {
+                                    outbox.playback = None;
+                                    outbox.latest_seek = None;
+                                }
                                 let can_control_welcome = !current_control.host_control_active
                                     || current_control.local_is_host
                                     || current_control.local_is_admin;
@@ -1596,7 +1657,7 @@ async fn run_single_cloud_session(
                                     if let Some(frame) = send_msg(&CloudClientMsg::Ping {
                                         client_ms: now_epoch_ms(),
                                     }) {
-                                        let _ = ws_tx.send(frame).await;
+                                        let _ = send_ws_bounded(&mut ws_tx, frame).await;
                                     }
                                 }
                             }
@@ -1699,10 +1760,14 @@ async fn run_single_cloud_session(
                                         } else {
                                             pending_remote_state = None;
                                             pending_remote_deadline = None;
+                                            let mut state_to_apply = next_state.clone();
+                                            if seq_skipped || forced_snap {
+                                                state_to_apply.do_seek = true;
+                                            }
                                             if apply_remote_playback_state(
                                                 app,
                                                 mpv,
-                                                &next_state,
+                                                &state_to_apply,
                                                 clock,
                                                 &drift_ctrl,
                                                 timeline_transform,
@@ -1841,6 +1906,15 @@ async fn run_single_cloud_session(
                                 );
                                 }
                             }
+                            CloudServerMsg::ChatAck { id } => {
+                                let _ = app.emit(
+                                    "chat://delivery",
+                                    serde_json::json!({
+                                        "id": id,
+                                        "status": "delivered",
+                                    }),
+                                );
+                            }
                             CloudServerMsg::ChatEdit {
                                 target_msg_id,
                                 username: sender,
@@ -1951,7 +2025,12 @@ async fn run_single_cloud_session(
                     SyncCommand::SetFile(meta) => {
                         let wire = meta.as_ref().map(to_wire_file);
                         if let Some(frame) = send_msg(&CloudClientMsg::File { file: wire }) {
-                            let _ = ws_tx.send(frame).await;
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                break CloudSessionExit::Error {
+                                    message,
+                                    was_connected,
+                                };
+                            }
                         }
                         emit_cloud_participants(app, &last_participants, local_file);
                         p2p.try_send(P2pControlCmd::UpdateLocalMedia(build_p2p_local_media(
@@ -1962,7 +2041,12 @@ async fn run_single_cloud_session(
                     }
                     SyncCommand::SetReady { is_ready, manual } => {
                         if let Some(frame) = send_msg(&CloudClientMsg::Ready { is_ready, manual }) {
-                            let _ = ws_tx.send(frame).await;
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                break CloudSessionExit::Error {
+                                    message,
+                                    was_connected,
+                                };
+                            }
                         }
                     }
                     SyncCommand::UserPlay(local_pos) => {
@@ -2189,10 +2273,20 @@ async fn run_single_cloud_session(
                         if let Some(frame) = send_msg(&CloudClientMsg::Ping {
                             client_ms: now_epoch_ms(),
                         }) {
-                            let _ = ws_tx.send(frame).await;
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                break CloudSessionExit::Error {
+                                    message,
+                                    was_connected,
+                                };
+                            }
                         }
                         if let Some(frame) = send_msg(&CloudClientMsg::Resync) {
-                            let _ = ws_tx.send(frame).await;
+                            if let Err(message) = send_ws_bounded(&mut ws_tx, frame).await {
+                                break CloudSessionExit::Error {
+                                    message,
+                                    was_connected,
+                                };
+                            }
                         }
                     }
                     SyncCommand::SetScrubbing(s) => {

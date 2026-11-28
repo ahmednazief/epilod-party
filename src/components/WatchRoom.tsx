@@ -222,6 +222,7 @@ import {
   onSyncChatImageData,
   onSyncChatImageMeta,
   onSyncChatReact,
+  onChatDelivery,
   onSyncChatSeen,
   onSyncChatTyping,
   onSyncIntroSkipVote,
@@ -2634,6 +2635,13 @@ export function WatchRoom() {
           onSyncChatSeen((seen) => {
             if (!active) return;
             useChatStore.getState().recordPeerSeen(seen.username, seen.lastMsgId);
+          }),
+          onChatDelivery((delivery) => {
+            if (!active) return;
+            import("../lib/chat").then(({ clearChatDeliveryTimer }) => {
+              clearChatDeliveryTimer(delivery.id);
+            });
+            useChatStore.getState().setMessageDeliveryStatus(delivery.id, delivery.status);
           }),
           onSyncIntroSkipVote((vote) => {
             if (!active) return;
