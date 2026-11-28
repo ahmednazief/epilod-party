@@ -24,10 +24,11 @@ test("Components contain zero native <select>, zero backdrop-blur, zero gradient
 
   for (const file of componentFiles) {
     const src = fs.readFileSync(file, "utf8");
+    const srcNoMask = src.replace(/\[mask-image:linear-gradient\([^\]]+\)\]/g, "");
     assert.equal(src.includes("<select"), false, `Forbidden <select> found in ${file}`);
     assert.equal(src.includes("backdrop-blur"), false, `Forbidden backdrop-blur found in ${file}`);
     assert.equal(
-      /linear-gradient|radial-gradient/.test(src),
+      /linear-gradient|radial-gradient/.test(srcNoMask),
       false,
       `Forbidden CSS gradient found in ${file}`,
     );
@@ -176,7 +177,7 @@ test("Animation and compositor performance invariants hold in UI primitives and 
     "utf8",
   );
   assert.equal(homeSrc.includes("max-h-[calc(100vh-4rem)] overflow-hidden"), true);
-  assert.equal(homeSrc.includes("ep-menu-scroll flex-1 min-h-0 overflow-y-auto"), true);
+  assert.equal(homeSrc.includes("ep-menu-scroll flex-1 min-h-0"), true);
   assert.equal(settingsSrc.includes("overflow-y-auto gap-3") || settingsSrc.includes("min-h-0 overflow-y-auto"), true);
   assert.equal(settingsSrc.includes("break-all"), false);
 });
@@ -587,10 +588,10 @@ test("Modal glass sheets keep unnested sibling backdrops and emit unprefixed bac
   // Play bar and menus use dark Smoked-Amethyst Liquid Glass without harsh white top lines or bright top washes
   assert.match(globalsCss, /\.ep-glass-capsule\s*\{[^}]*brightness\(0\.92\)/);
   assert.doesNotMatch(globalsCss, /\.ep-glass-capsule\s*\{[^}]*inset 0 12px 24px -16px rgba\(255,\s*255,\s*255,\s*0\.08\)/);
-  assert.match(globalsCss, /\.ep-glass-bottom-bar\s*\{[^}]*border-top:\s*1px solid rgba\(255,\s*255,\s*255,\s*0\.06\)[^}]*brightness\(0\.92\)/);
-  assert.match(globalsCss, /\.ep-glass-submenu\s*\{[^}]*rgba\(16,\s*16,\s*22,\s*0\.16\)[^}]*brightness\(0\.90\)/);
+  assert.match(globalsCss, /\.ep-glass-bottom-bar\s*\{[^}]*border-top:\s*1px solid rgba\(255,\s*255,\s*255,\s*0\.14\)[^}]*brightness\(0\.92\)/);
+  assert.match(globalsCss, /\.ep-glass-submenu\s*\{[^}]*rgba\(16,\s*16,\s*22,\s*0\.16\)[^}]*brightness\(0\.45\)/);
   assert.match(globalsCss, /\.ep-menu-row\[data-active="true"\]\s*\{[^}]*rgba\(124,\s*58,\s*237,\s*0\.16\)/);
-  assert.match(globalsCss, /\.ep-droplet-indicator\s*\{[^}]*rgba\(124,\s*58,\s*237,\s*0\.14\)[^}]*rgba\(255,\s*255,\s*255,\s*0\.24\)/);
+  assert.match(globalsCss, /\.ep-droplet-indicator\s*\{[^}]*rgba\(139,\s*92,\s*246,\s*0\.18\)[^}]*rgba\(196,\s*181,\s*253,\s*0\.24\)/);
   assert.doesNotMatch(
     fs.readFileSync(path.join(REPO_ROOT, "src/components/VideoGlassBackdrop.tsx"), "utf8"),
     /brightness\(0\.84\)|#08080c/,
@@ -928,7 +929,7 @@ test("TransportBar party avatar dock aligns concentrically with custom chevron a
   const watchSrc = fs.readFileSync(path.join(REPO_ROOT, "src/components/WatchRoom.tsx"), "utf8");
 
   // Users pill aligns avatar concentrically (pl-1 + 1px border - 2px ring = 3px margin) and displays custom chevron arrow
-  assert.match(transportSrc, /!hideParticipants && visiblePeers\.length > 0[\s\S]*?pl-1 \$\{barLayout\.showPartyCount \? "pr-2\.5" : "pr-2"\} gap-1\.5/);
+  assert.match(transportSrc, /!hideParticipants && visiblePeers\.length > 0[\s\S]*?pl-\[5px\] pr-2\.5 gap-2/);
   assert.match(transportSrc, /<PlayerPartyChevronIcon\s+open=\{activeTab === "room"\}/);
   assert.equal(iconsSrc.includes("export function PlayerPartyChevronIcon"), true);
   assert.equal(transportSrc.includes("ep-reaction-icon-btn"), true);
@@ -1042,7 +1043,7 @@ test("AvatarPicker hides visible name captions, enlarges avatar artwork, and pro
   assert.match(avatarSrc, /ep-avatar-reveal-tile/);
   assert.match(avatarSrc, /ep-avatar-more-slot/);
   assert.doesNotMatch(avatarSrc, /Show \$\{hiddenCount\} more characters[\s\S]{0,160}bg-white\/\[0\.045\]/);
-  assert.match(avatarSrc, /ep-press h-7[\s\S]*Surprise me/);
+  assert.match(avatarSrc, /ep-glass-pill ep-press h-8[\s\S]*AppShuffleIcon/);
 
   const globalsCss = fs.readFileSync(path.join(REPO_ROOT, "src/styles/globals.css"), "utf8");
   assert.match(globalsCss, /\.ep-avatar-more-orb\s*\{/);

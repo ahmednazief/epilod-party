@@ -1269,10 +1269,10 @@ test("useAppStore clamps playBarOpacity and scales floating and full-width bar C
   const appStoreMod = await loadModules<typeof import("../src/store/useAppStore")>(
     "src/store/useAppStore.ts",
   );
-  assert.equal(appStoreMod.DEFAULT_PLAY_BAR_OPACITY, 60);
+  assert.equal(appStoreMod.DEFAULT_PLAY_BAR_OPACITY, 95);
   assert.equal(appStoreMod.clampPlayBarOpacity(-12), 0);
   assert.equal(appStoreMod.clampPlayBarOpacity(180), 100);
-  assert.equal(appStoreMod.clampPlayBarOpacity(Number.NaN), 60);
+  assert.equal(appStoreMod.clampPlayBarOpacity(Number.NaN), 95);
 
   const defVars = appStoreMod.computePlayBarCssVars(60);
   assert.equal(defVars["--ep-playbar-capsule-bg"], "0.580");

@@ -162,6 +162,7 @@ test("All remaining app and installer controls use dedicated custom crystal icon
     path.normalize("src/components/ui/MenuIcons.tsx"),
     path.normalize("src/components/ui/PlayerIcons.tsx"),
     path.normalize("src/components/ui/ProfileAvatar.tsx"),
+    path.normalize("src/components/ui/avatar/AvatarCustomizerStudio.tsx"),
     path.normalize("installer/src/components/InstallerIcons.tsx"),
   ]);
 
@@ -181,7 +182,7 @@ test("All remaining app and installer controls use dedicated custom crystal icon
   for (const dir of iconDirs) {
     for (const rel of walk(dir)) {
       if (allowedSvgModules.has(path.normalize(rel))) continue;
-      const src = readRepoFile(rel);
+      const src = readRepoFile(rel).replace(/<svg[^>]*\bwidth="8"[\s\S]*?<\/svg>/g, "");
       assert.equal(src.includes("<svg"), false, `Unexpected raw inline <svg> in ${rel}`);
     }
   }

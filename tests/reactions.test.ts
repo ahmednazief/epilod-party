@@ -217,8 +217,8 @@ test("Shortcuts, UI components, WatchRoom, and Rust P2P/Syncplay layers wire liv
     playerIcons.indexOf("export function PlayerReactionsIcon"),
     playerIcons.indexOf("export function PlayerAutoNextIcon"),
   );
-  assert.equal(reactionSection.includes("ep-laugh-face-"), true);
-  assert.equal(reactionSection.includes("ep-laugh-tear-"), true);
+  assert.equal(reactionSection.includes("ep-react-grad-"), true);
+  assert.equal(reactionSection.includes("data-active"), true);
 
   const sfxSrc = fs.readFileSync(path.join(REPO_ROOT, "src/lib/soundEffects.ts"), "utf8");
   assert.equal(sfxSrc.includes("playReactionSoundCue"), true);
