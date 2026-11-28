@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost https://api.tvmaze.com https://v3-cinemeta.strem.io; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost https://api.tvmaze.com https://v3-cinemeta.strem.io; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'"
     }
   },
   "bundle": {

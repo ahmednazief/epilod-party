@@ -27,6 +27,7 @@ import {
   resolvePeerNameTint,
   sendPartyChatEdit,
   sendPartyChatImage,
+  retryPartyChatMessage,
   sendPartyChatMessage,
   shouldShowTimeDivider,
   textMentionsUsername,
@@ -583,23 +584,33 @@ export const ChatSidebar = memo(function ChatSidebar({
   useEffect(() => {
     if (!chatOpen || !atBottom || messages.length === 0) return;
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-    const latest = [...messages].reverse().find((m) => m.kind === "message");
-    if (latest) {
-      notifyPartyChatSeen(latest.id);
+    const latestFromPeer = [...messages]
+      .reverse()
+      .find((m) => m.kind === "message" && !m.isSelf);
+    if (latestFromPeer) {
+      notifyPartyChatSeen(latestFromPeer.id);
     }
   }, [atBottom, chatOpen, messages]);
 
   const seenPeersByMsgId = useMemo(() => {
     const map: Record<string, string[]> = {};
     const myLower = effectiveUsername.trim().toLowerCase();
+    const senderById = new Map<string, string>();
+    for (const m of messages) {
+      if (m.kind === "message") {
+        senderById.set(m.id, m.sender.trim().toLowerCase());
+      }
+    }
     for (const entry of Object.values(seenByPeer)) {
       if (!entry || typeof entry.username !== "string" || !entry.lastMsgId) continue;
-      if (entry.username.trim().toLowerCase() === myLower) continue;
+      const peerLower = entry.username.trim().toLowerCase();
+      if (!peerLower || peerLower === myLower) continue;
+      if (senderById.get(entry.lastMsgId) === peerLower) continue;
       if (!map[entry.lastMsgId]) map[entry.lastMsgId] = [];
       map[entry.lastMsgId].push(entry.username);
     }
     return map;
-  }, [effectiveUsername, seenByPeer]);
+  }, [effectiveUsername, messages, seenByPeer]);
 
   const handleSend = useCallback(
     (overrideText?: string) => {
@@ -1381,10 +1392,10 @@ export const ChatSidebar = memo(function ChatSidebar({
                         msg.isSelf ? "items-end" : "items-start"
                       }`}
                     >
-                      {/* Floating corner action pill (anchored away from sender header) */}
+                      {/* Floating corner action pill (anchored to grow inward into open chat space) */}
                       <div
                         className={`ep-chat-hover-pill w-max absolute -top-3 z-20 rounded-full p-0.5 flex items-center gap-0.5 opacity-0 scale-95 translate-y-0.5 pointer-events-none group-hover/msg:opacity-100 group-hover/msg:scale-100 group-hover/msg:translate-y-0 group-hover/msg:pointer-events-auto group-focus-within/msg:opacity-100 group-focus-within/msg:scale-100 group-focus-within/msg:translate-y-0 group-focus-within/msg:pointer-events-auto ${
-                          msg.isSelf ? "left-1 flex-row-reverse" : "right-1 flex-row"
+                          msg.isSelf ? "right-1 flex-row-reverse" : "left-1 flex-row"
                         }`}
                       >
                         <button
@@ -1615,36 +1626,59 @@ export const ChatSidebar = memo(function ChatSidebar({
                         </div>
                       )}
 
+                      {msg.isSelf && msg.deliveryStatus === "sending" && (
+                        <div className="mt-1 flex items-center justify-end px-1">
+                          <span className="text-[10px] text-muted/80 leading-none">Sending…</span>
+                        </div>
+                      )}
+                      {msg.isSelf && msg.deliveryStatus === "failed" && (
+                        <div className="mt-1 flex items-center justify-end px-1">
+                          <button
+                            type="button"
+                            onClick={() => retryPartyChatMessage(msg.id)}
+                            className="inline-flex items-center gap-1 text-[10.5px] font-medium text-bad hover:text-white transition-colors cursor-pointer leading-none"
+                          >
+                            <span>Not delivered · Retry</span>
+                          </button>
+                        </div>
+                      )}
+
                       {/* Compact "Seen by" avatars under the latest message each peer read */}
                       {seenPeersByMsgId[msg.id]?.length ? (
                         <div
-                          className={`mt-1 flex items-center gap-1 px-0.5 ${
+                          className={`mt-1.5 flex items-center gap-1 px-1 ${
                             msg.isSelf ? "justify-end" : "justify-start"
                           }`}
                         >
-                          <GlassHoverTip
-                            label={
-                              hideParticipants
-                                ? `Seen by ${seenPeersByMsgId[msg.id].length}`
-                                : `Seen by ${seenPeersByMsgId[msg.id].join(", ")}`
-                            }
-                          >
-                            <span className="inline-flex items-center -space-x-1">
-                              {seenPeersByMsgId[msg.id].slice(0, 4).map((peerName) => (
-                                <ProfileAvatar
-                                  key={peerName}
-                                  avatarId={resolvePeerAvatarId(peerName, effectiveUsername)}
-                                  size={13}
-                                  className="ring-1 ring-[#08080d]"
-                                />
-                              ))}
-                              {seenPeersByMsgId[msg.id].length > 4 && (
-                                <span className="pl-1.5 text-[9.5px] text-muted num">
-                                  +{seenPeersByMsgId[msg.id].length - 4}
-                                </span>
-                              )}
-                            </span>
-                          </GlassHoverTip>
+                          {seenPeersByMsgId[msg.id].slice(0, 4).map((peerName) => (
+                            <GlassHoverTip
+                              key={peerName}
+                              label={hideParticipants ? "Seen" : `Seen by ${peerName}`}
+                              placement="top"
+                              className="inline-flex items-center cursor-default"
+                            >
+                              <ProfileAvatar
+                                avatarId={resolvePeerAvatarId(peerName, effectiveUsername)}
+                                size={14}
+                                className="ring-1 ring-white/15 rounded-full transition-transform hover:scale-110"
+                              />
+                            </GlassHoverTip>
+                          ))}
+                          {seenPeersByMsgId[msg.id].length > 4 && (
+                            <GlassHoverTip
+                              label={
+                                hideParticipants
+                                  ? `Seen by ${seenPeersByMsgId[msg.id].length - 4} more`
+                                  : `Seen by ${seenPeersByMsgId[msg.id].slice(4).join(", ")}`
+                              }
+                              placement="top"
+                              className="inline-flex items-center cursor-default"
+                            >
+                              <span className="pl-0.5 text-[10px] font-medium text-muted num leading-none">
+                                +{seenPeersByMsgId[msg.id].length - 4}
+                              </span>
+                            </GlassHoverTip>
+                          )}
                         </div>
                       ) : null}
                     </div>
