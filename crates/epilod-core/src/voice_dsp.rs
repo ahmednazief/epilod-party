@@ -11,7 +11,9 @@ static EPILOD_AURA_WEIGHTS: AlignedAuraWeights =
 use sonora::config::{
     AdaptiveDigital as SonoraAdaptiveDigitalConfig, EchoCanceller as SonoraEchoCancellerConfig,
     FixedDigital as SonoraFixedDigitalConfig, GainController2 as SonoraGainController2Config,
-    MaxProcessingRate as SonoraMaxProcessingRate, Pipeline as SonoraPipelineConfig,
+    MaxProcessingRate as SonoraMaxProcessingRate,
+    NoiseSuppression as SonoraNoiseSuppressionConfig,
+    NoiseSuppressionLevel as SonoraNoiseSuppressionLevel, Pipeline as SonoraPipelineConfig,
 };
 use sonora::{AudioProcessing, Config as SonoraConfig, StreamConfig as SonoraStreamConfig};
 use sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper;
@@ -380,14 +382,14 @@ impl Default for WebRtcAgc2Params {
 }
 
 impl WebRtcAgc2Params {
-    /// Aura preset: gentle startup gain (+6 dB, 0 dB fixed), 12 dB/s response, and -58 dBFS noise floor cap.
+    /// Aura preset: bounded +14 dB leveling (+4 dB startup, 0 dB fixed), 8 dB/s response, and -52 dBFS noise floor cap.
     pub fn aura() -> Self {
         Self {
-            headroom_db: 5.0,
-            max_gain_db: 34.0,
-            initial_gain_db: 6.0,
-            max_gain_change_db_per_second: 12.0,
-            max_output_noise_level_dbfs: -58.0,
+            headroom_db: 9.0,
+            max_gain_db: 14.0,
+            initial_gain_db: 4.0,
+            max_gain_change_db_per_second: 8.0,
+            max_output_noise_level_dbfs: -52.0,
             fixed_gain_db: 0.0,
         }
     }
@@ -704,6 +706,7 @@ impl VoiceDenoiserOptions {
 /// - Stage C: WebRTC 24 kHz Neural RNN-VAD fused with DFN3 LSNR + gentle silence-only floor smoother
 pub struct VoiceDenoiser {
     dfn: Dfn3Denoiser,
+    aura_post_ns: Option<AudioProcessing>,
     rnn_vad: VoiceActivityDetectorWrapper,
     options: VoiceDenoiserOptions,
     aura_mode: bool,
@@ -711,6 +714,7 @@ pub struct VoiceDenoiser {
     stage_a_buf: [f32; VOICE_FRAME_10MS],
     in_scaled: [f32; VOICE_FRAME_10MS],
     out_scaled: [f32; VOICE_FRAME_10MS],
+    post_ns_scratch: [f32; VOICE_FRAME_10MS],
     vad_pcm_buf: [f32; VOICE_FRAME_10MS],
     speech_rms_env: f32,
     noise_rms_env: f32,
@@ -748,6 +752,39 @@ impl VoiceDenoiser {
         Self::with_options_and_aura(options, false)
     }
 
+    fn aura_post_ns_config(mode: NoiseSuppressionMode) -> SonoraConfig {
+        let ns_cfg = match mode {
+            NoiseSuppressionMode::Off => None,
+            NoiseSuppressionMode::Balanced => Some(SonoraNoiseSuppressionConfig {
+                level: SonoraNoiseSuppressionLevel::Low,
+                analyze_linear_aec_output_when_available: false,
+            }),
+            NoiseSuppressionMode::Strong => Some(SonoraNoiseSuppressionConfig {
+                level: SonoraNoiseSuppressionLevel::High,
+                analyze_linear_aec_output_when_available: false,
+            }),
+        };
+        SonoraConfig {
+            pipeline: SonoraPipelineConfig {
+                maximum_internal_processing_rate: SonoraMaxProcessingRate::Rate48kHz,
+                multi_channel_render: false,
+                multi_channel_capture: false,
+                ..Default::default()
+            },
+            noise_suppression: ns_cfg,
+            ..Default::default()
+        }
+    }
+
+    fn build_aura_post_ns(mode: NoiseSuppressionMode) -> AudioProcessing {
+        let stream_cfg = SonoraStreamConfig::new(VOICE_SAMPLE_RATE as u32, 1);
+        AudioProcessing::builder()
+            .config(Self::aura_post_ns_config(mode))
+            .capture_config(stream_cfg)
+            .render_config(stream_cfg)
+            .build()
+    }
+
     pub fn with_options_and_aura(options: VoiceDenoiserOptions, use_aura_weights: bool) -> Self {
         let mut dfn = if use_aura_weights {
             let mut d = match Dfn3Model::from_bytes(&EPILOD_AURA_WEIGHTS.0) {
@@ -765,12 +802,18 @@ impl VoiceDenoiser {
         } else {
             Self::BALANCED_ATTEN_LIMIT_DB
         });
+        let aura_post_ns = if use_aura_weights {
+            Some(Self::build_aura_post_ns(NoiseSuppressionMode::Balanced))
+        } else {
+            None
+        };
         let rnn_vad = VoiceActivityDetectorWrapper::new(
             sonora_simd::detect_backend(),
             VOICE_SAMPLE_RATE as i32,
         );
         Self {
             dfn,
+            aura_post_ns,
             rnn_vad,
             options,
             aura_mode: use_aura_weights,
@@ -778,6 +821,7 @@ impl VoiceDenoiser {
             stage_a_buf: [0.0; VOICE_FRAME_10MS],
             in_scaled: [0.0; VOICE_FRAME_10MS],
             out_scaled: [0.0; VOICE_FRAME_10MS],
+            post_ns_scratch: [0.0; VOICE_FRAME_10MS],
             vad_pcm_buf: [0.0; VOICE_FRAME_10MS],
             speech_rms_env: Self::TARGET_INPUT_RMS,
             noise_rms_env: 0.003,
@@ -790,6 +834,9 @@ impl VoiceDenoiser {
 
     pub fn reset(&mut self) {
         self.dfn.reset();
+        if self.aura_mode {
+            self.aura_post_ns = Some(Self::build_aura_post_ns(self.last_mode));
+        }
         self.rnn_vad = VoiceActivityDetectorWrapper::new(
             sonora_simd::detect_backend(),
             VOICE_SAMPLE_RATE as i32,
@@ -797,6 +844,7 @@ impl VoiceDenoiser {
         self.stage_a_buf.fill(0.0);
         self.in_scaled.fill(0.0);
         self.out_scaled.fill(0.0);
+        self.post_ns_scratch.fill(0.0);
         self.vad_pcm_buf.fill(0.0);
         self.speech_rms_env = Self::TARGET_INPUT_RMS;
         self.noise_rms_env = 0.003;
@@ -899,6 +947,9 @@ impl VoiceDenoiser {
             };
             self.dfn
                 .set_attenuation_limit_smooth(limit_db, Duration::from_millis(20));
+            if let Some(ref mut post_ns) = self.aura_post_ns {
+                post_ns.apply_config(Self::aura_post_ns_config(mode));
+            }
             self.last_mode = mode;
         }
 
@@ -930,6 +981,23 @@ impl VoiceDenoiser {
         }
 
         let lsnr = self.dfn.process(&self.in_scaled, &mut self.out_scaled);
+        if let Some(ref mut post_ns) = self.aura_post_ns {
+            if post_ns
+                .process_capture_f32(
+                    &[self.out_scaled.as_slice()],
+                    &mut [&mut self.post_ns_scratch[..]],
+                )
+                .is_ok()
+            {
+                for (dst, &src) in self.out_scaled.iter_mut().zip(self.post_ns_scratch.iter()) {
+                    *dst = if src.is_finite() {
+                        src.clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
         let lsnr_prob = if lsnr.is_finite() {
             ((lsnr + 6.0) / 14.0).clamp(0.0, 1.0)
         } else {
@@ -989,11 +1057,11 @@ impl VoiceDenoiser {
         }
 
         // Stage C: Gentle silence-only residual floor smoother (no HF muffling low-pass;
-        // keeps soft speech & whispers >= 0.12 at full unity gain so VoiceGate & AGC2 never starve).
+        // keeps Aura's silence floor gentle so AGC2 estimates stationary noise accurately without +34 dB jumps).
         let floor_gain = match mode {
             NoiseSuppressionMode::Off => 1.0,
-            NoiseSuppressionMode::Balanced => if self.aura_mode { 0.16 } else { 0.22 },
-            NoiseSuppressionMode::Strong => 0.08,
+            NoiseSuppressionMode::Balanced => if self.aura_mode { 0.65 } else { 0.22 },
+            NoiseSuppressionMode::Strong => if self.aura_mode { 0.50 } else { 0.08 },
         };
         let unity_thresh = if self.aura_mode { 0.12 } else { 0.20 };
         let target_post_gain = if self.hangover_frames > 0 || self.prob_smooth >= unity_thresh {
@@ -1585,13 +1653,13 @@ impl PeerRxLeveler {
             let alpha = if frame_rms > self.env_rms { 0.08 } else { 0.03 };
             self.env_rms += alpha * (frame_rms - self.env_rms);
         }
-        let (min_gain, max_gain) = if aura_mode {
-            (0.70, 1.60)
+        let (target_rms, min_gain, max_gain) = if aura_mode {
+            (0.08, 0.75, 1.35)
         } else {
-            (Self::MIN_GAIN, Self::MAX_GAIN)
+            (Self::TARGET_RMS, Self::MIN_GAIN, Self::MAX_GAIN)
         };
         let target_gain = if self.env_rms > 1e-4 {
-            (Self::TARGET_RMS / self.env_rms).clamp(min_gain, max_gain)
+            (target_rms / self.env_rms).clamp(min_gain, max_gain)
         } else {
             1.0
         };
@@ -1599,6 +1667,176 @@ impl PeerRxLeveler {
         for s in samples.iter_mut() {
             self.gain_smooth += step;
             *s = (*s * self.gain_smooth).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// Receive-side echo suppressor. Detects when a remote peer's audio is just OUR OWN transmitted
+/// voice coming back (through their speakers -> their mic) by correlating loudness envelopes at
+/// 10 ms resolution, then ducks only those moments. Independent of the peer's app version / AEC.
+pub struct RxEchoSuppressor {
+    peer_env: VecDeque<f32>,
+    lag: usize,
+    hold: u32,
+    ratio: f32,
+    gain: f32,
+    cand_lag: usize,
+    confirm: u32,
+}
+
+impl Default for RxEchoSuppressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RxEchoSuppressor {
+    const WIN: usize = 100; // 1 s correlation window
+    const LAG_MIN: usize = 8; // 80 ms
+    const LAG_MAX: usize = 90; // 900 ms
+    const CORR_MIN: f32 = 0.91;
+    const CONFIRM_TICKS: u32 = 15; // 300 ms of consistent lag
+    const HOLD_TICKS: u32 = 100; // 2 s of 20 ms ticks
+
+    pub fn new() -> Self {
+        Self {
+            peer_env: VecDeque::with_capacity(256),
+            lag: 0,
+            hold: 0,
+            ratio: 0.0,
+            gain: 1.0,
+            cand_lag: 0,
+            confirm: 0,
+        }
+    }
+
+    pub fn is_suppressing(&self) -> bool {
+        self.hold > 0
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    /// `own_env`: oldest -> newest 10 ms RMS of what we transmitted (newest ~= now).
+    /// `pcm`: one decoded 20 ms peer frame (modified in place).
+    pub fn process_20ms(&mut self, own_env: &[f32], pcm: &mut [f32]) {
+        let half = pcm.len() / 2;
+        if half == 0 {
+            return;
+        }
+        let pe = [Self::rms(&pcm[..half]), Self::rms(&pcm[half..])];
+        for v in pe {
+            if self.peer_env.len() >= 256 {
+                self.peer_env.pop_front();
+            }
+            self.peer_env.push_back(v);
+        }
+
+        let n = own_env.len();
+        let pl = self.peer_env.len();
+        if pl >= Self::WIN && n >= Self::WIN + Self::LAG_MIN {
+            let own_max = own_env[n - Self::WIN.min(n)..]
+                .iter()
+                .cloned()
+                .fold(0.0f32, f32::max);
+            let _ = own_max;
+            let p: Vec<f32> = self.peer_env.iter().skip(pl - Self::WIN).copied().collect();
+            let pmean = p.iter().sum::<f32>() / Self::WIN as f32;
+            let pvar: f32 = p.iter().map(|x| (x - pmean) * (x - pmean)).sum();
+            let pmax = p.iter().cloned().fold(0.0f32, f32::max);
+            if pvar > 1e-8 && pmax > 0.002 {
+                let mut best_corr = 0.0f32;
+                let mut best_lag = 0usize;
+                let mut best_ratio = 0.0f32;
+                let max_lag = Self::LAG_MAX.min(n - Self::WIN);
+                for lag in Self::LAG_MIN..=max_lag {
+                    let start = n - Self::WIN - lag;
+                    let o = &own_env[start..start + Self::WIN];
+                    let omean = o.iter().sum::<f32>() / Self::WIN as f32;
+                    let omax = o.iter().cloned().fold(0.0f32, f32::max);
+                    if omax < 0.004 {
+                        continue;
+                    }
+                    let mut cov = 0.0f32;
+                    let mut ovar = 0.0f32;
+                    let mut po = 0.0f32;
+                    let mut oo = 0.0f32;
+                    for j in 0..Self::WIN {
+                        let dp = p[j] - pmean;
+                        let dop = o[j] - omean;
+                        cov += dp * dop;
+                        ovar += dop * dop;
+                        po += p[j] * o[j];
+                        oo += o[j] * o[j];
+                    }
+                    if ovar < 1e-9 {
+                        continue;
+                    }
+                    let corr = cov / (pvar.sqrt() * ovar.sqrt() + 1e-12);
+                    if corr > best_corr {
+                        best_corr = corr;
+                        best_lag = lag;
+                        best_ratio = po / (oo + 1e-12);
+                    }
+                }
+                if best_corr >= Self::CORR_MIN && best_ratio > 0.01 && best_ratio < 12.0 {
+                    if best_lag.abs_diff(self.cand_lag) <= 1 {
+                        self.confirm += 1;
+                    } else {
+                        self.cand_lag = best_lag;
+                        self.confirm = 1;
+                    }
+                    if self.confirm >= Self::CONFIRM_TICKS {
+                        self.lag = best_lag;
+                        self.ratio = best_ratio;
+                        self.hold = Self::HOLD_TICKS;
+                    }
+                } else {
+                    self.confirm = self.confirm.saturating_sub(2);
+                }
+            }
+        }
+
+        let active = self.hold > 0;
+        if active {
+            self.hold -= 1;
+        }
+        let prev_gain = self.gain;
+        let mut gains = [1.0f32; 2];
+        for h in 0..2 {
+            let mut target = 1.0f32;
+            if active && n > self.lag + 4 {
+                let idx = (n as isize) - 2 + h as isize - self.lag as isize;
+                let lo = (idx - 2).max(0) as usize;
+                let hi = ((idx + 2) as usize).min(n - 1);
+                let own_v = own_env[lo..=hi].iter().cloned().fold(0.0f32, f32::max);
+                if own_v > 0.004 {
+                    let predicted = self.ratio * own_v;
+                    target = if pe[h] > 2.5 * predicted + 0.01 {
+                        0.7
+                    } else {
+                        0.06
+                    };
+                }
+            }
+            let coef = if target < self.gain { 0.6 } else { 0.12 };
+            self.gain += (target - self.gain) * coef;
+            gains[h] = self.gain;
+        }
+        if (prev_gain - 1.0).abs() < 1e-4 && (gains[0] - 1.0).abs() < 1e-4 && (gains[1] - 1.0).abs() < 1e-4 {
+            return;
+        }
+        let mut g_prev = prev_gain;
+        for h in 0..2 {
+            let g_new = gains[h];
+            let seg = if h == 0 { &mut pcm[..half] } else { &mut pcm[half..] };
+            let len = seg.len() as f32;
+            for (i, s) in seg.iter_mut().enumerate() {
+                let t = (i + 1) as f32 / len;
+                *s *= g_prev + (g_new - g_prev) * t;
+            }
+            g_prev = g_new;
         }
     }
 }
@@ -2215,6 +2453,125 @@ pub fn mix_mono_peers_to_stereo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn burst_env(len: usize, seed: u32) -> Vec<f32> {
+        let mut rng = seed;
+        let mut out = Vec::with_capacity(len);
+        let mut on = true;
+        while out.len() < len {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            let seg = 20 + ((rng >> 16) % 40) as usize;
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            let amp = 0.05 + ((rng >> 16) % 150) as f32 / 1000.0;
+            for k in 0..seg {
+                let wobble = 1.0 + 0.3 * ((k as f32) * 0.7).sin();
+                out.push(if on { amp * wobble } else { 0.0 });
+            }
+            on = !on;
+        }
+        out.truncate(len);
+        out
+    }
+
+    fn noise_frame(rng: &mut u32, rms: f32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|_| {
+                *rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                let u = ((*rng >> 16) as f32 / 32768.0) - 1.0;
+                u * rms * 1.732
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rx_echo_suppressor_ducks_own_voice_returning_from_peer() {
+        let total_halves = 800usize;
+        let lag = 35usize; // 350 ms round trip
+        let own = burst_env(total_halves, 7);
+        let mut sup = RxEchoSuppressor::new();
+        let mut rng = 99u32;
+        let (mut in_e, mut out_e) = (0.0f32, 0.0f32);
+        for t in 0..total_halves / 2 {
+            let n = (t + 1) * 2;
+            let own_slice = &own[..n];
+            let mut pcm = Vec::new();
+            for h in 0..2 {
+                let k = t * 2 + h;
+                let e = if k >= lag { 0.3 * own[k - lag] } else { 0.0 };
+                pcm.extend(noise_frame(&mut rng, e, 480));
+            }
+            let before = pcm.iter().map(|s| s * s).sum::<f32>();
+            sup.process_20ms(own_slice, &mut pcm);
+            let after = pcm.iter().map(|s| s * s).sum::<f32>();
+            if t > 250 {
+                in_e += before;
+                out_e += after;
+            }
+        }
+        let atten_db = 10.0 * (in_e / (out_e + 1e-12)).log10();
+        assert!(atten_db >= 12.0, "echo attenuation too weak: {atten_db:.1} dB");
+    }
+
+    #[test]
+    fn rx_echo_suppressor_leaves_independent_peer_speech_untouched() {
+        let total_halves = 800usize;
+        let own = burst_env(total_halves, 7);
+        let peer = burst_env(total_halves, 12345);
+        let mut sup = RxEchoSuppressor::new();
+        let mut rng = 5u32;
+        let (mut in_e, mut out_e) = (0.0f32, 0.0f32);
+        for t in 0..total_halves / 2 {
+            let n = (t + 1) * 2;
+            let mut pcm = Vec::new();
+            for h in 0..2 {
+                pcm.extend(noise_frame(&mut rng, peer[t * 2 + h], 480));
+            }
+            let before = pcm.iter().map(|s| s * s).sum::<f32>();
+            sup.process_20ms(&own[..n], &mut pcm);
+            let after = pcm.iter().map(|s| s * s).sum::<f32>();
+            in_e += before;
+            out_e += after;
+        }
+        let loss_db = 10.0 * (in_e / (out_e + 1e-12)).log10();
+        assert!(loss_db < 1.5, "independent speech must not be ducked: {loss_db:.2} dB");
+    }
+
+    #[test]
+    fn rx_echo_suppressor_catches_agc_boosted_compressed_echo() {
+        let total_halves = 800usize;
+        let lag = 35usize; // 350 ms round trip
+        let own = burst_env(total_halves, 7);
+        let mut sup = RxEchoSuppressor::new();
+        let mut rng = 123u32;
+        let (mut in_e, mut out_e) = (0.0f32, 0.0f32);
+        for t in 0..total_halves / 2 {
+            let n = (t + 1) * 2;
+            let own_slice = &own[..n];
+            let mut pcm = Vec::new();
+            for h in 0..2 {
+                let k = t * 2 + h;
+                // Peer AGC2 boosts & nonlinearly compresses our leaked voice
+                let e = if k >= lag && own[k - lag] > 0.001 {
+                    (2.5 * own[k - lag].powf(0.65)).min(0.65)
+                } else {
+                    0.0
+                };
+                pcm.extend(noise_frame(&mut rng, e, 480));
+            }
+            let before = pcm.iter().map(|s| s * s).sum::<f32>();
+            sup.process_20ms(own_slice, &mut pcm);
+            let after = pcm.iter().map(|s| s * s).sum::<f32>();
+            if t > 250 {
+                in_e += before;
+                out_e += after;
+            }
+        }
+        let atten_db = 10.0 * (in_e / (out_e + 1e-12)).log10();
+        assert!(
+            atten_db >= 12.0,
+            "AGC-boosted/compressed returning echo attenuation too weak: {atten_db:.1} dB"
+        );
+    }
 
     #[test]
     fn rnnoise_scaling_actually_attenuates_synthetic_noise() {

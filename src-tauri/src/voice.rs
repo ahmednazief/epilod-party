@@ -15,7 +15,7 @@ use epilod_core::p2p::MAX_VOICE_OPUS_BYTES;
 use epilod_core::voice_dsp::{
     frame_dbfs, mix_mono_peers_to_stereo, soft_limit, AdaptiveBitrateController, BiquadHighPass,
     EchoCanceller, JitterPacket, NoiseSuppressionMode, NoopEchoCanceller, PeerJitterBuffer,
-    PeerRxLeveler, SpeakerEchoDetector, VoiceCalibrator, VoiceCompressor, VoiceDenoiser, VoiceGate,
+    PeerRxLeveler, RxEchoSuppressor, SpeakerEchoDetector, VoiceCalibrator, VoiceCompressor, VoiceDenoiser, VoiceGate,
     WebRtcAec3Canceller, WebRtcAgc2Leveler, WebRtcAgc2Params, VOICE_FRAME_10MS, VOICE_FRAME_20MS,
     VOICE_SAMPLE_RATE,
 };
@@ -138,11 +138,11 @@ pub struct VoiceConfigDto {
     pub spatial_pan: bool,
     #[serde(default = "default_true")]
     pub echo_guard_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub aec_enabled: bool,
     #[serde(default = "default_engine_mode")]
     pub engine_mode: VoiceEngineModeWire,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub use_windows_comm_aec: bool,
     pub allow_relay_for_others: bool,
     pub allow_relayed_voice: bool,
@@ -172,9 +172,9 @@ impl Default for VoiceConfigDto {
             cinema_tight_gate: true,
             spatial_pan: false,
             echo_guard_enabled: true,
-            aec_enabled: false,
+            aec_enabled: true,
             engine_mode: VoiceEngineModeWire::Aura,
-            use_windows_comm_aec: false,
+            use_windows_comm_aec: true,
             allow_relay_for_others: true,
             allow_relayed_voice: true,
             master_volume: 1.0,
@@ -782,6 +782,7 @@ struct SharedVoiceRuntime {
     runtime_epoch: Instant,
     far_end_rms_bits: AtomicU32,
     far_end_ref_fifo: Mutex<VecDeque<[f32; VOICE_FRAME_10MS]>>,
+    own_tx_env: Mutex<VecDeque<f32>>,
     voice_logs: Mutex<VecDeque<String>>,
     test_loopback_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<f32>>>>,
     duck: Arc<DuckController>,
@@ -985,6 +986,7 @@ impl VoiceController {
             runtime_epoch: Instant::now(),
             far_end_rms_bits: AtomicU32::new(0.0f32.to_bits()),
             far_end_ref_fifo: Mutex::new(VecDeque::with_capacity(16)),
+            own_tx_env: Mutex::new(VecDeque::with_capacity(256)),
             voice_logs: Mutex::new(VecDeque::with_capacity(200)),
             test_loopback_tx: Mutex::new(None),
             duck,
@@ -1974,15 +1976,21 @@ fn setup_and_run_wasapi_comm_capture(
     let mut byte_buf = vec![0u8; buffer_frames * 4 * 4];
     while !stop_worker.load(Ordering::Acquire) {
         match capture_client.read_from_device(&mut byte_buf) {
-            Ok((frames_read, _)) => {
+            Ok((frames_read, info)) => {
                 if frames_read > 0 {
                     shared_worker
                         .last_in_cb_ms
                         .store(shared_worker.now_ms(), Ordering::Relaxed);
-                    let byte_len = (frames_read as usize * 4).min(byte_buf.len());
-                    for chunk in byte_buf[..byte_len].chunks_exact(4) {
-                        let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        let _ = prod.try_push(sample);
+                    if info.flags.silent {
+                        for _ in 0..frames_read {
+                            let _ = prod.try_push(0.0);
+                        }
+                    } else {
+                        let byte_len = (frames_read as usize * 4).min(byte_buf.len());
+                        for chunk in byte_buf[..byte_len].chunks_exact(4) {
+                            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            let _ = prod.try_push(sample);
+                        }
                     }
                 }
             }
@@ -2860,8 +2868,8 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 std::thread::sleep(Duration::from_millis(25));
                 continue;
             }
-            let use_comm_category =
-                cfg.engine_mode == VoiceEngineModeWire::Classic || cfg.use_windows_comm_aec;
+            let use_comm_category = cfg.engine_mode == VoiceEngineModeWire::Classic
+                || (cfg.use_windows_comm_aec && (cfg.aec_enabled || cfg.echo_guard_enabled));
             match open_input_stream(
                 &cfg.input_device,
                 &cfg.output_device,
@@ -2940,9 +2948,9 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 &mut lb_resampler,
                 &mut lb_mono_48k_fifo,
             );
-            // Keep render loopback latency tightly bounded (max 120 ms)
-            while lb_mono_48k_fifo.len() > VOICE_FRAME_10MS * 12 {
-                lb_mono_48k_fifo.pop_front();
+            // Keep render loopback latency tightly bounded in whole 10 ms frames so FFT phase stays aligned
+            while lb_mono_48k_fifo.len() > VOICE_FRAME_10MS * 8 {
+                lb_mono_48k_fifo.drain(..VOICE_FRAME_10MS);
             }
         }
 
@@ -2968,29 +2976,32 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
 
             let is_aura = cfg.engine_mode == VoiceEngineModeWire::Aura;
             // Feed playback far-end reference: prefer system WASAPI render loopback (covers mpv movie + voice)
-            // and fall back to mixed peer voices only when loopback is not open.
-            let far_frame = if active_loopback.is_some() {
-                if lb_mono_48k_fifo.len() >= VOICE_FRAME_10MS {
-                    lb_empty_ticks = 0;
-                    let mut f = [0.0f32; VOICE_FRAME_10MS];
-                    for dst in &mut f {
-                        *dst = lb_mono_48k_fifo.pop_front().unwrap_or(0.0);
-                    }
-                    Some(f)
-                } else {
-                    lb_empty_ticks = lb_empty_ticks.saturating_add(1);
-                    // Windows WASAPI loopback pauses callbacks during system silence; keep reference continuous with zeros
-                    Some([0.0f32; VOICE_FRAME_10MS])
+            // and fall back immediately to mixed peer voices (far_end_ref_fifo) whenever loopback has < 10 ms.
+            let mut popped_peer_ref = None;
+            let far_frame = if active_loopback.is_some() && lb_mono_48k_fifo.len() >= VOICE_FRAME_10MS
+            {
+                lb_empty_ticks = 0;
+                let mut f = [0.0f32; VOICE_FRAME_10MS];
+                for dst in &mut f {
+                    *dst = lb_mono_48k_fifo.pop_front().unwrap_or(0.0);
                 }
-            } else {
-                lb_empty_ticks = lb_empty_ticks.saturating_add(1);
-                shared
+                // Keep peer FIFO drained in lockstep while loopback is live so fallback stays fresh.
+                let _ = shared
                     .far_end_ref_fifo
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .pop_front()
+                    .pop_front();
+                Some(f)
+            } else {
+                lb_empty_ticks = lb_empty_ticks.saturating_add(1);
+                popped_peer_ref = shared
+                    .far_end_ref_fifo
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop_front();
+                popped_peer_ref
             };
-            let lb_has_live_audio = active_loopback.is_some() && lb_empty_ticks < 20;
+            let _ = (lb_empty_ticks, popped_peer_ref);
             let far_rms = if let Some(ref f) = far_frame {
                 (f.iter().map(|s| s * s).sum::<f32>() / VOICE_FRAME_10MS as f32).sqrt()
             } else {
@@ -3019,31 +3030,20 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
                 shared.emit_status_snapshot();
             }
 
-            let use_aec = if is_aura {
-                (cfg.aec_enabled || (cfg.echo_guard_enabled && detected_leak && !live_comm_aec))
-                    && lb_has_live_audio
-            } else {
-                cfg.aec_enabled || (cfg.echo_guard_enabled && detected_leak && !live_comm_aec)
-            };
+            let use_aec = cfg.aec_enabled || cfg.echo_guard_enabled;
             if use_aec {
-                webrtc_aec3.set_delay_ms((echo_detector.best_lag_frames() as i32) * 10);
                 let ref_slice = far_frame.unwrap_or([0.0; VOICE_FRAME_10MS]);
                 webrtc_aec3.process_10ms(&frame_10ms, Some(&ref_slice), &mut aec_out);
             } else {
                 noop_aec.process_10ms(&frame_10ms, None, &mut aec_out);
             }
 
-            // Gentle speaker-echo guard: runs only when hardware Comm AEC isn't active and WebRTC AEC3
-            // lacks a live loopback reference so full-duplex double-talk stays unattenuated under AEC3.
+            // Gentle speaker-echo guard: runs only when neither hardware Comm AEC nor WebRTC AEC3
+            // is actively cancelling the far-end signal.
             let half_duplex_guard = cfg.echo_guard_enabled
                 && detected_leak
                 && !live_comm_aec
-                && (!use_aec
-                    || (if is_aura {
-                        !lb_has_live_audio
-                    } else {
-                        active_loopback.is_none()
-                    }))
+                && !use_aec
                 && (shared.duck.is_remote_speaking() || far_rms > 0.025);
             if half_duplex_guard {
                 for s in &mut aec_out {
@@ -3207,6 +3207,21 @@ fn run_dsp_tx_thread(shared: Arc<SharedVoiceRuntime>) {
             }
             was_gate_open = is_open;
 
+            {
+                // Loudness envelope of what we actually transmit, used by the RX echo suppressor.
+                let env = if out_cnt > 0 && !eff_muted {
+                    (gate_out[out_cnt - 1].iter().map(|s| s * s).sum::<f32>()
+                        / VOICE_FRAME_10MS as f32)
+                        .sqrt()
+                } else {
+                    0.0
+                };
+                let mut q = shared.own_tx_env.lock().unwrap_or_else(|e| e.into_inner());
+                if q.len() >= 256 {
+                    q.pop_front();
+                }
+                q.push_back(env);
+            }
             for frame in gate_out.iter().take(out_cnt) {
                 encode_accum.extend_from_slice(frame);
             }
@@ -3386,6 +3401,7 @@ struct PeerDecoderState {
     jitter: PeerJitterBuffer,
     decoder: OpusDecoder,
     leveler: PeerRxLeveler,
+    echo_sup: RxEchoSuppressor,
     last_speaking_at: Option<Instant>,
     is_speaking: bool,
 }
@@ -3549,6 +3565,7 @@ fn run_mix_rx_thread(
                                 jitter,
                                 decoder,
                                 leveler: PeerRxLeveler::new(),
+                                echo_sup: RxEchoSuppressor::new(),
                                 last_speaking_at: None,
                                 is_speaking: false,
                             },
@@ -3657,6 +3674,15 @@ fn run_mix_rx_thread(
             let peer_muted = ov.is_some_and(|o| o.muted);
 
             if has_audio && !peer_muted && !deafened {
+                // Remove our own voice coming back from this peer's speakers (works regardless of their app version).
+                let own_env: Vec<f32> = shared
+                    .own_tx_env
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .copied()
+                    .collect();
+                state.echo_sup.process_20ms(&own_env, &mut decoded_buf);
                 let db = frame_dbfs(&decoded_buf);
                 if db > -52.0 {
                     state.last_speaking_at = Some(Instant::now());
@@ -3803,7 +3829,7 @@ fn run_mix_rx_thread(
                     .far_end_ref_fifo
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                while q.len() >= 12 {
+                while q.len() >= 6 {
                     q.pop_front();
                 }
                 q.push_back(f0);
@@ -3849,7 +3875,7 @@ fn run_mix_rx_thread(
                 .far_end_ref_fifo
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            while q.len() >= 12 {
+            while q.len() >= 6 {
                 q.pop_front();
             }
             q.push_back([0.0f32; VOICE_FRAME_10MS]);
@@ -4526,9 +4552,8 @@ mod tests {
     }
 
     #[test]
-    fn aura_mode_skips_aec3_when_loopback_is_paused() {
-        let mut aec3 = WebRtcAec3Canceller::new();
-        let mut noop = NoopEchoCanceller;
+    fn aura_continuous_aec3_hmm_preserves_near_end_and_cancels_echo_tail() {
+        let mut aec3_clean = WebRtcAec3Canceller::new();
         let zero_ref = [0.0f32; VOICE_FRAME_10MS];
         let mut near = [0.0f32; VOICE_FRAME_10MS];
         for (i, s) in near.iter_mut().enumerate() {
@@ -4536,19 +4561,96 @@ mod tests {
             *s = 0.25 * (2.0 * std::f32::consts::PI * 300.0 * t).sin();
         }
         let mut aec_out = [0.0f32; VOICE_FRAME_10MS];
-        let mut noop_out = [0.0f32; VOICE_FRAME_10MS];
+        for _ in 0..10 {
+            aec3_clean.process_10ms(&near, Some(&zero_ref), &mut aec_out);
+        }
+        assert!(
+            (frame_dbfs(&aec_out) - frame_dbfs(&near)).abs() < 1.5,
+            "Continuous HMM AEC3 with silent render must preserve near-end speech: in={:.2}, out={:.2}",
+            frame_dbfs(&near),
+            frame_dbfs(&aec_out)
+        );
 
-        // Simulate paused loopback: lb_has_live_audio == false -> Aura bypasses AEC3
-        let lb_has_live_audio = false;
-        let aec_requested = true;
-        let use_aec_aura = aec_requested && lb_has_live_audio;
-        assert!(!use_aec_aura);
+        // Converge AEC3 on a 20 ms delayed speech-like harmonic echo path, then cut far-end to zero and confirm the tail cancels
+        let mut aec3_tail = WebRtcAec3Canceller::new();
+        let delay_len = VOICE_FRAME_10MS * 2; // 20 ms tail
+        let mut delay_ring = vec![0.0f32; delay_len];
+        let mut ring_idx = 0usize;
+        let mut far = [0.0f32; VOICE_FRAME_10MS];
+        let mut mic = [0.0f32; VOICE_FRAME_10MS];
+        for f_idx in 0..60 {
+            for (i, s) in far.iter_mut().enumerate() {
+                let t = ((f_idx * VOICE_FRAME_10MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                *s = 0.35
+                    * (0.6 * (2.0 * std::f32::consts::PI * 240.0 * t).sin()
+                        + 0.4 * (2.0 * std::f32::consts::PI * 520.0 * t).sin());
+            }
+            for i in 0..VOICE_FRAME_10MS {
+                let delayed = delay_ring[ring_idx];
+                delay_ring[ring_idx] = far[i];
+                ring_idx = (ring_idx + 1) % delay_len;
+                mic[i] = delayed * 0.35;
+            }
+            aec3_tail.process_10ms(&mic, Some(&far), &mut aec_out);
+        }
 
-        noop.process_10ms(&near, None, &mut noop_out);
-        aec3.process_10ms(&near, Some(&zero_ref), &mut aec_out);
-        assert!(frame_dbfs(&noop_out) > -20.0);
-        // Noop passes near-end signal unmodified
-        assert!((frame_dbfs(&noop_out) - frame_dbfs(&near)).abs() < 0.01);
-        let _ = aec_out;
+        // Far-end stops abruptly; remaining 20 ms echo tail arrives while far reference is zero
+        let mut tail_in_pow = 0.0f64;
+        let mut tail_out_pow = 0.0f64;
+        for _ in 0..2 {
+            for i in 0..VOICE_FRAME_10MS {
+                let delayed = delay_ring[ring_idx];
+                delay_ring[ring_idx] = 0.0;
+                ring_idx = (ring_idx + 1) % delay_len;
+                mic[i] = delayed * 0.35;
+            }
+            aec3_tail.process_10ms(&mic, Some(&zero_ref), &mut aec_out);
+            for (&m, &o) in mic.iter().zip(aec_out.iter()) {
+                tail_in_pow += (m as f64) * (m as f64);
+                tail_out_pow += (o as f64) * (o as f64);
+            }
+        }
+        let tail_erle_db = 10.0 * (tail_in_pow / tail_out_pow.max(1e-12)).log10();
+        assert!(
+            tail_erle_db >= 10.0,
+            "Continuous AEC3 must cancel 20 ms room echo tail even after far-end drops to zero; got {tail_erle_db:.2} dB"
+        );
+    }
+
+    #[test]
+    fn webrtc_aec3_cancels_far_end_echo_even_with_headset_crosstalk() {
+        let mut aec3 = WebRtcAec3Canceller::new();
+        let mut far = [0.0f32; VOICE_FRAME_10MS];
+        let mut near_echo_only = [0.0f32; VOICE_FRAME_10MS];
+        let mut out = [0.0f32; VOICE_FRAME_10MS];
+
+        // Feed 60 frames (600ms) of far-end peer speech-like harmonic + acoustic echo (20ms delayed, 0.35x gain)
+        let mut delay_ring = vec![0.0f32; VOICE_FRAME_10MS * 2];
+        let mut ring_idx = 0usize;
+        let mut last_out_db = 0.0f32;
+        let mut echo_in_db = -90.0f32;
+        for f_idx in 0..60 {
+            for (i, s) in far.iter_mut().enumerate() {
+                let t = ((f_idx * VOICE_FRAME_10MS + i) as f32) / (VOICE_SAMPLE_RATE as f32);
+                *s = 0.35
+                    * (0.6 * (2.0 * std::f32::consts::PI * 240.0 * t).sin()
+                        + 0.4 * (2.0 * std::f32::consts::PI * 520.0 * t).sin());
+            }
+            for i in 0..VOICE_FRAME_10MS {
+                let delayed = delay_ring[ring_idx];
+                delay_ring[ring_idx] = far[i];
+                ring_idx = (ring_idx + 1) % delay_ring.len();
+                near_echo_only[i] = delayed * 0.35;
+            }
+            aec3.process_10ms(&near_echo_only, Some(&far), &mut out);
+            if f_idx >= 45 {
+                echo_in_db = frame_dbfs(&near_echo_only);
+                last_out_db = frame_dbfs(&out);
+            }
+        }
+        assert!(
+            echo_in_db - last_out_db >= 12.0,
+            "AEC3 must strongly attenuate leaked peer echo: in={echo_in_db:.1} dBFS, out={last_out_db:.1} dBFS"
+        );
     }
 }

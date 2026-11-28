@@ -262,9 +262,9 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   cinemaTightGate: readStorage("ep.voice.cinemaTightGate", "true") !== "false",
   spatialPan: readStorage("ep.voice.spatialPan", "false") === "true",
   echoGuardEnabled: readStorage("ep.voice.echoGuard", "true") !== "false",
-  aecEnabled: readStorage("ep.voice.aecEnabled", "false") === "true",
+  aecEnabled: readStorage("ep.voice.aecEnabled", "true") !== "false",
   engineMode: initialEngineMode,
-  useWindowsCommAec: readStorage("ep.voice.useWindowsCommAec", "false") === "true",
+  useWindowsCommAec: readStorage("ep.voice.useWindowsCommAec.v2", "true") !== "false",
   allowRelayForOthers: readStorage("ep.voice.allowRelayForOthers", "true") !== "false",
   allowRelayedVoice: readStorage("ep.voice.allowRelayedVoice", "true") !== "false",
   masterVolume: clampMasterVolume(readNum("ep.voice.masterVolume", 1.0, 0.0, 2.0)),
@@ -409,7 +409,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       writeStorage("ep.voice.echoGuard", next.echoGuardEnabled ? "true" : "false");
       writeStorage("ep.voice.aecEnabled", next.aecEnabled ? "true" : "false");
       writeStorage("ep.voice.engineMode", next.engineMode);
-      writeStorage("ep.voice.useWindowsCommAec", next.useWindowsCommAec ? "true" : "false");
+      writeStorage("ep.voice.useWindowsCommAec.v2", next.useWindowsCommAec ? "true" : "false");
       writeStorage("ep.voice.allowRelayForOthers", next.allowRelayForOthers ? "true" : "false");
       writeStorage("ep.voice.allowRelayedVoice", next.allowRelayedVoice ? "true" : "false");
       writeStorage("ep.voice.masterVolume", String(next.masterVolume));
